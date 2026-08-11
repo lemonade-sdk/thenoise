@@ -50,8 +50,6 @@ def load_anima_model(
         "pos_emb_cls": "rope3d",
         "pos_emb_learnable": True,
         "pos_emb_interpolation": "crop",
-        "min_fps": 1,
-        "max_fps": 30,
         "use_adaln_lora": True,
         "adaln_lora_dim": 256,
         "num_blocks": 28,
@@ -63,7 +61,6 @@ def load_anima_model(
         "extra_h_extrapolation_ratio": 1.0,
         "extra_w_extrapolation_ratio": 1.0,
         "extra_t_extrapolation_ratio": 1.0,
-        "rope_enable_fps_modulation": False,
         "use_llm_adapter": True,
     }
     with init_empty_weights():

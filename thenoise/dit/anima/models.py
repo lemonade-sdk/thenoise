@@ -266,12 +266,12 @@ class VideoPositionEmb(nn.Module):
     def seq_dim(self) -> int:
         return 1
 
-    def forward(self, x_B_T_H_W_C: torch.Tensor, fps: Optional[torch.Tensor]) -> torch.Tensor:
+    def forward(self, x_B_T_H_W_C: torch.Tensor) -> torch.Tensor:
         B_T_H_W_C = x_B_T_H_W_C.shape
-        embeddings = self.generate_embeddings(B_T_H_W_C, fps=fps)
+        embeddings = self.generate_embeddings(B_T_H_W_C)
         return embeddings
 
-    def generate_embeddings(self, B_T_H_W_C: torch.Size, fps: Optional[torch.Tensor]) -> Any:
+    def generate_embeddings(self, B_T_H_W_C: torch.Size) -> Any:
         raise NotImplementedError
 
 
@@ -285,21 +285,17 @@ class VideoRopePosition3DEmb(VideoPositionEmb):
         len_h: int,
         len_w: int,
         len_t: int,
-        base_fps: int = 24,
         h_extrapolation_ratio: float = 1.0,
         w_extrapolation_ratio: float = 1.0,
         t_extrapolation_ratio: float = 1.0,
-        enable_fps_modulation: bool = True,
         **kwargs,
     ):
         del kwargs
         super().__init__()
         self.register_buffer("seq", torch.arange(max(len_h, len_w, len_t), dtype=torch.float))
-        self.base_fps = base_fps
         self.max_h = len_h
         self.max_w = len_w
         self.max_t = len_t
-        self.enable_fps_modulation = enable_fps_modulation
         dim = head_dim
         dim_h = dim // 6 * 2
         dim_w = dim_h
@@ -331,11 +327,9 @@ class VideoRopePosition3DEmb(VideoPositionEmb):
         self.dim_spatial_range = torch.arange(0, dim_h, 2)[: (dim_h // 2)].float().to(self.dim_spatial_range.device) / dim_h
         self.dim_temporal_range = torch.arange(0, dim_t, 2)[: (dim_t // 2)].float().to(self.dim_spatial_range.device) / dim_t
 
-    @torch.compile(fullgraph=True)
     def generate_embeddings(
         self,
         B_T_H_W_C: torch.Size,
-        fps: Optional[torch.Tensor] = None,
         h_ntk_factor: Optional[float] = None,
         w_ntk_factor: Optional[float] = None,
         t_ntk_factor: Optional[float] = None,
@@ -352,26 +346,13 @@ class VideoRopePosition3DEmb(VideoPositionEmb):
         w_spatial_freqs = 1.0 / (w_theta**self.dim_spatial_range)
         temporal_freqs = 1.0 / (t_theta**self.dim_temporal_range)
 
-        B, T, H, W, _ = B_T_H_W_C
+        _, T, H, W, _ = B_T_H_W_C
         assert (
             H <= self.max_h and W <= self.max_w
         ), f"Input dimensions (H={H}, W={W}) exceed the maximum dimensions (max_h={self.max_h}, max_w={self.max_w})"
         half_emb_h = torch.outer(self.seq[:H], h_spatial_freqs)
         half_emb_w = torch.outer(self.seq[:W], w_spatial_freqs)
-
-        if self.enable_fps_modulation:
-            uniform_fps = (fps is None) or (fps.min() == fps.max())
-            assert (
-                uniform_fps or B == 1 or T == 1
-            ), "For video batch, batch size should be 1 for non-uniform fps. For image batch, T should be 1"
-
-            if fps is None:
-                assert T == 1, "T should be 1 for image batch."
-                half_emb_t = torch.outer(self.seq[:T], temporal_freqs)
-            else:
-                half_emb_t = torch.outer(self.seq[:T] / fps[:1] * self.base_fps, temporal_freqs)
-        else:
-            half_emb_t = torch.outer(self.seq[:T], temporal_freqs)
+        half_emb_t = torch.outer(self.seq[:T], temporal_freqs)
 
         em_T_H_W_D = torch.cat(
             [
@@ -421,7 +402,7 @@ class LearnablePosEmbAxis(VideoPositionEmb):
         torch.nn.init.trunc_normal_(self.pos_emb_w, std=std, a=-3 * std, b=3 * std)
         torch.nn.init.trunc_normal_(self.pos_emb_t, std=std, a=-3 * std, b=3 * std)
 
-    def generate_embeddings(self, B_T_H_W_C: torch.Size, fps: Optional[torch.Tensor]) -> torch.Tensor:
+    def generate_embeddings(self, B_T_H_W_C: torch.Size) -> torch.Tensor:
         B, T, H, W, _ = B_T_H_W_C
         if self.interpolation == "crop":
             emb_h_H = self.pos_emb_h[:H]
@@ -867,8 +848,6 @@ class Anima(nn.Module):
         pos_emb_cls: str = "sincos",
         pos_emb_learnable: bool = False,
         pos_emb_interpolation: str = "crop",
-        min_fps: int = 1,
-        max_fps: int = 30,
         use_adaln_lora: bool = False,
         adaln_lora_dim: int = 256,
         rope_h_extrapolation_ratio: float = 1.0,
@@ -878,7 +857,6 @@ class Anima(nn.Module):
         extra_h_extrapolation_ratio: float = 1.0,
         extra_w_extrapolation_ratio: float = 1.0,
         extra_t_extrapolation_ratio: float = 1.0,
-        rope_enable_fps_modulation: bool = True,
         use_llm_adapter: bool = False,
     ) -> None:
         super().__init__()
@@ -896,8 +874,6 @@ class Anima(nn.Module):
         self.pos_emb_cls = pos_emb_cls
         self.pos_emb_learnable = pos_emb_learnable
         self.pos_emb_interpolation = pos_emb_interpolation
-        self.min_fps = min_fps
-        self.max_fps = max_fps
         self.rope_h_extrapolation_ratio = rope_h_extrapolation_ratio
         self.rope_w_extrapolation_ratio = rope_w_extrapolation_ratio
         self.rope_t_extrapolation_ratio = rope_t_extrapolation_ratio
@@ -905,7 +881,6 @@ class Anima(nn.Module):
         self.extra_h_extrapolation_ratio = extra_h_extrapolation_ratio
         self.extra_w_extrapolation_ratio = extra_w_extrapolation_ratio
         self.extra_t_extrapolation_ratio = extra_t_extrapolation_ratio
-        self.rope_enable_fps_modulation = rope_enable_fps_modulation
         self.use_llm_adapter = use_llm_adapter
 
         self.build_patch_embed()
@@ -950,6 +925,11 @@ class Anima(nn.Module):
         )
 
         self.t_embedding_norm = RMSNorm(model_channels, eps=1e-6)
+        # RoPE cache: for a still image the rotary embeddings depend only on the
+        # (patched) latent size, so they are recomputed identically inside every
+        # DiT forward (~56x per image with CFG). Cache the tensor keyed by
+        # (T, H, W) and reuse it across steps / cond+null forwards.
+        self._rope_cache: dict = {}
         self.init_weights()
 
     def init_weights(self) -> None:
@@ -991,15 +971,12 @@ class Anima(nn.Module):
             len_h=self.max_img_h // self.patch_spatial,
             len_w=self.max_img_w // self.patch_spatial,
             len_t=self.max_frames // self.patch_temporal,
-            max_fps=self.max_fps,
-            min_fps=self.min_fps,
             is_learnable=self.pos_emb_learnable,
             interpolation=self.pos_emb_interpolation,
             head_dim=self.model_channels // self.num_heads,
             h_extrapolation_ratio=self.rope_h_extrapolation_ratio,
             w_extrapolation_ratio=self.rope_w_extrapolation_ratio,
             t_extrapolation_ratio=self.rope_t_extrapolation_ratio,
-            enable_fps_modulation=self.rope_enable_fps_modulation,
         )
         self.pos_embedder = cls_type(**kwargs)
 
@@ -1012,7 +989,6 @@ class Anima(nn.Module):
     def prepare_embedded_sequence(
         self,
         x_B_C_T_H_W: torch.Tensor,
-        fps: Optional[torch.Tensor] = None,
         padding_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         from torchvision import transforms
@@ -1025,15 +1001,37 @@ class Anima(nn.Module):
         x_B_T_H_W_D = self.x_embedder(x_B_C_T_H_W)
 
         if self.extra_per_block_abs_pos_emb:
-            extra_pos_emb = self.extra_pos_embedder(x_B_T_H_W_D, fps=fps)
+            extra_pos_emb = self.extra_pos_embedder(x_B_T_H_W_D)
         else:
             extra_pos_emb = None
 
         if "rope" in self.pos_emb_cls.lower():
-            return x_B_T_H_W_D, self.pos_embedder(x_B_T_H_W_D, fps=fps), extra_pos_emb
+            rope_emb = self._cached_rope(x_B_T_H_W_D)
+            return x_B_T_H_W_D, rope_emb, extra_pos_emb
         x_B_T_H_W_D = x_B_T_H_W_D + self.pos_embedder(x_B_T_H_W_D)
 
         return x_B_T_H_W_D, None, extra_pos_emb
+
+    def _cached_rope(self, x_B_T_H_W_D: torch.Tensor) -> torch.Tensor:
+        """Return the 3D RoPE embedding, computing it only once per (T, H, W).
+
+        For a still image (T=1) the rope depends only on the patched latent size,
+        never on the latent values, so caching is exact — the same tensor is
+        returned for every step and the cond/null forwards.
+        """
+        _, T, H, W, _ = x_B_T_H_W_D.shape
+        key = (T, H, W)
+        rope_emb = self._rope_cache.get(key)
+        if rope_emb is None:
+            rope_emb = self.pos_embedder(x_B_T_H_W_D)
+            self._rope_cache[key] = rope_emb
+        return rope_emb
+
+    def _apply(self, fn, recurse=True):
+        # The rope cache holds tensors on a specific device/dtype; drop it when
+        # the module is moved (via .to/.cuda/.float) so stale entries never leak.
+        self._rope_cache = {}
+        return super()._apply(fn, recurse=recurse)
 
     def unpatchify(self, x_B_T_H_W_M: torch.Tensor) -> torch.Tensor:
         x_B_C_Tt_Hp_Wp = rearrange(
@@ -1050,7 +1048,6 @@ class Anima(nn.Module):
         x: torch.Tensor,
         timesteps: torch.Tensor,
         context: Optional[torch.Tensor] = None,
-        fps: Optional[torch.Tensor] = None,
         padding_mask: Optional[torch.Tensor] = None,
         target_input_ids: Optional[torch.Tensor] = None,
         target_attention_mask: Optional[torch.Tensor] = None,
@@ -1061,7 +1058,6 @@ class Anima(nn.Module):
 
         x_B_T_H_W_D, rope_emb_L_1_1_D, extra_pos_emb = self.prepare_embedded_sequence(
             x,
-            fps=fps,
             padding_mask=padding_mask,
         )
 
