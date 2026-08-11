@@ -1,103 +1,33 @@
-# Unified attention function supporting various implementations
+# Unified attention function using PyTorch's scaled dot-product attention (SDPA).
 
 from dataclasses import dataclass
 import torch
+import torch.nn.functional as F
 from typing import Optional, Union
-
-try:
-    import flash_attn
-    from flash_attn.flash_attn_interface import _flash_attn_forward
-    from flash_attn.flash_attn_interface import flash_attn_varlen_func
-    from flash_attn.flash_attn_interface import flash_attn_func
-except ImportError:
-    flash_attn = None
-    flash_attn_varlen_func = None
-    _flash_attn_forward = None
-    flash_attn_func = None
-
-try:
-    from sageattention import sageattn_varlen, sageattn
-except ImportError:
-    sageattn_varlen = None
-    sageattn = None
-
-try:
-    import xformers.ops as xops
-except ImportError:
-    xops = None
-
-
-def preferred_attn_mode(configured: Optional[str] = None) -> str:
-    """Resolve the attention backend to the best one available.
-
-    Auto-detect on this ROCm build: prefer the fused flash-attention kernel
-    (``flash``) when installed, else the fused ``sageattn`` kernel, else PyTorch
-    SDPA (``torch``). An explicitly configured mode is honored verbatim so
-    callers can force a specific backend for testing, but the default is
-    automatic.
-
-    Returns:
-        One of ``"flash"`` / ``"sageattn"`` / ``"torch"``.
-    """
-    if configured:
-        return configured
-    if flash_attn is not None:
-        return "flash"
-    if sageattn is not None:
-        return "sageattn"
-    return "torch"
 
 
 @dataclass
 class AttentionParams:
-    attn_mode: Optional[str] = None
-    split_attn: bool = False
-    img_len: Optional[int] = None
     attention_mask: Optional[torch.Tensor] = None
-    seqlens: Optional[torch.Tensor] = None
-    cu_seqlens: Optional[torch.Tensor] = None
-    max_seqlen: Optional[int] = None
 
     @staticmethod
-    def create_attention_params(attn_mode: Optional[str], split_attn: bool) -> "AttentionParams":
-        return AttentionParams(attn_mode, split_attn)
+    def create_attention_params() -> "AttentionParams":
+        return AttentionParams()
 
     @staticmethod
     def create_attention_params_from_mask(
-        attn_mode: Optional[str], split_attn: bool, img_len: Optional[int], attention_mask: Optional[torch.Tensor]
+        img_len: Optional[int], attention_mask: Optional[torch.Tensor]
     ) -> "AttentionParams":
         if attention_mask is None:
             # No attention mask provided: assume all tokens are valid
-            return AttentionParams(attn_mode, split_attn, None, None, None, None, None)
-        else:
-            # Note: attention_mask is only for text tokens, not including image tokens
-            seqlens = attention_mask.sum(dim=1).to(torch.int32) + img_len  # [B]
-            max_seqlen = attention_mask.shape[1] + img_len
+            return AttentionParams()
+        # Note: attention_mask is only for text tokens, not including image tokens.
+        # Expand to include the (always valid) image tokens, then shape as an SDPA
+        # key-padding mask: [B, 1, 1, img_len + L].
+        attention_mask = F.pad(attention_mask, (img_len, 0), value=1)  # [B, img_len + L]
+        attention_mask = attention_mask[:, None, None, :].to(torch.bool)  # [B, 1, 1, img_len + L]
 
-            if split_attn:
-                # cu_seqlens is not needed for split attention
-                return AttentionParams(attn_mode, split_attn, img_len, attention_mask, seqlens, None, max_seqlen)
-
-            # Convert attention mask to cumulative sequence lengths for flash attention
-            batch_size = attention_mask.shape[0]
-            cu_seqlens = torch.zeros([2 * batch_size + 1], dtype=torch.int32, device=attention_mask.device)
-            for i in range(batch_size):
-                cu_seqlens[2 * i + 1] = i * max_seqlen + seqlens[i]  # end of valid tokens for query
-                cu_seqlens[2 * i + 2] = (i + 1) * max_seqlen  # end of all tokens for query
-
-            # Expand attention mask to include image tokens
-            attention_mask = torch.nn.functional.pad(attention_mask, (img_len, 0), value=1)  # [B, img_len + L]
-
-            # attention bias for xformers
-            if attn_mode == "xformers":
-                seqlens_list = seqlens.cpu().tolist()
-                attention_mask = xops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(
-                    seqlens_list, seqlens_list, device=attention_mask.device
-                )
-            elif attn_mode == "torch":
-                attention_mask = attention_mask[:, None, None, :].to(torch.bool)  # [B, 1, 1, img_len + L]
-
-            return AttentionParams(attn_mode, split_attn, img_len, attention_mask, seqlens, cu_seqlens, max_seqlen)
+        return AttentionParams(attention_mask)
 
 
 def attention(
@@ -108,16 +38,17 @@ def attention(
     drop_rate: float = 0.0,
 ) -> torch.Tensor:
     """
-    Compute scaled dot-product attention with variable sequence lengths.
+    Compute scaled dot-product attention over a batch of sequences.
 
-    Handles batches with different sequence lengths by splitting and
-    processing each sequence individually.
+    The whole batch is processed in a single SDPA call. Variable sequence lengths are
+    handled with a key-padding ``attention_mask`` (padding positions excluded from the
+    softmax). ``attn_params`` may carry no mask, meaning all tokens are valid.
 
     Args:
         qkv_or_q: Query tensor [B, L, H, D]. or list of such tensors.
         k: Key tensor [B, L, H, D].
         v: Value tensor [B, L, H, D].
-        attn_param: Attention parameters including mask and sequence lengths.
+        attn_param: Attention parameters including the optional key-padding mask.
         drop_rate: Attention dropout rate.
 
     Returns:
@@ -133,164 +64,29 @@ def attention(
         del qkv_or_q
         assert k is not None and v is not None, "k and v must be provided if qkv_or_q is a tensor"
     if attn_params is None:
-        attn_params = AttentionParams.create_attention_params("torch", False)
+        attn_params = AttentionParams.create_attention_params()
 
-    # GQA: q may carry more heads than k/v (e.g. Krea 2 = 48 query / 12 kv heads). flash and
-    # sageattn group heads natively inside the kernel (verified), so they ignore this. For the
-    # torch (SDPA) path we expand k/v to q's head count below instead of passing enable_gqa=True,
-    # because enable_gqa forces SDPA onto the slow math kernel (~7x slower than the fused kernels
-    # at K2 scale); the repeat is numerically identical. Revert to enable_gqa=True once PyTorch's
-    # fused (flash / mem-efficient) kernels gain native GQA support. (q/k/v here are [B, L, H, D].)
+    # GQA: q may carry more heads than k/v (e.g. Krea 2 = 48 query / 12 kv heads). SDPA has no
+    # native fused GQA path, so we expand k/v to q's head count. We avoid enable_gqa=True because
+    # that forces SDPA onto the slow math kernel (~7x slower at K2 scale); the repeat is numerically
+    # identical. (q/k/v here are [B, L, H, D].)
     enable_gqa = q.shape[-2] != k.shape[-2]
 
-    # Determine tensor layout based on attention implementation
-    if attn_params.attn_mode == "torch" or (
-        attn_params.attn_mode == "sageattn" and (attn_params.split_attn or attn_params.cu_seqlens is None)
-    ):
-        transpose_fn = lambda x: x.transpose(1, 2)  # [B, H, L, D] for SDPA and sageattn with fixed length
-        # pad on sequence length dimension
-        pad_fn = lambda x, pad_to: torch.nn.functional.pad(x, (0, 0, 0, pad_to - x.shape[-2]), value=0)
-    else:
-        transpose_fn = lambda x: x  # [B, L, H, D] for other implementations
-        # pad on sequence length dimension
-        pad_fn = lambda x, pad_to: torch.nn.functional.pad(x, (0, 0, 0, 0, 0, pad_to - x.shape[-3]), value=0)
+    # SDPA layout is [B, H, L, D], so transpose from the [B, L, H, D] input.
+    transpose_fn = lambda x: x.transpose(1, 2)
 
-    # Process each batch element with its valid sequence lengths
-    if attn_params.split_attn:
-        if attn_params.seqlens is None:
-            # If no seqlens provided, assume all tokens are valid
-            attn_params = AttentionParams.create_attention_params(attn_params.attn_mode, True)  # do not in-place modify
-            attn_params.seqlens = torch.tensor([q.shape[1]] * q.shape[0], device=q.device)
-            attn_params.max_seqlen = q.shape[1]
-        # Materialize seqlens as Python ints to avoid .item() graph break inside the loop
-        seqlens_list = attn_params.seqlens.tolist()
-        q = [transpose_fn(q[i : i + 1, : seqlens_list[i]]) for i in range(len(q))]
-        k = [transpose_fn(k[i : i + 1, : seqlens_list[i]]) for i in range(len(k))]
-        v = [transpose_fn(v[i : i + 1, : seqlens_list[i]]) for i in range(len(v))]
-    else:
-        q = transpose_fn(q)
-        k = transpose_fn(k)
-        v = transpose_fn(v)
+    q = transpose_fn(q)
+    k = transpose_fn(k)
+    v = transpose_fn(v)
 
-    if attn_params.attn_mode == "torch":
-        if attn_params.split_attn:
-            x = []
-            for i in range(len(q)):
-                qi, ki, vi = q[i], k[i], v[i]
-                if enable_gqa:  # expand k/v heads to avoid SDPA's slow enable_gqa math path
-                    g = qi.shape[1] // ki.shape[1]  # [B, H, L, D] -> heads at dim 1
-                    ki = ki.repeat_interleave(g, dim=1)
-                    vi = vi.repeat_interleave(g, dim=1)
-                x_i = torch.nn.functional.scaled_dot_product_attention(qi, ki, vi, dropout_p=drop_rate)
-                q[i] = None
-                k[i] = None
-                v[i] = None
-                x.append(pad_fn(x_i, attn_params.max_seqlen))  # B, H, L, D
-            x = torch.cat(x, dim=0)
-            q, k, v = None, None, None
+    if enable_gqa:  # expand k/v heads to avoid SDPA's slow enable_gqa math path
+        g = q.shape[1] // k.shape[1]  # [B, H, L, D] -> heads at dim 1
+        k = k.repeat_interleave(g, dim=1)
+        v = v.repeat_interleave(g, dim=1)
 
-        else:
-            if enable_gqa:  # expand k/v heads to avoid SDPA's slow enable_gqa math path
-                g = q.shape[1] // k.shape[1]  # [B, H, L, D] -> heads at dim 1
-                k = k.repeat_interleave(g, dim=1)
-                v = v.repeat_interleave(g, dim=1)
-            x = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_params.attention_mask, dropout_p=drop_rate)
-            q, k, v = None, None, None
-
-    elif attn_params.attn_mode == "xformers":
-        if attn_params.split_attn:
-            x = []
-            for i in range(len(q)):
-                qi, ki, vi = q[i], k[i], v[i]
-                if enable_gqa:  # expand k/v heads to q's count; xformers 4D has no native GQA ([B, L, H, D] -> dim 2)
-                    g = qi.shape[2] // ki.shape[2]
-                    ki = ki.repeat_interleave(g, dim=2)
-                    vi = vi.repeat_interleave(g, dim=2)
-                x_i = xops.memory_efficient_attention(qi, ki, vi, p=drop_rate)
-                q[i] = None
-                k[i] = None
-                v[i] = None
-                x.append(pad_fn(x_i, attn_params.max_seqlen))  # B, L, H, D
-            x = torch.cat(x, dim=0)
-            q, k, v = None, None, None
-
-        else:
-            if enable_gqa:  # expand k/v heads to q's count; xformers 4D has no native GQA ([B, L, H, D] -> dim 2)
-                g = q.shape[2] // k.shape[2]
-                k = k.repeat_interleave(g, dim=2)
-                v = v.repeat_interleave(g, dim=2)
-            x = xops.memory_efficient_attention(q, k, v, attn_bias=attn_params.attention_mask, p=drop_rate)
-            q, k, v = None, None, None
-
-    elif attn_params.attn_mode == "sageattn":
-        if attn_params.split_attn:
-            x = []
-            for i in range(len(q)):
-                # HND seems to cause an error
-                x_i = sageattn(q[i], k[i], v[i])  # B, H, L, D. No dropout support
-                q[i] = None
-                k[i] = None
-                v[i] = None
-                x.append(pad_fn(x_i, attn_params.max_seqlen))  # B, H, L, D
-            x = torch.cat(x, dim=0)
-            q, k, v = None, None, None
-        elif attn_params.cu_seqlens is None:  # all tokens are valid
-            x = sageattn(q, k, v)  # B, L, H, D. No dropout support
-            q, k, v = None, None, None
-        else:
-            # Reshape to [(bxs), a, d]
-            batch_size, seqlen = q.shape[0], q.shape[1]
-            # reshape (not view): callers may pass non-contiguous q/k/v (e.g. Krea 2 transposes
-            # [B,H,L,D]->[B,L,H,D] after RoPE); reshape copies only when needed, view-equivalent otherwise.
-            q = q.reshape(q.shape[0] * q.shape[1], *q.shape[2:])  # [B*L, H, D]
-            k = k.reshape(k.shape[0] * k.shape[1], *k.shape[2:])  # [B*L, H, D]
-            v = v.reshape(v.shape[0] * v.shape[1], *v.shape[2:])  # [B*L, H, D]
-
-            # Assume cu_seqlens_q == cu_seqlens_kv and max_seqlen_q == max_seqlen_kv. No dropout support
-            x = sageattn_varlen(
-                q, k, v, attn_params.cu_seqlens, attn_params.cu_seqlens, attn_params.max_seqlen, attn_params.max_seqlen
-            )
-            q, k, v = None, None, None
-
-            # Reshape x with shape [(bxs), a, d] to [b, s, a, d]
-            x = x.view(batch_size, seqlen, x.shape[-2], x.shape[-1])  # B, L, H, D
-
-    elif attn_params.attn_mode == "flash":
-        if attn_params.split_attn:
-            x = []
-            for i in range(len(q)):
-                # HND seems to cause an error
-                x_i = flash_attn_func(q[i], k[i], v[i], drop_rate)  # B, L, H, D
-                q[i] = None
-                k[i] = None
-                v[i] = None
-                x.append(pad_fn(x_i, attn_params.max_seqlen))  # B, L, H, D
-            x = torch.cat(x, dim=0)
-            q, k, v = None, None, None
-        elif attn_params.cu_seqlens is None:  # all tokens are valid
-            x = flash_attn_func(q, k, v, drop_rate)  # B, L, H, D
-            q, k, v = None, None, None
-        else:
-            # Reshape to [(bxs), a, d]
-            batch_size, seqlen = q.shape[0], q.shape[1]
-            # reshape (not view): callers may pass non-contiguous q/k/v (e.g. Krea 2 transposes
-            # [B,H,L,D]->[B,L,H,D] after RoPE); reshape copies only when needed, view-equivalent otherwise.
-            q = q.reshape(q.shape[0] * q.shape[1], *q.shape[2:])  # [B*L, H, D]
-            k = k.reshape(k.shape[0] * k.shape[1], *k.shape[2:])  # [B*L, H, D]
-            v = v.reshape(v.shape[0] * v.shape[1], *v.shape[2:])  # [B*L, H, D]
-
-            # Assume cu_seqlens_q == cu_seqlens_kv and max_seqlen_q == max_seqlen_kv
-            x = flash_attn_varlen_func(
-                q, k, v, attn_params.cu_seqlens, attn_params.cu_seqlens, attn_params.max_seqlen, attn_params.max_seqlen, drop_rate
-            )
-            q, k, v = None, None, None
-
-            # Reshape x with shape [(bxs), a, d] to [b, s, a, d]
-            x = x.view(batch_size, seqlen, x.shape[-2], x.shape[-1])  # B, L, H, D
-
-    else:
-        # Currently only PyTorch SDPA and xformers are implemented
-        raise ValueError(f"Unsupported attention mode: {attn_params.attn_mode}")
+    x = F.scaled_dot_product_attention(
+        q, k, v, attn_mask=attn_params.attention_mask, dropout_p=drop_rate
+    )
 
     x = transpose_fn(x)  # [B, L, H, D]
     x = x.reshape(x.shape[0], x.shape[1], -1)  # [B, L, H*D]

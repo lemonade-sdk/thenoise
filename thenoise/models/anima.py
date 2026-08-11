@@ -70,8 +70,6 @@ class AnimaModel(DiffusionModel):
         self.dit = anima_utils.load_anima_model(
             device,
             dit_path,
-            attn_mode=None,
-            split_attn=False,
             loading_device=device,
             dit_weight_dtype=dtype,
         )

@@ -41,8 +41,6 @@ def load_krea2_dit(
     dtype: torch.dtype = torch.bfloat16,
     config: SingleMMDiTConfig = single_mmdit_large_wide,
     loading_device: Optional[Union[str, torch.device]] = None,
-    attn_mode: Optional[str] = None,
-    split_attn: bool = False,
 ) -> SingleStreamDiT:
     """Build the K2 single-stream MMDiT on meta and load weights (assign=True).
 
@@ -54,7 +52,7 @@ def load_krea2_dit(
 
     logger.info(f"Loading Krea 2 DiT weights from {dit_path}")
     with torch.device("meta"):
-        dit = SingleStreamDiT(config, attn_mode=attn_mode, split_attn=split_attn)
+        dit = SingleStreamDiT(config)
 
     sd = load_dit_safetensors(
         dit_path,

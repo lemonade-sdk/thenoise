@@ -26,8 +26,9 @@ def gather_valid_text(txt, mask):
 
     The Qwen3-VL conditioner pads the prompt to max_length and appends the template suffix,
     so its mask is [valid prompt, pad, valid suffix] — valid tokens are NOT a prefix. The
-    shared attention (cu_seqlens / trim) assumes valid == leading prefix, so the interior
-    padding must be removed first. Dropping it is lossless: text tokens get zero RoPE position
+    shared attention handles padding via a key-padding mask, so interior padding is covered
+    there; the trim below is still applied to keep each sample's valid tokens contiguous.
+    Dropping it is lossless: text tokens get zero RoPE position
     and padding is masked out, so only the set/order of valid tokens matters.
 
     txt: (B, seq, L, D), mask: (B, seq) bool -> (B, max_valid, L, D), (B, max_valid) bool.
@@ -47,7 +48,7 @@ def prepare(img, txtlen, patch, txtmask):
 
     Image tokens lead the sequence so each sample's valid tokens form a contiguous prefix
     ([img (all valid), text (valid prefix + padding)]), which the shared attention's
-    varlen / cu_seqlens path requires. Returns (img_tokens, pos, mask).
+    key-padding-mask path uses. Returns (img_tokens, pos, mask).
     """
     b, _, h, w = img.shape
     h_, w_ = h // patch, w // patch

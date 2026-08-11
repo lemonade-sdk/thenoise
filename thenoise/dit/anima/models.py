@@ -250,12 +250,6 @@ class Attention(nn.Module):
         rope_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         q, k, v = self.compute_qkv(x, context, rope_emb=rope_emb)
-        if q.dtype != v.dtype:
-            if (not attn_params.supports_fp32 or attn_params.requires_same_dtype) and torch.is_autocast_enabled():
-                # FlashAttention requires fp16/bf16, xformers require same dtype; only cast when autocast is active.
-                target_dtype = v.dtype  # v has fp16/bf16 dtype
-                q = q.to(target_dtype)
-                k = k.to(target_dtype)
         # return self.compute_attention(q, k, v)
         qkv = [q, k, v]
         del q, k, v
@@ -897,8 +891,6 @@ class Anima(nn.Module):
         extra_t_extrapolation_ratio: float = 1.0,
         rope_enable_fps_modulation: bool = True,
         use_llm_adapter: bool = False,
-        attn_mode: str = None,
-        split_attn: bool = False,
     ) -> None:
         super().__init__()
         self.max_img_h = max_img_h
@@ -926,9 +918,6 @@ class Anima(nn.Module):
         self.extra_t_extrapolation_ratio = extra_t_extrapolation_ratio
         self.rope_enable_fps_modulation = rope_enable_fps_modulation
         self.use_llm_adapter = use_llm_adapter
-
-        self.attn_mode = attention.preferred_attn_mode(attn_mode)
-        self.split_attn = split_attn
 
         self.build_patch_embed()
         self.build_pos_embed()
@@ -1098,7 +1087,7 @@ class Anima(nn.Module):
             "extra_per_block_pos_emb": extra_pos_emb,
         }
 
-        attn_params = attention.AttentionParams.create_attention_params(self.attn_mode, self.split_attn)
+        attn_params = attention.AttentionParams.create_attention_params()
 
         # Determine whether to use float32 for block computations based on input dtype (use float32 for better stability when input is float16)
         use_fp32 = x_B_T_H_W_D.dtype == torch.float16

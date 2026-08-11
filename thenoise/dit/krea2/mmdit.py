@@ -2,9 +2,9 @@
 
 Ported from references/Krea2/mmdit.py, plus musubi training hooks (gradient checkpointing,
 block swap) and the shared attention backend. The core attention now goes through
-musubi's common ``modules.attention`` (SDPA / flash / sageattn, selectable via attn_mode),
+musubi's common ``modules.attention`` (PyTorch SDPA),
 with the combined sequence ordered image-first so that valid tokens form a contiguous
-prefix per sample — this lets the shared varlen / cu_seqlens machinery handle text padding.
+prefix per sample — this lets the shared attention machinery handle text padding.
 """
 
 import math
@@ -16,7 +16,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
-from thenoise.utils.attention import AttentionParams, attention as common_attention, preferred_attn_mode
+from thenoise.utils.attention import AttentionParams, attention as common_attention
 
 
 def rope(pos: Tensor, dim: int, theta: float = 1e4, ntk: float = 1.0) -> Tensor:
@@ -179,7 +179,7 @@ class Attention(torch.nn.Module):
             q, k = ropeapply(q, k, freqs)
 
         # The shared attention expects [B, L, H, D] and returns [B, L, H*D]. GQA (heads != kvheads)
-        # is detected and handled inside it (enable_gqa for SDPA; native for flash/sageattn).
+        # is detected and handled inside it via k/v head expansion for SDPA.
         q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
         x = common_attention([q, k, v], attn_params=attn_params)
         out = self.wo(x * F.sigmoid(gate))
@@ -287,13 +287,9 @@ class SingleStreamBlock(nn.Module):
 
 
 class SingleStreamDiT(nn.Module):
-    def __init__(self, config: SingleMMDiTConfig, attn_mode: str = None, split_attn: bool = False):
+    def __init__(self, config: SingleMMDiTConfig):
         super().__init__()
         self.config = config
-        # Backend for the shared attention ("torch"=SDPA, "flash", "sageattn", "xformers").
-        # ``None`` resolves to the best available backend for this ROCm build.
-        self.attn_mode = preferred_attn_mode(attn_mode)
-        self.split_attn = split_attn
 
         headdim = config.features // config.heads
         axes = [
@@ -361,8 +357,8 @@ class SingleStreamDiT(nn.Module):
 
         # Text fusion is a self-attention over text tokens only (img_len=0). The per-layer
         # blocks see every token (no mask); the refiner masks padding via txtmask.
-        txt_attn_params_nomask = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, 0, None)
-        txt_attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, 0, txtmask)
+        txt_attn_params_nomask = AttentionParams.create_attention_params_from_mask(0, None)
+        txt_attn_params = AttentionParams.create_attention_params_from_mask(0, txtmask)
         context = self.txtfusion(context, txt_attn_params_nomask, txt_attn_params)
         context = self.txtmlp(context)
 
@@ -370,7 +366,7 @@ class SingleStreamDiT(nn.Module):
 
         # Pad the combined sequence to a multiple of 256 to keep compiled kernel shapes stable.
         # The pad lands on the text tail; extending txtmask with False makes the shared attention
-        # machinery (cu_seqlens / key-padding mask / trim) exclude it, so it is numerically inert.
+        # machinery (key-padding mask / trim) exclude it, so it is numerically inert.
         fulllen = combined.shape[1]
         padlen = (-fulllen) % 256
         if padlen > 0:
@@ -380,8 +376,8 @@ class SingleStreamDiT(nn.Module):
 
         # Main blocks: bidirectional attention over [image (img_len, all valid) + text (padded)].
         # Image-first ordering keeps each sample's valid tokens a contiguous prefix, which the
-        # shared varlen path requires.
-        attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, imglen, txtmask)
+        # shared key-padding-mask path uses.
+        attn_params = AttentionParams.create_attention_params_from_mask(imglen, txtmask)
 
         freqs = self.posemb(pos)
 
