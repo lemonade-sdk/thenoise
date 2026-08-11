@@ -955,15 +955,20 @@ class Anima(nn.Module):
     def prepare_embedded_sequence(
         self,
         x_B_C_T_H_W: torch.Tensor,
-        padding_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
-        from torchvision import transforms
-
         if self.concat_padding_mask:
-            padding_mask = transforms.functional.resize(
-                padding_mask, list(x_B_C_T_H_W.shape[-2:]), interpolation=transforms.InterpolationMode.NEAREST
+            # Still images (T=1) always carry an all-zero padding mask. The x_embedder
+            # weights expect 17 input channels, but the extra channel is constant zero,
+            # so build it directly instead of resizing a zero tensor each forward.
+            x_B_C_T_H_W = torch.cat(
+                [
+                    x_B_C_T_H_W,
+                    x_B_C_T_H_W.new_zeros(
+                        (x_B_C_T_H_W.shape[0], 1, x_B_C_T_H_W.shape[2], x_B_C_T_H_W.shape[3], x_B_C_T_H_W.shape[4])
+                    ),
+                ],
+                dim=1,
             )
-            x_B_C_T_H_W = torch.cat([x_B_C_T_H_W, padding_mask.unsqueeze(1).repeat(1, 1, x_B_C_T_H_W.shape[2], 1, 1)], dim=1)
         x_B_T_H_W_D = self.x_embedder(x_B_C_T_H_W)
 
         if self.extra_per_block_abs_pos_emb:
@@ -992,7 +997,6 @@ class Anima(nn.Module):
         x: torch.Tensor,
         timesteps: torch.Tensor,
         context: Optional[torch.Tensor] = None,
-        padding_mask: Optional[torch.Tensor] = None,
         target_input_ids: Optional[torch.Tensor] = None,
         target_attention_mask: Optional[torch.Tensor] = None,
         source_attention_mask: Optional[torch.Tensor] = None,
@@ -1000,10 +1004,7 @@ class Anima(nn.Module):
     ) -> torch.Tensor:
         context = self._preprocess_text_embeds(context, target_input_ids, target_attention_mask, source_attention_mask)
 
-        x_B_T_H_W_D, rope_emb_L_1_1_D, extra_pos_emb = self.prepare_embedded_sequence(
-            x,
-            padding_mask=padding_mask,
-        )
+        x_B_T_H_W_D, rope_emb_L_1_1_D, extra_pos_emb = self.prepare_embedded_sequence(x)
 
         if timesteps.ndim == 1:
             timesteps = timesteps.unsqueeze(1)

@@ -169,15 +169,11 @@ class AnimaModel(DiffusionModel):
         guidance_scale: float,
         i: int,
     ) -> torch.Tensor:
-        dev = torch.device(self.device)
         t_expand = t.expand(latents.shape[0])
-        padding_mask = torch.zeros(
-            1, 1, latents.shape[3], latents.shape[4], dtype=torch.bfloat16, device=dev
-        )
         with torch.no_grad():
-            noise_pred = self.dit(latents, t_expand, cond.cond, padding_mask=padding_mask)
+            noise_pred = self.dit(latents, t_expand, cond.cond)
             if guidance_scale > 1.0 and cond.null is not None:
-                uncond = self.dit(latents, t_expand, cond.null, padding_mask=padding_mask)
+                uncond = self.dit(latents, t_expand, cond.null)
                 noise_pred = uncond + guidance_scale * (noise_pred - uncond)
         return noise_pred
 
