@@ -15,6 +15,7 @@ from thenoise.models.base import (
     Step,
     normalize_keys,
 )
+from thenoise.vae import load_qwen_vae
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,14 @@ class AnimaModel(DiffusionModel):
             t5_max_length=512,
         )
         self.encoding_strategy = AnimaTextEncodingStrategy()
+
+        # Qwen-Image VAE (single-frame decode).
+        self.vae = (
+            load_qwen_vae(self.vae_path, device=self.device, disable_mmap=True)
+            .to(self.dtype)
+            .eval()
+            .requires_grad_(False)
+        )
 
         logger.info("Anima model ready on %s (%s)", device, dtype)
 
@@ -193,9 +202,3 @@ class AnimaModel(DiffusionModel):
         t = 1.0 - percent
         shift = self.DEFAULT_FLOW_SHIFT
         return (shift * t) / (1.0 + (shift - 1.0) * t)
-
-    def _apply_loras_for_generation(
-        self, lora_specs: Optional[List[str]]
-    ) -> None:
-        """Apply LoRAs to the Anima DiT before generation."""
-        self.switch_loras(lora_specs, self.dit)

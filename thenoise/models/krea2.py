@@ -16,6 +16,7 @@ from thenoise.models.base import (
     Step,
     normalize_keys,
 )
+from thenoise.vae import load_qwen_vae
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,14 @@ class Krea2Model(DiffusionModel):
         logger.info("Loading Krea 2 text encoder from %s", text_encoder_path)
         self.encoder = krea2_utils.load_krea2_text_encoder(
             text_encoder_path, dtype=dtype, device=device
+        )
+
+        # Qwen-Image VAE
+        self.vae = (
+            load_qwen_vae(self.vae_path, device=self.device, disable_mmap=True)
+            .to(self.dtype)
+            .eval()
+            .requires_grad_(False)
         )
 
         # VAE latent geometry (shared Qwen-Image VAE): 8x spatial compression.
@@ -216,9 +225,3 @@ class Krea2Model(DiffusionModel):
         t = 1.0 - percent
         mu = self.DEFAULT_MU
         return math.exp(mu) / (math.exp(mu) + (1.0 / t - 1.0))
-
-    def _apply_loras_for_generation(
-        self, lora_specs: Optional[List[str]]
-    ) -> None:
-        """Apply LoRAs to the Krea2 DiT before generation."""
-        self.switch_loras(lora_specs, self.dit)

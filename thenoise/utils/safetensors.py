@@ -8,8 +8,6 @@ from typing import Dict, Any, Union, Optional
 
 from safetensors.torch import load_file
 
-from thenoise.utils.device import synchronize_device
-
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -292,7 +290,7 @@ def load_safetensors(
         with MemoryEfficientSafeOpen(path, disable_numpy_memmap=disable_numpy_memmap) as f:
             for key in f.keys():
                 state_dict[key] = f.get_tensor(key, device=device, dtype=dtype)
-        synchronize_device(device)
+            torch.cuda.synchronize()
         return state_dict
     else:
         try:

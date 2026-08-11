@@ -1,9 +1,9 @@
 """Abstract interface for a diffusion model adapter.
 
 The base class owns the entire high-level pipeline — encode -> denoise -> decode
--> postprocess -> PIL — plus the shared Qwen-Image VAE, the inference lock, the
-denoising loop, and the tensor/PIL conversions. Subclasses implement only the
-model-specific kernels:
+-> postprocess -> PIL — plus the inference lock, the denoising loop, and the
+tensor/PIL conversions. Subclasses implement the model-specific kernels and load
+their own VAE:
 
   * ``detect(f)``            — recognize this model's DiT from a safetensors handle.
   * ``encode_prompt(...)``   — text -> conditioning embeddings (cond + null).
@@ -79,7 +79,6 @@ from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
 from thenoise.utils.lora import LoRAApplyResult
 from thenoise.utils.pipeline_cache import PipelineCache
 from thenoise.utils.safetensors import WRAP_PREFIXES
-from thenoise.vae import load_vae
 from thenoise.postprocess.film_grain import film_grain
 from thenoise.postprocess.nyquist import nyquist_notch
 from thenoise.postprocess.rcas import rcas
@@ -195,17 +194,6 @@ class DiffusionModel(ABC):
         self._upscaler = None
         self._adaptor = None
 
-        # Shared Qwen-Image VAE. Single-frame decode, so caching is disabled.
-        self.vae = self._load_vae(vae_path)
-
-    def _load_vae(self, vae_path: str):
-        """Load the shared Qwen-Image VAE onto device/dtype."""
-        return load_vae(
-            vae_path,
-            device=self.device,
-            disable_mmap=True,
-        ).to(self.dtype).eval().requires_grad_(False)
-
     # ------------------------------------------------------------------ hooks
     @abstractmethod
     def encode_prompt(
@@ -267,15 +255,6 @@ class DiffusionModel(ABC):
         """Return the effective (width, height). Override to round/validate."""
         return width, height
 
-    def _apply_loras_for_generation(
-        self, lora_specs: Optional[List[str]]
-    ) -> None:
-        """Apply LoRAs before generation. Override in subclasses to pass the DiT.
-
-        The base implementation is a no-op; subclasses call ``self.switch_loras(
-        lora_specs, self.dit)`` (or equivalent) to target the actual model module.
-        """
-        pass
 
     # --------------------------------------------------------------- LoRA
     def _parse_lora_spec(self, spec: str) -> Tuple[str, float]:
@@ -369,8 +348,6 @@ class DiffusionModel(ABC):
                 self._parse_lora_spec(s)[0] for s in lora_specs
             )
             logger.info("Applied LoRA(s): %s", active_names)
-            # Workaround supposed ROCm 7.14+ bug (looks like it is using freed memory)
-            torch.cuda.empty_cache()
         else:
             logger.debug("Using base model (no LoRA)")
 
@@ -518,7 +495,7 @@ class DiffusionModel(ABC):
             if self._cache.sampling_hit(sampling_key):
                 latents = self._cache.sampling_get()
             else:
-                self._apply_loras_for_generation(lora_specs)
+                self.switch_loras(lora_specs, self.dit)
                 with torch.no_grad():
                     latents = self._denoise(
                         cond, steps, height, width, seed,

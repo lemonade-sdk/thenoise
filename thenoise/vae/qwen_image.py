@@ -27,6 +27,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from thenoise.utils.safetensors import load_safetensors
 
@@ -312,8 +313,10 @@ class QwenImageAttentionBlock(nn.Module):
         #
         # On ROCm 7.14+ the fused SDPA backends (flash and memory-efficient) produce
         # localized broken-pixel artifacts in this VAE decoder (the math backend and
-        # this manual implementation are both clean). We keep it in the module dtype 
-        # (bf16) for speed; the tradeoff is an O(seq^2) attention matrix.
+        # this manual implementation are both clean).
+        # using with sdpa_kernel([SDPBackend.MATH]):
+        #                x = F.scaled_dot_product_attention(q, k, v)
+        # would work as well but seems to introduce a delay (at least on gfx1150).
         scale = channels ** 0.5  # SDPA default scale = 1/sqrt(head_dim)
         attn = (q @ k.transpose(-2, -1)) / scale
         attn = attn.softmax(dim=-1)
@@ -931,13 +934,13 @@ def convert_comfyui_state_dict(sd):
     return new_state_dict
 
 
-def load_vae(
+def load_qwen_vae(
     vae_path: str,
     input_channels: int = 3,
     device: Union[str, torch.device] = "cpu",
     disable_mmap: bool = False,
 ) -> AutoencoderKLQwenImage:
-    """Load VAE from a given path."""
+    """Load the Qwen-Image VAE from a given path."""
     VAE_CONFIG_JSON = """
 {
   "_class_name": "AutoencoderKLQwenImage",
@@ -1022,4 +1025,4 @@ def load_vae(
     logger.info(f"Loaded VAE: {info}")
 
     vae.to(device)
-    return vae
+    return torch.compile(vae, fullgraph=True, mode="reduce-overhead")

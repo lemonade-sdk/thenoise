@@ -2,8 +2,6 @@ import os
 import re
 from typing import Dict, List, Optional, Tuple, TypedDict, Union
 import torch
-from thenoise.utils.device import synchronize_device
-
 
 from thenoise.utils.setup_logging import setup_logging
 
