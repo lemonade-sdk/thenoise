@@ -1025,4 +1025,4 @@ def load_qwen_vae(
     logger.info(f"Loaded VAE: {info}")
 
     vae.to(device)
-    return torch.compile(vae, fullgraph=True, mode="reduce-overhead")
+    return vae
