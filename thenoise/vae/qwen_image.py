@@ -169,7 +169,7 @@ class QwenImageUpsample(nn.Upsample):
     """
 
     def forward(self, x):
-        return super().forward(x.float()).type_as(x)
+        return super().forward(x)
 
 
 class QwenImageResample(nn.Module):
@@ -669,6 +669,18 @@ class AutoencoderKLQwenImage(nn.Module):
         self.latents_mean = latents_mean
         self.latents_std = latents_std
 
+        # Hoisted buffers (built once; moved with the module via `.to(device)`).
+        self.register_buffer(
+            "_latents_mean",
+            torch.tensor(latents_mean).view(1, self.z_dim, 1, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_latents_std",
+            (1.0 / torch.tensor(latents_std)).view(1, self.z_dim, 1, 1, 1),
+            persistent=False,
+        )
+
         self.encoder = QwenImageEncoder3d(
             base_dim, z_dim * 2, dim_mult, num_res_blocks, attn_scales, self.temperal_downsample, dropout, input_channels
         )
@@ -743,8 +755,8 @@ class AutoencoderKLQwenImage(nn.Module):
             latents = latents.unsqueeze(2)  # [B, C, H, W] -> [B, C, 1, H, W]
 
         latents = latents.to(self.dtype)
-        latents_mean = torch.tensor(self.latents_mean).view(1, self.z_dim, 1, 1, 1).to(latents.device, latents.dtype)
-        latents_std = 1.0 / torch.tensor(self.latents_std).view(1, self.z_dim, 1, 1, 1).to(latents.device, latents.dtype)
+        latents_mean = self._latents_mean.to(latents.device, latents.dtype)
+        latents_std = self._latents_std.to(latents.device, latents.dtype)
         latents = latents / latents_std + latents_mean
 
         image = self.decode(latents, return_dict=False)[0]  # -1 to 1
@@ -775,8 +787,8 @@ class AutoencoderKLQwenImage(nn.Module):
         latents = posterior.mode()  # Use mode instead of sampling for deterministic results
 
         # Apply normalization using mean/std
-        latents_mean = torch.tensor(self.latents_mean).view(1, self.z_dim, 1, 1, 1).to(latents.device, latents.dtype)
-        latents_std = 1.0 / torch.tensor(self.latents_std).view(1, self.z_dim, 1, 1, 1).to(latents.device, latents.dtype)
+        latents_mean = self._latents_mean.to(latents.device, latents.dtype)
+        latents_std = self._latents_std.to(latents.device, latents.dtype)
         latents = (latents - latents_mean) * latents_std
 
         if is_4d:
