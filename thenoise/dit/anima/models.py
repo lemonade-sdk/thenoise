@@ -122,7 +122,6 @@ class RMSNorm(torch.nn.Module):
     def _norm(self, x: torch.Tensor) -> torch.Tensor:
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
-    @torch.compile(fullgraph=True)
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         with torch.autocast(device_type=x.device.type, dtype=torch.float32):
             output = self._norm(x.float()).type_as(x)
@@ -485,33 +484,6 @@ class TimestepEmbedding(nn.Module):
 
         return emb_B_T_D, adaln_lora_B_T_3D
 
-
-# Commented out Fourier Features (not used in Anima). Kept for reference.
-# class FourierFeatures(nn.Module):
-#     """Fourier feature transform: [B] -> [B, D]."""
-
-#     def __init__(self, num_channels: int, bandwidth: int = 1, normalize: bool = False):
-#         super().__init__()
-#         self.register_buffer("freqs", 2 * np.pi * bandwidth * torch.randn(num_channels), persistent=True)
-#         self.register_buffer("phases", 2 * np.pi * torch.rand(num_channels), persistent=True)
-#         self.gain = np.sqrt(2) if normalize else 1
-#         self.bandwidth = bandwidth
-#         self.num_channels = num_channels
-#         self.reset_parameters()
-
-#     def reset_parameters(self) -> None:
-#         generator = torch.Generator()
-#         generator.manual_seed(0)
-#         self.freqs = 2 * np.pi * self.bandwidth * torch.randn(self.num_channels, generator=generator).to(self.freqs.device)
-#         self.phases = 2 * np.pi * torch.rand(self.num_channels, generator=generator).to(self.freqs.device)
-
-#     def forward(self, x: torch.Tensor, gain: float = 1.0) -> torch.Tensor:
-#         in_dtype = x.dtype
-#         x = x.to(torch.float32).ger(self.freqs.to(torch.float32)).add(self.phases.to(torch.float32))
-#         x = x.cos().mul(self.gain * gain).to(in_dtype)
-#         return x
-
-
 # Patch Embedding
 class PatchEmbed(nn.Module):
     """Patch embedding: (B, C, T, H, W) -> (B, T', H', W', D)"""
@@ -599,7 +571,6 @@ class FinalLayer(nn.Module):
 
         self.layer_norm.reset_parameters()
 
-    @torch.compile(fullgraph=True)
     def forward(
         self,
         x_B_T_H_W_D: torch.Tensor,
