@@ -925,11 +925,6 @@ class Anima(nn.Module):
         )
 
         self.t_embedding_norm = RMSNorm(model_channels, eps=1e-6)
-        # RoPE cache: for a still image the rotary embeddings depend only on the
-        # (patched) latent size, so they are recomputed identically inside every
-        # DiT forward (~56x per image with CFG). Cache the tensor keyed by
-        # (T, H, W) and reuse it across steps / cond+null forwards.
-        self._rope_cache: dict = {}
         self.init_weights()
 
     def init_weights(self) -> None:
@@ -1006,32 +1001,10 @@ class Anima(nn.Module):
             extra_pos_emb = None
 
         if "rope" in self.pos_emb_cls.lower():
-            rope_emb = self._cached_rope(x_B_T_H_W_D)
-            return x_B_T_H_W_D, rope_emb, extra_pos_emb
+            return x_B_T_H_W_D, self.pos_embedder(x_B_T_H_W_D), extra_pos_emb
         x_B_T_H_W_D = x_B_T_H_W_D + self.pos_embedder(x_B_T_H_W_D)
 
         return x_B_T_H_W_D, None, extra_pos_emb
-
-    def _cached_rope(self, x_B_T_H_W_D: torch.Tensor) -> torch.Tensor:
-        """Return the 3D RoPE embedding, computing it only once per (T, H, W).
-
-        For a still image (T=1) the rope depends only on the patched latent size,
-        never on the latent values, so caching is exact — the same tensor is
-        returned for every step and the cond/null forwards.
-        """
-        _, T, H, W, _ = x_B_T_H_W_D.shape
-        key = (T, H, W)
-        rope_emb = self._rope_cache.get(key)
-        if rope_emb is None:
-            rope_emb = self.pos_embedder(x_B_T_H_W_D)
-            self._rope_cache[key] = rope_emb
-        return rope_emb
-
-    def _apply(self, fn, recurse=True):
-        # The rope cache holds tensors on a specific device/dtype; drop it when
-        # the module is moved (via .to/.cuda/.float) so stale entries never leak.
-        self._rope_cache = {}
-        return super()._apply(fn, recurse=recurse)
 
     def unpatchify(self, x_B_T_H_W_M: torch.Tensor) -> torch.Tensor:
         x_B_C_Tt_Hp_Wp = rearrange(
