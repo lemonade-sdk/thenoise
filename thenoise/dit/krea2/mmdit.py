@@ -103,7 +103,6 @@ class PositionalEncoding(torch.nn.Module):
         self.theta = theta
         self.ntk = ntk
 
-    @torch.compile(fullgraph=True)
     def forward(self, pos: Tensor) -> Tensor:
         return torch.cat(
             [rope(pos[..., i], d, self.theta, self.ntk) for i, d in enumerate(self.axdims)],
@@ -128,7 +127,6 @@ class RMSNorm(torch.nn.Module):
         self.eps = eps
         self.scale = torch.nn.Parameter(torch.zeros(features, device=device, dtype=torch.float32))
 
-    @torch.compile(fullgraph=True)
     def forward(self, x: Tensor) -> Tensor:
         t, dtype = x.float(), x.dtype
         t = F.rms_norm(t, (self.features,), eps=self.eps, weight=(self.scale.float() + 1.0))
@@ -194,7 +192,6 @@ class LastLayer(torch.nn.Module):
         self.linear = torch.nn.Linear(features, patch * patch * channels, bias=True)
         self.modulation = SimpleModulation(features)
 
-    @torch.compile(fullgraph=True)
     def forward(self, x: Tensor, tvec: Tensor) -> Tensor:
         scale, shift = self.modulation(tvec)
         x = (1 + scale) * self.norm(x) + shift
@@ -338,6 +335,23 @@ class SingleStreamDiT(nn.Module):
 
         self.tproj = nn.Sequential(nn.GELU(approximate="tanh"), nn.Linear(config.features, config.features * 6))
 
+    def fuse_text(self, context: Tensor, txtmask: Tensor | None) -> Tensor:
+        """Run the text-fusion stream (TextFusionTransformer) + text-MLP.
+
+        Depends only on the text embeddings and their key-padding mask — NOT on the
+        image latent or timestep. Callers may precompute it once per prompt and reuse
+        the result across all denoise steps / resolutions (it is cached at the prompt
+        stage in the adapter). ``txtmask`` is the text-only key-padding mask, shape
+        (B, txt_len) bool.
+        """
+        # Text fusion is a self-attention over text tokens only (img_len=0). The per-layer
+        # blocks see every token (no mask); the refiner masks padding via txtmask.
+        txt_attn_params_nomask = AttentionParams.create_attention_params_from_mask(0, None)
+        txt_attn_params = AttentionParams.create_attention_params_from_mask(0, txtmask)
+        context = self.txtfusion(context, txt_attn_params_nomask, txt_attn_params)
+        context = self.txtmlp(context)
+        return context
+
     def forward(
         self,
         img: Tensor,
@@ -355,13 +369,8 @@ class SingleStreamDiT(nn.Module):
         imglen = img.shape[1]
         txtmask = mask[:, imglen:]  # (B, txt_len) bool
 
-        # Text fusion is a self-attention over text tokens only (img_len=0). The per-layer
-        # blocks see every token (no mask); the refiner masks padding via txtmask.
-        txt_attn_params_nomask = AttentionParams.create_attention_params_from_mask(0, None)
-        txt_attn_params = AttentionParams.create_attention_params_from_mask(0, txtmask)
-        context = self.txtfusion(context, txt_attn_params_nomask, txt_attn_params)
-        context = self.txtmlp(context)
-
+        # `context` is the already-fused text representation (see ``fuse_text``). The adapter
+        # precomputes it once per prompt because it is independent of image/timestep.
         combined = torch.cat((img, context), dim=1)  # image first, then text
 
         # Pad the combined sequence to a multiple of 256 to keep compiled kernel shapes stable.

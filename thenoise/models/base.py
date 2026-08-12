@@ -45,7 +45,7 @@ at any stage invalidates that stage and all downstream stages.
 
   Stage          | Cache key depends on                    | Cached value
   ---------------+-----------------------------------------+---------------
-  Prompt         | prompt, negative_prompt, guidance_scale | Conditioning
+  Prompt         | prompt, negative_prompt, guidance_scale, lora_specs | Conditioning
   Sampling       | prompt_key + size, steps, seed, sampler, lora_specs | latents
   Upscale+refine | (driven by decode cache hit below)      | —
   VAE decode     | sampling_key (+ upscale constants)      | pixels (fp32)
@@ -376,9 +376,20 @@ class DiffusionModel(ABC):
         prompt: str,
         negative_prompt: str,
         guidance_scale: float,
+        lora_specs: Optional[List[str]] = None,
     ) -> Tuple:
-        """Cache key for prompt conditioning."""
-        return ("prompt", prompt, negative_prompt, guidance_scale)
+        """Cache key for prompt conditioning.
+
+        Includes ``lora_specs`` so a change of LoRA invalidates any cached text
+        fusion (the fused text is computed from the LoRA-adjusted DiT weights).
+        """
+        return (
+            "prompt",
+            prompt,
+            negative_prompt,
+            guidance_scale,
+            tuple(sorted(lora_specs)) if lora_specs else None,
+        )
 
     def _cache_key_sampling(
         self,
@@ -388,12 +399,10 @@ class DiffusionModel(ABC):
         steps: int,
         seed: int,
         sampler: str,
-        lora_specs: Optional[List[str]],
     ) -> Tuple:
         """Cache key for the sampling (denoise stage).
 
-        Embeds the prompt key so any prompt/guidance change cascades.
-        guidance_scale is not repeated — it is already in prompt_key.
+        Embeds the prompt key so any prompt/guidance/LoRA change cascades..
         """
         return (
             "sampling",
@@ -403,7 +412,6 @@ class DiffusionModel(ABC):
             steps,
             seed,
             sampler,
-            tuple(sorted(lora_specs)) if lora_specs else None,
         )
 
     def _cache_key_decode(
@@ -470,11 +478,10 @@ class DiffusionModel(ABC):
 
         # --- compute cache keys (pure data, no model access) ---
         prompt_key = self._cache_key_prompt(
-            prompt, negative_prompt, guidance_scale
+            prompt, negative_prompt, guidance_scale, lora_specs
         )
         sampling_key = self._cache_key_sampling(
-            prompt_key, width, height, steps, seed,
-            effective_sampler, lora_specs,
+            prompt_key, width, height, steps, seed, effective_sampler
         )
         decode_key = self._cache_key_decode(
             sampling_key, upscale,
@@ -482,6 +489,8 @@ class DiffusionModel(ABC):
 
         # --- locked section: cache checks + model access ---
         with self._lock:
+            self.switch_loras(lora_specs, self.dit)
+
             # Stage 1: prompt conditioning
             if self._cache.prompt_hit(prompt_key):
                 cond = self._cache.prompt_get()
@@ -495,7 +504,6 @@ class DiffusionModel(ABC):
             if self._cache.sampling_hit(sampling_key):
                 latents = self._cache.sampling_get()
             else:
-                self.switch_loras(lora_specs, self.dit)
                 with torch.no_grad():
                     latents = self._denoise(
                         cond, steps, height, width, seed,

@@ -109,7 +109,28 @@ class Krea2Model(DiffusionModel):
         txt, txtmask, untxt, untxtmask = encode_prompts(
             self.encoder, [prompt], [negative_prompt], cfg=cfg
         )
-        return Conditioning(cond=txt, cond_mask=txtmask, null=untxt, null_mask=untxtmask)
+        # Fuse the text stream ONCE here (prompt stage) so it is cached and reused
+        # across denoise steps and across runs with the same prompt/LoRA config. The
+        # fusion is independent of image/timestep, but depends on the (LoRA-adjusted)
+        # DiT weights
+        dev = torch.device(self.device)
+        with torch.no_grad():
+            txt_fused = self.dit.fuse_text(
+                txt.to(device=dev, dtype=self.dtype),
+                txtmask.to(device=dev),
+            )
+            untxt_fused = None
+            if cfg:
+                untxt_fused = self.dit.fuse_text(
+                    untxt.to(device=dev, dtype=self.dtype),
+                    untxtmask.to(device=dev),
+                )
+        return Conditioning(
+            cond=txt_fused,
+            cond_mask=txtmask,
+            null=untxt_fused,
+            null_mask=untxtmask,
+        )
 
     def init_latents(self, height: int, width: int, seed: int) -> torch.Tensor:
         dev = torch.device(self.device)
