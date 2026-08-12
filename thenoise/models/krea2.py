@@ -166,15 +166,18 @@ class Krea2Model(DiffusionModel):
         txt = cond.cond.to(device=dev, dtype=self.dtype)
         txtmask = cond.cond_mask.to(device=dev)
         img, pos, mask = prepare(latents, txt.shape[1], patch, txtmask)
+        self._freqs = self.dit.posemb(pos).to(self.dtype)
         self._txt, self._pos, self._mask = txt, pos, mask
 
         if cond.null is not None:
             untxt = cond.null.to(device=dev, dtype=self.dtype)
             untxtmask = cond.null_mask.to(device=dev)
             _, unpos, unmask = prepare(latents, untxt.shape[1], patch, untxtmask)
+            self._freqs_un = self.dit.posemb(unpos).to(self.dtype)
             self._untxt, self._unpos, self._unmask = untxt, unpos, unmask
         else:
             self._untxt = self._unpos = self._unmask = None
+            self._freqs_un = None
 
         return img
 
@@ -203,11 +206,11 @@ class Krea2Model(DiffusionModel):
         t_full = torch.full((len(latents),), t, dtype=latents.dtype, device=dev)
         with torch.autocast(device_type=device_type, dtype=self.dtype):
             cond_out = self.dit(
-                img=latents, context=self._txt, t=t_full, pos=self._pos, mask=self._mask
+                img=latents, context=self._txt, t=t_full, pos=self._pos, mask=self._mask, freqs=self._freqs
             )
             if guidance_scale > 1.0 and self._untxt is not None:
                 uncond = self.dit(
-                    img=latents, context=self._untxt, t=t_full, pos=self._unpos, mask=self._unmask
+                    img=latents, context=self._untxt, t=t_full, pos=self._unpos, mask=self._unmask, freqs=self._freqs_un
                 )
                 v = uncond + guidance_scale * (cond_out - uncond)
             else:

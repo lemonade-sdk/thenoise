@@ -20,21 +20,21 @@ from thenoise.utils.attention import AttentionParams, attention as common_attent
 
 
 def rope(pos: Tensor, dim: int, theta: float = 1e4, ntk: float = 1.0) -> Tensor:
-    scale = torch.arange(0, dim, 2, dtype=torch.float64, device=pos.device) / dim
+    scale = torch.arange(0, dim, 2, dtype=torch.float32, device=pos.device) / dim
     omega = 1.0 / ((theta * ntk) ** scale)
     out = torch.einsum("...n,d->...nd", pos, omega)
     out = torch.stack([torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)], dim=-1)
     out = rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
-    return out.float()
+    return out
 
 
 def ropeapply(xq: Tensor, xk: Tensor, freqs: Tensor) -> tuple[Tensor, Tensor]:
-    xq_ = xq.float().reshape(*xq.shape[:-1], -1, 1, 2)
-    xk_ = xk.float().reshape(*xk.shape[:-1], -1, 1, 2)
+    xq_ = xq.reshape(*xq.shape[:-1], -1, 1, 2)
+    xk_ = xk.reshape(*xk.shape[:-1], -1, 1, 2)
     freqs = freqs[:, None, :, :, :]
     xq_ = freqs[..., 0] * xq_[..., 0] + freqs[..., 1] * xq_[..., 1]
     xk_ = freqs[..., 0] * xk_[..., 0] + freqs[..., 1] * xk_[..., 1]
-    return xq_.reshape(*xq.shape).to(xq.dtype), xk_.reshape(*xk.shape).to(xk.dtype)
+    return xq_.reshape(*xq.shape), xk_.reshape(*xk.shape)
 
 
 def temb(
@@ -128,9 +128,7 @@ class RMSNorm(torch.nn.Module):
         self.scale = torch.nn.Parameter(torch.zeros(features, device=device, dtype=torch.float32))
 
     def forward(self, x: Tensor) -> Tensor:
-        t, dtype = x.float(), x.dtype
-        t = F.rms_norm(t, (self.features,), eps=self.eps, weight=(self.scale.float() + 1.0))
-        return t.to(dtype)
+        return F.rms_norm(x, (self.features,), eps=self.eps, weight=(self.scale + 1.0).to(x.dtype))
 
 
 class SwiGLU(torch.nn.Module):
@@ -358,7 +356,8 @@ class SingleStreamDiT(nn.Module):
         context: Tensor,
         t: Tensor,
         pos: Tensor,
-        mask: Tensor | None = None,
+        mask: Tensor | None,
+        freqs: Tensor,
     ) -> Tensor:
         img = self.first(img)
         t = self.tmlp(temb(t, self.config.tdim, device=img.device, dtype=img.dtype))
@@ -382,13 +381,12 @@ class SingleStreamDiT(nn.Module):
             combined = F.pad(combined, (0, 0, 0, padlen))
             pos = F.pad(pos, (0, 0, 0, padlen))
             txtmask = F.pad(txtmask, (0, padlen), value=False)
+            freqs = F.pad(freqs, (0, 0, 0, 0, 0, 0, 0, padlen, 0, 0))
 
         # Main blocks: bidirectional attention over [image (img_len, all valid) + text (padded)].
         # Image-first ordering keeps each sample's valid tokens a contiguous prefix, which the
         # shared key-padding-mask path uses.
         attn_params = AttentionParams.create_attention_params_from_mask(imglen, txtmask)
-
-        freqs = self.posemb(pos)
 
         for block in self.blocks:
             combined = block(combined, tvec, freqs, attn_params)
