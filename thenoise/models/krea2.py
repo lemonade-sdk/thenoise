@@ -94,7 +94,7 @@ class Krea2Model(DiffusionModel):
         )
 
         # VAE latent geometry (shared Qwen-Image VAE): 8x spatial compression.
-        self._compression = 2 ** len(self.vae.temperal_downsample)
+        self._compression = self.vae.compression
 
         logger.info("Krea 2 model ready on %s (%s)", device, dtype)
 

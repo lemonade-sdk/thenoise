@@ -17,7 +17,8 @@ their own VAE:
 Both models use the same Qwen-Image VAE (z_dim=16, spatial compression 8), so
 ``init_latents`` produces and ``finalize_latent`` returns the canonical latent
 format ``[B, C, H, W]`` (4D). The VAE's ``decode_to_pixels`` accepts that
-directly (it adds the frame axis internally). Model-internal reshaping (e.g.
+directly (the VAE is 2D / single-frame; it no longer adds a frame axis).
+Model-internal reshaping (e.g.
 Anima's frame axis, Krea2's patchify) lives in ``prepare_latent``/``finalize_latent``
 and runs ONCE around the loop, so the per-step ``denoise_step`` never re-converts
 the latent.
@@ -650,8 +651,8 @@ class DiffusionModel(ABC):
     def decode(self, latents: torch.Tensor) -> torch.Tensor:
         """Shared Qwen-Image VAE decode.
 
-        Accepts the canonical 4D latent ``[B, C, H, W]`` (the VAE adds the frame
-        axis internally) and returns pixels ``[C, H, W]`` in [-1, 1] as an fp32
+        Accepts the canonical 4D latent ``[B, C, H, W]`` (the VAE is 2D /
+        single-frame) and returns pixels ``[C, H, W]`` in [-1, 1] as an fp32
         GPU tensor, ready for tensor post-processing.
         """
         dev = torch.device(self.device)
