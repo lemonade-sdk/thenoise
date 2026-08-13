@@ -157,21 +157,6 @@ class QwenImageRMS_norm(nn.Module):
         return F.normalize(x, dim=(1 if self.channel_first else -1)) * self.scale * self.gamma + self.bias
 
 
-class QwenImageUpsample(nn.Upsample):
-    r"""
-    Perform upsampling while ensuring the output tensor has the same data type as the input.
-
-    Args:
-        x (torch.Tensor): Input tensor to be upsampled.
-
-    Returns:
-        torch.Tensor: Upsampled tensor with the same data type as the input.
-    """
-
-    def forward(self, x):
-        return super().forward(x)
-
-
 class QwenImageResample(nn.Module):
     r"""
     A custom resampling module for 2D and 3D data.
@@ -199,12 +184,12 @@ class QwenImageResample(nn.Module):
         # layers
         if mode == "upsample2d":
             self.resample = nn.Sequential(
-                QwenImageUpsample(scale_factor=(2.0, 2.0), mode="nearest-exact"),
+                nn.Upsample(scale_factor=2.0, mode="nearest-exact"),
                 nn.Conv2d(dim, dim // 2, 3, padding=1),
             )
         elif mode == "upsample3d":
             self.resample = nn.Sequential(
-                QwenImageUpsample(scale_factor=(2.0, 2.0), mode="nearest-exact"),
+                nn.Upsample(scale_factor=2.0, mode="nearest-exact"),
                 nn.Conv2d(dim, dim // 2, 3, padding=1),
             )
             self.time_conv = QwenImageCausalConv3d(dim, dim * 2, (3, 1, 1), padding=(1, 0, 0))
@@ -233,7 +218,6 @@ class QwenImageResidualBlock(nn.Module):
     Args:
         in_dim (int): Number of input channels.
         out_dim (int): Number of output channels.
-        dropout (float, optional): Dropout rate for the dropout layer. Default is 0.0.
         non_linearity (str, optional): Type of non-linearity to use. Default is "silu".
     """
 
@@ -241,7 +225,6 @@ class QwenImageResidualBlock(nn.Module):
         self,
         in_dim: int,
         out_dim: int,
-        dropout: float = 0.0,
         non_linearity: str = "silu",
     ) -> None:
         assert non_linearity in ["silu"], "Only 'silu' non-linearity is supported currently."
@@ -254,7 +237,6 @@ class QwenImageResidualBlock(nn.Module):
         self.norm1 = QwenImageRMS_norm(in_dim, images=False)
         self.conv1 = QwenImageCausalConv3d(in_dim, out_dim, 3, padding=1)
         self.norm2 = QwenImageRMS_norm(out_dim, images=False)
-        self.dropout = nn.Dropout(dropout)
         self.conv2 = QwenImageCausalConv3d(out_dim, out_dim, 3, padding=1)
         self.conv_shortcut = QwenImageCausalConv3d(in_dim, out_dim, 1) if in_dim != out_dim else nn.Identity()
 
@@ -271,8 +253,6 @@ class QwenImageResidualBlock(nn.Module):
         x = self.norm2(x)
         x = self.nonlinearity(x)
 
-        # Dropout
-        x = self.dropout(x)
         x = self.conv2(x)
 
         # Add residual connection
@@ -340,20 +320,19 @@ class QwenImageMidBlock(nn.Module):
 
     Args:
         dim (int): Number of input/output channels.
-        dropout (float): Dropout rate.
         non_linearity (str): Type of non-linearity to use.
     """
 
-    def __init__(self, dim: int, dropout: float = 0.0, non_linearity: str = "silu", num_layers: int = 1):
+    def __init__(self, dim: int, non_linearity: str = "silu", num_layers: int = 1):
         super().__init__()
         self.dim = dim
 
         # Create the components
-        resnets = [QwenImageResidualBlock(dim, dim, dropout, non_linearity)]
+        resnets = [QwenImageResidualBlock(dim, dim, non_linearity)]
         attentions = []
         for _ in range(num_layers):
             attentions.append(QwenImageAttentionBlock(dim))
-            resnets.append(QwenImageResidualBlock(dim, dim, dropout, non_linearity))
+            resnets.append(QwenImageResidualBlock(dim, dim, non_linearity))
         self.attentions = nn.ModuleList(attentions)
         self.resnets = nn.ModuleList(resnets)
 
@@ -382,7 +361,6 @@ class QwenImageEncoder3d(nn.Module):
         num_res_blocks (int): Number of residual blocks in each block.
         attn_scales (list of float): Scales at which to apply attention mechanisms.
         temperal_downsample (list of bool): Whether to downsample temporally in each block.
-        dropout (float): Dropout rate for the dropout layers.
         input_channels (int): Number of input channels.
         non_linearity (str): Type of non-linearity to use.
     """
@@ -395,7 +373,6 @@ class QwenImageEncoder3d(nn.Module):
         num_res_blocks=2,
         attn_scales=[],
         temperal_downsample=[True, True, False],
-        dropout=0.0,
         input_channels: int = 3,
         non_linearity: str = "silu",
     ):
@@ -421,7 +398,7 @@ class QwenImageEncoder3d(nn.Module):
         for i, (in_dim, out_dim) in enumerate(zip(dims[:-1], dims[1:])):
             # residual (+attention) blocks
             for _ in range(num_res_blocks):
-                self.down_blocks.append(QwenImageResidualBlock(in_dim, out_dim, dropout))
+                self.down_blocks.append(QwenImageResidualBlock(in_dim, out_dim))
                 if scale in attn_scales:
                     self.down_blocks.append(QwenImageAttentionBlock(out_dim))
                 in_dim = out_dim
@@ -433,7 +410,7 @@ class QwenImageEncoder3d(nn.Module):
                 scale /= 2.0
 
         # middle blocks
-        self.mid_block = QwenImageMidBlock(out_dim, dropout, non_linearity, num_layers=1)
+        self.mid_block = QwenImageMidBlock(out_dim, non_linearity, num_layers=1)
 
         # output blocks
         self.norm_out = QwenImageRMS_norm(out_dim, images=False)
@@ -464,7 +441,6 @@ class QwenImageUpBlock(nn.Module):
         in_dim (int): Input dimension
         out_dim (int): Output dimension
         num_res_blocks (int): Number of residual blocks
-        dropout (float): Dropout rate
         upsample_mode (str, optional): Mode for upsampling ('upsample2d' or 'upsample3d')
         non_linearity (str): Type of non-linearity to use
     """
@@ -474,7 +450,6 @@ class QwenImageUpBlock(nn.Module):
         in_dim: int,
         out_dim: int,
         num_res_blocks: int,
-        dropout: float = 0.0,
         upsample_mode: Optional[str] = None,
         non_linearity: str = "silu",
     ):
@@ -487,7 +462,7 @@ class QwenImageUpBlock(nn.Module):
         # Add residual blocks and attention if needed
         current_dim = in_dim
         for _ in range(num_res_blocks + 1):
-            resnets.append(QwenImageResidualBlock(current_dim, out_dim, dropout, non_linearity))
+            resnets.append(QwenImageResidualBlock(current_dim, out_dim, non_linearity))
             current_dim = out_dim
 
         self.resnets = nn.ModuleList(resnets)
@@ -517,7 +492,6 @@ class QwenImageDecoder3d(nn.Module):
         num_res_blocks (int): Number of residual blocks in each block.
         attn_scales (list of float): Scales at which to apply attention mechanisms.
         temperal_upsample (list of bool): Whether to upsample temporally in each block.
-        dropout (float): Dropout rate for the dropout layers.
         output_channels (int): Number of output channels.
         non_linearity (str): Type of non-linearity to use.
     """
@@ -530,7 +504,6 @@ class QwenImageDecoder3d(nn.Module):
         num_res_blocks=2,
         attn_scales=[],
         temperal_upsample=[False, True, True],
-        dropout=0.0,
         output_channels: int = 3,
         non_linearity: str = "silu",
     ):
@@ -553,7 +526,7 @@ class QwenImageDecoder3d(nn.Module):
         self.conv_in = QwenImageCausalConv3d(z_dim, dims[0], 3, padding=1)
 
         # middle blocks
-        self.mid_block = QwenImageMidBlock(dims[0], dropout, non_linearity, num_layers=1)
+        self.mid_block = QwenImageMidBlock(dims[0], non_linearity, num_layers=1)
 
         # upsample blocks
         self.up_blocks = nn.ModuleList([])
@@ -572,7 +545,6 @@ class QwenImageDecoder3d(nn.Module):
                 in_dim=in_dim,
                 out_dim=out_dim,
                 num_res_blocks=num_res_blocks,
-                dropout=dropout,
                 upsample_mode=upsample_mode,
                 non_linearity=non_linearity,
             )
@@ -622,7 +594,6 @@ class AutoencoderKLQwenImage(nn.Module):
         num_res_blocks: int = 2,
         attn_scales: List[float] = [],
         temperal_downsample: List[bool] = [False, True, True],
-        dropout: float = 0.0,
         latents_mean: List[float] = [
             -0.7571,
             -0.7089,
@@ -682,13 +653,13 @@ class AutoencoderKLQwenImage(nn.Module):
         )
 
         self.encoder = QwenImageEncoder3d(
-            base_dim, z_dim * 2, dim_mult, num_res_blocks, attn_scales, self.temperal_downsample, dropout, input_channels
+            base_dim, z_dim * 2, dim_mult, num_res_blocks, attn_scales, self.temperal_downsample, input_channels
         )
         self.quant_conv = QwenImageCausalConv3d(z_dim * 2, z_dim * 2, 1)
         self.post_quant_conv = QwenImageCausalConv3d(z_dim, z_dim, 1)
 
         self.decoder = QwenImageDecoder3d(
-            base_dim, z_dim, dim_mult, num_res_blocks, attn_scales, self.temperal_upsample, dropout, input_channels
+            base_dim, z_dim, dim_mult, num_res_blocks, attn_scales, self.temperal_upsample, input_channels
         )
 
     @property
@@ -965,7 +936,6 @@ def load_qwen_vae(
     4,
     4
   ],
-  "dropout": 0.0,
   "latents_mean": [
     -0.7571,
     -0.7089,
@@ -1021,7 +991,6 @@ def load_qwen_vae(
         num_res_blocks=config["num_res_blocks"],
         attn_scales=config["attn_scales"],
         temperal_downsample=config["temperal_downsample"],
-        dropout=config["dropout"],
         latents_mean=config["latents_mean"],
         latents_std=config["latents_std"],
         input_channels=input_channels,
