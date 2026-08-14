@@ -15,6 +15,7 @@ def _serve(args) -> None:
             vae_path=args.vae,
             text_encoder_path=args.text_encoder,
             lora_dir=args.lora_dir,
+            esrgan_path=args.esrgan,
         ),
     )
 

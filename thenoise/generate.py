@@ -24,6 +24,7 @@ def run_generate(args) -> None:
             vae_path=args.vae,
             text_encoder_path=args.text_encoder,
             lora_dir=args.lora_dir,
+            esrgan_path=args.esrgan,
         ),
     )
 
@@ -37,6 +38,8 @@ def run_generate(args) -> None:
         guidance_scale=args.guidance_scale,
         seed=seed,
         upscale=args.upscale,
+        upscale_factor=args.upscale_factor,
+        upscale_type=args.upscale_type,
         sampler=args.sampler,
         qwen_vae_enhance=args.qwen_vae_enhance,
         film_grain=args.film_grain,

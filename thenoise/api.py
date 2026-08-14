@@ -38,6 +38,8 @@ class Text2ImageRequest(BaseModel):
     guidance_scale: Optional[float] = None
     seed: Optional[int] = None
     upscale: bool = False
+    upscale_factor: float = 1.0
+    upscale_type: str = "refined"
     sampler: Optional[str] = None
     qwen_vae_enhance: bool = False
     film_grain: float = 0.0
@@ -83,6 +85,8 @@ def create_app(runtime) -> FastAPI:
                 guidance_scale=req.guidance_scale,
                 seed=req.seed,
                 upscale=req.upscale,
+                upscale_factor=req.upscale_factor,
+                upscale_type=req.upscale_type,
                 sampler=req.sampler,
                 qwen_vae_enhance=req.qwen_vae_enhance,
                 film_grain=req.film_grain,

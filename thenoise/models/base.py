@@ -34,6 +34,23 @@ mantissa causes banding in image filters); the tensor is only cast to uint8 and
 moved to CPU inside ``_to_pil``. Metadata that must live on the final PNG is a
 separate concern and is added later, after the PIL conversion.
 
+Upscaling has two modes, driven by ``upscale_factor`` (f in (0.0, 8.0]) and
+``upscale_type``:
+
+  * ``refined`` (default): the latent (Sesqui) upscaler runs ``UPSCALE_SCALE``x
+    in latent space followed by a low-strength refine denoise. For f in (1, 2]
+    that 2x is the whole upscale; for f in (2, ...] a pixel-domain Real-ESRGAN
+    step (scale auto-detected from the model, 2/4/8) is added on the decoded
+    image and the result is downscaled to f.
+  * ``fast``: only the pixel-domain Real-ESRGAN step runs on the decoded image
+    (no latent 2x multiplier), so f is capped at the detected ESRGAN scale.
+
+ESRGAN requires an ``esrgan_path`` (optional CLI ``--esrgan``); without it only
+``refined`` factors <= 2 are available. Max factor ranges follow the detected
+model scale: ``refined`` up to ``UPSCALE_SCALE * esrgan_scale``, ``fast`` up to
+``esrgan_scale``. ESRGAN is fast and is deliberately *not* pipeline-cached —
+only the decoded VAE output is cached.
+
 Pipeline caching
 ----------------
 Each stage of the generate pipeline is cached (single-entry, on-device tensors).
@@ -43,12 +60,14 @@ embeds the sampling key. This gives automatic cascade invalidation — a change
 at any stage invalidates that stage and all downstream stages.
 
   Stage          | Cache key depends on                    | Cached value
-  ---------------+-----------------------------------------+---------------
+  ---------------+-----------------------------------------------+-----------
   Prompt         | prompt, negative_prompt, guidance_scale, lora_specs | Conditioning
   Sampling       | prompt_key + size, steps, seed, sampler, lora_specs | latents
   Upscale+refine | (driven by decode cache hit below)      | —
-  VAE decode     | sampling_key (+ upscale constants)      | pixels (fp32)
+  VAE decode     | sampling_key + refined constants        | pixels (fp32)
+  Notch filter   | (not cached; runs right after decode)   | —
   Postprocess    | (not cached — cheap)                    | —
+  ESRGAN/resize  | (not cached — fast)                     | —
 
 LoRA switching
 ---------------
@@ -69,10 +88,11 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from safetensors.torch import load_file
 
-from thenoise.upscale import load_upscaler
+from thenoise.upscale import load_upscaler, load_esrgan, detect_esrgan_scale
 from thenoise.samplers import Step, create_sampler
 from thenoise.samplers.euler import EulerSampler
 from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
@@ -164,6 +184,7 @@ class DiffusionModel(ABC):
         device: str = "cuda",
         dtype: torch.dtype = torch.bfloat16,
         lora_dir: Optional[str] = None,
+        esrgan_path: Optional[str] = None,
     ):
         self.device = device
         self.dtype = dtype
@@ -171,6 +192,7 @@ class DiffusionModel(ABC):
         self.vae_path = vae_path
         self.text_encoder_path = text_encoder_path
         self.lora_dir = lora_dir
+        self.esrgan_path = esrgan_path
         self._lock = threading.Lock()
 
         torch._dynamo.config.recompile_limit = 64
@@ -189,6 +211,10 @@ class DiffusionModel(ABC):
         # ``_upscale_format`` supplies the latent-format name matching the VAE.
         self._upscaler = None
         self._adaptor = None
+
+        # Lazy pixel-domain Real-ESRGAN upscaler (only if ``esrgan_path`` set).
+        self._esrgan = None
+        self._esrgan_scale_val: Optional[int] = None  # detected scale, cached
 
     # ------------------------------------------------------------------ hooks
     @abstractmethod
@@ -419,18 +445,20 @@ class DiffusionModel(ABC):
     def _cache_key_decode(
         self,
         sampling_key: Tuple,
-        upscale: bool,
+        refined: bool,
     ) -> Tuple:
         """Cache key for the VAE decode stage.
 
         Embeds the sampling key so any upstream change cascades.
-        When upscale is True the upscale-and-refine pipeline produces
-        different latents, so the upscale class-constants are added.
+        When ``refined`` is True the latent upscale-and-refine pipeline produces
+        different latents (at 2x), so the refined constants are added to the key.
+        The pixel-domain ESRGAN step is deliberately NOT cached (it is fast), so
+        it does not participate in the key.
         """
-        if not upscale:
+        if not refined:
             return ("decode", sampling_key)
         return (
-            "decode_upscale",
+            "decode_refined",
             sampling_key,
             self.UPSCALE_SCALE,
             self.REFINE_STEPS,
@@ -449,6 +477,8 @@ class DiffusionModel(ABC):
         guidance_scale: Optional[float] = None,
         seed: Optional[int] = None,
         upscale: bool = False,
+        upscale_factor: float = 1.0,
+        upscale_type: str = "refined",
         sampler: Optional[str] = None,
         qwen_vae_enhance: bool = False,
         film_grain: float = 0.0,
@@ -472,11 +502,19 @@ class DiffusionModel(ABC):
             else guidance_scale
         )
 
-        target_width, target_height = width, height
-        if upscale:
-            target_width *= self.UPSCALE_SCALE
-            target_height *= self.UPSCALE_SCALE
+        # Resolve upscale parameters: ``upscale`` is a legacy alias for a 2x
+        # refined upscale; an explicit factor/type overrides it.
+        if upscale and upscale_factor == 1.0:
+            upscale_factor = float(self.UPSCALE_SCALE)
+        factor, upscale_type = self._resolve_upscale(upscale_factor, upscale_type)
         width, height = self.resolve_size(width, height)
+        target_width = width
+        target_height = height
+        if factor != 1.0:
+            target_width = round(width * factor)
+            target_height = round(height * factor)
+        refined = upscale_type == "refined" and factor > 1.0
+        esrgan_scale = self._esrgan_scale_for(factor, upscale_type)
         effective_sampler = sampler or self.SAMPLER
 
         # seed=-1 is treated as "random" (same as None)
@@ -490,9 +528,7 @@ class DiffusionModel(ABC):
         sampling_key = self._cache_key_sampling(
             prompt_key, width, height, steps, seed, effective_sampler
         )
-        decode_key = self._cache_key_decode(
-            sampling_key, upscale,
-        )
+        decode_key = self._cache_key_decode(sampling_key, refined)
 
         # --- locked section: cache checks + model access ---
         with self._lock:
@@ -522,18 +558,27 @@ class DiffusionModel(ABC):
             if self._cache.decode_hit(decode_key):
                 pixels = self._cache.decode_get()
             else:
-                # Cache miss — run upscale (if requested) then decode
-                if upscale:
+                # Cache miss — run latent upscale+refine (if refined) then decode
+                if refined:
                     latents = self._upscale_and_refine(
                         latents, cond, steps, height, width, seed, guidance_scale
                     )
                 pixels = self.decode(latents)  # fp32 GPU tensor [C,H,W]
                 self._cache.decode_store(decode_key, pixels)
 
+            # Qwen notch filter must run immediately after VAE decode (before any
+            # pixel-domain upscaling), so the 2px grid pattern is removed at its
+            # native resolution.
+            if qwen_vae_enhance:
+                pixels = nyquist_notch(pixels)
+
+            # Pixel-domain ESRGAN (fast, not cached) + GPU resize to target size.
+            pixels = self._esrgan_step(pixels, esrgan_scale)
+            pixels = self._resize_to_target(pixels, target_width, target_height)
+
             # Stage 5: postprocess (cheap — not cached)
             pixels = self.postprocess(
                 pixels,
-                qwen_vae_enhance=qwen_vae_enhance,
                 film_grain_strength=film_grain,
                 sharpening=sharpening,
             )
@@ -553,6 +598,8 @@ class DiffusionModel(ABC):
                 guidance_scale=guidance_scale,
                 seed=seed,
                 upscale=upscale,
+                upscale_factor=factor,
+                upscale_type=upscale_type,
                 sampler=effective_sampler,
                 qwen_vae_enhance=qwen_vae_enhance,
                 film_grain=film_grain,
@@ -607,6 +654,129 @@ class DiffusionModel(ABC):
                 dtype=self.dtype,
             )
         return self._upscaler, self._adaptor
+
+    # ------------------------------------------------------------- upscale plan
+    def _resolve_upscale(
+        self,
+        factor: float,
+        upscale_type: str,
+    ) -> tuple[float, str]:
+        """Validate and return the effective (factor, type).
+
+        ``upscale_factor`` must be in (0.0, 8.0]. ``fast`` mode has no latent
+        2x multiplier so it is capped at 4.0. ESRGAN (required for ``fast`` and
+        for ``refined`` factors above the latent 2x) must have been configured
+        via ``esrgan_path``.
+        """
+        if upscale_type not in ("refined", "fast"):
+            raise ValueError(
+                f"upscale_type must be 'refined' or 'fast', got {upscale_type!r}"
+            )
+        if not 0.0 < factor <= 8.0:
+            raise ValueError("upscale_factor must be in (0.0, 8.0]")
+        esrgan = self._esrgan_scale  # detected scale (0 = no ESRGAN configured)
+        if esrgan == 0:
+            # No ESRGAN: only ``refined`` factors up to the latent 2x work.
+            if factor > self.UPSCALE_SCALE:
+                raise ValueError(
+                    f"upscale_factor > {self.UPSCALE_SCALE} requires a "
+                    "Real-ESRGAN model; pass --esrgan PATH (or run "
+                    "scripts/download_esrgan.py)"
+                )
+            if upscale_type == "fast" and factor > 1.0:
+                raise ValueError(
+                    "upscale_type='fast' requires a Real-ESRGAN model; "
+                    "pass --esrgan PATH (or run scripts/download_esrgan.py)"
+                )
+        else:
+            # Max factor depends on the detected model scale: refined gets the
+            # latent 2x multiplier, fast does not.
+            max_refined = self.UPSCALE_SCALE * esrgan
+            if upscale_type == "refined" and factor > max_refined:
+                raise ValueError(
+                    f"upscale_type='refined' with a {esrgan}x ESRGAN model is "
+                    f"limited to factor {max_refined}"
+                )
+            if upscale_type == "fast" and factor > esrgan:
+                raise ValueError(
+                    f"upscale_type='fast' with a {esrgan}x ESRGAN model is "
+                    f"limited to factor {esrgan}"
+                )
+        return factor, upscale_type
+
+    @property
+    def _esrgan_scale(self) -> int:
+        """Detected scale of the configured ESRGAN model (0 if none), cached.
+
+        Reads only the safetensors header on first use; the value is then reused.
+        Tests may set ``_esrgan_scale_val`` directly to skip file access.
+        """
+        if self._esrgan_scale_val is None:
+            if not self.esrgan_path:
+                self._esrgan_scale_val = 0
+            else:
+                self._esrgan_scale_val = detect_esrgan_scale(self.esrgan_path)
+        return self._esrgan_scale_val
+
+    def _esrgan_scale_for(self, factor: float, upscale_type: str) -> int:
+        """Pixel-domain ESRGAN scale for a (factor, type), or 0 to skip.
+
+        ``refined`` gets a 2x from the latent path, so ESRGAN is only needed when
+        the factor exceeds that 2x. ``fast`` has no latent multiplier and always
+        needs ESRGAN for any upscale. Uses the detected model scale.
+        """
+        esrgan = self._esrgan_scale
+        if esrgan == 0 or factor <= 1.0:
+            return 0
+        if upscale_type == "fast":
+            return esrgan
+        return esrgan if factor > self.UPSCALE_SCALE else 0
+
+    def _load_esrgan(self):
+        """Load the pixel-domain ESRGAN model (once, lazily, under the lock)."""
+        if self._esrgan is None:
+            if not self.esrgan_path:
+                raise ValueError(
+                    "no ESRGAN model configured; pass --esrgan PATH "
+                    "(or run scripts/download_esrgan.py)"
+                )
+            self._esrgan, scale = load_esrgan(self.esrgan_path, device=self.device)
+            self._esrgan_scale_val = scale
+        return self._esrgan
+
+    def _esrgan_step(self, pixels: torch.Tensor, scale: int) -> torch.Tensor:
+        """Apply the pixel-domain ESRGAN upscale by ``scale``x (if > 0).
+
+        The Real-ESRGAN model operates on RGB in [0, 1] (see its ``enhance``
+        path), while the pipeline's decoded pixels are in [-1, 1]. Convert to
+        [0, 1] before the model and back to [-1, 1] afterwards so downstream
+        postprocessing / ``_to_pil`` stay unchanged.
+        """
+        if not scale:
+            return pixels
+        model = self._load_esrgan()
+        x = (pixels.unsqueeze(0) + 1.0) / 2.0  # [-1, 1] -> [0, 1]
+        with torch.no_grad():
+            out = model.forward_tiled(x)
+        out = out * 2.0 - 1.0  # [0, 1] -> [-1, 1]
+        return out[0]
+
+    @staticmethod
+    def _resize_to_target(
+        pixels: torch.Tensor, target_w: int, target_h: int
+    ) -> torch.Tensor:
+        """GPU bilinear resize of ``[C, H, W]`` to the target size (no-op if equal)."""
+        c, h, w = pixels.shape
+        if (w, h) == (target_w, target_h):
+            return pixels
+        with torch.no_grad():
+            return F.interpolate(
+                pixels.unsqueeze(0),
+                size=(target_h, target_w),
+                mode="bilinear",
+                align_corners=False,
+            )[0]
+
 
     def _upscale_and_refine(
         self,
@@ -691,13 +861,10 @@ class DiffusionModel(ABC):
         self,
         pixels: torch.Tensor,
         *,
-        qwen_vae_enhance: bool = False,
         film_grain_strength: float = 0.0,
         sharpening: float = 0.0,
     ) -> torch.Tensor:
         """Tensor post-processing hook. Runs on the fp32 GPU pixels."""
-        if qwen_vae_enhance:
-            pixels = nyquist_notch(pixels)
         if sharpening > 0.0:
             pixels = rcas(pixels, strength=sharpening)
         if film_grain_strength > 0.0:

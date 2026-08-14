@@ -23,6 +23,10 @@ def _add_model_paths(p: argparse.ArgumentParser) -> None:
     p.add_argument("--lora-dir", default="", metavar="PATH",
                    help="directory containing LoRA .safetensors files "
                         "(subdirectories allowed)")
+    p.add_argument("--esrgan", default="", metavar="PATH",
+                   help="optional Real-ESRGAN model (.safetensors) for pixel "
+                        "upscaling; without it only refiner (latent) upscale is "
+                        "available")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,6 +61,15 @@ def build_parser() -> argparse.ArgumentParser:
     gen.add_argument("--upscale", action="store_true",
                      help="upscale the latent 2x in latent space (SesquiLSR) and "
                           "run a low-strength refine denoise before decoding")
+    gen.add_argument("--upscale-factor", type=float, default=1.0,
+                     help="upscale factor, > 0.0 (default: 1.0 = no upscale); "
+                          "max depends on the ESRGAN model scale: 'fast' is "
+                          "limited to the model scale, 'refined' to latent 2x * "
+                          "model scale")
+    gen.add_argument("--upscale-type", choices=["refined", "fast"],
+                     default="refined",
+                     help="'refined' (default): latent 2x + refiner, plus ESRGAN "
+                          "above factor 2; 'fast': ESRGAN only (no latent 2x)")
     gen.add_argument("--sampler", choices=["euler", "er_sde"], default=None,
                      help="denoising solver (default: er_sde)")
     gen.add_argument("--qwen-vae-enhance", action="store_true",

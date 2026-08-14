@@ -18,6 +18,8 @@ def build_pnginfo(
     guidance_scale: float,
     seed: int,
     upscale: bool,
+    upscale_factor: float,
+    upscale_type: str,
     sampler: str,
     qwen_vae_enhance: bool,
     film_grain: float,
@@ -43,6 +45,8 @@ def build_pnginfo(
         "guidance_scale": guidance_scale,
         "seed": seed,
         "upscale": upscale,
+        "upscale_factor": upscale_factor,
+        "upscale_type": upscale_type,
         "sampler": sampler,
         "qwen_vae_enhance": qwen_vae_enhance,
         "film_grain": film_grain,
@@ -67,6 +71,9 @@ def build_pnginfo(
     ]
     if upscale:
         meta_parts.append("Upscale: true")
+    if upscale_factor != 1.0:
+        meta_parts.append(f"Upscale factor: {upscale_factor:g}")
+        meta_parts.append(f"Upscale type: {upscale_type}")
     if lora_specs:
         meta_parts.append(f"LoRA: {'; '.join(lora_specs)}")
     parts.append(", ".join(meta_parts))

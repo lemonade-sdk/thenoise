@@ -292,7 +292,22 @@
     <input type="range" id="sharpening" min="0" max="1" step="0.05" value="0">
   </div>
 
-  <label class="check"><input type="checkbox" id="upscale"> Upscale 2x</label>
+  <div class="field">
+    <label for="upscale_type">Upscale type</label>
+    <select id="upscale_type">
+      <option value="refined">refined (latent 2x + refiner)</option>
+      <option value="fast">fast (ESRGAN only)</option>
+    </select>
+  </div>
+
+  <div class="range">
+    <div class="range-head">
+      <label for="upscale_factor">Upscale factor</label>
+      <span class="val" id="upscale_factor_val">1.00</span>
+    </div>
+    <input type="range" id="upscale_factor" min="1" max="8" step="0.25" value="1">
+  </div>
+
   <label class="check"><input type="checkbox" id="qwen_vae_enhance"> Reduce grid pattern <span class="hint">(enable when needed)</span></label>
 
   <div class="divider"></div>
@@ -339,6 +354,19 @@ let history = []; // newest first, capped at 10: {url, meta, time}
 
 $('film_grain').addEventListener('input', e => $('film_grain_val').textContent = parseFloat(e.target.value).toFixed(2));
 $('sharpening').addEventListener('input', e => $('sharpening_val').textContent = parseFloat(e.target.value).toFixed(2));
+$('upscale_factor').addEventListener('input', e => $('upscale_factor_val').textContent = parseFloat(e.target.value).toFixed(2));
+$('upscale_type').addEventListener('change', updateUpscaleMax);
+
+// Cap the factor slider to the type's max (fast has no latent 2x multiplier).
+function updateUpscaleMax() {
+  const slider = $('upscale_factor');
+  const max = $('upscale_type').value === 'fast' ? 4 : 8;
+  slider.max = max;
+  if (parseFloat(slider.value) > max) {
+    slider.value = max;
+    $('upscale_factor_val').textContent = max.toFixed(2);
+  }
+}
 
 function setTimer(state, text) {
   const t = $('timer');
@@ -388,6 +416,7 @@ const FIELD_LABELS = {
   model: 'Model', prompt: 'Prompt', negative_prompt: 'Negative prompt',
   width: 'Width', height: 'Height', steps: 'Steps',
   guidance_scale: 'CFG scale', seed: 'Seed', upscale: 'Upscale',
+  upscale_factor: 'Upscale factor', upscale_type: 'Upscale type',
   sampler: 'Sampler', qwen_vae_enhance: 'Reduce grid pattern',
   film_grain: 'Film grain', sharpening: 'Sharpening', lora_specs: 'LoRA',
 };
@@ -414,6 +443,8 @@ function renderInfo(meta) {
     if (key in meta) add(FIELD_LABELS[key], meta[key], key === 'prompt' || key === 'negative_prompt' ? 'prompt' : '');
   }
   if ('upscale' in meta) add('Upscale', meta.upscale);
+  if ('upscale_factor' in meta) add('Upscale factor', meta.upscale_factor);
+  if ('upscale_type' in meta) add('Upscale type', meta.upscale_type);
   if ('qwen_vae_enhance' in meta) add('Reduce grid pattern', meta.qwen_vae_enhance);
   for (const key of ['film_grain','sharpening','lora_specs']) {
     if (key in meta && (key !== 'film_grain' || meta.film_grain) && (key !== 'sharpening' || meta.sharpening)) {
@@ -489,7 +520,17 @@ function applySettings(meta) {
   if (meta.guidance_scale != null) $('guidance_scale').value = meta.guidance_scale;
   if (meta.seed != null) $('seed').value = meta.seed;
   if (meta.sampler) $('sampler').value = meta.sampler;
-  if (meta.upscale != null) $('upscale').checked = meta.upscale;
+  if (meta.upscale_factor != null) {
+    $('upscale_factor').value = meta.upscale_factor;
+    $('upscale_factor_val').textContent = meta.upscale_factor.toFixed(2);
+  } else if (meta.upscale === true) {
+    // legacy metadata: 'upscale: true' == 2x refined
+    $('upscale_factor').value = 2;
+    $('upscale_factor_val').textContent = '2.00';
+    $('upscale_type').value = 'refined';
+  }
+  if (meta.upscale_type) $('upscale_type').value = meta.upscale_type;
+  updateUpscaleMax();
   if (meta.qwen_vae_enhance != null) $('qwen_vae_enhance').checked = meta.qwen_vae_enhance;
   if (meta.film_grain != null) {
     $('film_grain').value = meta.film_grain;
@@ -647,7 +688,8 @@ $('generate').addEventListener('click', async () => {
   const body = {
     prompt: $('prompt').value,
     negative_prompt: $('negative_prompt').value,
-    upscale: $('upscale').checked,
+    upscale_factor: parseFloat($('upscale_factor').value),
+    upscale_type: $('upscale_type').value,
     qwen_vae_enhance: $('qwen_vae_enhance').checked,
     film_grain: parseFloat($('film_grain').value),
     sharpening: parseFloat($('sharpening').value),

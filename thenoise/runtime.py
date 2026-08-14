@@ -32,6 +32,7 @@ class ModelPaths:
     vae_path: str
     text_encoder_path: str
     lora_dir: str = ""
+    esrgan_path: str = ""  # optional pixel-domain Real-ESRGAN model
 
 
 class NotLoadedError(RuntimeError):
@@ -57,6 +58,7 @@ class Runtime:
             device=self._settings.device,
         )
         kwargs["lora_dir"] = paths.lora_dir or None
+        kwargs["esrgan_path"] = paths.esrgan_path or None
 
         self._unload()  # swap: only one model resident at a time
         logger.info("Loading model '%s'", name)

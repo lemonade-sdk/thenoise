@@ -36,6 +36,8 @@ from .upscaler import LatentUpscaler
 
 logger = logging.getLogger(__name__)
 
+from .esrgan import load_esrgan, detect_esrgan_scale
+
 _WEIGHT_DIR = Path(__file__).resolve().parent / "weights"
 
 # Latent format name -> (adaptor factory, weight filename, raw-VAE channel count).
@@ -101,4 +103,6 @@ def load_upscaler(
 
 __all__ = [
     "load_upscaler",
+    "load_esrgan",
+    "detect_esrgan_scale",
 ]
