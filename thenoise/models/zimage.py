@@ -68,6 +68,7 @@ class ZImageModel(DiffusionModel):
         device: str = "cuda",
         dtype: torch.dtype = torch.bfloat16,
         lora_dir: Optional[str] = None,
+        esrgan_path: Optional[str] = None,
     ):
         super().__init__(
             dit_path=dit_path,
@@ -76,6 +77,7 @@ class ZImageModel(DiffusionModel):
             device=device,
             dtype=dtype,
             lora_dir=lora_dir,
+            esrgan_path=esrgan_path,
         )
 
         logger.info("Loading Z-Image DiT from %s", dit_path)
