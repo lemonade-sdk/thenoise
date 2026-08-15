@@ -20,8 +20,10 @@ conv_body(body(conv_first(x)))`` and nearest-neighbour upsampling between the
 
 Weights are kept in fp32: bf16's ~7-bit mantissa degrades super-resolution
 detail, and the model is small enough that fp32 is cheap. The upscale scale
-(2/4/8) is auto-detected from the state dict's ``conv_upN`` stages via
-``detect_esrgan_scale``, so both x2 and x4 weights are supported.
+(2 or 4) is auto-detected from ``conv_first``'s input channels via
+``detect_esrgan_scale``: scale-2 models pixel-unshuffle the input by 2 (so
+``conv_first`` takes 12 channels) and use two 2x upsample stages for a net 2x;
+scale-4 models take the 3 RGB channels directly and use two 2x stages for 4x.
 
 Original copyright/license notice follows.
 """
@@ -92,8 +94,10 @@ class RRDBNet(nn.Module):
     Faithful to the original: the trunk output is added back to the
     ``conv_first`` feature map (``feat + conv_body(body(feat))``) before the
     nearest-neighbour upsample stages. Omitting that residual skip ruins the
-    image (ghost/halo artifacts). Scale is the number of 2x upsample stages
-    (1 = 2x, 2 = 4x, 3 = 8x). Weights: ``RealESRGAN_x2plus/x4plus.safetensors``
+    image (ghost/halo artifacts). Scale is 2 or 4: scale-2 models pixel-unshuffle
+    the input by 2 (``conv_first`` takes 12 channels) and use two 2x upsample
+    stages for a net 2x; scale-4 models take the 3 RGB channels and use two 2x
+    stages for 4x. Weights: ``RealESRGAN_x2plus/x4plus.safetensors``
     (num_feat 64, num_block 23, num_grow_ch 32).
     """
 
@@ -107,22 +111,21 @@ class RRDBNet(nn.Module):
         scale: int = 4,
     ):
         super().__init__()
-        if scale not in (2, 4, 8):
-            raise ValueError(f"unsupported ESRGAN scale: {scale} (use 2, 4 or 8)")
+        if scale not in (2, 4):
+            raise ValueError(f"unsupported ESRGAN scale: {scale} (use 2 or 4)")
         self.scale = scale
-        # BasicSR uses a 2x pixel-unshuffle on the input for scale-2 models, so
-        # ``conv_first`` takes 4x the input channels there.
+        # Scale-2 models pixel-unshuffle the input by 2 (BasicSR), so
+        # ``conv_first`` takes 4x the input channels there; scale-4 models take
+        # the 3 RGB channels directly.
         in_ch = num_in_ch * 4 if scale == 2 else num_in_ch
         self.conv_first = nn.Conv2d(in_ch, num_feat, 3, 1, 1)
         self.body = nn.Sequential(
             *[RRDB(num_feat, num_grow_ch) for _ in range(num_block)]
         )
         self.conv_body = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        # Both scales use two 2x upsample stages (net 2x / 4x).
         self.conv_up1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        if scale >= 4:
-            self.conv_up2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        if scale >= 8:
-            self.conv_up3 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        self.conv_up2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
         self.conv_hr = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
         self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
         self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
@@ -135,14 +138,9 @@ class RRDBNet(nn.Module):
         feat = self.lrelu(
             self.conv_up1(F.interpolate(feat, scale_factor=2, mode="nearest"))
         )
-        if self.scale >= 4:
-            feat = self.lrelu(
-                self.conv_up2(F.interpolate(feat, scale_factor=2, mode="nearest"))
-            )
-        if self.scale >= 8:
-            feat = self.lrelu(
-                self.conv_up3(F.interpolate(feat, scale_factor=2, mode="nearest"))
-            )
+        feat = self.lrelu(
+            self.conv_up2(F.interpolate(feat, scale_factor=2, mode="nearest"))
+        )
         return self.conv_last(self.lrelu(self.conv_hr(feat)))
 
     @torch.no_grad()
@@ -184,38 +182,31 @@ class RRDBNet(nn.Module):
 
 
 def detect_esrgan_scale(path: str) -> int:
-    """Detect an ESRGAN model's upscale scale from its safetensors header keys.
+    """Detect an ESRGAN model's upscale scale (2 or 4) from its safetensors header.
 
-    Reads only the header (no weight tensors are loaded). The scale is the number
-    of ``conv_upN`` upsample stages: 1 -> 2x, 2 -> 4x, 3 -> 8x.
+    Reads only the header (no weight tensors are loaded). The scale is
+    determined by ``conv_first``'s input channels: scale-2 models pixel-unshuffle
+    the input by 2, so ``conv_first`` takes 3*4 = 12 channels; scale-4 models
+    take the 3 RGB channels directly.
     """
     from safetensors import safe_open
 
     with safe_open(path, framework="pt") as f:
-        keys = f.keys()
-    stages = set()
-    for k in keys:
-        if k.startswith("conv_up"):
-            num = k[len("conv_up"):].split(".")[0]
-            if num.isdigit():
-                stages.add(int(num))
-    n = len(stages)
-    if n == 1:
+        in_ch = f.get_slice("conv_first.weight").get_shape()[1]
+    if in_ch == 12:
         return 2
-    if n == 2:
+    if in_ch == 3:
         return 4
-    if n == 3:
-        return 8
     raise ValueError(
-        f"could not detect ESRGAN scale from {path} "
-        f"(found {n} conv_up upsample stages; expected 1, 2 or 3)"
+        f"could not detect ESRGAN scale from {path}: conv_first takes "
+        f"{in_ch} input channels (expected 12 for 2x or 3 for 4x)"
     )
 
 
 def load_esrgan(path: str, device: str = "cuda") -> tuple[RRDBNet, int]:
-    """Load a Real-ESRGAN model from a ComfyUI repackaged safetensors.
+    """Load a Real-ESRGAN model from a safetensors (ComfyUI repackaged keys).
 
-    The upscale scale (2/4/8) is auto-detected from the state dict. Returns
+    The upscale scale (2 or 4) is auto-detected from the state dict. Returns
     ``(model, scale)``. Weights are kept in fp32 for super-resolution quality.
     """
     from safetensors.torch import load_file
