@@ -12,7 +12,7 @@ format that ``make_wan21`` returns.
 The ``make_*`` constructors cover the other formats SesquiLSR supports (SDXL,
 Flux, Flux2, Ideogram4). They are imported here as groundwork for future VAE
 support: a model whose VAE uses a different latent format can build the matching
-adaptor and hand it to ``load_upscaler``.
+adaptor and hand it to ``load_latent_upscaler``.
 
 Copied and trimmed from https://github.com/LoganBooker/SesquiLSR (MIT).
 """

@@ -18,6 +18,13 @@ original, including the crucial trunk residual skip ``conv_first(x) +
 conv_body(body(conv_first(x)))`` and nearest-neighbour upsampling between the
 ``conv_up`` stages.
 
+Models saved in the *original-ESRGAN* ``nn.Sequential`` naming (``model.*``,
+e.g. ``remacri_original`` / ``4xlsdir`` / ``nmkdSiaxCX``) are also supported:
+their keys are remapped on load. They share the same trained architecture as the
+ComfyUI repackage — including the trunk residual skip — differing only in key
+naming. Both naming schemes are detected automatically via
+``detect_esrgan_scheme``.
+
 Weights are kept in fp32: bf16's ~7-bit mantissa degrades super-resolution
 detail, and the model is small enough that fp32 is cheap. The upscale scale
 (2 or 4) is auto-detected from ``conv_first``'s input channels via
@@ -31,6 +38,8 @@ Original copyright/license notice follows.
 # Copyright (c) 2021 xinntao. Licensed under the BSD-3-Clause License.
 # Source: https://github.com/xinntao/Real-ESRGAN
 from __future__ import annotations
+
+import re
 
 import torch
 import torch.nn as nn
@@ -89,15 +98,17 @@ def _pixel_unshuffle(x: Tensor, scale: int) -> Tensor:
 
 
 class RRDBNet(nn.Module):
-    """Real-ESRGAN generator (BasicSR RRDBNet, ComfyUI repackaged weights).
+    """Real-ESRGAN generator (BasicSR RRDBNet).
 
-    Faithful to the original: the trunk output is added back to the
-    ``conv_first`` feature map (``feat + conv_body(body(feat))``) before the
-    nearest-neighbour upsample stages. Omitting that residual skip ruins the
-    image (ghost/halo artifacts). Scale is 2 or 4: scale-2 models pixel-unshuffle
-    the input by 2 (``conv_first`` takes 12 channels) and use two 2x upsample
-    stages for a net 2x; scale-4 models take the 3 RGB channels and use two 2x
-    stages for 4x. Weights: ``RealESRGAN_x2plus/x4plus.safetensors``
+    The trunk output is added back to the ``conv_first`` feature map
+    (``feat + conv_body(body(feat))``) before the nearest-neighbour upsample
+    stages; omitting that residual skip ruins the image (ghost/halo artifacts
+    and washed-out contrast). This holds for both the ComfyUI repackaged and the
+    original-ESRGAN ``nn.Sequential`` weight namings — they differ only in key
+    naming, not in the trained architecture. Scale is 2 or 4: scale-2 models
+    pixel-unshuffle the input by 2 (``conv_first`` takes 12 channels) and use
+    two 2x upsample stages for a net 2x; scale-4 models take the 3 RGB channels
+    and use two 2x stages for 4x. Weights: ``RealESRGAN_x2plus/x4plus.safetensors``
     (num_feat 64, num_block 23, num_grow_ch 32).
     """
 
@@ -134,7 +145,7 @@ class RRDBNet(nn.Module):
         feat = _pixel_unshuffle(x, 2) if self.scale == 2 else x
         feat = self.conv_first(feat)
         feat = feat + self.conv_body(self.body(feat))  # trunk residual skip
-        # One 2x nearest + conv stage per upsampling level.
+        # Two 2x nearest + conv stages (net 2x / 4x).
         feat = self.lrelu(
             self.conv_up1(F.interpolate(feat, scale_factor=2, mode="nearest"))
         )
@@ -181,37 +192,110 @@ class RRDBNet(nn.Module):
         return out
 
 
-def detect_esrgan_scale(path: str) -> int:
-    """Detect an ESRGAN model's upscale scale (2 or 4) from its safetensors header.
+def detect_esrgan_scheme(path: str) -> str:
+    """Detect the weight naming / architecture scheme from the safetensors header.
 
-    Reads only the header (no weight tensors are loaded). The scale is
-    determined by ``conv_first``'s input channels: scale-2 models pixel-unshuffle
-    the input by 2, so ``conv_first`` takes 3*4 = 12 channels; scale-4 models
-    take the 3 RGB channels directly.
+    Returns ``"comfy"`` for the ComfyUI repackaged Real-ESRGAN naming
+    (``body.*`` / ``conv_first``) or ``"original"`` for the original-ESRGAN
+    ``nn.Sequential`` naming (``model.*``). Both share the same trained
+    architecture (including the trunk residual skip); they differ only in key
+    naming, so ``"original"`` weights are remapped on load. Reads only the header.
     """
     from safetensors import safe_open
 
     with safe_open(path, framework="pt") as f:
-        in_ch = f.get_slice("conv_first.weight").get_shape()[1]
+        keys = f.keys()
+    if "conv_first.weight" in keys:
+        return "comfy"
+    if "model.0.weight" in keys:
+        return "original"
+    raise ValueError(
+        f"could not detect ESRGAN scheme from {path}: expected ComfyUI "
+        f"('conv_first.weight') or original-ESRGAN ('model.0.weight') naming"
+    )
+
+
+def detect_esrgan_scale(path: str) -> int:
+    """Detect an ESRGAN model's upscale scale (2 or 4) from its safetensors header.
+
+    Reads only the header (no weight tensors are loaded). The scale is
+    determined by the first conv's input channels: scale-2 models pixel-unshuffle
+    the input by 2, so it takes 3*4 = 12 channels; scale-4 models take the 3 RGB
+    channels directly. Handles both the ComfyUI (``conv_first``) and
+    original-ESRGAN (``model.0``) naming schemes.
+    """
+    from safetensors import safe_open
+
+    with safe_open(path, framework="pt") as f:
+        if "conv_first.weight" in f.keys():
+            in_ch = f.get_slice("conv_first.weight").get_shape()[1]
+        else:
+            in_ch = f.get_slice("model.0.weight").get_shape()[1]
     if in_ch == 12:
         return 2
     if in_ch == 3:
         return 4
     raise ValueError(
-        f"could not detect ESRGAN scale from {path}: conv_first takes "
+        f"could not detect ESRGAN scale from {path}: first conv takes "
         f"{in_ch} input channels (expected 12 for 2x or 3 for 4x)"
     )
 
 
-def load_esrgan(path: str, device: str = "cuda") -> tuple[RRDBNet, int]:
-    """Load a Real-ESRGAN model from a safetensors (ComfyUI repackaged keys).
+# Canonical ComfyUI naming for the original-ESRGAN ``nn.Sequential`` skeleton:
+# ``model.1`` is a Sequential of the RRDB blocks followed by the trunk conv, so
+# ``model.1.sub.0..N-1`` are blocks and ``model.1.sub.N`` is the trunk.
+_ORIGINAL_SKELETON = {
+    "model.0": "conv_first",
+    "model.1.sub.23": "conv_body",  # trunk conv, last element of the body sequence
+    "model.3": "conv_up1",
+    "model.6": "conv_up2",
+    "model.8": "conv_hr",
+    "model.10": "conv_last",
+}
+_RDB_RE = re.compile(r"model\.1\.sub\.(\d+)\.(RDB\d)\.(conv\d)\.0\.(weight|bias)")
 
-    The upscale scale (2 or 4) is auto-detected from the state dict. Returns
-    ``(model, scale)``. Weights are kept in fp32 for super-resolution quality.
+
+def _remap_original_esrgan(state: dict) -> dict:
+    """Convert original-ESRGAN ``nn.Sequential`` keys to canonical ComfyUI naming.
+
+    ``model.1`` is a Sequential of the RRDB blocks followed by the trunk conv:
+    ``model.1.sub.0..22`` are RDB blocks (remapped to ``body.0..22`` with
+    ``RDB1`` -> ``rdb1`` and the ``convN.0`` Sequential wrapper dropped), and
+    ``model.1.sub.23`` is the trunk conv (``conv_body``). The up/HR/last convs
+    live directly on the top-level ``model`` Sequential.
+    """
+    out: dict = {}
+    for k, v in state.items():
+        m = _RDB_RE.match(k)
+        if m:
+            block, rdb, conv, suffix = m.groups()
+            out[f"body.{block}.{rdb.lower()}.{conv}.{suffix}"] = v
+            continue
+        for prefix, target in _ORIGINAL_SKELETON.items():
+            if k.startswith(prefix + "."):
+                out[target + k[len(prefix):]] = v
+                break
+        else:
+            raise ValueError(f"unmapped original-ESRGAN key: {k}")
+    return out
+
+
+def load_esrgan(path: str, device: str = "cuda") -> tuple[RRDBNet, int]:
+    """Load a Real-ESRGAN model from a safetensors file.
+
+    Supports both the ComfyUI repackaged naming (``body.*`` / ``conv_first``)
+    and the original-ESRGAN ``nn.Sequential`` naming (``model.*``, whose keys
+    are remapped on load). Both share the same trained architecture, so the
+    trunk residual skip is always applied. The upscale scale (2 or 4) is
+    auto-detected from the state dict. Returns ``(model, scale)``. Weights are
+    kept in fp32 for super-resolution quality.
     """
     from safetensors.torch import load_file
 
     state_dict = load_file(path, device="cpu")
+    scheme = detect_esrgan_scheme(path)
+    if scheme == "original":
+        state_dict = _remap_original_esrgan(state_dict)
     scale = detect_esrgan_scale(path)
     model = RRDBNet(scale=scale)
     model.load_state_dict(state_dict)
@@ -219,4 +303,4 @@ def load_esrgan(path: str, device: str = "cuda") -> tuple[RRDBNet, int]:
     return model, scale
 
 
-__all__ = ["RRDBNet", "load_esrgan", "detect_esrgan_scale"]
+__all__ = ["RRDBNet", "load_esrgan", "detect_esrgan_scale", "detect_esrgan_scheme"]

@@ -14,7 +14,7 @@ their own VAE:
   * ``finalize_latent(...)`` — model-internal -> canonical latent (once, post-loop).
   * ``resolve_size(...)``    — per-model size rounding / validation.
   * ``_upscale_format(...)``  — required: the latent-format name for this
-    model's VAE (selected by ``load_upscaler``).
+    model's VAE (selected by ``load_latent_upscaler``).
 
 Both models use the same Qwen-Image VAE (z_dim=16, spatial compression 8), so
 ``init_latents`` produces and ``finalize_latent`` returns the canonical latent
@@ -92,7 +92,7 @@ import torch.nn.functional as F
 from PIL import Image
 from safetensors.torch import load_file
 
-from thenoise.upscale import load_upscaler, load_esrgan, detect_esrgan_scale
+from thenoise.upscale import load_latent_upscaler, load_esrgan, detect_esrgan_scale
 from thenoise.samplers import Step, create_sampler
 from thenoise.samplers.euler import EulerSampler
 from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
@@ -641,14 +641,14 @@ class DiffusionModel(ABC):
 
         Concrete subclasses must override this to return the name of their VAE's
         latent format (e.g. ``"wan21"`` for the shared Qwen-Image VAE). It is
-        passed to ``load_upscaler``, which selects the adaptor and weight file.
+        passed to ``load_latent_upscaler``, which selects the adaptor and weight file.
         """
         ...
 
-    def _load_upscaler(self):
+    def _load_latent_upscaler(self):
         """Load the latent upscaler (once, lazily, under the lock)."""
         if self._upscaler is None:
-            self._upscaler, self._adaptor = load_upscaler(
+            self._upscaler, self._adaptor = load_latent_upscaler(
                 self._upscale_format(),
                 device=self.device,
                 dtype=self.dtype,
@@ -795,7 +795,7 @@ class DiffusionModel(ABC):
         latent to/from that raw space. The refined result is the canonical latent
         at the upscaled spatial size, ready for ``decode``.
         """
-        upscaler, adaptor = self._load_upscaler()
+        upscaler, adaptor = self._load_latent_upscaler()
         scale = self.UPSCALE_SCALE
         z = latents.to(device=self.device, dtype=self.dtype)
 
