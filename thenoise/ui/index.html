@@ -296,7 +296,14 @@
     <label for="upscale_type">Upscale type</label>
     <select id="upscale_type">
       <option value="refined">refined (latent 2x + refiner)</option>
-      <option value="fast">fast (ESRGAN only)</option>
+      <option value="no-refiner">no-refiner (pixel upscaler only)</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label for="pixel_upscaler">Pixel upscaler <span class="hint">(from --upscaler-dir)</span></label>
+    <select id="pixel_upscaler">
+      <option value="">none</option>
     </select>
   </div>
 
@@ -357,10 +364,10 @@ $('sharpening').addEventListener('input', e => $('sharpening_val').textContent =
 $('upscale_factor').addEventListener('input', e => $('upscale_factor_val').textContent = parseFloat(e.target.value).toFixed(2));
 $('upscale_type').addEventListener('change', updateUpscaleMax);
 
-// Cap the factor slider to the type's max (fast has no latent 2x multiplier).
+// Cap the factor slider to the type's max (no-refiner has no latent 2x multiplier).
 function updateUpscaleMax() {
   const slider = $('upscale_factor');
-  const max = $('upscale_type').value === 'fast' ? 4 : 8;
+  const max = $('upscale_type').value === 'no-refiner' ? 4 : 8;
   slider.max = max;
   if (parseFloat(slider.value) > max) {
     slider.value = max;
@@ -445,6 +452,7 @@ function renderInfo(meta) {
   if ('upscale' in meta) add('Upscale', meta.upscale);
   if ('upscale_factor' in meta) add('Upscale factor', meta.upscale_factor);
   if ('upscale_type' in meta) add('Upscale type', meta.upscale_type);
+  if ('pixel_upscaler' in meta && meta.pixel_upscaler) add('Pixel upscaler', meta.pixel_upscaler);
   if ('qwen_vae_enhance' in meta) add('Reduce grid pattern', meta.qwen_vae_enhance);
   for (const key of ['film_grain','sharpening','lora_specs']) {
     if (key in meta && (key !== 'film_grain' || meta.film_grain) && (key !== 'sharpening' || meta.sharpening)) {
@@ -543,6 +551,9 @@ function applySettings(meta) {
   if (Array.isArray(meta.lora_specs)) {
     $('lora_specs').value = meta.lora_specs.join('\n');
   }
+  if (meta.pixel_upscaler) {
+    $('pixel_upscaler').value = meta.pixel_upscaler;
+  }
 }
 
 /* ---------- swap width/height ---------- */
@@ -575,6 +586,26 @@ async function loadLoras() {
       loras = (data.loras || []).sort();
     }
   } catch (e) { loras = []; }
+}
+
+/* ---------- pixel upscaler select ---------- */
+async function loadUpscalers() {
+  const sel = $('pixel_upscaler');
+  const none = sel.firstElementChild; // the empty 'none' option
+  sel.innerHTML = '';
+  sel.appendChild(none);
+  try {
+    const res = await fetch('/upscalers');
+    if (res.ok) {
+      const data = await res.json();
+      for (const name of (data.upscalers || []).sort()) {
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name;
+        sel.appendChild(opt);
+      }
+    }
+  } catch (e) { /* leave just 'none' */ }
 }
 
 const acEl = () => $('lora_ac');
@@ -667,6 +698,7 @@ document.addEventListener('click', e => {
 });
 
 loadLoras();
+loadUpscalers();
 
 /* ---------- generate ---------- */
 $('generate').addEventListener('click', async () => {
@@ -690,6 +722,7 @@ $('generate').addEventListener('click', async () => {
     negative_prompt: $('negative_prompt').value,
     upscale_factor: parseFloat($('upscale_factor').value),
     upscale_type: $('upscale_type').value,
+    pixel_upscaler: $('pixel_upscaler').value || null,
     qwen_vae_enhance: $('qwen_vae_enhance').checked,
     film_grain: parseFloat($('film_grain').value),
     sharpening: parseFloat($('sharpening').value),

@@ -101,8 +101,30 @@ def load_latent_upscaler(
     return model, adaptor
 
 
+def load_pixel_upscaler(path: str, device: str = "cuda") -> tuple:
+    """Load a pixel-domain upscaler from a safetensors file.
+
+    Generic entry point so the model-facing code never names a specific pixel
+    upscaler architecture. Today the only pixel-space upscaler is Real-ESRGAN,
+    so this dispatches to ``load_esrgan``; future pixel upscalers plug in here.
+    Returns ``(model, scale)``.
+    """
+    return load_esrgan(path, device=device)
+
+
+def detect_pixel_upscaler_scale(path: str) -> int:
+    """Detect a pixel upscaler's upscale scale (2 or 4) from its header.
+
+    Generic wrapper around the ESRGAN scale detection; see
+    ``load_pixel_upscaler`` for the rationale.
+    """
+    return detect_esrgan_scale(path)
+
+
 __all__ = [
     "load_latent_upscaler",
     "load_esrgan",
     "detect_esrgan_scale",
+    "load_pixel_upscaler",
+    "detect_pixel_upscaler_scale",
 ]

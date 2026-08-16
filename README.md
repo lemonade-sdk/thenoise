@@ -178,6 +178,7 @@ the project venv created by [Setup](#setup) — a bare `python` will not work.
 | Anima | ~5.4 GB | 2B params; fastest to download and run |
 | Krea 2 | ~35 GB | Higher quality; much larger text encoder and DiT |
 | Z-Image-Turbo | ~21 GB | Distilled 8-step S3-DiT; Flux VAE + Qwen3 caption encoder |
+| Z-Image | ~21 GB | Non-distilled version of Z-Image-Turob |
 
 ### Krea 2
 
@@ -210,15 +211,7 @@ Available variants include `turbo-v1.0` (fewest steps), `aesthetic-v1.1`, and
 ```
 
 This fetches the single-file bf16 Turbo DiT (~12 GB), the Flux VAE (`ae.safetensors`),
-and the Qwen3-4B text encoder (`qwen_3_4b.safetensors`, ~8 GB) — all from
-`Comfy-Org/z_image_turbo` — plus the tokenizer (`tokenizer/`) from
-`Tongyi-MAI/Z-Image-Turbo`. It also downloads the SesquiLSR **Flux** latent upscaler
-and converts it fp32 → bf16 into the package's `thenoise/upscale/weights/` directory
-(used by `--upscale`; the `--vae` for Z-Image is the Flux VAE).
-
-Z-Image-Turbo is a distilled flow model: **8 denoising steps, CFG off** (the default
-`guidance_scale` is 1, ComfyUI's "off" convention). It uses the Flux VAE, so it has
-its own `--vae`.
+and the Qwen3-4B text encoder (`qwen_3_4b.safetensors`, ~8 GB).
 
 ```bash
 ./thenoise.sh generate \
@@ -314,6 +307,8 @@ LoRA format is `filename:weight` — the `.safetensors` extension is appended au
 |--------|------|-------------|
 | `GET` | `/` | Web UI |
 | `GET` | `/health` | Server status and loaded model |
+| `GET` | `/lora` | List available LoRA names |
+| `GET` | `/upscalers` | List available pixel upscaler names |
 | `POST` | `/text2image` | Generate an image |
 
 ### `/text2image` request body
@@ -330,6 +325,9 @@ All fields except `prompt` are optional. Omitted fields use the loaded model's d
 | `guidance_scale` | `float` | model default | CFG scale (≤ 1.0 disables CFG) |
 | `seed` | `int` | random | Random seed (`-1` for random) |
 | `upscale` | `bool` | `false` | 2× latent-space upscale with refine denoise |
+| `upscale_factor` | `float` | `1.0` | Upscale factor (max depends on the pixel upscaler scale) |
+| `upscale_type` | `string` | `refined` | `refined` (latent 2x + refiner) or `no-refiner` (pixel upscaler only) |
+| `pixel_upscaler` | `string` | `null` | Pixel upscaler name (no `.safetensors` suffix) from `--upscaler-dir` |
 | `sampler` | `string` | `er_sde` | Denoising solver: `euler` or `er_sde` |
 | `qwen_vae_enhance` | `bool` | `false` | Nyquist notch post-filter (removes 2px grid artifacts) |
 | `film_grain` | `float` | `0.0` | Film grain strength, 0.0–10.0 |
@@ -371,6 +369,7 @@ If no model is loaded, `/text2image` returns HTTP 503.
 |------|---------|-------------|
 | `--host` | `127.0.0.1` | Bind host |
 | `--port` | `8000` | Bind port |
+| `--upscaler-dir` | — | Directory containing pixel upscaler `.safetensors` files (e.g. Real-ESRGAN); selected per-request via `pixel_upscaler` |
 
 ### `generate` only
 
@@ -385,6 +384,8 @@ If no model is loaded, `/text2image` returns HTTP 503.
 | `--seed` | no | random | Random seed |
 | `--out` | no | `out.png` | Output file path |
 | `--lora` | no | — | LoRA to apply (repeatable, format: `file:weight`) |
+| `--pixel-upscaler` | no | — | Full path to the pixel upscaler model (one-shot; e.g. a Real-ESRGAN `.safetensors`) |
+| `--upscale-type` | no | `refined` | `refined` or `no-refiner` |
 | `--upscale` | no | off | 2× latent upscale with refine denoise |
 | `--sampler` | no | `er_sde` | Solver: `euler` or `er_sde` |
 | `--qwen-vae-enhance` | no | off | Nyquist notch post-filter |

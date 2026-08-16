@@ -72,10 +72,10 @@ def test_resolve_lora_path_blocks_traversal():
         assert "sub/style.safetensors" in path
 
         # .. escape → ValueError
-        with pytest.raises(ValueError, match="escapes lora_dir"):
+        with pytest.raises(ValueError, match="escapes base directory"):
             model._resolve_lora_path("../etc/passwd")
 
-        with pytest.raises(ValueError, match="escapes lora_dir"):
+        with pytest.raises(ValueError, match="escapes base directory"):
             model._resolve_lora_path("sub/../../etc/passwd")
 
 
@@ -148,14 +148,62 @@ def test_cli_serve_parses_model_paths():
         "--vae", "vae.safetensors",
         "--text-encoder", "te.safetensors",
         "--lora-dir", "/path/to/loras",
+        "--upscaler-dir", "/path/to/upscalers",
         "--host", "0.0.0.0", "--port", "9000", "--device", "hip",
     ])
     assert args.command == "serve"
     assert args.dit == "dit.safetensors"
     assert args.lora_dir == "/path/to/loras"
+    assert args.upscaler_dir == "/path/to/upscalers"
     assert args.host == "0.0.0.0"
     assert args.port == 9000
     assert args.device == "hip"
+
+
+def test_cli_serve_has_no_pixel_upscaler():
+    args = build_parser().parse_args([
+        "serve",
+        "--dit", "d.safetensors",
+        "--vae", "v.safetensors",
+        "--text-encoder", "te.safetensors",
+    ])
+    assert args.upscaler_dir == ""
+    assert not hasattr(args, "pixel_upscaler")
+
+
+def test_cli_generate_parses_pixel_upscaler_and_type():
+    args = build_parser().parse_args([
+        "generate",
+        "--dit", "d.safetensors",
+        "--vae", "v.safetensors",
+        "--text-encoder", "te.safetensors",
+        "--prompt", "a fox",
+        "--pixel-upscaler", "/models/RealESRGAN_x4.safetensors",
+        "--upscale-type", "no-refiner",
+    ])
+    assert args.pixel_upscaler == "/models/RealESRGAN_x4.safetensors"
+    assert args.upscale_type == "no-refiner"
+    assert not hasattr(args, "upscaler_dir")
+
+
+def test_cli_generate_rejects_fast_and_old_flags():
+    # 'fast' type and '--esrgan' are removed.
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([
+            "generate",
+            "--dit", "d.safetensors",
+            "--vae", "v.safetensors",
+            "--text-encoder", "te.safetensors",
+            "--prompt", "a fox", "--upscale-type", "fast",
+        ])
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([
+            "generate",
+            "--dit", "d.safetensors",
+            "--vae", "v.safetensors",
+            "--text-encoder", "te.safetensors",
+            "--prompt", "a fox", "--esrgan", "/models/x.safetensors",
+        ])
 
 
 def test_cli_serve_defaults():
@@ -168,6 +216,7 @@ def test_cli_serve_defaults():
     assert args.host == "127.0.0.1"
     assert args.port == 8000
     assert args.device == "cuda"
+    assert args.upscaler_dir == ""
 
 
 def test_cli_serve_requires_paths():

@@ -45,6 +45,7 @@ class Text2ImageRequest(BaseModel):
     film_grain: float = 0.0
     sharpening: float = 0.0
     lora_specs: Optional[List[str]] = None  # ["filename.safetensors:0.8", ...]
+    pixel_upscaler: Optional[str] = None  # name (no .safetensors) in upscaler_dir
     out: Literal["png", "json"] = "png"
 
 
@@ -69,6 +70,15 @@ def create_app(runtime) -> FastAPI:
             return Response(status_code=503, content="no model is loaded")
         return {"loras": model.list_loras()}
 
+    @app.get("/upscalers")
+    def upscalers():
+        """List available pixel upscaler names (short, no .safetensors suffix)."""
+        try:
+            model = runtime.model
+        except NotLoadedError:
+            return Response(status_code=503, content="no model is loaded")
+        return {"upscalers": model.list_pixel_upscalers()}
+
     @app.post("/text2image")
     def text2image(req: Text2ImageRequest):
         try:
@@ -92,6 +102,7 @@ def create_app(runtime) -> FastAPI:
                 film_grain=req.film_grain,
                 sharpening=req.sharpening,
                 lora_specs=req.lora_specs,
+                pixel_upscaler=req.pixel_upscaler,
             )
         except Exception as e:  # surface generation errors cleanly
             logger.exception("generation failed")

@@ -3,9 +3,11 @@
 Source: https://huggingface.co/Comfy-Org/Real-ESRGAN_repackaged
   RealESRGAN_x4plus.safetensors
 
-Used by thenoise's ``fast`` upscale path, and by the ``refined`` path when
-``--upscale-factor`` exceeds the latent 2x. Optional: if the model is absent
-only the refiner (latent) upscale is available.
+Used by thenoise's ``no-refiner`` pixel-upscale path, and by the ``refined``
+path when ``--upscale-factor`` exceeds the latent 2x. Optional: if absent only
+the refiner (latent) upscale is available. Drop the downloaded file into a
+``--upscaler-dir`` (serve) or pass its full path via ``--pixel-upscaler``
+(generate).
 
 Usage:
     python scripts/download_esrgan.py --out ./models/esrgan
@@ -24,7 +26,8 @@ FILE = "RealESRGAN_x4plus.safetensors"
 def main() -> None:
     ap = argparse.ArgumentParser(description="Download the Real-ESRGAN x4 model")
     ap.add_argument(
-        "--out", default="./models/esrgan", help="output directory"
+        "--out", default="./models/esrgan",
+        help="output directory (usable as --upscaler-dir)",
     )
     args = ap.parse_args()
 

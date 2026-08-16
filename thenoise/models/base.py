@@ -39,17 +39,20 @@ Upscaling has two modes, driven by ``upscale_factor`` (f in (0.0, 8.0]) and
 
   * ``refined`` (default): the latent (Sesqui) upscaler runs ``UPSCALE_SCALE``x
     in latent space followed by a low-strength refine denoise. For f in (1, 2]
-    that 2x is the whole upscale; for f in (2, ...] a pixel-domain Real-ESRGAN
-    step (scale auto-detected from the model, 2/4/8) is added on the decoded
+    that 2x is the whole upscale; for f in (2, ...] a pixel-domain upscaler
+    step (scale auto-detected from the model, 2/4) is added on the decoded
     image and the result is downscaled to f.
-  * ``fast``: only the pixel-domain Real-ESRGAN step runs on the decoded image
-    (no latent 2x multiplier), so f is capped at the detected ESRGAN scale.
+  * ``no-refiner``: only the pixel-domain upscaler step runs on the decoded
+    image (no latent 2x multiplier), so f is capped at the detected scale.
 
-ESRGAN requires an ``esrgan_path`` (optional CLI ``--esrgan``); without it only
-``refined`` factors <= 2 are available. Max factor ranges follow the detected
-model scale: ``refined`` up to ``UPSCALE_SCALE * esrgan_scale``, ``fast`` up to
-``esrgan_scale``. ESRGAN is fast and is deliberately *not* pipeline-cached —
-only the decoded VAE output is cached.
+Pixel-domain upscalers are selected by name from ``upscaler_dir`` (CLI
+``--upscaler-dir``); the request's ``pixel_upscaler`` picks which model in that
+directory is used. Today the only pixel-space upscaler is Real-ESRGAN, but the
+nomenclature is kept generic so future pixel upscalers pass through the same
+options. Only the last-used pixel upscaler is kept loaded (switched on change).
+Without a pixel upscaler only ``refined`` factors <= 2 are available. Max factor
+ranges follow the detected model scale: ``refined`` up to ``UPSCALE_SCALE *
+pixel_scale``, ``no-refiner`` up to ``pixel_scale``.
 
 Pipeline caching
 ----------------
@@ -66,8 +69,8 @@ at any stage invalidates that stage and all downstream stages.
   Upscale+refine | (driven by decode cache hit below)      | —
   VAE decode     | sampling_key + refined constants        | pixels (fp32)
   Notch filter   | (not cached; runs right after decode)   | —
+  ESRGAN/resize  | (not cached)                            | —
   Postprocess    | (not cached — cheap)                    | —
-  ESRGAN/resize  | (not cached — fast)                     | —
 
 LoRA switching
 ---------------
@@ -92,7 +95,17 @@ import torch.nn.functional as F
 from PIL import Image
 from safetensors.torch import load_file
 
-from thenoise.upscale import load_latent_upscaler, load_esrgan, detect_esrgan_scale
+from thenoise.upscale import (
+    load_latent_upscaler,
+    load_pixel_upscaler,
+    detect_pixel_upscaler_scale,
+)
+from thenoise.utils.model_dir import (
+    ensure_safetensors,
+    strip_safetensors,
+    resolve_in_dir,
+    list_safetensors,
+)
 from thenoise.samplers import Step, create_sampler
 from thenoise.samplers.euler import EulerSampler
 from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
@@ -184,7 +197,7 @@ class DiffusionModel(ABC):
         device: str = "cuda",
         dtype: torch.dtype = torch.bfloat16,
         lora_dir: Optional[str] = None,
-        esrgan_path: Optional[str] = None,
+        upscaler_dir: Optional[str] = None,
     ):
         self.device = device
         self.dtype = dtype
@@ -192,7 +205,7 @@ class DiffusionModel(ABC):
         self.vae_path = vae_path
         self.text_encoder_path = text_encoder_path
         self.lora_dir = lora_dir
-        self.esrgan_path = esrgan_path
+        self.upscaler_dir = upscaler_dir
         self._lock = threading.Lock()
 
         torch._dynamo.config.recompile_limit = 64
@@ -212,9 +225,13 @@ class DiffusionModel(ABC):
         self._upscaler = None
         self._adaptor = None
 
-        # Lazy pixel-domain Real-ESRGAN upscaler (only if ``esrgan_path`` set).
-        self._esrgan = None
-        self._esrgan_scale_val: Optional[int] = None  # detected scale, cached
+        # Lazy pixel-domain upscaler, kept only while it is the last-used one.
+        # ``upscaler_dir`` holds the available models; a request selects one by
+        # name via ``pixel_upscaler``. The currently loaded model is cached so
+        # repeated requests reuse it and a different name unloads the previous.
+        self._pixel_upscaler = None
+        self._pixel_upscaler_name: Optional[str] = None  # currently loaded name
+        self._pixel_upscaler_scales: Dict[str, int] = {}  # per-name detected scale
 
     # ------------------------------------------------------------------ hooks
     @abstractmethod
@@ -291,7 +308,7 @@ class DiffusionModel(ABC):
             filename = spec
             weight = 1.0
 
-        filename = filename + ".safetensors"
+        filename = ensure_safetensors(filename)
 
         return filename, weight
 
@@ -299,18 +316,9 @@ class DiffusionModel(ABC):
         """Resolve a LoRA filename to an absolute path, guarded against traversal.
 
         Subdirectories are allowed, but .. components that would escape lora_dir
-        raise ValueError.
+        raise ValueError. Shared path logic lives in ``utils.model_dir``.
         """
-        if not self.lora_dir:
-            raise ValueError("lora_dir is not set")
-
-        base = os.path.abspath(self.lora_dir)
-        candidate = os.path.abspath(os.path.join(self.lora_dir, filename))
-
-        if not candidate.startswith(base + os.sep) and candidate != base:
-            raise ValueError("LoRA path escapes lora_dir")
-
-        return candidate
+        return resolve_in_dir(self.lora_dir, filename)
 
     def _get_lora_sd(self, filename: str) -> Dict[str, torch.Tensor]:
         """Load a LoRA state dict from disk."""
@@ -375,20 +383,85 @@ class DiffusionModel(ABC):
     def list_loras(self) -> List[str]:
         """List available LoRA names relative to lora_dir.
 
-        Subdirectories are scanned recursively. Names are relative paths with the
-        .safetensors suffix stripped (e.g. "12345_something" or "sub/style"), so
-        they can be used directly as lora_specs (which auto-appends the suffix).
+        Names are relative paths with the .safetensors suffix stripped (e.g.
+        "12345_something" or "sub/style"), so they can be used directly as
+        lora_specs (which auto-appends the suffix). Shared listing logic lives
+        in ``utils.model_dir``.
         """
-        if not self.lora_dir:
-            return []
-        names = []
-        for root, _dirs, files in os.walk(self.lora_dir):
-            for name in sorted(files):
-                if not name.endswith(".safetensors"):
-                    continue
-                rel = os.path.relpath(os.path.join(root, name), self.lora_dir)
-                names.append(rel[: -len(".safetensors")])
-        return sorted(names)
+        return list_safetensors(self.lora_dir)
+
+    # ---------------------------------------------------------- pixel upscaler
+    def _parse_pixel_upscaler_name(self, name: str) -> str:
+        """Return the canonical pixel-upscaler name (strip optional suffix)."""
+        return strip_safetensors(name)
+
+    def _resolve_pixel_upscaler_path(self, filename: str) -> str:
+        """Resolve a pixel-upscaler filename within upscaler_dir (guarded)."""
+        return resolve_in_dir(self.upscaler_dir, filename)
+
+    def list_pixel_upscalers(self) -> List[str]:
+        """List available pixel-upscaler names relative to upscaler_dir.
+
+        Names are relative paths with the .safetensors suffix stripped, so they
+        can be used directly as the request's ``pixel_upscaler`` value. Shared
+        listing logic lives in ``utils.model_dir``.
+        """
+        return list_safetensors(self.upscaler_dir)
+
+    def _validate_pixel_upscaler(self, name: str) -> str:
+        """Validate a pixel-upscaler name; return its canonical form.
+
+        Raises if no ``upscaler_dir`` is configured or the named model does not
+        exist in it.
+        """
+        if not self.upscaler_dir:
+            raise ValueError(
+                "no pixel upscaler configured; pass --upscaler-dir PATH "
+                "(or run scripts/download_esrgan.py)"
+            )
+        name = self._parse_pixel_upscaler_name(name)
+        filepath = self._resolve_pixel_upscaler_path(ensure_safetensors(name))
+        if not os.path.isfile(filepath):
+            raise ValueError(
+                f"pixel upscaler '{name}' not found in {self.upscaler_dir}"
+            )
+        return name
+
+    def _pixel_upscaler_scale(self, name: str) -> int:
+        """Detected scale of the requested pixel upscaler (0 if none), cached.
+
+        Reads only the safetensors header on first use per name; the value is
+        then reused. Tests may pre-populate ``_pixel_upscaler_scales`` to skip
+        file access.
+        """
+        if not self.upscaler_dir or not name:
+            return 0
+        name = self._parse_pixel_upscaler_name(name)
+        scale = self._pixel_upscaler_scales.get(name)
+        if scale is None:
+            filepath = self._resolve_pixel_upscaler_path(ensure_safetensors(name))
+            scale = detect_pixel_upscaler_scale(filepath)
+            self._pixel_upscaler_scales[name] = scale
+        return scale
+
+    def _switch_pixel_upscaler(self, name: str) -> None:
+        """Load the requested pixel upscaler, keeping only the last-used loaded.
+
+        Swaps (unloads) any previously loaded upscaler when the requested name
+        differs; repeated requests with the same name are no-ops. Must be called
+        under the inference lock (it loads weights onto the device).
+        """
+        name = self._parse_pixel_upscaler_name(name)
+        if self._pixel_upscaler_name == name:
+            return  # no-op: same upscaler
+        logger = __import__("logging").getLogger(__name__)
+        filepath = self._resolve_pixel_upscaler_path(ensure_safetensors(name))
+        logger.info("Loading pixel upscaler: %s", filepath)
+        self._pixel_upscaler, scale = load_pixel_upscaler(
+            filepath, device=self.device
+        )
+        self._pixel_upscaler_name = name
+        self._pixel_upscaler_scales[name] = scale
 
     def percent_to_sigma(self, percent: float) -> float:
         """Map a percent (0..1) to a sigma, used by the sampler's SNR offset.
@@ -484,6 +557,7 @@ class DiffusionModel(ABC):
         film_grain: float = 0.0,
         sharpening: float = 0.0,
         lora_specs: Optional[List[str]] = None,
+        pixel_upscaler: Optional[str] = None,
     ) -> Image.Image:
         """Encode -> denoise -> decode -> postprocess. Returns a single PIL image.
 
@@ -503,10 +577,15 @@ class DiffusionModel(ABC):
         )
 
         # Resolve upscale parameters: ``upscale`` is a legacy alias for a 2x
-        # refined upscale; an explicit factor/type overrides it.
+        # refined upscale; an explicit factor/type overrides it. A requested
+        # pixel upscaler is validated (exists in upscaler_dir) before planning.
+        if pixel_upscaler:
+            pixel_upscaler = self._validate_pixel_upscaler(pixel_upscaler)
         if upscale and upscale_factor == 1.0:
             upscale_factor = float(self.UPSCALE_SCALE)
-        factor, upscale_type = self._resolve_upscale(upscale_factor, upscale_type)
+        factor, upscale_type = self._resolve_upscale(
+            upscale_factor, upscale_type, pixel_upscaler
+        )
         width, height = self.resolve_size(width, height)
         target_width = width
         target_height = height
@@ -514,7 +593,9 @@ class DiffusionModel(ABC):
             target_width = round(width * factor)
             target_height = round(height * factor)
         refined = upscale_type == "refined" and factor > 1.0
-        esrgan_scale = self._esrgan_scale_for(factor, upscale_type)
+        pixel_scale = self._pixel_upscaler_scale_for(
+            factor, upscale_type, pixel_upscaler
+        )
         effective_sampler = sampler or self.SAMPLER
 
         # seed=-1 is treated as "random" (same as None)
@@ -572,8 +653,10 @@ class DiffusionModel(ABC):
             if qwen_vae_enhance:
                 pixels = nyquist_notch(pixels)
 
-            # Pixel-domain ESRGAN (fast, not cached) + GPU resize to target size.
-            pixels = self._esrgan_step(pixels, esrgan_scale)
+            # Pixel-domain upscaler (fast, not cached) + GPU resize to target size.
+            pixels = self._pixel_upscaler_step(
+                pixels, pixel_scale, pixel_upscaler
+            )
             pixels = self._resize_to_target(pixels, target_width, target_height)
 
             # Stage 5: postprocess (cheap — not cached)
@@ -605,6 +688,7 @@ class DiffusionModel(ABC):
                 film_grain=film_grain,
                 sharpening=sharpening,
                 lora_specs=lora_specs,
+                pixel_upscaler=pixel_upscaler,
             )
             image._pnginfo = pnginfo
             return image
@@ -660,101 +744,93 @@ class DiffusionModel(ABC):
         self,
         factor: float,
         upscale_type: str,
+        pixel_upscaler: Optional[str] = None,
     ) -> tuple[float, str]:
         """Validate and return the effective (factor, type).
 
-        ``upscale_factor`` must be in (0.0, 8.0]. ``fast`` mode has no latent
-        2x multiplier so it is capped at 4.0. ESRGAN (required for ``fast`` and
-        for ``refined`` factors above the latent 2x) must have been configured
-        via ``esrgan_path``.
+        ``upscale_factor`` must be in (0.0, 8.0]. ``no-refiner`` mode has no
+        latent 2x multiplier so it is capped at the pixel-upscaler scale. A pixel
+        upscaler (selected by ``pixel_upscaler`` from ``upscaler_dir``) is
+        required for ``no-refiner`` and for ``refined`` factors above the latent
+        2x.
         """
-        if upscale_type not in ("refined", "fast"):
+        if upscale_type not in ("refined", "no-refiner"):
             raise ValueError(
-                f"upscale_type must be 'refined' or 'fast', got {upscale_type!r}"
+                f"upscale_type must be 'refined' or 'no-refiner', "
+                f"got {upscale_type!r}"
             )
         if not 0.0 < factor <= 8.0:
             raise ValueError("upscale_factor must be in (0.0, 8.0]")
-        esrgan = self._esrgan_scale  # detected scale (0 = no ESRGAN configured)
-        if esrgan == 0:
-            # No ESRGAN: only ``refined`` factors up to the latent 2x work.
+        scale = self._pixel_upscaler_scale(pixel_upscaler)
+        if scale == 0:
+            # No pixel upscaler: only ``refined`` factors up to the latent 2x work.
             if factor > self.UPSCALE_SCALE:
                 raise ValueError(
-                    f"upscale_factor > {self.UPSCALE_SCALE} requires a "
-                    "Real-ESRGAN model; pass --esrgan PATH (or run "
+                    f"upscale_factor > {self.UPSCALE_SCALE} requires a pixel "
+                    "upscaler; pass --pixel-upscaler PATH (or run "
                     "scripts/download_esrgan.py)"
                 )
-            if upscale_type == "fast" and factor > 1.0:
+            if upscale_type == "no-refiner" and factor > 1.0:
                 raise ValueError(
-                    "upscale_type='fast' requires a Real-ESRGAN model; "
-                    "pass --esrgan PATH (or run scripts/download_esrgan.py)"
+                    "upscale_type='no-refiner' requires a pixel upscaler; "
+                    "pass --pixel-upscaler PATH (or run "
+                    "scripts/download_esrgan.py)"
                 )
         else:
             # Max factor depends on the detected model scale: refined gets the
-            # latent 2x multiplier, fast does not.
-            max_refined = self.UPSCALE_SCALE * esrgan
+            # latent 2x multiplier, no-refiner does not.
+            max_refined = self.UPSCALE_SCALE * scale
             if upscale_type == "refined" and factor > max_refined:
                 raise ValueError(
-                    f"upscale_type='refined' with a {esrgan}x ESRGAN model is "
+                    f"upscale_type='refined' with a {scale}x pixel upscaler is "
                     f"limited to factor {max_refined}"
                 )
-            if upscale_type == "fast" and factor > esrgan:
+            if upscale_type == "no-refiner" and factor > scale:
                 raise ValueError(
-                    f"upscale_type='fast' with a {esrgan}x ESRGAN model is "
-                    f"limited to factor {esrgan}"
+                    f"upscale_type='no-refiner' with a {scale}x pixel upscaler "
+                    f"is limited to factor {scale}"
                 )
         return factor, upscale_type
 
-    @property
-    def _esrgan_scale(self) -> int:
-        """Detected scale of the configured ESRGAN model (0 if none), cached.
+    def _pixel_upscaler_scale_for(
+        self,
+        factor: float,
+        upscale_type: str,
+        pixel_upscaler: Optional[str] = None,
+    ) -> int:
+        """Pixel-upscaler scale to apply for (factor, type, name), or 0 to skip.
 
-        Reads only the safetensors header on first use; the value is then reused.
-        Tests may set ``_esrgan_scale_val`` directly to skip file access.
+        ``refined`` gets a 2x from the latent path, so the pixel upscaler is only
+        needed when the factor exceeds that 2x. ``no-refiner`` has no latent
+        multiplier and always needs it for any upscale. Uses the detected scale
+        of the requested ``pixel_upscaler``.
         """
-        if self._esrgan_scale_val is None:
-            if not self.esrgan_path:
-                self._esrgan_scale_val = 0
-            else:
-                self._esrgan_scale_val = detect_esrgan_scale(self.esrgan_path)
-        return self._esrgan_scale_val
-
-    def _esrgan_scale_for(self, factor: float, upscale_type: str) -> int:
-        """Pixel-domain ESRGAN scale for a (factor, type), or 0 to skip.
-
-        ``refined`` gets a 2x from the latent path, so ESRGAN is only needed when
-        the factor exceeds that 2x. ``fast`` has no latent multiplier and always
-        needs ESRGAN for any upscale. Uses the detected model scale.
-        """
-        esrgan = self._esrgan_scale
-        if esrgan == 0 or factor <= 1.0:
+        if not pixel_upscaler:
             return 0
-        if upscale_type == "fast":
-            return esrgan
-        return esrgan if factor > self.UPSCALE_SCALE else 0
+        scale = self._pixel_upscaler_scale(pixel_upscaler)
+        if scale == 0 or factor <= 1.0:
+            return 0
+        if upscale_type == "no-refiner":
+            return scale
+        return scale if factor > self.UPSCALE_SCALE else 0
 
-    def _load_esrgan(self):
-        """Load the pixel-domain ESRGAN model (once, lazily, under the lock)."""
-        if self._esrgan is None:
-            if not self.esrgan_path:
-                raise ValueError(
-                    "no ESRGAN model configured; pass --esrgan PATH "
-                    "(or run scripts/download_esrgan.py)"
-                )
-            self._esrgan, scale = load_esrgan(self.esrgan_path, device=self.device)
-            self._esrgan_scale_val = scale
-        return self._esrgan
+    def _pixel_upscaler_step(
+        self,
+        pixels: torch.Tensor,
+        scale: int,
+        pixel_upscaler: Optional[str] = None,
+    ) -> torch.Tensor:
+        """Apply the pixel-domain upscaler by ``scale``x (if > 0).
 
-    def _esrgan_step(self, pixels: torch.Tensor, scale: int) -> torch.Tensor:
-        """Apply the pixel-domain ESRGAN upscale by ``scale``x (if > 0).
-
-        The Real-ESRGAN model operates on RGB in [0, 1] (see its ``enhance``
-        path), while the pipeline's decoded pixels are in [-1, 1]. Convert to
-        [0, 1] before the model and back to [-1, 1] afterwards so downstream
-        postprocessing / ``_to_pil`` stay unchanged.
+        Loads (or reuses) the requested pixel upscaler, keeping only the last-used
+        model loaded. The model operates on RGB in [0, 1] while the pipeline's
+        decoded pixels are in [-1, 1]; convert to [0, 1] before the model and back
+        afterwards so downstream postprocessing / ``_to_pil`` stay unchanged.
         """
-        if not scale:
+        if not scale or not pixel_upscaler:
             return pixels
-        model = self._load_esrgan()
+        self._switch_pixel_upscaler(pixel_upscaler)
+        model = self._pixel_upscaler
         x = (pixels.unsqueeze(0) + 1.0) / 2.0  # [-1, 1] -> [0, 1]
         with torch.no_grad():
             out = model.forward_tiled(x)
