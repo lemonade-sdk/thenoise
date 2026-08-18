@@ -24,11 +24,15 @@ class Settings:
     ``upscaler_dir`` is server configuration (like host/port): pixel-domain
     upscaling is a pixel-space / postprocessing concern that needs no diffusion
     model, so its directory is NOT a model-load parameter.
+
+    ``gallery_dir`` is a server configuration: when set, generated images are
+    saved here and served in the gallery.
     """
     device: str = "cuda"      # ROCm torch aliases cuda -> hip
     host: str = "127.0.0.1"
     port: int = 8000
     upscaler_dir: str = ""     # directory of pixel-domain upscaler models
+    gallery_dir: str = ""     # directory for saving/serving generated images
 
 
 @dataclass

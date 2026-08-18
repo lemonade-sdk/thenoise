@@ -53,6 +53,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="bind port (default: 8000)")
     serve.add_argument("--device", default="cuda",
                        help="inference device; ROCm aliases cuda -> hip (default: cuda)")
+    serve.add_argument("--gallery", default="", metavar="PATH",
+                       help="directory to save generated images and serve "
+                            "a persistent gallery from future starts")
 
     # generate
     gen = sub.add_parser("generate", help="run one generation and save a PNG")

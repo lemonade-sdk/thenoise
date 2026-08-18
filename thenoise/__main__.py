@@ -5,10 +5,14 @@ from .cli import build_parser
 
 
 def _serve(args) -> None:
+    import logging
+    logging.basicConfig(level=logging.INFO)
+
     from .runtime import Settings, ModelPaths, Runtime
     settings = Settings(
         device=args.device, host=args.host, port=args.port,
         upscaler_dir=args.upscaler_dir,
+        gallery_dir=args.gallery,
     )
 
     runtime = Runtime(settings)
@@ -22,9 +26,10 @@ def _serve(args) -> None:
     )
 
     from .api import create_app
+    from .api import Gallery
     import uvicorn
 
-    app = create_app(runtime)
+    app = create_app(runtime, gallery=Gallery(settings.gallery_dir))
     print(f"thenoise serving model '{runtime.model_name}' on {settings.device}")
     uvicorn.run(app, host=settings.host, port=settings.port)
 

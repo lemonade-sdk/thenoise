@@ -38,6 +38,26 @@
   }
   .sidebar h1 { font-size: 1.05rem; font-weight: 650; letter-spacing: .01em; }
   .sidebar h1 .dot { color: var(--accent); }
+  /* gallery toggle */
+  .gallery-btn {
+    display: none;
+    background: var(--input);
+    color: var(--dim);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: .35rem .6rem;
+    font-size: .72rem;
+    font-weight: 600;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    transition: border-color .12s, color .12s;
+    justify-content: center;
+  }
+  .gallery-btn:hover { color: var(--text); }
+  .gallery-btn.active { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+  .gallery-btn.visible { display: flex; }
+  .gallery-btn.visible { display: flex !important; }
   .field { display: flex; flex-direction: column; gap: .4rem; }
   .field > label { font-size: .78rem; color: var(--dim); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
   .sidebar input, .sidebar textarea, .sidebar select {
@@ -155,6 +175,62 @@
   }
   .swap:hover { color: var(--accent); border-color: var(--accent); }
 
+  /* gallery grid */
+  .gallery-grid {
+    display: none;
+    flex-wrap: wrap;
+    gap: .75rem;
+    width: 100%;
+    padding: 1rem 0;
+  }
+  .gallery-grid.visible { display: flex; }
+  .gallery-grid .gallery-item {
+    width: 120px;
+    aspect-ratio: 1;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 2px solid var(--border);
+    cursor: pointer;
+    background: var(--panel);
+    position: relative;
+  }
+  .gallery-grid .gallery-item:hover { border-color: var(--accent); }
+  .gallery-grid .gallery-item.selected { border-color: var(--accent); }
+  .gallery-grid .gallery-item img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+  .gallery-grid .gallery-item .seed-label {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, .6);
+    color: #ccc;
+    font-size: .58rem;
+    text-align: center;
+    padding: .1rem 0;
+    font-variant-numeric: tabular-nums;
+  }
+  .gallery-grid .gallery-item.loading img {
+    opacity: 0;
+  }
+  .gallery-grid .gallery-item.loading::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 6px;
+    background: var(--panel);
+    animation: pulse-bg 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse-bg {
+    0%, 100% { background: var(--panel); }
+    50% { background: var(--panel-2); }
+  }
+  .main-title { display: flex; align-items: baseline; gap: .5rem; }
+
   /* ---------- main ---------- */
   .main {
     flex: 1; min-width: 0;
@@ -224,7 +300,11 @@
 <body>
 
 <aside class="sidebar">
-  <h1>The<span class="dot">Noise</span></h1>
+  <div class="main-title">
+    <h1>The<span class="dot">Noise</span></h1>
+  </div>
+
+  <div class="divider"></div>
 
   <div class="field">
     <label for="prompt">Prompt</label>
@@ -326,6 +406,8 @@
   </div>
 
   <button class="btn" id="generate">Generate</button>
+
+  <button class="gallery-btn" id="galleryBtn" disabled>Gallery</button>
 </aside>
 
 <main class="main">
@@ -347,7 +429,9 @@
     </div>
   </details>
 
-  <div class="history hidden" id="history">
+  <div class="gallery-grid" id="galleryGrid"></div>
+
+  <div class="history" id="history">
     <div class="history-head">History</div>
     <div class="history-items" id="history_items"></div>
   </div>
@@ -772,6 +856,97 @@ $('generate').addEventListener('click', async () => {
     btn.disabled = false;
   }
 });
+
+/* ---------- gallery mode ---------- */
+let activeTab = 'generate'; // 'generate' | 'gallery'
+let galleryItems = [];
+
+function showGallery(show) {
+  activeTab = show ? 'gallery' : 'generate';
+  const isGallery = activeTab === 'gallery';
+  $('galleryBtn').classList.toggle('active', isGallery);
+  $('galleryGrid').classList.toggle('visible', isGallery);
+  $('history').classList.toggle('hidden', isGallery);
+  $('timer').style.display = isGallery ? 'none' : '';
+  $('info').style.display = isGallery ? 'none' : '';
+  if (!isGallery) {
+    currentUrl = null;
+    currentMeta = null;
+  }
+  if (isGallery) {
+    loadGallery();
+  }
+}
+
+function renderGallery() {
+  const grid = $('galleryGrid');
+  grid.innerHTML = '';
+  galleryItems.forEach(item => {
+    const div = document.createElement('div');
+    div.className = 'gallery-item' + (item.url === currentUrl ? ' selected' : '');
+    const img = document.createElement('img');
+    img.src = item.url;
+    img.alt = 'gallery image';
+    div.appendChild(img);
+    const seed = document.createElement('span');
+    seed.className = 'seed-label';
+    seed.textContent = item.meta && item.meta.seed != null ? item.meta.seed : '';
+    div.appendChild(seed);
+    div.addEventListener('click', () => selectGalleryItem(item));
+    grid.appendChild(div);
+  });
+}
+
+function selectGalleryItem(item) {
+  currentUrl = item.url;
+  currentMeta = item.meta;
+  const img = $('image');
+  img.src = item.url;
+  img.style.display = 'block';
+  $('placeholder').style.display = 'none';
+
+  if (item.meta) {
+    renderInfo(item.meta);
+    applySettings(item.meta);
+  }
+
+  $('download').disabled = false;
+  $('galleryGrid').querySelectorAll('.gallery-item').forEach((el, i) => {
+    el.classList.toggle('selected', galleryItems[i] === item);
+  });
+}
+
+function loadGallery() {
+  fetch('/gallery').then(r => r.json()).then(items => {
+    if (items && items.length > 0) {
+      galleryItems = items;
+      renderGallery();
+    }
+  }).catch(() => {});
+}
+
+// Initial gallery load
+fetch('/gallery').then(r => r.json()).then(items => {
+  if (items && items.length > 0) {
+    const btn = $('galleryBtn');
+    if (btn) {
+      btn.classList.add('visible');
+      btn.disabled = false;
+    }
+    galleryItems = items;
+    renderGallery();
+    if (activeTab !== 'gallery') {
+      showGallery(true);
+    }
+  }
+}).catch(() => {});
+
+// Single click handler
+$('galleryBtn').addEventListener('click', () => {
+  showGallery(activeTab !== 'gallery');
+});
+
+
 </script>
 </body>
 </html>

@@ -316,6 +316,7 @@ LoRA format is `filename:weight` — the `.safetensors` extension is appended au
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/` | Web UI |
+| `GET` | `/gallery` | List images in the persistent gallery, if available |
 | `GET` | `/health` | Server status and loaded model |
 | `GET` | `/lora` | List available LoRA names |
 | `GET` | `/upscalers` | List available pixel upscaler names |
@@ -380,6 +381,7 @@ If no model is loaded, `/text2image` returns HTTP 503.
 | `--host` | `127.0.0.1` | Bind host |
 | `--port` | `8000` | Bind port |
 | `--upscaler-dir` | — | Directory containing pixel upscaler `.safetensors` files (e.g. Real-ESRGAN); selected per-request via `pixel_upscaler` |
+| `--gallery` | — | Directory to use as a persistent image store. If enabled, it also displays previously saved images |
 
 ### `generate` only
 
