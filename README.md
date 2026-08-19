@@ -177,7 +177,7 @@ rather keep the system interpreter.
 
 ## Supported Models
 
-Anima, Krea 2, and Z-Image-Turbo are supported. New models will be added. PRs adding model support are welcome.
+Anima, Krea 2, Z-Image-Turbo, and Flux.2 Klein are supported. New models will be added. PRs adding model support are welcome.
 
 All download commands use `.venv/bin/python` and need the `scripts` extra
 installed (`uv pip install -e ".[scripts]"`), because `huggingface_hub` lives
@@ -188,7 +188,9 @@ in the project venv created by [Setup](#setup) — a bare `python` will not work
 | Anima | ~5.4 GB | 2B params; fastest to download and run |
 | Krea 2 | ~35 GB | Higher quality; much larger text encoder and DiT |
 | Z-Image-Turbo | ~21 GB | Distilled 8-step S3-DiT; Flux VAE + Qwen3 caption encoder |
-| Z-Image | ~21 GB | Non-distilled version of Z-Image-Turob |
+| Z-Image | ~21 GB | Non-distilled version of Z-Image-Turbo |
+| Flux.2 Klein 4B | ~12 GB | Distilled 4-step flow MMDiT; Flux.2 VAE + Qwen3-4B |
+| Flux.2 Klein 9B | ~25 GB | Distilled 4-step flow MMDiT; Flux.2 VAE + Qwen3-8B |
 
 ### Krea 2
 
@@ -231,6 +233,39 @@ and the Qwen3-4B text encoder (`qwen_3_4b.safetensors`, ~8 GB).
   --prompt "a fox walking in the snow" \
   --out /tmp/zimage.png
 ```
+
+### Flux.2 Klein
+
+```bash
+.venv/bin/python scripts/download_klein.py --out ./models/klein --variant 4b
+```
+
+This fetches the single-file bf16 DiT, the Flux.2 VAE (`flux2-vae.safetensors`),
+and the Qwen3 text encoder (a single file from Comfy-Org). Pick `--variant` from
+`4b` / `4b-base` / `9b` / `9b-base`. The 9B DiTs come from the official
+black-forest-labs repos (they are not published as single files elsewhere). The
+Qwen3 tokenizer is reused from the vendored Z-Image config, and the Flux2 latent
+upscaler is already committed under `thenoise/upscale/weights/`, so neither is
+downloaded.
+
+The DiT size (4B vs 9B) is auto-detected from the checkpoint; the matching Qwen3
+text encoder is selected automatically. The distilled variants (default) run 4
+steps with CFG off (`guidance_scale` 1.0). Base variants need explicit CFG:
+
+```bash
+./thenoise.sh generate \
+  --dit ./models/klein/split_files/diffusion_models/flux-2-klein-4b.safetensors \
+  --vae ./models/klein/split_files/vae/flux2-vae.safetensors \
+  --text-encoder ./models/klein/split_files/text_encoders/qwen_3_4b.safetensors \
+  --prompt "a fox walking in the snow" \
+  --steps 4 \
+  --sampler euler \
+  --out /tmp/klein.png
+```
+
+For a *base* checkpoint (`-base-4b` / `-base-9b`) use `--steps 50 --guidance-scale 4`
+and pass a `--negative-prompt`. The default sampler is Euler; ER-SDE is also
+selectable via `--sampler er_sde`.
 
 ---
 

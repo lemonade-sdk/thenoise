@@ -47,8 +47,8 @@ _WEIGHT_DIR = Path(__file__).resolve().parent / "weights"
 _UPSCALER_FORMATS = {
     "wan21": (make_wan21, "upscaler_Wan21.safetensors", 16),
     "flux":  (make_flux,  "upscaler_flux.safetensors", 16),
+    "flux2": (make_flux2, "upscaler_flux2.safetensors", 32),
     # "sdxl":     (make_sdxl,     "upscaler_sdxl.safetensors", 4),  # not yet committed
-    # "flux2":    (make_flux2,    "upscaler_flux2.safetensors", 32),  # not yet committed
     # "ideogram4":(make_ideogram4, "upscaler_ideogram4.safetensors", 32),  # not yet committed
 }
 

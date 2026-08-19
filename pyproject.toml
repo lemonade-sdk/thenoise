@@ -36,6 +36,7 @@ packages = [
     "thenoise.dit.krea2",
     "thenoise.dit.anima",
     "thenoise.dit.zimage",
+    "thenoise.dit.flux2",
     "thenoise.models",
     "thenoise.postprocess",
     "thenoise.samplers",

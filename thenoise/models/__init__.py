@@ -9,10 +9,16 @@ from typing import List, Type
 
 from .base import DiffusionModel
 from .anima import AnimaModel
+from .flux_klein import FluxKleinModel
 from .krea2 import Krea2Model
 from .zimage import ZImageModel
 
-MODEL_CATALOG: List[Type[DiffusionModel]] = [Krea2Model, AnimaModel, ZImageModel]
+MODEL_CATALOG: List[Type[DiffusionModel]] = [
+    Krea2Model,
+    AnimaModel,
+    ZImageModel,
+    FluxKleinModel,
+]
 
 
 def resolve(dit_path: str) -> Type[DiffusionModel]:
@@ -31,4 +37,4 @@ def resolve(dit_path: str) -> Type[DiffusionModel]:
     raise ValueError(f"could not determine model type from {dit_path} (known: {names})")
 
 
-__all__ = ["MODEL_CATALOG", "DiffusionModel", "resolve"]
+__all__ = ["MODEL_CATALOG", "DiffusionModel", "resolve", "Krea2Model", "AnimaModel", "ZImageModel", "FluxKleinModel"]

@@ -426,7 +426,11 @@ class PipelineController:
             # Adaptor math in fp32; the model runs in bf16.
             raw = adaptor.to_vae_latent(z).to(model.dtype)
             h, w = z.shape[-2:]
-            raw_up = upscaler(raw, (scale * h, scale * w))
+            # The raw VAE latent may be spatially larger than the pipeline latent
+            # (Flux2 packs 2x2 into channels), so the target size goes through the
+            # adaptor's spatial scale. For scale-1 formats this is the identity.
+            target = adaptor.vae_target_size((scale * h, scale * w))
+            raw_up = upscaler(raw, target)
             z_up = adaptor.from_vae_latent(raw_up.float()).to(model.dtype)
 
         # One short low-strength refine denoise at the upscaled size. The refine
