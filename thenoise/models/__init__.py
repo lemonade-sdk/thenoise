@@ -37,4 +37,4 @@ def resolve(dit_path: str) -> Type[DiffusionModel]:
     raise ValueError(f"could not determine model type from {dit_path} (known: {names})")
 
 
-__all__ = ["MODEL_CATALOG", "DiffusionModel", "resolve", "Krea2Model", "AnimaModel", "ZImageModel", "FluxKleinModel"]
+__all__ = ["MODEL_CATALOG", "DiffusionModel", "resolve"]
