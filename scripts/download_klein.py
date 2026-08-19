@@ -80,11 +80,5 @@ def main() -> None:
         dest = hf_hub_download(repo, path, local_dir=str(out))
         print(f"{name:13s} -> {dest}")
 
-    print(
-        "\nTokenizers are vendored in the package (reused from Z-Image). "
-        "The Flux2 latent upscaler is committed under thenoise/upscale/weights/."
-    )
-
-
 if __name__ == "__main__":
     main()
