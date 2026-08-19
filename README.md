@@ -243,10 +243,7 @@ and the Qwen3-4B text encoder (`qwen_3_4b.safetensors`, ~8 GB).
 This fetches the single-file bf16 DiT, the Flux.2 VAE (`flux2-vae.safetensors`),
 and the Qwen3 text encoder (a single file from Comfy-Org). Pick `--variant` from
 `4b` / `4b-base` / `9b` / `9b-base`. The 9B DiTs come from the official
-black-forest-labs repos (they are not published as single files elsewhere). The
-Qwen3 tokenizer is reused from the vendored Z-Image config, and the Flux2 latent
-upscaler is already committed under `thenoise/upscale/weights/`, so neither is
-downloaded.
+black-forest-labs repos (they are not published as single files elsewhere).
 
 The DiT size (4B vs 9B) is auto-detected from the checkpoint; the matching Qwen3
 text encoder is selected automatically. The distilled variants (default) run 4

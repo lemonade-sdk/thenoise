@@ -185,9 +185,6 @@ class PipelineController:
             else request.guidance_scale
         )
 
-        # Resolve upscale parameters: ``upscale`` is a legacy alias for a 2x
-        # refined upscale; an explicit factor/type overrides it. A requested
-        # pixel upscaler is validated (exists in upscaler_dir) before planning.
         pixel_upscaler = request.pixel_upscaler
         if pixel_upscaler:
             pixel_upscaler = self._pixel_upscalers.validate(pixel_upscaler)
