@@ -1,25 +1,29 @@
 """Download the Z-Image-Turbo model artifacts into a local directory.
 
-Everything comes from ``Comfy-Org/z_image_turbo`` (single-file bf16, no auth): the
-DiT, the Flux VAE, and the Qwen3-4B text encoder are each one safetensors file. The
-tokenizer config files are vendored under ``thenoise/dit/zimage/configs/tokenizer/``
-(they carry the Qwen chat template used by the caption encoder), so no tokenizer is
-downloaded; the model's vendored config means no ``config.json`` is needed next to
-the text encoder.
+Everything comes from ``Comfy-Org/z_image_turbo`` (single-file, no auth): the
+DiT, the Flux VAE, and the Qwen3-4B text encoder are each one safetensors file.
+By default the bf16 DiT is fetched; pass ``--int8-convrot`` to fetch the
+int8-convrot DiT instead (same repo). The tokenizer config files are vendored
+under ``thenoise/dit/zimage/configs/tokenizer/`` (they carry the Qwen chat
+template used by the caption encoder), so no tokenizer is downloaded; the
+model's vendored config means no ``config.json`` is needed next to the text
+encoder.
 
 The Flux latent upscaler for the Z-Image upscale path is fetched from
 ``LoganBooker/SesquiLSR`` and converted fp32 -> bf16 into the package's committed
 ``thenoise/upscale/weights/`` directory (the format registry expects
 ``upscaler_flux.safetensors`` there).
 
-  DiT           split_files/diffusion_models/z_image_turbo_bf16.safetensors
-  VAE           split_files/vae/ae.safetensors                             (Flux VAE)
-  Text encoder  split_files/text_encoders/qwen_3_4b.safetensors           (Qwen3-4B)
-  Tokenizer     vendored in thenoise/dit/zimage/configs/tokenizer/       (not downloaded)
-  Flux upscaler thenoise/upscale/weights/upscaler_flux.safetensors        (bf16)
+  DiT (bf16)     split_files/diffusion_models/z_image_turbo_bf16.safetensors
+  DiT (int8)     split_files/diffusion_models/z_image_turbo_int8_convrot.safetensors  (--int8-convrot)
+  VAE            split_files/vae/ae.safetensors                             (Flux VAE)
+  Text encoder   split_files/text_encoders/qwen_3_4b.safetensors           (Qwen3-4B)
+  Tokenizer      vendored in thenoise/dit/zimage/configs/tokenizer/       (not downloaded)
+  Flux upscaler  thenoise/upscale/weights/upscaler_flux.safetensors        (bf16)
 
 Usage:
     python scripts/download_zimage.py --out ./models/zimage
+    python scripts/download_zimage.py --out ./models/zimage --int8-convrot
 """
 from __future__ import annotations
 
@@ -43,6 +47,11 @@ SINGLE_FILES = [
     ("vae", COMFY_REPO, "split_files/vae/ae.safetensors"),
     ("text_encoder", COMFY_REPO, "split_files/text_encoders/qwen_3_4b.safetensors"),
 ]
+
+#: The int8-convrot DiT lives in the same repo.
+INT8_DIT = (
+    "dit", COMFY_REPO, "split_files/diffusion_models/z_image_turbo_int8_convrot.safetensors"
+)
 
 
 def download_flux_upscaler() -> Path:
@@ -78,12 +87,20 @@ def download_flux_upscaler() -> Path:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Download Z-Image-Turbo model artifacts")
     ap.add_argument("--out", default="./models/zimage", help="output directory")
+    ap.add_argument(
+        "--int8-convrot", action="store_true",
+        help="download the int8-convrot DiT instead of bf16",
+    )
     args = ap.parse_args()
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    for name, repo, path in SINGLE_FILES:
+    files = SINGLE_FILES
+    if args.int8_convrot:
+        files = [INT8_DIT] + [f for f in SINGLE_FILES if f[0] != "dit"]
+
+    for name, repo, path in files:
         dest = hf_hub_download(repo, path, local_dir=str(out))
         print(f"{name:14s} -> {dest}")
 

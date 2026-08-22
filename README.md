@@ -202,7 +202,7 @@ Download:
 
 This fetches the bf16 Turbo DiT (~26 GB), the VAE (~0.25 GB), and the Qwen3-VL
 text encoder (~8.9 GB). Add `--include-raw` for the non-turbo DiT (another
-~26 GB).
+~26 GB), and `--int8-convrot` to fetch the int8-convrot DiT(s) instead of bf16.
 
 ### Anima
 
@@ -214,7 +214,8 @@ same value in your `--dit` path:
 ```
 
 Available variants include `turbo-v1.0` (fewest steps), `aesthetic-v1.1`, and
-`base-v1.0`.
+`base-v1.0`. Add `--int8-convrot` to fetch the int8-convrot DiT (from
+`Bedovyy/Anima-INT8`) instead of the bf16 one.
 
 ### Z-Image-Turbo
 
@@ -223,7 +224,8 @@ Available variants include `turbo-v1.0` (fewest steps), `aesthetic-v1.1`, and
 ```
 
 This fetches the single-file bf16 Turbo DiT (~12 GB), the Flux VAE (`ae.safetensors`),
-and the Qwen3-4B text encoder (`qwen_3_4b.safetensors`, ~8 GB).
+and the Qwen3-4B text encoder (`qwen_3_4b.safetensors`, ~8 GB). Add
+`--int8-convrot` to fetch the int8-convrot DiT instead.
 
 ```bash
 ./thenoise.sh generate \
@@ -244,6 +246,11 @@ This fetches the single-file bf16 DiT, the Flux.2 VAE (`flux2-vae.safetensors`),
 and the Qwen3 text encoder (a single file from Comfy-Org). Pick `--variant` from
 `4b` / `4b-base` / `9b` / `9b-base`. The 9B DiTs come from the official
 black-forest-labs repos (they are not published as single files elsewhere).
+
+Add `--int8-convrot` to fetch the int8-convrot DiT instead. The 4B DiT comes from
+`wraps/FLUX.2-klein-4B-INT8-ConvRot-ComfyUI`; the 9B DiT is only published on
+Civitai and is downloaded directly from there (if Civitai requires login, the
+script prints the model page link). Base variants have no int8-convrot release.
 
 The DiT size (4B vs 9B) is auto-detected from the checkpoint; the matching Qwen3
 text encoder is selected automatically. The distilled variants (default) run 4
