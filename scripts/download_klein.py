@@ -1,14 +1,7 @@
 """Download the Flux.2 (Flux Klein) model artifacts into a local directory.
 
 The DiT and text encoder use single-file bf16 checkpoints from Comfy-Org where
-available (the project's preferred format). The 9B DiT (and its base variant) are
-only published by black-forest-labs, so those come from the official repos.
-
-The Qwen3 tokenizer config files are vendored under
-``thenoise/dit/zimage/configs/tokenizer/`` (reused by Flux Klein), so no tokenizer
-is downloaded. The Flux2 latent upscaler is already committed under
-``thenoise/upscale/weights/upscaler_flux2.safetensors`` (bf16), so it is not
-downloaded either.
+available (the project's preferred format).
 
   Variant     DiT                                    Text encoder
   ---------   ------------------------------------   --------------
@@ -44,8 +37,8 @@ VAE = (COMFY_4B, "split_files/vae/flux2-vae.safetensors")
 DITS = {
     "4b": (COMFY_4B, "split_files/diffusion_models/flux-2-klein-4b.safetensors"),
     "4b-base": (COMFY_4B, "split_files/diffusion_models/flux-2-klein-base-4b.safetensors"),
-    "9b": ("black-forest-labs/FLUX.2-klein-9B", "flux-2-klein-9b.safetensors"),
-    "9b-base": ("black-forest-labs/FLUX.2-klein-base-9B", "flux-2-klein-base-9b.safetensors"),
+    "9b": ("unsloth/FLUX.2-klein-9B", "flux-2-klein-9b.safetensors"),
+    "9b-base": ("unsloth/FLUX.2-klein-base-9B", "flux-2-klein-base-9b.safetensors"),
 }
 
 #: variant -> DiT size key used to pick the text encoder.
