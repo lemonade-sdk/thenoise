@@ -4,18 +4,10 @@ Guidance for AI coding agents working in this repository.
 
 ## Project overview
 
-`thenoise` is a focused diffusion inference engine for ROCm (Strix Halo /
-gfx1151, RDNA 3.5, native BF16/FP16, 128GB unified RAM). It loads **one model at
-a time** and exposes a small, explicit surface.
-
-- **Layout**:
-  - `thenoise/` — server package: `__main__.py` + `cli.py` (CLI entrypoints),
-    `api.py` (FastAPI `/text2image`), `runtime.py` (single-model runtime),
-    `models/` (adapters + catalog + detect), `dit/` (per-model compute),
-    `vae/` (shared Qwen-Image VAE), `utils/` (safetensors, lora, attention, device).
-  - `scripts/` — model download helpers.
-  - `tests/` — CLI + runtime + detection tests (no torch needed).
-- Invocation: `python -m thenoise serve ...` and `python -m thenoise generate ...`.
+`thenoise` is a focused diffusion inference engine for ROCm. It loads **one model at
+a time** and exposes a small, explicit surface. The main deployment target is
+Strix Halo / gfx1151, RDNA 3.5, native BF16/FP16, 128GB unified RAM. Other tested
+targets are gfx1150 and gfx1152.
 
 ## Critical constraints
 
