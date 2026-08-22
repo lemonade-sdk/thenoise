@@ -211,11 +211,11 @@ def test_load_int8_state_dict_orphan_scale_raises():
         load_int8_state_dict(_TinyModel(), sd)
 
 
-# --------------------------------------------------------------------------- load_int8_if_present
+# --------------------------------------------------------------------------- load_dit (central quant-aware loader)
 
 
-def test_load_int8_if_present_true(tmp_path):
-    from thenoise.utils.int8 import load_int8_if_present
+def test_load_dit_int8(tmp_path):
+    from thenoise.utils.loader import load_dit
 
     p = tmp_path / "int8.safetensors"
     _write(p, {
@@ -226,23 +226,42 @@ def test_load_int8_if_present_true(tmp_path):
         "model.diffusion_model.plain.bias": torch.randn(512, dtype=torch.bfloat16),
     })
     model = _TinyModel()
-    assert load_int8_if_present(model, str(p), device="cpu", dtype=torch.bfloat16) is True
+    out = load_dit(model, str(p), device="cpu", dtype=torch.bfloat16)
+    assert out is model
     assert model.q._int8 is True
     assert model.q.qweight.dtype == torch.int8
     assert model.plain.weight.dtype == torch.bfloat16
 
 
-def test_load_int8_if_present_false_for_bf16(tmp_path):
-    from thenoise.utils.int8 import load_int8_if_present
+def test_load_dit_bf16(tmp_path):
+    from thenoise.utils.loader import load_dit
 
     p = tmp_path / "bf16.safetensors"
-    _write(p, {
-        "plain.weight": torch.randn(512, 256, dtype=torch.bfloat16),
-        "plain.bias": torch.randn(512, dtype=torch.bfloat16),
-    })
+    _write(p, _bf16_sd())
     model = _TinyModel()
-    assert load_int8_if_present(model, str(p), device="cpu", dtype=torch.bfloat16) is False
-    assert model.q._int8 is False  # untouched; caller loads bf16
+    load_dit(model, str(p), device="cpu", dtype=torch.bfloat16)
+    assert model.q._int8 is False
+    assert model.q.weight is not None  # bf16 layer assigned normally
+    assert model.q.weight.dtype == torch.bfloat16
+    assert model.plain.weight.dtype == torch.bfloat16
+
+
+def test_load_dit_int8_key_map(tmp_path):
+    from thenoise.utils.loader import load_dit
+
+    # ComfyUI's INT8 exporter stores norm ``scale`` params under ``weight``.
+    p = tmp_path / "int8.safetensors"
+    _write(p, {
+        "q.weight": torch.randint(-127, 127, (512, 256), dtype=torch.int8),
+        "q.weight_scale": torch.rand(512, 1),
+        "q.comfy_quant": torch.zeros(8, dtype=torch.uint8),
+        "norm.weight": torch.randn(512, dtype=torch.bfloat16),
+    })
+    model = _ScaleModel()
+    key_map = lambda k: k[: -len(".weight")] + ".scale" if k.endswith("norm.weight") else k
+    load_dit(model, str(p), device="cpu", dtype=torch.bfloat16, int8_key_map=key_map)
+    assert model.q._int8 is True
+    assert model.norm.scale.dtype == torch.bfloat16
 
 
 class _ScaleNorm(nn.Module):
@@ -258,23 +277,87 @@ class _ScaleModel(nn.Module):
         self.norm = _ScaleNorm(512)
 
 
-def test_load_int8_if_present_key_map(tmp_path):
-    from thenoise.utils.int8 import load_int8_if_present
+def test_load_dit_drop_keys_on_bf16(tmp_path):
+    from thenoise.utils.loader import load_dit
 
-    # ComfyUI's INT8 exporter stores norm ``scale`` params under ``weight``.
+    p = tmp_path / "bf16.safetensors"
+    sd = _bf16_sd()
+    sd["last.down.residual"] = torch.randn(16, dtype=torch.bfloat16)
+    sd["last.up.residual"] = torch.randn(16, dtype=torch.bfloat16)
+    _write(p, sd)
+    model = _TinyModel()
+    # Without drop_keys the strict load would fail on the unexpected keys.
+    load_dit(model, str(p), device="cpu", dtype=torch.bfloat16, drop_keys=("last.down", "last.up"))
+    assert model.q._int8 is False
+    assert model.plain.weight.dtype == torch.bfloat16
+
+
+def test_load_dit_drop_keys_on_int8(tmp_path):
+    from thenoise.utils.loader import load_dit
+
     p = tmp_path / "int8.safetensors"
-    _write(p, {
+    sd = {
         "q.weight": torch.randint(-127, 127, (512, 256), dtype=torch.int8),
         "q.weight_scale": torch.rand(512, 1),
         "q.comfy_quant": torch.zeros(8, dtype=torch.uint8),
-        "norm.weight": torch.randn(512, dtype=torch.bfloat16),
-    })
-    model = _ScaleModel()
-    key_map = lambda k: k[: -len(".weight")] + ".scale" if k.endswith("norm.weight") else k
-    assert load_int8_if_present(model, str(p), device="cpu", dtype=torch.bfloat16, key_map=key_map) is True
+        "plain.weight": torch.randn(512, 256, dtype=torch.bfloat16),
+        "plain.bias": torch.randn(512, dtype=torch.bfloat16),
+        "last.down.residual": torch.randn(16, dtype=torch.bfloat16),
+        "last.up.residual": torch.randn(16, dtype=torch.bfloat16),
+    }
+    _write(p, sd)
+    model = _TinyModel()
+    # drop_keys applies to the INT8 path too.
+    load_dit(model, str(p), device="cpu", dtype=torch.bfloat16, drop_keys=("last.down", "last.up"))
     assert model.q._int8 is True
-    assert model.norm.scale.dtype == torch.bfloat16
+    assert model.plain.weight.dtype == torch.bfloat16
 
+
+class _BufModel(nn.Module):
+    """Model with an internal buffer not saved in the checkpoint."""
+
+    def __init__(self):
+        super().__init__()
+        self.plain = nn.Linear(256, 512, bias=True)
+        self.register_buffer("rope_seq", torch.zeros(128))
+
+
+def test_load_dit_expected_missing(tmp_path):
+    from thenoise.utils.loader import load_dit
+
+    p = tmp_path / "bf16.safetensors"
+    _write(p, {
+        "plain.weight": torch.randn(512, 256, dtype=torch.bfloat16),
+        "plain.bias": torch.randn(512, dtype=torch.bfloat16),
+    })
+    model = _BufModel()
+    load_dit(
+        model, str(p), device="cpu", dtype=torch.bfloat16,
+        expected_missing=("rope_seq",),
+    )
+    assert model.plain.weight.dtype == torch.bfloat16
+    assert model.rope_seq.dtype == torch.float32  # buffer kept, not from checkpoint
+
+
+def test_load_dit_expected_missing_mismatch_raises(tmp_path):
+    from thenoise.utils.loader import load_dit
+
+    p = tmp_path / "bf16.safetensors"
+    _write(p, {"plain.weight": torch.randn(512, 256, dtype=torch.bfloat16)})  # plain.bias missing
+    model = _BufModel()
+    with pytest.raises(RuntimeError, match="missing"):
+        load_dit(
+            model, str(p), device="cpu", dtype=torch.bfloat16,
+            expected_missing=("rope_seq",),  # does not cover plain.bias
+        )
+
+
+def _bf16_sd():
+    return {
+        "q.weight": torch.randn(512, 256, dtype=torch.bfloat16),
+        "plain.weight": torch.randn(512, 256, dtype=torch.bfloat16),
+        "plain.bias": torch.randn(512, dtype=torch.bfloat16),
+    }
 
 
 # --------------------------------------------------------------------------- real checkpoint (optional)

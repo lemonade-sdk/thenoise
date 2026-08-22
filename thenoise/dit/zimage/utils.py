@@ -17,8 +17,8 @@ from typing import Optional, Union
 import torch
 
 from thenoise.dit.zimage.models import ZImageTransformer2DModel
-from thenoise.utils.int8 import load_int8_if_present
-from thenoise.utils.safetensors import load_split_weights, strip_wrap_prefixes
+from thenoise.utils.loader import load_dit
+from thenoise.utils.safetensors import load_split_weights
 
 logger = logging.getLogger(__name__)
 
@@ -86,11 +86,7 @@ def load_zimage_dit(
     loading_device: Optional[Union[str, torch.device]] = None,
     config: Optional[dict] = None,
 ) -> ZImageTransformer2DModel:
-    """Build the Z-Image S3-DiT on meta and load weights (assign=True).
-
-    Accepts a single-file checkpoint (e.g. ComfyUI's ``z_image_turbo_bf16.safetensors``)
-    or a sharded HF checkpoint (pass any ``model-0000X-of-0000Y`` shard path).
-    """
+    """Build the Z-Image S3-DiT on meta and load weights."""
     device = torch.device(device)
     loading_device = device if loading_device is None else torch.device(loading_device)
     cfg = dict(ZIMAGE_DIT_CONFIG)
@@ -101,14 +97,7 @@ def load_zimage_dit(
     with torch.device("meta"):
         dit = ZImageTransformer2DModel(**cfg)
 
-    if load_int8_if_present(dit, dit_path, device=loading_device, dtype=dtype):
-        return dit
-
-    sd = load_split_weights(dit_path, device=str(loading_device), disable_mmap=True, dtype=dtype)
-    sd = strip_wrap_prefixes(sd)
-
-    dit.load_state_dict(sd, strict=True, assign=True)
-    return dit
+    return load_dit(dit, dit_path, device=loading_device, dtype=dtype)
 
 
 def _load_qwen3(

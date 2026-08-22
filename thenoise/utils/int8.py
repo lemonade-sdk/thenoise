@@ -12,15 +12,11 @@ INT8 at load time; every other layer is assigned normally.
 from __future__ import annotations
 
 import logging
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 
-from thenoise.utils.safetensors import (
-    MemoryEfficientSafeOpen,
-    WRAP_PREFIXES,
-    load_dit_safetensors,
-)
+from thenoise.utils.safetensors import MemoryEfficientSafeOpen, WRAP_PREFIXES
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -119,36 +115,4 @@ def _switch_to_int8(module: torch.nn.Module, qweight: torch.Tensor, scale, key: 
     module.load_int8(qweight, scale)
 
 
-def load_int8_if_present(
-    model: torch.nn.Module,
-    dit_path: str,
-    *,
-    device: Union[str, torch.device],
-    dtype: Optional[torch.dtype] = None,
-    key_map: Optional[callable] = None,
-) -> bool:
-    """Load an INT8+ConvRot checkpoint into ``model`` if ``dit_path`` is one.
-
-    Centralizes the INT8 detection + loading shared by every model adapter: if
-    the checkpoint is INT8 it is fully loaded (native int8 weights/scales, full-
-    precision params cast to ``dtype``) and True is returned; otherwise the
-    caller loads the BF16 checkpoint as usual and False is returned. Handles the
-    final device move of buffers/parameters.
-
-    ``key_map`` (optional) transforms checkpoint keys before loading; it is used
-    to reconcile exporter-specific renames (e.g. ComfyUI's INT8 exporter stores
-    norm ``scale`` params under ``weight``).
-    """
-    if not is_int8_checkpoint(dit_path):
-        return False
-    device = torch.device(device)
-    sd = load_dit_safetensors(dit_path, device=device, disable_mmap=True, dtype=None)
-    if key_map is not None:
-        sd = {key_map(k): v for k, v in sd.items()}
-    load_int8_state_dict(model, sd, dtype=dtype)
-    model.to(device)
-    logger.info("Loaded INT8+ConvRot checkpoint from %s", dit_path)
-    return True
-
-
-__all__ = ["is_int8_checkpoint", "load_int8_state_dict", "load_int8_if_present"]
+__all__ = ["is_int8_checkpoint", "load_int8_state_dict"]

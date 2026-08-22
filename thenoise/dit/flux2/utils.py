@@ -23,12 +23,11 @@ from accelerate import init_empty_weights
 
 from thenoise.dit.flux2.models import Flux2, Flux2Params, Klein4BParams, Klein9BParams
 from thenoise.dit.zimage.utils import QWEN3_4B_CONFIG, ZIMAGE_TOKENIZER_CONFIG_DIR
-from thenoise.utils.int8 import load_int8_if_present
+from thenoise.utils.loader import load_dit
 from thenoise.utils.safetensors import (
     WRAP_PREFIXES,
     MemoryEfficientSafeOpen,
     load_split_weights,
-    strip_wrap_prefixes,
 )
 
 logger = logging.getLogger(__name__)
@@ -111,18 +110,18 @@ def load_flux2_dit(
     device: Union[str, torch.device] = "cpu",
     dtype: torch.dtype = torch.bfloat16,
 ) -> Flux2:
-    """Build the Flux2 DiT on meta and load the checkpoint weights (assign=True)."""
+    """Build the Flux2 DiT on meta and load the checkpoint weights."""
     device = torch.device(device)
     logger.info(f"Loading Flux Klein DiT weights from {dit_path}")
     with torch.device("meta"):
         dit = Flux2(params)
-    if load_int8_if_present(dit, dit_path, device=device, dtype=dtype, key_map=_flux2_int8_key_map):
-        return dit
-    sd = load_split_weights(dit_path, device=str(device), disable_mmap=True, dtype=dtype)
-    sd = strip_wrap_prefixes(sd)
-    info = dit.load_state_dict(sd, strict=True, assign=True)
-    logger.info(f"Loaded Flux Klein DiT: {info}")
-    return dit
+    return load_dit(
+        dit,
+        dit_path,
+        device=device,
+        dtype=dtype,
+        int8_key_map=_flux2_int8_key_map,
+    )
 
 
 def _load_qwen3(
