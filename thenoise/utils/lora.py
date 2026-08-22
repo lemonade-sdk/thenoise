@@ -3,6 +3,7 @@ import re
 from typing import Dict, List, Optional, Tuple, TypedDict, Union
 import torch
 
+from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -180,13 +181,17 @@ class LoRAApplyResult(TypedDict):
 
     Keeps the small rank-reduced LoRA factors in memory instead of full-sized
     delta tensors.  On undo the deltas are recomputed from these factors.
-    ``affected_keys`` tracks exactly which model parameters were modified,
-    so undo can skip the unaffected ones without iterating the full state dict.
+    ``affected_keys`` tracks exactly which model parameters were modified, so
+    undo can skip the unaffected ones without iterating the full state dict.
+    ``int8_affected`` lists the INT8 ``QuantizedLinear`` module paths whose LoRA
+    residual branch was populated (see ``thenoise.dit.quantized``); undo calls
+    ``clear_lora`` on them.
     """
 
     lora_sds: List[Dict[str, torch.Tensor]]
     multipliers: List[float]
     affected_keys: Tuple[str, ...]
+    int8_affected: Tuple[str, ...]
 
 
 def apply_lora_to_model(
@@ -205,7 +210,7 @@ def apply_lora_to_model(
     Param keys use the same naming as ``model.state_dict()`` (e.g. "blocks.0.attn.gate.weight").
     """
     if not lora_sds:
-        return {"lora_sds": [], "multipliers": []}
+        return {"lora_sds": [], "multipliers": [], "affected_keys": (), "int8_affected": ()}
 
     if multipliers is None:
         multipliers = [1.0] * len(lora_sds)
@@ -263,6 +268,32 @@ def apply_lora_to_model(
             if alpha_key in lora_weight_keys:
                 lora_weight_keys.remove(alpha_key)
 
+    # INT8 QuantizedLinear layers have no bf16 ``.weight`` parameter to mutate;
+    # their LoRA is applied as a separate bf16 residual branch stored on the
+    # module (``apply_lora``), keeping the int8 weight untouched. This must run
+    # before the unused-key warning so the consumed keys are not reported.
+    int8_affected: List[str] = []
+    for module_path, module in base_model.named_modules():
+        if not isinstance(module, QuantizedLinear) or not module._int8:
+            continue
+        model_key = f"{module_path}.weight"
+        for lora_weight_keys, lora_sd, multiplier in zip(lora_weight_keys_list, lora_sds, multipliers):
+            match = _match_lora_keys(model_key, lora_weight_keys)
+            if match is None:
+                continue
+            down_key, up_key, alpha_key = match
+            module.apply_lora(
+                lora_sd[down_key],
+                lora_sd[up_key],
+                lora_sd.get(alpha_key, lora_sd[down_key].size(0)),
+                multiplier,
+                calc_device,
+            )
+            lora_weight_keys.discard(down_key)
+            lora_weight_keys.discard(up_key)
+            lora_weight_keys.discard(alpha_key)
+            int8_affected.append(module_path)
+
     # Warn about unused LoRA keys
     for i, lora_weight_keys in enumerate(lora_weight_keys_list):
         if len(lora_weight_keys) > 0:
@@ -279,6 +310,7 @@ def apply_lora_to_model(
         "lora_sds": lora_sds,
         "multipliers": multipliers,
         "affected_keys": tuple(undo_deltas.keys()),
+        "int8_affected": tuple(dict.fromkeys(int8_affected)),
     }
 
 
@@ -297,11 +329,22 @@ def undo_lora_on_model(
     lora_sds = result["lora_sds"]
     multipliers = result["multipliers"]
     affected_keys = result.get("affected_keys")
+    int8_affected = result.get("int8_affected")
+    if not lora_sds and not int8_affected:
+        return
+
+    base_model = _unwrap_compiled(model)
+
+    # INT8 residual LoRAs: just drop the stored factors on the module.
+    for module_path in int8_affected or ():
+        module = base_model.get_submodule(module_path)
+        if hasattr(module, "clear_lora"):
+            module.clear_lora()
+
     if not lora_sds or not affected_keys:
         return
 
     logger.debug("Undoing LoRA on model (%d LoRA(s), %d keys)", len(lora_sds), len(affected_keys))
-    base_model = _unwrap_compiled(model)
 
     # Build key sets for each LoRA (copy so we can mutate)
     lora_weight_keys_list = [set(sd.keys()) for sd in lora_sds]

@@ -51,6 +51,85 @@ def test_quantized_linear_load_int8_frees_bf16_weight():
     assert layer.weight is None  # bf16 weight dropped -> memory savings
 
 
+def test_quantized_linear_int8_lora_residual():
+    layer = QuantizedLinear(256, 512)
+    layer.load_int8(
+        torch.randint(-127, 127, (512, 256), dtype=torch.int8),
+        torch.rand(512, 1),
+    )
+    x = torch.randn(4, 256, dtype=torch.bfloat16)
+    base = layer(x)  # without LoRA
+
+    # LoRA factors: down [r, in], up [out, r]
+    down = torch.randn(8, 256, dtype=torch.bfloat16)
+    up = torch.randn(512, 8, dtype=torch.bfloat16)
+    layer.apply_lora(down, up, alpha=8.0, multiplier=0.5, calc_device=torch.device("cpu"))
+    assert layer._lora is True
+
+    out = layer(x)
+    # expected residual: x @ down^T @ up^T * (alpha/r * multiplier)
+    expected = base + x @ (down * (8.0 / 8 * 0.5)).t() @ up.t()
+    assert torch.allclose(out.float(), expected.float(), rtol=1e-2, atol=1e-2)
+
+    layer.clear_lora()
+    assert layer._lora is False
+    assert torch.allclose(layer(x).float(), base.float(), rtol=1e-2, atol=1e-2)
+
+
+class _TinyInt8Model(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.q = QuantizedLinear(256, 512)
+        self.q.load_int8(
+            torch.randint(-127, 127, (512, 256), dtype=torch.int8),
+            torch.rand(512, 1),
+        )
+        self.plain = nn.Linear(256, 512)
+
+
+def _int8_lora_sd():
+    return {
+        "q.lora_down.weight": torch.randn(8, 256, dtype=torch.bfloat16),
+        "q.lora_up.weight": torch.randn(512, 8, dtype=torch.bfloat16),
+        "q.alpha": torch.tensor(8.0),
+    }
+
+
+def test_apply_lora_to_model_int8_residual():
+    from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
+
+    model = _TinyInt8Model()
+    result = apply_lora_to_model(
+        model, [_int8_lora_sd()], [1.0], torch.device("cpu")
+    )
+    assert model.q._lora is True
+    assert result["int8_affected"] == ("q",)
+
+    undo_lora_on_model(model, result, torch.device("cpu"))
+    assert model.q._lora is False
+
+
+def test_apply_lora_to_model_mixed_int8_and_bf16():
+    from thenoise.utils.lora import apply_lora_to_model
+
+    model = _TinyInt8Model()
+    # LoRA targeting both the int8 q layer and the bf16 plain layer
+    sd = {
+        "q.lora_down.weight": torch.randn(8, 256, dtype=torch.bfloat16),
+        "q.lora_up.weight": torch.randn(512, 8, dtype=torch.bfloat16),
+        "q.alpha": torch.tensor(8.0),
+        "plain.lora_down.weight": torch.randn(8, 256, dtype=torch.bfloat16),
+        "plain.lora_up.weight": torch.randn(512, 8, dtype=torch.bfloat16),
+        "plain.alpha": torch.tensor(8.0),
+    }
+    result = apply_lora_to_model(model, [sd], [1.0], torch.device("cpu"))
+    assert model.q._lora is True
+    assert model.plain.weight is not None  # bf16 layer mutated normally
+    assert "plain.weight" in result["affected_keys"]
+    assert result["int8_affected"] == ("q",)
+
+
+
 # --------------------------------------------------------------------------- is_int8_checkpoint
 
 
