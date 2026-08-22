@@ -1,6 +1,6 @@
 # TheNoise
 
-A text-to-image diffusion inference engine. Tested on Strix Halo and Strix Point.
+A text-to-image diffusion inference engine. Tested on Strix Halo, Strix Point and Krackan Point.
 
 Loads one model at a time and generates images from text prompts. Available as a CLI tool, an HTTP API (with a simple web UI).
 
