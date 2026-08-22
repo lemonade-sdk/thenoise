@@ -7,7 +7,7 @@ from safetensors.torch import load_file
 from accelerate import init_empty_weights
 
 from thenoise.dit.anima import models as anima_models
-from thenoise.utils.int8 import is_int8_checkpoint, load_int8_state_dict
+from thenoise.utils.int8 import load_int8_if_present
 from thenoise.utils.safetensors import WRAP_PREFIXES, load_dit_safetensors
 from thenoise.utils.setup_logging import setup_logging
 
@@ -98,48 +98,44 @@ def load_anima_model(
         "extra_t_extrapolation_ratio": 1.0,
         "use_llm_adapter": True,
     }
-    is_int8 = is_int8_checkpoint(dit_path)
-    logger.info("Detected %s Anima DiT", "INT8+ConvRot" if is_int8 else "BF16")
-
     with init_empty_weights():
         model = anima_models.Anima(**dit_config)
         if dit_weight_dtype is not None:
             # Casts every init-time parameter to the target dtype. For INT8
             # checkpoints this is still correct: the int8 qweight/scale buffers
-            # are created later by load_int8_state_dict, so they are untouched.
+            # are created later by load_int8_if_present, so they are untouched.
             model.to(dit_weight_dtype)
 
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
 
-    # INT8 checkpoints keep their native dtypes (int8 weights, F32 scales, BF16
-    # everywhere else); BF16 checkpoints are cast to the requested dtype.
+    if load_int8_if_present(model, dit_path, device=loading_device, dtype=dit_weight_dtype):
+        return model
+
+    # BF16 path: cast to the requested dtype and load via load_state_dict.
     sd = load_dit_safetensors(
         dit_path,
         device=loading_device,
         disable_mmap=True,
-        dtype=None if is_int8 else dit_weight_dtype,
+        dtype=dit_weight_dtype,
     )
 
-    if is_int8:
-        load_int8_state_dict(model, sd)
-    else:
-        missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
-        if missing:
-            # Filter out expected missing buffers (initialized in __init__, not saved in checkpoint)
-            unexpected_missing = [
-                k
-                for k in missing
-                if not any(buf_name in k for buf_name in ("seq", "dim_spatial_range", "dim_temporal_range", "inv_freq"))
-            ]
-            if unexpected_missing:
-                # Raise error to avoid silent failures
-                raise RuntimeError(
-                    f"Missing keys in checkpoint: {unexpected_missing[:10]}{'...' if len(unexpected_missing) > 10 else ''}"
-                )
-            missing = {}  # all missing keys were expected
-        if unexpected:
+    missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
+    if missing:
+        # Filter out expected missing buffers (initialized in __init__, not saved in checkpoint)
+        unexpected_missing = [
+            k
+            for k in missing
+            if not any(buf_name in k for buf_name in ("seq", "dim_spatial_range", "dim_temporal_range", "inv_freq"))
+        ]
+        if unexpected_missing:
             # Raise error to avoid silent failures
-            raise RuntimeError(f"Unexpected keys in checkpoint: {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
+            raise RuntimeError(
+                f"Missing keys in checkpoint: {unexpected_missing[:10]}{'...' if len(unexpected_missing) > 10 else ''}"
+            )
+        missing = {}  # all missing keys were expected
+    if unexpected:
+        # Raise error to avoid silent failures
+        raise RuntimeError(f"Unexpected keys in checkpoint: {unexpected[:5]}{'...' if len(unexpected) > 5 else ''}")
 
     # Move the whole model (including buffers not present in the checkpoint, e.g. the
     # RoPE position-embedding buffers seq/dim_spatial_range/dim_temporal_range) onto the
@@ -148,7 +144,7 @@ def load_anima_model(
     # would otherwise stay off-device and break rotary attention on the GPU.
     if loading_device.type != "cpu":
         model.to(loading_device)
-    logger.info("Loaded DiT model from %s (%s)", dit_path, "INT8+ConvRot" if is_int8 else "BF16")
+    logger.info("Loaded DiT model from %s", dit_path)
 
     return model
 

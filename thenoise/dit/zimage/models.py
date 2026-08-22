@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention
 from thenoise.utils.setup_logging import setup_logging
 
@@ -83,16 +84,19 @@ class Attention(nn.Module):
         super().__init__()
         self.n_heads = n_heads
         self.head_dim = dim // n_heads
-        self.qkv = nn.Linear(dim, 3 * dim, bias=False)
-        self.out = nn.Linear(dim, dim, bias=False)
+        self.qkv = QuantizedLinear(dim, 3 * dim, bias=False)
+        self.out = QuantizedLinear(dim, dim, bias=False)
         self.q_norm = RMSNorm(self.head_dim, eps=eps) if qk_norm else nn.Identity()
         self.k_norm = RMSNorm(self.head_dim, eps=eps) if qk_norm else nn.Identity()
 
     def _apply_rotary_emb(self, x, freqs_cis):
+        x_dtype = x.dtype
         x = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
         freqs_cis = freqs_cis.unsqueeze(2)
         x_out = torch.view_as_real(x * freqs_cis).flatten(3)
-        return x_out.type_as(self.out.weight)
+        # Cast back to the activation dtype (bf16); the int8 ``out`` projection has
+        # no bf16 ``weight`` to reference for the dtype.
+        return x_out.to(x_dtype)
 
     def forward(self, hidden_states, attention_mask=None, freqs_cis=None):
         dim = hidden_states.shape[-1]
@@ -126,9 +130,9 @@ class FeedForward(nn.Module):
 
     def __init__(self, dim, hidden_dim):
         super().__init__()
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w1 = QuantizedLinear(dim, hidden_dim, bias=False)
+        self.w2 = QuantizedLinear(hidden_dim, dim, bias=False)
+        self.w3 = QuantizedLinear(dim, hidden_dim, bias=False)
 
     def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
@@ -149,7 +153,7 @@ class ZImageTransformerBlock(nn.Module):
 
         self.modulation = modulation
         if modulation:
-            self.adaLN_modulation = nn.Sequential(nn.Linear(min(dim, ADALN_EMBED_DIM), 4 * dim, bias=True))
+            self.adaLN_modulation = nn.Sequential(QuantizedLinear(min(dim, ADALN_EMBED_DIM), 4 * dim, bias=True))
 
     @torch.compile(fullgraph=True)
     def forward(self, x, attn_mask, freqs_cis, adaln_input=None):

@@ -16,6 +16,7 @@ ComfyUI-style INT8 checkpoint.
 """
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 import torch
@@ -39,11 +40,14 @@ class QuantizedLinear(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.convrot_groupsize = convrot_groupsize
-        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=torch.bfloat16))
+        # float32 default (matching ``nn.Linear``); the model is cast to the compute
+        # dtype (bf16) by the adapter, or the weight is replaced at load time.
+        self.weight = nn.Parameter(torch.empty(out_features, in_features))
         if bias:
-            self.bias = nn.Parameter(torch.empty(out_features, dtype=torch.bfloat16))
+            self.bias = nn.Parameter(torch.empty(out_features))
         else:
             self.register_parameter("bias", None)
+        self._reset_parameters()
         # INT8 output is always bf16; the raw op takes this as an int code (not a
         # torch.dtype), resolved once here so torch.compile never traces the dict
         # lookup. Using torch.ops.comfy_kitchen.int8_linear (a torch.library
@@ -58,6 +62,14 @@ class QuantizedLinear(nn.Module):
         self.lora_down: Optional[torch.Tensor] = None
         self.lora_up: Optional[torch.Tensor] = None
         self._lora = False
+
+    def _reset_parameters(self) -> None:
+        """Initialize like ``nn.Linear`` (kaiming on weight, uniform on bias)."""
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            nn.init.uniform_(self.bias, -bound, bound)
 
     def load_int8(
         self,

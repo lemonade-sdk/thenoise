@@ -290,7 +290,8 @@ def load_safetensors(
         with MemoryEfficientSafeOpen(path, disable_numpy_memmap=disable_numpy_memmap) as f:
             for key in f.keys():
                 state_dict[key] = f.get_tensor(key, device=device, dtype=dtype)
-            torch.cuda.synchronize()
+            if device is not None and device.type == "cuda":
+                torch.cuda.synchronize()
         return state_dict
     else:
         try:

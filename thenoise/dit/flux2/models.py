@@ -25,6 +25,7 @@ import torch
 from einops import rearrange
 from torch import Tensor, nn
 
+from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import attention as sdpa_attention
 from thenoise.utils.setup_logging import setup_logging
 
@@ -216,9 +217,9 @@ class SelfAttention(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
-        self.qkv = nn.Linear(dim, dim * 3, bias=False)
+        self.qkv = QuantizedLinear(dim, dim * 3, bias=False)
         self.norm = QKNorm(head_dim)
-        self.proj = nn.Linear(dim, dim, bias=False)
+        self.proj = QuantizedLinear(dim, dim, bias=False)
 
 
 class SingleStreamBlock(nn.Module):
@@ -231,8 +232,8 @@ class SingleStreamBlock(nn.Module):
         self.mlp_hidden_dim = int(hidden_size * mlp_ratio)
         self.mlp_mult_factor = 2
 
-        self.linear1 = nn.Linear(hidden_size, hidden_size * 3 + self.mlp_hidden_dim * self.mlp_mult_factor, bias=False)
-        self.linear2 = nn.Linear(hidden_size + self.mlp_hidden_dim, hidden_size, bias=False)
+        self.linear1 = QuantizedLinear(hidden_size, hidden_size * 3 + self.mlp_hidden_dim * self.mlp_mult_factor, bias=False)
+        self.linear2 = QuantizedLinear(hidden_size + self.mlp_hidden_dim, hidden_size, bias=False)
         self.norm = QKNorm(head_dim)
         self.hidden_size = hidden_size
         self.pre_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
@@ -269,18 +270,18 @@ class DoubleStreamBlock(nn.Module):
         self.img_attn = SelfAttention(dim=hidden_size, num_heads=num_heads)
         self.img_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.img_mlp = nn.Sequential(
-            nn.Linear(hidden_size, mlp_hidden_dim * self.mlp_mult_factor, bias=False),
+            QuantizedLinear(hidden_size, mlp_hidden_dim * self.mlp_mult_factor, bias=False),
             SiLUActivation(),
-            nn.Linear(mlp_hidden_dim, hidden_size, bias=False),
+            QuantizedLinear(mlp_hidden_dim, hidden_size, bias=False),
         )
 
         self.txt_norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.txt_attn = SelfAttention(dim=hidden_size, num_heads=num_heads)
         self.txt_norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.txt_mlp = nn.Sequential(
-            nn.Linear(hidden_size, mlp_hidden_dim * self.mlp_mult_factor, bias=False),
+            QuantizedLinear(hidden_size, mlp_hidden_dim * self.mlp_mult_factor, bias=False),
             SiLUActivation(),
-            nn.Linear(mlp_hidden_dim, hidden_size, bias=False),
+            QuantizedLinear(mlp_hidden_dim, hidden_size, bias=False),
         )
 
     @torch.compile(fullgraph=True)

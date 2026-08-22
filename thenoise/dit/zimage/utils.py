@@ -17,6 +17,7 @@ from typing import Optional, Union
 import torch
 
 from thenoise.dit.zimage.models import ZImageTransformer2DModel
+from thenoise.utils.int8 import load_int8_if_present
 from thenoise.utils.safetensors import load_split_weights, strip_wrap_prefixes
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,9 @@ def load_zimage_dit(
     logger.info(f"Loading Z-Image DiT weights from {dit_path}")
     with torch.device("meta"):
         dit = ZImageTransformer2DModel(**cfg)
+
+    if load_int8_if_present(dit, dit_path, device=loading_device, dtype=dtype):
+        return dit
 
     sd = load_split_weights(dit_path, device=str(loading_device), disable_mmap=True, dtype=dtype)
     sd = strip_wrap_prefixes(sd)

@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor
 
+from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention as common_attention
 
 
@@ -138,9 +139,9 @@ class SwiGLU(torch.nn.Module):
         mlpdim = int(2 * features / 3) * multiplier
         mlpdim = multiple * ((mlpdim + multiple - 1) // multiple)
 
-        self.gate = torch.nn.Linear(features, mlpdim, bias=bias)
-        self.up = torch.nn.Linear(features, mlpdim, bias=bias)
-        self.down = torch.nn.Linear(mlpdim, features, bias=bias)
+        self.gate = QuantizedLinear(features, mlpdim, bias=bias)
+        self.up = QuantizedLinear(features, mlpdim, bias=bias)
+        self.down = QuantizedLinear(mlpdim, features, bias=bias)
 
     def forward(self, x: Tensor) -> Tensor:
         return self.down(F.silu(self.gate(x)) * self.up(x))
@@ -153,12 +154,12 @@ class Attention(torch.nn.Module):
         self.kvheads = kvheads if kvheads is not None else heads
         self.headdim = dim // self.heads
 
-        self.wq = torch.nn.Linear(dim, self.headdim * self.heads, bias=bias)
-        self.wk = torch.nn.Linear(dim, self.headdim * self.kvheads, bias=bias)
-        self.wv = torch.nn.Linear(dim, self.headdim * self.kvheads, bias=bias)
-        self.gate = torch.nn.Linear(dim, dim, bias=bias)
+        self.wq = QuantizedLinear(dim, self.headdim * self.heads, bias=bias)
+        self.wk = QuantizedLinear(dim, self.headdim * self.kvheads, bias=bias)
+        self.wv = QuantizedLinear(dim, self.headdim * self.kvheads, bias=bias)
+        self.gate = QuantizedLinear(dim, dim, bias=bias)
         self.qknorm = QKNorm(self.headdim)
-        self.wo = torch.nn.Linear(dim, dim, bias=bias)
+        self.wo = QuantizedLinear(dim, dim, bias=bias)
 
     def forward(self, qkv: Tensor, freqs: Tensor | None = None, attn_params: AttentionParams | None = None) -> Tensor:
         q, k, v, gate = self.wq(qkv), self.wk(qkv), self.wv(qkv), self.gate(qkv)

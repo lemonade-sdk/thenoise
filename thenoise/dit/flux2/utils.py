@@ -23,6 +23,7 @@ from accelerate import init_empty_weights
 
 from thenoise.dit.flux2.models import Flux2, Flux2Params, Klein4BParams, Klein9BParams
 from thenoise.dit.zimage.utils import QWEN3_4B_CONFIG, ZIMAGE_TOKENIZER_CONFIG_DIR
+from thenoise.utils.int8 import load_int8_if_present
 from thenoise.utils.safetensors import (
     WRAP_PREFIXES,
     MemoryEfficientSafeOpen,
@@ -68,6 +69,19 @@ QWEN3_8B_CONFIG = {
 _KLEIN_VARIANTS = {3072: Klein4BParams, 4096: Klein9BParams}
 
 
+# ComfyUI's INT8 exporter stores RMSNorm ``scale`` params under the ``weight``
+# name. Reconcile those keys so the shared loader assigns them to the model's
+# ``scale`` parameters (only the QKNorm scales carry this suffix).
+_NORM_WEIGHT_SUFFIXES = (".norm.key_norm.weight", ".norm.query_norm.weight")
+
+
+def _flux2_int8_key_map(key: str) -> str:
+    for suffix in _NORM_WEIGHT_SUFFIXES:
+        if key.endswith(suffix):
+            return key[: -len(".weight")] + ".scale"
+    return key
+
+
 def detect_klein_params(dit_path: str) -> Flux2Params:
     """Return the Klein variant params (4B / 9B) from the DiT's ``img_in`` width."""
     with MemoryEfficientSafeOpen(dit_path) as f:
@@ -102,6 +116,8 @@ def load_flux2_dit(
     logger.info(f"Loading Flux Klein DiT weights from {dit_path}")
     with torch.device("meta"):
         dit = Flux2(params)
+    if load_int8_if_present(dit, dit_path, device=device, dtype=dtype, key_map=_flux2_int8_key_map):
+        return dit
     sd = load_split_weights(dit_path, device=str(device), disable_mmap=True, dtype=dtype)
     sd = strip_wrap_prefixes(sd)
     info = dit.load_state_dict(sd, strict=True, assign=True)

@@ -21,6 +21,7 @@ from thenoise.utils.int8 import is_int8_checkpoint, load_int8_state_dict
 def test_quantized_linear_bf16_forward():
     layer = QuantizedLinear(256, 512, bias=False)
     torch.nn.init.ones_(layer.weight)
+    layer = layer.to(torch.bfloat16)  # models are cast to bf16 by the adapter
     x = torch.randn(4, 256, dtype=torch.bfloat16)
     out = layer(x)
     assert out.shape == (4, 512)
@@ -208,6 +209,72 @@ def test_load_int8_state_dict_orphan_scale_raises():
     sd["plain.weight_scale"] = torch.zeros(512, 1, dtype=torch.float32)
     with pytest.raises(RuntimeError, match="orphan"):
         load_int8_state_dict(_TinyModel(), sd)
+
+
+# --------------------------------------------------------------------------- load_int8_if_present
+
+
+def test_load_int8_if_present_true(tmp_path):
+    from thenoise.utils.int8 import load_int8_if_present
+
+    p = tmp_path / "int8.safetensors"
+    _write(p, {
+        "model.diffusion_model.q.weight": torch.randint(-127, 127, (512, 256), dtype=torch.int8),
+        "model.diffusion_model.q.weight_scale": torch.rand(512, 1),
+        "model.diffusion_model.q.comfy_quant": torch.zeros(8, dtype=torch.uint8),
+        "model.diffusion_model.plain.weight": torch.randn(512, 256, dtype=torch.bfloat16),
+        "model.diffusion_model.plain.bias": torch.randn(512, dtype=torch.bfloat16),
+    })
+    model = _TinyModel()
+    assert load_int8_if_present(model, str(p), device="cpu", dtype=torch.bfloat16) is True
+    assert model.q._int8 is True
+    assert model.q.qweight.dtype == torch.int8
+    assert model.plain.weight.dtype == torch.bfloat16
+
+
+def test_load_int8_if_present_false_for_bf16(tmp_path):
+    from thenoise.utils.int8 import load_int8_if_present
+
+    p = tmp_path / "bf16.safetensors"
+    _write(p, {
+        "plain.weight": torch.randn(512, 256, dtype=torch.bfloat16),
+        "plain.bias": torch.randn(512, dtype=torch.bfloat16),
+    })
+    model = _TinyModel()
+    assert load_int8_if_present(model, str(p), device="cpu", dtype=torch.bfloat16) is False
+    assert model.q._int8 is False  # untouched; caller loads bf16
+
+
+class _ScaleNorm(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.scale = nn.Parameter(torch.ones(dim))
+
+
+class _ScaleModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.q = QuantizedLinear(256, 512)
+        self.norm = _ScaleNorm(512)
+
+
+def test_load_int8_if_present_key_map(tmp_path):
+    from thenoise.utils.int8 import load_int8_if_present
+
+    # ComfyUI's INT8 exporter stores norm ``scale`` params under ``weight``.
+    p = tmp_path / "int8.safetensors"
+    _write(p, {
+        "q.weight": torch.randint(-127, 127, (512, 256), dtype=torch.int8),
+        "q.weight_scale": torch.rand(512, 1),
+        "q.comfy_quant": torch.zeros(8, dtype=torch.uint8),
+        "norm.weight": torch.randn(512, dtype=torch.bfloat16),
+    })
+    model = _ScaleModel()
+    key_map = lambda k: k[: -len(".weight")] + ".scale" if k.endswith("norm.weight") else k
+    assert load_int8_if_present(model, str(p), device="cpu", dtype=torch.bfloat16, key_map=key_map) is True
+    assert model.q._int8 is True
+    assert model.norm.scale.dtype == torch.bfloat16
+
 
 
 # --------------------------------------------------------------------------- real checkpoint (optional)

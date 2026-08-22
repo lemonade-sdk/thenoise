@@ -12,6 +12,7 @@ from thenoise.dit.krea2.encoder import (
     load_qwen3_vl_conditioner,
 )
 from thenoise.dit.krea2.mmdit import SingleMMDiTConfig, SingleStreamDiT
+from thenoise.utils.int8 import load_int8_if_present
 from thenoise.utils.safetensors import load_dit_safetensors
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,9 @@ def load_krea2_dit(
     logger.info(f"Loading Krea 2 DiT weights from {dit_path}")
     with torch.device("meta"):
         dit = SingleStreamDiT(config)
+
+    if load_int8_if_present(dit, dit_path, device=loading_device, dtype=dtype):
+        return dit
 
     sd = load_dit_safetensors(
         dit_path,
