@@ -11,6 +11,7 @@ from einops.layers.torch import Rearrange
 from torch import nn
 import torch.nn.functional as F
 
+from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils import attention
 
 from thenoise.utils.setup_logging import setup_logging
@@ -132,8 +133,8 @@ class GPT2FeedForward(nn.Module):
     def __init__(self, d_model: int, d_ff: int) -> None:
         super().__init__()
         self.activation = nn.GELU()
-        self.layer1 = nn.Linear(d_model, d_ff, bias=False)
-        self.layer2 = nn.Linear(d_ff, d_model, bias=False)
+        self.layer1 = QuantizedLinear(d_model, d_ff, bias=False)
+        self.layer2 = QuantizedLinear(d_ff, d_model, bias=False)
 
         self._layer_id = None
         self._dim = d_model
@@ -184,16 +185,16 @@ class Attention(nn.Module):
         self.query_dim = query_dim
         self.context_dim = context_dim
 
-        self.q_proj = nn.Linear(query_dim, inner_dim, bias=False)
+        self.q_proj = QuantizedLinear(query_dim, inner_dim, bias=False)
         self.q_norm = RMSNorm(self.head_dim, eps=1e-6)
 
-        self.k_proj = nn.Linear(context_dim, inner_dim, bias=False)
+        self.k_proj = QuantizedLinear(context_dim, inner_dim, bias=False)
         self.k_norm = RMSNorm(self.head_dim, eps=1e-6)
 
-        self.v_proj = nn.Linear(context_dim, inner_dim, bias=False)
+        self.v_proj = QuantizedLinear(context_dim, inner_dim, bias=False)
         self.v_norm = nn.Identity()
 
-        self.output_proj = nn.Linear(inner_dim, query_dim, bias=False)
+        self.output_proj = QuantizedLinear(inner_dim, query_dim, bias=False)
         self.output_dropout = nn.Dropout(dropout) if dropout > 1e-4 else nn.Identity()
 
         self._query_dim = query_dim
