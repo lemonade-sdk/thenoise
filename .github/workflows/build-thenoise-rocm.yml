@@ -267,10 +267,16 @@ jobs:
             -Name "thenoise-rocm-gfx1151-win-x64" `
             -Out (Join-Path $work "artifact.zip")
           # artifact.zip holds the release zip (not raw bundle contents); expand
-          # both so $work\bundle is the bundle root (python.exe, Lib\, ...).
-          Expand-Archive -Path (Join-Path $work "artifact.zip") -DestinationPath (Join-Path $work "raw") -Force
+          # both with bsdtar so $work\bundle is the bundle root (python.exe,
+          # Lib\, ...). (Expand-Archive is unreliable on multi-GB archives —
+          # its internal cleanup fails on the large bundle, so use tar instead.)
+          New-Item -ItemType Directory -Force (Join-Path $work "raw") | Out-Null
+          tar -xf (Join-Path $work "artifact.zip") -C (Join-Path $work "raw")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $rel = Get-ChildItem (Join-Path $work "raw") -Filter *.zip | Select-Object -First 1
-          Expand-Archive -Path $rel.FullName -DestinationPath (Join-Path $work "bundle") -Force
+          New-Item -ItemType Directory -Force (Join-Path $work "bundle") | Out-Null
+          tar -xf $rel.FullName -C (Join-Path $work "bundle")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Remove-Item -Recurse -Force (Join-Path $work "raw") -ErrorAction SilentlyContinue
           Remove-Item -Force (Join-Path $work "artifact.zip") -ErrorAction SilentlyContinue
           $mb = [math]::Round((Get-ChildItem (Join-Path $work "bundle") -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
