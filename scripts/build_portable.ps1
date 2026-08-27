@@ -21,9 +21,6 @@
 #   * ROCm runtime DLLs live in _rocm_sdk_core\bin (amdhip64_7.dll, hiprtc,
 #     amd_comgr.dll, ...) and are kept on PATH by the launcher; unlike the
 #     Linux build, _rocm_sdk_core\bin must NOT be removed.
-#   * The ROCm wheels ship only versioned DLLs (amdhip64_7.dll); we defensively
-#     create a bare amdhip64.dll alias (the Windows analog of the Linux soname
-#     symlink step).
 #
 # Usage: build_portable.ps1 <gfx_target>
 #   gfx_target: gfx1151 | gfx1150 | gfx1152
@@ -118,21 +115,6 @@ $Constraints = Join-Path $env:TEMP "thenoise-constraints.txt"
 Set-Content -Path $Constraints -Value "torch==${TorchVer}`ntorchvision==${TorchVisionVer}"
 pip-deep install --constraint $Constraints $RepoRoot
 
-# ROCm wheels ship only versioned DLLs (amdhip64_7.dll) without a bare
-# amdhip64.dll alias that some consumers load by name. Create the alias now so
-# the bundle is self-consistent (Windows analog of the Linux soname-symlink
-# step; a copy because Windows has no per-file symlinks).
-say "Ensuring bare HIP runtime DLL alias (amdhip64.dll -> amdhip64_7.dll)"
-$SdkDir = Get-ChildItem $SPDir -Directory -Filter "_rocm_sdk_*" -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($SdkDir) {
-  $SdkBin = Join-Path $SdkDir.FullName "bin"
-  $HipVersioned = Get-ChildItem $SdkBin -Filter "amdhip64_*.dll" -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -notmatch '^amdhip64\.dll$' } | Select-Object -First 1
-  if ($HipVersioned -and -not (Test-Path (Join-Path $SdkBin "amdhip64.dll"))) {
-    Copy-Item $HipVersioned.FullName (Join-Path $SdkBin "amdhip64.dll")
-    say "copied $($HipVersioned.Name) -> amdhip64.dll"
-  }
-}
 
 # --------------------------------------- 3. Triton precompile (NOT on Windows) --
 # The Linux build precompiles Triton's hip_utils glue and bundles clang so
