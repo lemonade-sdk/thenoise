@@ -136,7 +136,9 @@ jobs:
         shell: powershell
         run: |
           $archive = Join-Path $env:RUNNER_TEMP "thenoise-${{ matrix.gfx_target }}-win-x64.zip"
-          tar -cf $archive -C $env:THENOISE_ROOT .
+          # -a lets bsdtar auto-detect the format from the .zip extension and
+          # write a real zip (without -a it writes a gzip tar).
+          tar -a -cf $archive -C $env:THENOISE_ROOT .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # AppendAllText writes UTF-8 without a BOM (Out-File -Encoding utf8
           # adds a BOM in Windows PowerShell 5.1, which corrupts GITHUB_ENV).

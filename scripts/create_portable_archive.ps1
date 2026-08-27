@@ -99,8 +99,9 @@ function Package-Bundle {
   say "Release tag:  $tag"
 
   say "Creating: ${base}.zip"
-  # bsdtar detects the zip format from the .zip extension.
-  tar -cf "${base}.zip" -C $bundle .
+  # -a lets bsdtar auto-detect the format from the .zip extension and write a
+  # real zip (without -a it writes a gzip tar).
+  tar -a -cf "${base}.zip" -C $bundle .
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   $sizeMb = [math]::Ceiling((Get-Item "${base}.zip").Length / 1MB)
