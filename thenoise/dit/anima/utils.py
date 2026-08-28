@@ -147,8 +147,8 @@ def load_qwen3_tokenizer(qwen3_path: str):
 
 def load_qwen3_text_encoder(
     qwen3_path: str,
-    dtype: torch.dtype = torch.bfloat16,
-    device: str = "cpu",
+    dtype: Union[str, torch.device],
+    device: str,
     lora_weights: Optional[List[Dict[str, torch.Tensor]]] = None,
     lora_multipliers: Optional[List[float]] = None,
 ):

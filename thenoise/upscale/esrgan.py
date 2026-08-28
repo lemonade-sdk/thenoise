@@ -38,6 +38,7 @@ Original copyright/license notice follows.
 # Copyright (c) 2021 xinntao. Licensed under the BSD-3-Clause License.
 # Source: https://github.com/xinntao/Real-ESRGAN
 from __future__ import annotations
+from typing import Union
 
 import re
 
@@ -288,7 +289,7 @@ def _remap_original_esrgan(state: dict) -> dict:
     return out
 
 
-def load_esrgan(path: str, device: str = "cuda") -> tuple[RRDBNet, int]:
+def load_esrgan(path: str, device: Union[str, torch.device]) -> tuple[RRDBNet, int]:
     """Load a Real-ESRGAN model from a safetensors file.
 
     Supports both the ComfyUI repackaged naming (``body.*`` / ``conv_first``)

@@ -100,8 +100,9 @@ def test_flux_upscaler_loads_and_runs():
 
 def test_load_upscaler_rejects_unknown_format():
     import pytest
+    import torch
 
     from thenoise.upscale import load_latent_upscaler
 
     with pytest.raises(ValueError):
-        load_latent_upscaler("not_a_real_format")
+        load_latent_upscaler("not_a_real_format", device="cpu", dtype=torch.bfloat16)

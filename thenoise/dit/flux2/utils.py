@@ -107,8 +107,8 @@ def detect_klein_params(dit_path: str) -> Flux2Params:
 def load_flux2_dit(
     dit_path: str,
     params: Flux2Params,
-    device: Union[str, torch.device] = "cpu",
-    dtype: torch.dtype = torch.bfloat16,
+    device: Union[str, torch.device],
+    dtype: torch.dtype,
 ) -> Flux2:
     """Build the Flux2 DiT on meta and load the checkpoint weights."""
     device = torch.device(device)
@@ -195,8 +195,8 @@ class Qwen3Embedder:
 def load_qwen3_embedder(
     path: str,
     is_8b: bool,
-    dtype: torch.dtype = torch.bfloat16,
-    device: Union[str, torch.device] = "cpu",
+    dtype: torch.dtype,
+    device: Union[str, torch.device],
     tokenizer_dir: Optional[str] = None,
 ) -> Qwen3Embedder:
     """Load the Qwen3 text encoder + tokenizer and wrap it as a context embedder.

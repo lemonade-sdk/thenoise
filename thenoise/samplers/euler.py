@@ -6,6 +6,7 @@ from typing import List
 import torch
 from tqdm import tqdm
 
+from thenoise.utils.device import synchronize_device
 from .base import Sampler, Step
 
 
@@ -30,6 +31,6 @@ class EulerSampler(Sampler):
             v = self.model.denoise_step(x, step.t, cond, guidance_scale, i)
             x = x.float() - step.delta * v.float()
             x = x.to(dtype)
-            # Synchronize to get accurate timing
-            torch.cuda.synchronize()
+            # Synchronize to get accurate timing, on whatever device we're on.
+            synchronize_device(x.device)
         return x

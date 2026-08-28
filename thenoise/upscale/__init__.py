@@ -14,6 +14,7 @@ Usage:
     out = adaptor.from_vae_latent(up)            # raw -> pipeline latent
 """
 from __future__ import annotations
+from typing import Union
 
 import logging
 from pathlib import Path
@@ -66,8 +67,8 @@ def upscale_weight_path(filename: str) -> Path:
 
 def load_latent_upscaler(
     format_name: str,
-    device: str | torch.device = "cuda",
-    dtype: torch.dtype = torch.bfloat16,
+    device: Union[str, torch.device],
+    dtype: torch.dtype,
 ) -> tuple[LatentUpscaler, LatentFormatAdaptor]:
     """Load the latent upscaler for the given ``format_name``.
 
@@ -101,7 +102,7 @@ def load_latent_upscaler(
     return model, adaptor
 
 
-def load_pixel_upscaler(path: str, device: str = "cuda") -> tuple:
+def load_pixel_upscaler(path: str, device: str) -> tuple:
     """Load a pixel-domain upscaler from a safetensors file.
 
     Generic entry point so the model-facing code never names a specific pixel

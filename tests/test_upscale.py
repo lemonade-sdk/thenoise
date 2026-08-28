@@ -125,7 +125,7 @@ def _make_upscale_controller(upscaler_dir="/tmp", scales=None):
     """Build a PixelUpscaleController over an injected-scale manager."""
     from thenoise.upscale_controller import PixelUpscaleController
 
-    m = PixelUpscalerManager(upscaler_dir=upscaler_dir)
+    m = PixelUpscalerManager(upscaler_dir=upscaler_dir, device="cpu")
     m._pixel_upscaler_scales = dict(scales or {})
     return PixelUpscaleController(m)
 

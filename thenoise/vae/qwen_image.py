@@ -826,8 +826,8 @@ def convert_comfyui_state_dict(sd):
 
 def load_qwen_vae(
     vae_path: str,
+    device: Union[str, torch.device],
     input_channels: int = 3,
-    device: Union[str, torch.device] = "cpu",
     disable_mmap: bool = False,
 ) -> AutoencoderKLQwenImage:
     """Load the Qwen-Image VAE from a given path."""

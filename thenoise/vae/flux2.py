@@ -222,7 +222,7 @@ class AutoencoderKLFlux2(nn.Module):
 
 def load_flux2_vae(
     vae_path: str,
-    device: Union[str, torch.device] = "cpu",
+    device: Union[str, torch.device],
     disable_mmap: bool = False,
     dtype: Optional[torch.dtype] = None,
 ) -> AutoencoderKLFlux2:

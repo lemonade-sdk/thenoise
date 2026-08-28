@@ -9,6 +9,7 @@ from typing import Dict, Any, Union, Optional
 from safetensors.torch import load_file
 
 from thenoise.utils.setup_logging import setup_logging
+from thenoise.utils.device import synchronize_device
 
 setup_logging()
 import logging
@@ -75,7 +76,7 @@ class MemoryEfficientSafeOpen:
 
         **Note:**
         If device is 'cuda' , the transfer to GPU is done efficiently using pinned memory and non-blocking transfer.
-        So you must ensure that the transfer is completed before using the tensor (e.g., by `torch.cuda.synchronize()`).
+        So you must ensure that the transfer is completed before using the tensor.
 
         If the tensor is large (>10MB) and the target device is CUDA, memory mapping with numpy.memmap is used to avoid intermediate copies.
 
@@ -290,8 +291,7 @@ def load_safetensors(
         with MemoryEfficientSafeOpen(path, disable_numpy_memmap=disable_numpy_memmap) as f:
             for key in f.keys():
                 state_dict[key] = f.get_tensor(key, device=device, dtype=dtype)
-            if device is not None and device.type == "cuda":
-                torch.cuda.synchronize()
+            synchronize_device(device)
         return state_dict
     else:
         try:
@@ -328,7 +328,7 @@ def get_split_weight_filenames(file_path: str) -> Optional[list[str]]:
 
 
 def load_split_weights(
-    file_path: str, device: Union[str, torch.device] = "cpu", disable_mmap: bool = False, dtype: Optional[torch.dtype] = None
+    file_path: str, device: Union[str, torch.device], disable_mmap: bool = False, dtype: Optional[torch.dtype] = None
 ) -> Dict[str, torch.Tensor]:
     """
     Load split weights from a file. If the file name ends with 00001-of-00004 etc, it will load all files with the same prefix.

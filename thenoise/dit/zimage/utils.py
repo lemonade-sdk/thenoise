@@ -81,8 +81,8 @@ ZIMAGE_DIT_CONFIG = dict(
 
 def load_zimage_dit(
     dit_path: str,
-    device: Union[str, torch.device] = "cpu",
-    dtype: torch.dtype = torch.bfloat16,
+    device: Union[str, torch.device],
+    dtype: torch.dtype,
     loading_device: Optional[Union[str, torch.device]] = None,
     config: Optional[dict] = None,
 ) -> ZImageTransformer2DModel:
@@ -115,7 +115,7 @@ def _load_qwen3(
         qwen3 = Qwen3ForCausalLM._from_config(config)
 
     logger.info(f"Loading Z-Image text encoder (Qwen3-4B) weights from {path}")
-    sd = load_split_weights(path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)
+    sd = load_split_weights(path, device=device, disable_mmap=disable_mmap, dtype=dtype)
 
     # Qwen3-4B ties the LM head to the input embeddings (tie_word_embeddings=true), so
     # the checkpoint omits lm_head.weight; re-tie so the strict load passes.
