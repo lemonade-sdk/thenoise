@@ -27,13 +27,18 @@ def _check_dim(name: str, value) -> None:
         print(f"error: {name} must be between 0 and {_MAX_DIM} (got {value}).", file=sys.stderr)
         sys.exit(1)
 
-
 def _build_runtime(args):
     """Load the model and split a one-shot --pixel-upscaler into dir+name."""
+    from .cli import resolve_model_paths
     from .runtime import Settings, ModelPaths, Runtime
 
     settings = Settings(device=args.device)
 
+    # ``--pixel-upscaler`` is a one-shot convenience: a full path to the model.
+    # Split it into ``upscaler_dir`` (server config) + ``pixel_upscaler`` (name,
+    # sans suffix) so the runtime/controller only ever see the same directory +
+    # name form as the ``serve``/API path. Must run before ``Runtime`` is built:
+    # the pixel-upscaler manager reads ``settings.upscaler_dir`` at construction.
     upscaler_dir = ""
     pixel_upscaler = None
     if args.pixel_upscaler:
@@ -46,14 +51,7 @@ def _build_runtime(args):
         settings.upscaler_dir = upscaler_dir
 
     runtime = Runtime(settings)
-    runtime.load(
-        ModelPaths(
-            dit_path=args.dit,
-            vae_path=args.vae,
-            text_encoder_path=args.text_encoder,
-            lora_dir=args.lora_dir,
-        ),
-    )
+    runtime.load(ModelPaths(**resolve_model_paths(args)))
     return runtime, pixel_upscaler
 
 

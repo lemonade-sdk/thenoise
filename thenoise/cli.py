@@ -14,18 +14,75 @@ passed on the command line (there is no config file).
 from __future__ import annotations
 
 import argparse
+from typing import Optional
 
 
-def _add_model_paths(p: argparse.ArgumentParser, required: bool = True) -> None:
-    p.add_argument("--dit", required=required, metavar="PATH",
-                   help="DiT checkpoint (.safetensors)")
-    p.add_argument("--vae", required=required, metavar="PATH",
-                   help="VAE checkpoint (.safetensors)")
-    p.add_argument("--text-encoder", required=required, metavar="PATH",
-                   help="text encoder checkpoint (.safetensors)")
+def _add_model_paths(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--dit", metavar="PATH",
+                   help="DiT checkpoint (.safetensors); omit when using --checkpoint")
+    p.add_argument("--vae", metavar="PATH",
+                   help="VAE checkpoint (.safetensors); omit when using --checkpoint")
+    p.add_argument("--text-encoder", metavar="PATH",
+                   help="text encoder checkpoint (.safetensors); omit when using --checkpoint")
+    p.add_argument("--checkpoint", metavar="PATH",
+                   help="single combined SDXL/Illustrious checkpoint (.safetensors); "
+                        "loads the DiT, VAE and text encoders from it directly, "
+                        "no splitting needed")
     p.add_argument("--lora-dir", default="", metavar="PATH",
                    help="directory containing LoRA .safetensors files "
                         "(subdirectories allowed)")
+    p.add_argument("--sd-zsnr", action="store_true",
+                   help="force the zero-terminal-SNR (zsnr) schedule for an "
+                        "SDXL/Illustrious checkpoint; auto-enabled when the "
+                        "checkpoint carries the ztsnr marker, this flag is for "
+                        "models whose marker was stripped")
+    p.add_argument("--no-sd-zsnr", action="store_true",
+                   help="disable the zsnr schedule even when the checkpoint "
+                        "carries the ztsnr marker (overrides --sd-zsnr)")
+
+
+def _resolve_sd_zsnr(args) -> Optional[bool]:
+    """Tri-state zsnr override: None = auto-detect, True = force on, False = off.
+
+    ``--no-sd-zsnr`` wins over ``--sd-zsnr`` so a marker-bearing checkpoint can
+    be forced onto the plain linear schedule for debugging (e.g. isolating a
+    zsnr vs v-prediction bug in a NoobAI checkpoint).
+    """
+    if args.no_sd_zsnr:
+        return False
+    if args.sd_zsnr:
+        return True
+    return None
+
+
+def resolve_model_paths(args) -> dict:
+    """Validate and assemble the model-path fields from parsed CLI args.
+
+    Accepts either ``--checkpoint`` (a single combined SDXL file) OR the split
+    ``--dit`` + ``--vae`` + ``--text-encoder`` trio; exactly one form must be
+    given. Returns the keyword args for ``ModelPaths``.
+    """
+    if args.checkpoint:
+        if args.dit or args.vae or args.text_encoder:
+            raise SystemExit(
+                "--checkpoint cannot be combined with --dit/--vae/--text-encoder"
+            )
+        return {"checkpoint_path": args.checkpoint, "lora_dir": args.lora_dir,
+                "sd_zsnr": _resolve_sd_zsnr(args)}
+    missing = [n for n, v in (("--dit", args.dit), ("--vae", args.vae),
+                              ("--text-encoder", args.text_encoder)) if not v]
+    if missing:
+        raise SystemExit(
+            "missing model checkpoint: provide --checkpoint, or "
+            f"--dit/--vae/--text-encoder (missing: {', '.join(missing)})"
+        )
+    return {
+        "dit_path": args.dit,
+        "vae_path": args.vae,
+        "text_encoder_path": args.text_encoder,
+        "lora_dir": args.lora_dir,
+        "sd_zsnr": _resolve_sd_zsnr(args),
+    }
 
 
 def _add_upscaler_args(p: argparse.ArgumentParser) -> None:
@@ -94,7 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
     # serve: model paths are optional — without them the server runs model-free
     # and only the pixel-upscale tab is usable.
     serve = sub.add_parser("serve", help="run the FastAPI HTTP server")
-    _add_model_paths(serve, required=False)
+    _add_model_paths(serve)
     _add_upscaler_args(serve)
     serve.add_argument("--host", default="127.0.0.1",
                        help="bind host (default: 127.0.0.1)")

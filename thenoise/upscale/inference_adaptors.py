@@ -86,6 +86,18 @@ class LatentFormatAdaptor:
 # ── Constructors ──────────────────────────────────────────────────────────
 
 
+def make_identity(external_channels: int) -> LatentFormatAdaptor:
+    """Adaptor where the external latent IS the model latent (no transform).
+
+    For SDXL, thenoise's pipeline latent is the *scaled* latent
+    (``raw * 0.13025``), which is exactly the space SesquiSDXL was trained on —
+    so no conversion is needed. (ComfyUI's ``make_sdxl`` affine applies a
+    raw <-> scaled transform because its node latents are raw; thenoise's
+    pipeline already holds scaled latents.)
+    """
+    return LatentFormatAdaptor(external_channels=external_channels)
+
+
 def make_wan21(
     latents_mean: Tensor | None = None,
     latents_std: Tensor | None = None,
@@ -348,6 +360,7 @@ class _ShiftScalePatchAdaptor(LatentFormatAdaptor):
 
 __all__ = [
     "LatentFormatAdaptor",
+    "make_identity",
     "make_wan21",
     "make_sdxl",
     "make_flux",

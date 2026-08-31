@@ -36,6 +36,7 @@ packages = [
     "thenoise.dit",
     "thenoise.dit.krea2",
     "thenoise.dit.anima",
+    "thenoise.dit.sdxl",
     "thenoise.dit.zimage",
     "thenoise.dit.flux2",
     "thenoise.models",
@@ -52,6 +53,8 @@ packages = [
 "thenoise.dit.anima" = ["configs/**/*"]
 # Tokenizer configs used by the Z-Image text encoder (loaded via __file__).
 "thenoise.dit.zimage" = ["configs/**/*"]
+# Vendored CLIP tokenizer + configs for the SDXL text encoders.
+"thenoise.dit.sdxl" = ["configs/**/*"]
 # Committed Sesqui latent upscaler weights (bf16, ~6MB).
 "thenoise.upscale" = ["weights/**/*"]
 # Web UI served at /

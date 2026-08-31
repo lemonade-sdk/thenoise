@@ -5,6 +5,7 @@ from .cli import build_parser
 
 
 def _serve(args) -> None:
+    from .cli import resolve_model_paths
     from .runtime import Settings, ModelPaths, Runtime
     settings = Settings(
         device=args.device, host=args.host, port=args.port,
@@ -13,23 +14,11 @@ def _serve(args) -> None:
 
     runtime = Runtime(settings)
 
-    # Model paths are optional. Load the model only when all three checkpoints
-    # are supplied; otherwise serve model-free (only upscale is available).
-    model_paths = [args.dit, args.vae, args.text_encoder]
-    if any(model_paths):
-        if not all(model_paths):
-            raise SystemExit(
-                "serve: to load a model you must supply --dit, --vae and "
-                "--text-encoder together; omit all three to run without a model"
-            )
-        runtime.load(
-            ModelPaths(
-                dit_path=args.dit,
-                vae_path=args.vae,
-                text_encoder_path=args.text_encoder,
-                lora_dir=args.lora_dir,
-            ),
-        )
+    # Model paths are optional. Load the model only when checkpoints are supplied
+    # (either --checkpoint or the --dit/--vae/--text-encoder trio); otherwise
+    # serve model-free (only upscale is available).
+    if args.checkpoint or args.dit or args.vae or args.text_encoder:
+        runtime.load(ModelPaths(**resolve_model_paths(args)))
 
     from .api import create_app
     import uvicorn

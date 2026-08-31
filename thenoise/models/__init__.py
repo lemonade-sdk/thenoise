@@ -10,6 +10,7 @@ from typing import List, Type
 from .base import DiffusionModel
 from .anima import AnimaModel
 from .flux_klein import FluxKleinModel
+from .sdxl import SdxlModel
 from .krea2 import Krea2Model
 from .zimage import ZImageModel
 
@@ -18,6 +19,7 @@ MODEL_CATALOG: List[Type[DiffusionModel]] = [
     AnimaModel,
     ZImageModel,
     FluxKleinModel,
+    SdxlModel,
 ]
 
 

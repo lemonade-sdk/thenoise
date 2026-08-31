@@ -1,11 +1,10 @@
 """SesquiLSR latent upscaler, vendored for thenoise.
 
-Both models (Krea2, Anima) currently use the shared Qwen-Image VAE, so only the
-Wan21 upscaler weights are committed (``weights/upscaler_Wan21.safetensors``,
-~6MB bf16). ``load_latent_upscaler`` takes a latent-format name and selects the
-adaptor factory + weight file from ``_UPSCALER_FORMATS``; formats without
-committed weights raise. See ``inference_adaptors.make_*`` for the available
-formats.
+The Qwen-Image/Anima/Krea2 models share the Wan21 upscaler, Z-Image the Flux one,
+and SDXL the 4-channel SDXL one (``weights/upscaler_SDXL.safetensors``, ~6MB bf16).
+``load_latent_upscaler`` takes a latent-format name and selects the adaptor
+factory + weight file from ``_UPSCALER_FORMATS``; formats without committed
+weights raise. See ``inference_adaptors.make_*`` for the available formats.
 
 Usage:
     model, adaptor = load_latent_upscaler("wan21", device="cuda", dtype=torch.bfloat16)
@@ -29,6 +28,7 @@ from .inference_adaptors import (
     LatentFormatAdaptor,
     make_flux,
     make_flux2,
+    make_identity,
     make_ideogram4,
     make_sdxl,
     make_wan21,
@@ -43,13 +43,16 @@ _WEIGHT_DIR = Path(__file__).resolve().parent / "weights"
 
 # Latent format name -> (adaptor factory, weight filename, raw-VAE channel count).
 # A format must be added here together with its upscaler weights before it can
-# be selected. ``wan21`` (Qwen-Image VAE: Krea2/Anima) and ``flux`` (Flux VAE:
-# Z-Image) weights are committed.
+# be selected. ``wan21`` (Qwen-Image VAE: Krea2/Anima), ``flux`` (Flux VAE:
+# Z-Image) and ``sdxl`` weights are committed.
 _UPSCALER_FORMATS = {
     "wan21": (make_wan21, "upscaler_Wan21.safetensors", 16),
     "flux":  (make_flux,  "upscaler_flux.safetensors", 16),
     "flux2": (make_flux2, "upscaler_flux2.safetensors", 32),
-    # "sdxl":     (make_sdxl,     "upscaler_sdxl.safetensors", 4),  # not yet committed
+    # SDXL pipeline latents are already scaled (raw * 0.13025) = Sesqui's trained
+    # space, so SDXL needs an identity adaptor (NOT make_sdxl's affine, which is
+    # for ComfyUI's raw node latents).
+    "sdxl":  (lambda: make_identity(4), "upscaler_SDXL.safetensors", 4),
     # "ideogram4":(make_ideogram4, "upscaler_ideogram4.safetensors", 32),  # not yet committed
 }
 

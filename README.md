@@ -100,6 +100,12 @@ Anima is the smaller of the two original supported models (~5.4 GB total), so it
 is the quickest way to get a first image. See [Supported Models](#supported-models)
 for Krea 2 (larger, higher quality) and Z-Image-Turbo (distilled 8-step).
 
+There is also a `download_civitai.py` script which downloads from `civitai.com`.
+This script requires `CivitaPy` which is **not** installed by `thenoise.sh`. If
+`CivitaPy` is not installed, you will be prompted to install it with
+`uv pip install civitapy`. To download from Civitai, you will also need an API
+token, stored in the `CIVITAI_TOKEN` environment variable.
+
 ### 5. Generate an image
 
 ```bash
@@ -188,7 +194,7 @@ rather keep the system interpreter.
 
 ## Supported Models
 
-Anima, Krea 2, Z-Image-Turbo, and Flux.2 Klein are supported. New models will be added. PRs adding model support are welcome.
+Anima, Krea 2, Z-Image-Turbo, Flux.2 Klein, and SDXL are supported. New models will be added. PRs adding model support are welcome.
 
 All download commands use `.venv/bin/python` and need the `scripts` extra
 installed (`uv pip install -e ".[scripts]"`), because `huggingface_hub` lives
@@ -202,7 +208,7 @@ in the project venv created by [Setup](#setup) — a bare `python` will not work
 | Z-Image | ~21 GB | Non-distilled version of Z-Image-Turbo | x |
 | Flux.2 Klein 4B | ~12 GB | Distilled 4-step flow MMDiT; Flux.2 VAE + Qwen3-4B | ✓ |
 | Flux.2 Klein 9B | ~25 GB | Distilled 4-step flow MMDiT; Flux.2 VAE + Qwen3-8B | ✓ |
-
+| SDXL | ~6.9 GB | Stable Diffusion XL (incl. anime fine-tunes like Illustrious-XL); CLIP-L + CLIP-G text encoders, discrete euler | x |
 
 ### Krea 2
 
@@ -282,6 +288,44 @@ steps with CFG off (`guidance_scale` 1.0). Base variants need explicit CFG:
 For a *base* checkpoint (`-base-4b` / `-base-9b`) use `--steps 50 --guidance-scale 4`
 and pass a `--negative-prompt`. The default sampler is Euler; ER-SDE is also
 selectable via `--sampler er_sde`.
+
+### SDXL
+
+Stable Diffusion XL and its variants (Illustrious, Juggernaut, Pony, Noob ...)
+load with a single adapter; the model type is auto-detected from the checkpoint.
+The prediction type (epsilon vs v-prediction) is likewise autodetected from
+marker tensors in the checkpoint. SDXL uses the `euler` sampler only.
+
+**Single-file checkpoints.** Many SDXL mixes on Civitai ship as one combined
+`.safetensors`. Point `--checkpoint` straight at that file and thenoise
+loads the DiT, VAE, and text encoders from it in memory — no splitting needed:
+
+```bash
+.venv/bin/python scripts/download_civitai.py --profile sdxl
+./thenoise.sh generate \
+  --checkpoint ./models/mix.safetensors \
+  --prompt "a fox walking in the snow" --steps 28 --guidance-scale 5.5 \
+  --out /tmp/sdxl.png
+```
+
+Or download and split into the DiT/VAE/text-encoder trio:
+
+```bash
+.venv/bin/python scripts/download_sdxl.py --out ./models/sdxl
+./thenoise.sh generate \
+  --dit ./models/sdxl/split_files/diffusion_models/sdxl_unet.safetensors \
+  --vae ./models/sdxl/split_files/vae/sdxl_vae.safetensors \
+  --text-encoder ./models/sdxl/split_files/text_encoders/clip_l_g.safetensors \
+  --prompt "a fox walking in the snow" --steps 28 --guidance-scale 5.5 \
+  --out /tmp/sdxl.png
+```
+
+`--checkpoint` is mutually exclusive with `--dit`/`--vae`/`--text-encoder`.
+
+Some SDXL fine-tunes (e.g. noobai) are trained with a zero-terminal-SNR schedule;
+pass `--sd-zsnr` if a checkpoint renders garbage. It is auto-enabled when the
+checkpoint carries the `ztsnr` marker. Some models have this flag incorrectly
+set, so it can be disabled with `--no-sd-zsnr`.
 
 ---
 
@@ -449,7 +493,7 @@ All fields except `prompt` are optional. Omitted fields use the loaded model's d
 | `upscale_factor` | `float` | `1.0` | Upscale factor (max depends on the pixel upscaler scale) |
 | `upscale_type` | `string` | `refined` | `refined` (latent 2x + refiner) or `no-refiner` (pixel upscaler only) |
 | `pixel_upscaler` | `string` | `null` | Pixel upscaler name (no `.safetensors` suffix) from `--upscaler-dir` |
-| `sampler` | `string` | `er_sde` | Denoising solver: `euler` or `er_sde` |
+| `sampler` | `string` | `er_sde` | Denoising solver: `euler` or `er_sde` (SDXL only supports euler; er_sde auto-falls back) |
 | `qwen_vae_enhance` | `bool` | `false` | Nyquist notch post-filter (removes 2px grid artifacts) |
 | `film_grain` | `float` | `0.0` | Film grain strength, 0.0–10.0 |
 | `sharpening` | `float` | `0.0` | RCAS sharpening strength, 0.0–1.0 |
@@ -550,7 +594,7 @@ curl -s localhost:8000/upscale \
 | `--upscale-type` | no | `refined` | `refined` or `no-refiner` |
 | `--upscale` | no | off | 2× latent upscale with refine denoise (legacy alias for `--upscale-type refined --upscale-factor 2`) |
 | `--upscale-factor` | no | `1.0` | Upscale factor (> 0.0; max depends on the pixel upscaler scale, see [Upscaling](#upscaling)) |
-| `--sampler` | no | `er_sde` | Solver: `euler` or `er_sde` |
+| `--sampler` | no | `er_sde` | Solver: `euler` or `er_sde` (SDXL only supports euler; er_sde auto-falls back) |
 | `--qwen-vae-enhance` | no | off | Nyquist notch post-filter |
 | `--film-grain` | no | `0.0` | Film grain strength (0.0–10.0) |
 | `--sharpening` | no | `0.0` | RCAS sharpening strength (0.0–1.0) |

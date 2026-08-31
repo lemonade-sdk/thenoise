@@ -11,7 +11,13 @@ from pathlib import Path
 
 import pytest
 
-from thenoise.models import AnimaModel, Krea2Model, ZImageModel, resolve
+from thenoise.models import (
+    AnimaModel,
+    SdxlModel,
+    Krea2Model,
+    ZImageModel,
+    resolve,
+)
 
 
 class _FakeHandle:
@@ -100,6 +106,52 @@ def test_zimage_rejects_krea2_keys():
 
 def test_anima_rejects_zimage_keys():
     assert AnimaModel.detect(_FakeHandle(_ZIMAGE_KEYS)) is False
+
+
+# SDXL is an SDXL LDM UNet: ``input_blocks`` / ``middle_block`` block
+# lists plus the ``label_emb`` / ``time_embed`` conditioning MLPs.
+_SDXL_KEYS = [
+    "model.diffusion_model.input_blocks.0.0.weight",
+    "model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight",
+    "model.diffusion_model.label_emb.0.0.weight",
+    "model.diffusion_model.time_embed.0.weight",
+]
+
+# An SDXL-style checkpoint repackaged under the ComfyUI ``model.diffusion_model.``
+# wrapper (already covered by ``_SDXL_KEYS``), plus a bare (unwrapped)
+# variant.
+_SDXL_BARE_KEYS = [
+    "input_blocks.0.0.weight",
+    "middle_block.1.transformer_blocks.0.attn1.to_q.weight",
+    "label_emb.0.0.weight",
+    "time_embed.0.weight",
+]
+
+
+def test_sdxl_detect_true():
+    assert SdxlModel.detect(_FakeHandle(_SDXL_KEYS)) is True
+
+
+def test_sdxl_detect_true_on_bare_keys():
+    assert SdxlModel.detect(_FakeHandle(_SDXL_BARE_KEYS)) is True
+
+
+def test_sdxl_rejects_other_models():
+    assert SdxlModel.detect(_FakeHandle(_ANIMA_KEYS)) is False
+    assert SdxlModel.detect(_FakeHandle(_KREA2_KEYS)) is False
+    assert SdxlModel.detect(_FakeHandle(_ZIMAGE_KEYS)) is False
+
+
+def test_other_models_reject_sdxl():
+    assert AnimaModel.detect(_FakeHandle(_SDXL_KEYS)) is False
+    assert Krea2Model.detect(_FakeHandle(_SDXL_KEYS)) is False
+    assert ZImageModel.detect(_FakeHandle(_SDXL_KEYS)) is False
+
+
+def test_resolve_sdxl(tmp_path):
+    p = tmp_path / "sdxl.safetensors"
+    _write_safetensors(p, _SDXL_KEYS)
+    assert resolve(str(p)) is SdxlModel
 
 
 # A Krea2 checkpoint repackaged under ComfyUI's generic "model.diffusion_model."

@@ -106,6 +106,42 @@ def test_resolve_invalid_type():
         c._resolve_upscale(2.0, "fast")
 
 
+# ------------------------------------------------- controller: latent-unsupported fallback
+def _make_controller_no_latent(upscaler_scales=None):
+    """A controller over a model that cannot run latent (refined) upscale."""
+    from thenoise.pipeline import PipelineController
+
+    class _Model:
+        name = "sdxl"
+        UPSCALE_SCALE = 2
+
+        def supports_latent_upscale(self):
+            return False
+
+    mgr = _make_manager(upscaler_scales)
+    return PipelineController(_Model(), mgr)
+
+
+def test_refined_falls_back_to_pixel_only():
+    # A model without latent upscale (SDXL) degrades ``refined`` to ``no-refiner``
+    # and needs a pixel upscaler to actually upscale.
+    c = _make_controller_no_latent(upscaler_scales={"x2": 2})
+    assert c._resolve_upscale(2.0, "refined", "x2") == (2.0, "no-refiner")
+
+
+def test_refined_fallback_requires_pixel_upscaler():
+    # Without a pixel upscaler, the degraded no-refiner path is rejected clearly.
+    c = _make_controller_no_latent()
+    with pytest.raises(ValueError):
+        c._resolve_upscale(2.0, "refined")
+
+
+def test_refined_fallback_scale_mapping():
+    # After degradation, the pixel upscaler scale is used like no-refiner.
+    c = _make_controller_no_latent(upscaler_scales={"x2": 2})
+    assert c._pixel_upscaler_scale_for(2.0, "no-refiner", "x2") == 2
+
+
 # ------------------------------------------------------------- manager: validate/list
 def test_validate_pixel_upscaler_requires_dir_and_file():
     m = _make_manager(upscaler_dir="")

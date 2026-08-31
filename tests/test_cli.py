@@ -220,12 +220,17 @@ def test_cli_serve_defaults():
 
 
 def test_cli_serve_requires_paths():
-    """serve model paths are optional; a bare `serve` must parse cleanly."""
+    # A bare `serve` parses cleanly (model-free); missing model paths are
+    # rejected by ``resolve_model_paths`` instead.
     args = build_parser().parse_args(["serve"])
     assert args.command == "serve"
     assert args.dit is None
     assert args.vae is None
     assert args.text_encoder is None
+    from thenoise.cli import resolve_model_paths
+
+    with pytest.raises(SystemExit):
+        resolve_model_paths(args)
 
 
 def test_cli_serve_partial_paths_parse():
@@ -233,6 +238,30 @@ def test_cli_serve_partial_paths_parse():
     args = build_parser().parse_args(["serve", "--dit", "d.safetensors"])
     assert args.dit == "d.safetensors"
     assert args.vae is None
+
+
+def test_cli_resolve_checkpoint_path():
+    from thenoise.cli import resolve_model_paths
+
+    args = build_parser().parse_args([
+        "generate", "--checkpoint", "mix.safetensors",
+        "--prompt", "a fox",
+    ])
+    paths = resolve_model_paths(args)
+    assert paths["checkpoint_path"] == "mix.safetensors"
+    assert "dit_path" not in paths  # split trio unused
+
+
+def test_cli_checkpoint_conflicts_with_trio():
+    from thenoise.cli import resolve_model_paths
+
+    args = build_parser().parse_args([
+        "generate", "--checkpoint", "mix.safetensors",
+        "--dit", "d.safetensors", "--vae", "v.safetensors",
+        "--text-encoder", "te.safetensors", "--prompt", "a fox",
+    ])
+    with pytest.raises(SystemExit):
+        resolve_model_paths(args)
 
 
 def test_cli_generate_parses():

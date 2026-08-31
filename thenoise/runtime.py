@@ -41,10 +41,12 @@ class ModelPaths:
     concern). Pixel-upscaler config is not model-bound, so ``upscaler_dir``
     lives on ``Settings`` instead.
     """
-    dit_path: str
-    vae_path: str
-    text_encoder_path: str
+    dit_path: str = ""
+    vae_path: str = ""
+    text_encoder_path: str = ""
     lora_dir: str = ""
+    checkpoint_path: str = ""  # single combined SDXL checkpoint (alternative to the trio)
+    sd_zsnr: Optional[bool] = None  # SDXL zsnr: None=auto (ztsnr marker), True=force on, False=force off
 
 
 class NotLoadedError(RuntimeError):
@@ -72,16 +74,32 @@ class Runtime:
         from .models.config import ModelConfig
         from .pipeline import PipelineController
 
-        cls = resolve(paths.dit_path)
-        name = cls.name
+        if paths.checkpoint_path:
+            # Single combined checkpoint: detect from it and load all components
+            # from the one file (no split needed).
+            detect_path = paths.checkpoint_path
+            config = ModelConfig(
+                dit_path=paths.checkpoint_path,
+                vae_path=paths.checkpoint_path,
+                text_encoder_path=paths.checkpoint_path,
+                device=self._settings.device,
+                lora_dir=paths.lora_dir or None,
+                checkpoint_path=paths.checkpoint_path,
+                sd_zsnr=paths.sd_zsnr,
+            )
+        else:
+            detect_path = paths.dit_path
+            config = ModelConfig(
+                dit_path=paths.dit_path,
+                vae_path=paths.vae_path,
+                text_encoder_path=paths.text_encoder_path,
+                device=self._settings.device,
+                lora_dir=paths.lora_dir or None,
+                sd_zsnr=paths.sd_zsnr,
+            )
 
-        config = ModelConfig(
-            dit_path=paths.dit_path,
-            vae_path=paths.vae_path,
-            text_encoder_path=paths.text_encoder_path,
-            device=self._settings.device,
-            lora_dir=paths.lora_dir or None,
-        )
+        cls = resolve(detect_path)
+        name = cls.name
 
         self._unload()  # swap: only one model resident at a time
         logger.info("Loading model '%s'", name)

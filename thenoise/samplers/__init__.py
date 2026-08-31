@@ -11,7 +11,10 @@ samplers never import the model classes.
 """
 from __future__ import annotations
 
+import logging
 from typing import Dict, Type
+
+logger = logging.getLogger(__name__)
 
 from .base import Sampler, Step
 from .euler import EulerSampler
@@ -27,8 +30,26 @@ SAMPLERS: Dict[str, Type[Sampler]] = {
 def create_sampler(name: str, model) -> Sampler:
     """Instantiate the named sampler bound to ``model``.
 
+    A model may declare ``SUPPORTED_SAMPLERS`` (list of names). If the requested
+    ``name`` is a known sampler but not in that list, warn and fall back to the
+    model's ``SAMPLER`` default instead of producing a wrong result. Most models
+    do not declare it, so any registered sampler is usable.
+
     Raises ``ValueError`` for an unknown sampler name.
     """
+    supported = getattr(model, "SUPPORTED_SAMPLERS", None)
+    if (
+        supported is not None
+        and name in SAMPLERS
+        and name not in supported
+    ):
+        logger.warning(
+            "%s sampler is not supported by %s; using %s instead",
+            name,
+            model.name,
+            model.SAMPLER,
+        )
+        name = model.SAMPLER
     cls = SAMPLERS.get(name)
     if cls is None:
         raise ValueError(

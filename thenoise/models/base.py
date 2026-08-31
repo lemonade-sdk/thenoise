@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import torch
@@ -57,6 +57,7 @@ from safetensors.torch import load_file
 
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.samplers import Step
+from thenoise.samplers.euler import EulerSampler
 from thenoise.upscale import load_latent_upscaler
 
 if TYPE_CHECKING:  # pragma: no cover - only for annotations
@@ -85,6 +86,8 @@ class Conditioning:
     cond_mask: Optional[torch.Tensor] = None
     null: Optional[torch.Tensor] = None
     null_mask: Optional[torch.Tensor] = None
+    pooled: Optional[torch.Tensor] = None
+    neg_pooled: Optional[torch.Tensor] = None
 
 
 # Generic wrapper prefixes that repackagings (e.g. ComfyUI's "diffusion_model"
@@ -362,6 +365,52 @@ class DiffusionModel(ABC):
                 dtype=self.dtype,
             )
         return self._upscaler, self._adaptor
+
+    def supports_latent_upscale(self) -> bool:
+        """True if this model can run latent (refined) upscaling.
+
+        Defaults to ``_upscale_format()`` succeeding; models that cannot raise
+        ``NotImplementedError`` there, so the pipeline degrades refined upscale
+        to pixel-only.
+        """
+        try:
+            self._upscale_format()
+            return True
+        except NotImplementedError:
+            return False
+
+    def refine_latents(
+        self,
+        z: torch.Tensor,
+        cond: Conditioning,
+        params: SamplingParams,
+    ) -> torch.Tensor:
+        """One short low-strength refine denoise on an already-clean latent.
+
+        Flow-model (CONST) default: blend a little noise in and euler over the
+        tail of an independent schedule. Discrete-epsilon models (SDXL) override
+        this with their EDM noise semantics.
+        """
+        refine_steps = self.REFINE_STEPS
+        denoise = self.REFINE_DENOISE
+        new_steps = int(refine_steps / denoise)  # int(1/0.1) = 10
+
+        refine_params = replace(params, steps=new_steps)
+        full = self.schedule(refine_params)
+        sub = full[-refine_steps:]
+        strength = float(sub[0].t)  # flow sigma == the tail step's timestep
+
+        # ComfyUI CONST noise scaling: x = sigma*noise + (1-sigma)*z.
+        generator = torch.Generator(device=self.device).manual_seed(params.seed)
+        noise = torch.randn_like(z, generator=generator)
+        noised = strength * noise + (1.0 - strength) * z
+
+        x = self.prepare_latent(noised, cond, refine_params)
+        solver = EulerSampler(self)
+        x = solver.sample(
+            x, sub, cond, params.guidance_scale, params.seed, desc="refining"
+        )
+        return self.finalize_latent(x, refine_params)
 
     # ------------------------------------------------------------ decode
     def decode(self, latents: torch.Tensor) -> torch.Tensor:
