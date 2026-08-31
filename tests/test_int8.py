@@ -373,8 +373,8 @@ def test_comfy_quant_marker_sets_groupsize(tmp_path):
     model = _TinyModel()
     load_dit(model, str(p), device="cpu", dtype=torch.bfloat16)
     assert model.q._quantized is True
-    assert model.q.convrot is True
-    assert model.q.convrot_groupsize == 64
+    assert model.q.weight.params.convrot is True
+    assert model.q.weight.params.convrot_groupsize == 64
 
 
 def test_comfy_quant_marker_convrot_false(tmp_path):
@@ -394,8 +394,8 @@ def test_comfy_quant_marker_convrot_false(tmp_path):
     model = _TinyModel()
     load_dit(model, str(p), device="cpu", dtype=torch.bfloat16)
     assert model.q._quantized is True
-    assert model.q.convrot is False
-    assert model.q.convrot_groupsize == 256  # irrelevant when convrot=False
+    assert model.q.weight.params.convrot is False
+    assert model.q.weight.params.convrot_groupsize == 256  # irrelevant when convrot=False
 
 
 def test_comfy_quant_marker_defaults(tmp_path):
@@ -413,8 +413,8 @@ def test_comfy_quant_marker_defaults(tmp_path):
     model = _TinyModel()
     load_dit(model, str(p), device="cpu", dtype=torch.bfloat16)
     assert model.q._quantized is True
-    assert model.q.convrot is True
-    assert model.q.convrot_groupsize == 256
+    assert model.q.weight.params.convrot is True
+    assert model.q.weight.params.convrot_groupsize == 256
 
 
 # --------------------------------------------------------------------------- load_quantized_state_dict

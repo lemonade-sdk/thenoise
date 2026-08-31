@@ -47,12 +47,45 @@ logger = logging.getLogger(__name__)
 _WEIGHT_SCALE_SUFFIX = ".weight_scale"
 # U8 JSON marker ComfyUI stores per quantized layer, recording its profile.
 _COMFY_QUANT_SUFFIX = ".comfy_quant"
-# Storage dtypes that mark a tensor as a quantized linear weight.
-_QUANT_DTYPES = [torch.int8]
-for _name in ("float8_e4m3fn", "float8_e5m2"):
+
+
+def _build_int8_qt(qweight: torch.Tensor, scale: torch.Tensor, marker: dict) -> QuantizedTensor:
+    """Reconstruct a TensorWiseINT8Layout weight from stored int8 + per-row scale."""
+    params = TensorWiseINT8Layout.Params(
+        scale=scale,
+        orig_dtype=torch.bfloat16,
+        orig_shape=tuple(qweight.shape),
+        is_weight=True,
+        convrot=bool(marker.get("convrot", True)),
+        convrot_groupsize=marker.get("convrot_groupsize", 256),
+    )
+    return QuantizedTensor(qweight, "TensorWiseINT8Layout", params)
+
+
+def _build_fp8_qt(qweight: torch.Tensor, scale: torch.Tensor, marker: dict) -> QuantizedTensor:
+    """Reconstruct a TensorCoreFP8Layout weight from stored FP8 + per-tensor scale.
+
+    The same layout covers E4M3 and E5M2 (the stored ``qweight`` dtype selects
+    the variant); ``marker`` is unused for FP8 here.
+    """
+    params = TensorCoreFP8Layout.Params(
+        scale=scale,
+        orig_dtype=torch.bfloat16,
+        orig_shape=tuple(qweight.shape),
+    )
+    return QuantizedTensor(qweight, "TensorCoreFP8Layout", params)
+
+
+# Storage dtype -> (safetensors header dtype string, layout builder). The module
+# and compute path are layout-agnostic (``QuantizedTensor.__torch_dispatch__``),
+# so supporting another comfy_kitchen layout is just registering its builder
+# here; ``_QUANT_DTYPES`` / ``_QUANT_HEADER_DTYPES`` derive from this registry.
+_QUANT_FORMATS = {torch.int8: ("I8", _build_int8_qt)}
+for _name, _header in (("float8_e4m3fn", "F8_E4M3"), ("float8_e5m2", "F8_E5M2")):
     if hasattr(torch, _name):
-        _QUANT_DTYPES.append(getattr(torch, _name))
-_QUANT_DTYPES = tuple(_QUANT_DTYPES)
+        _QUANT_FORMATS[getattr(torch, _name)] = (_header, _build_fp8_qt)
+_QUANT_DTYPES = tuple(_QUANT_FORMATS)
+_QUANT_HEADER_DTYPES = {header for header, _ in _QUANT_FORMATS.values()}
 
 
 def load_dit(
@@ -256,34 +289,20 @@ def _build_quantized_tensor(
 ) -> QuantizedTensor:
     """Wrap a stored low-bit ``weight`` + ``scale`` into a ``QuantizedTensor``.
 
-    The layout is chosen from the stored weight dtype (int8 vs FP8 E4M3/E5M2);
-    the ``comfy_quant`` marker supplies the profile (ConvRot flag/group size for
-    INT8). Quantized kernels emit BF16, so ``orig_dtype`` is set to bf16.
+    Dispatches on the stored weight dtype to the registered layout builder (see
+    ``_QUANT_FORMATS``), which chooses the layout and reads the ``comfy_quant``
+    marker profile (e.g. ConvRot flag/group size for INT8). Quantized kernels
+    emit BF16, so ``orig_dtype`` is set to bf16.
     """
     if scale is None:
         raise RuntimeError(f"quantized weight {key!r} is missing its {_WEIGHT_SCALE_SUFFIX}")
-    shape = tuple(qweight.shape)
-    if qweight.dtype == torch.int8:
-        params = TensorWiseINT8Layout.Params(
-            scale=scale,
-            orig_dtype=torch.bfloat16,
-            orig_shape=shape,
-            is_weight=True,
-            convrot=bool(marker.get("convrot", True)),
-            convrot_groupsize=marker.get("convrot_groupsize", 256),
+    entry = _QUANT_FORMATS.get(qweight.dtype)
+    if entry is None:
+        raise RuntimeError(
+            f"unsupported quantized dtype for {key!r}: {qweight.dtype} "
+            f"(expected one of {_QUANT_DTYPES})"
         )
-        return QuantizedTensor(qweight, "TensorWiseINT8Layout", params)
-    if qweight.dtype in (getattr(torch, "float8_e4m3fn", None), getattr(torch, "float8_e5m2", None)):
-        params = TensorCoreFP8Layout.Params(
-            scale=scale,
-            orig_dtype=torch.bfloat16,
-            orig_shape=shape,
-        )
-        return QuantizedTensor(qweight, "TensorCoreFP8Layout", params)
-    raise RuntimeError(
-        f"unsupported quantized dtype for {key!r}: {qweight.dtype} "
-        f"(expected one of {_QUANT_DTYPES})"
-    )
+    return entry[1](qweight, scale, marker)
 
 
 def _switch_to_quantized(module: torch.nn.Module, qt: QuantizedTensor, key: str) -> None:
@@ -322,7 +341,7 @@ def build_quantized_restore_map(
     restore: dict[str, str] = {}
     with MemoryEfficientSafeOpen(path) as f:
         for raw_key in f.keys():
-            if f.header[raw_key]["dtype"] not in ("I8", "F8_E4M3", "F8_E5M2"):
+            if f.header[raw_key]["dtype"] not in _QUANT_HEADER_DTYPES:
                 continue
             if not raw_key.endswith(".weight"):
                 continue
