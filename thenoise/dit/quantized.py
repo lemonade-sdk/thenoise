@@ -1,40 +1,44 @@
-"""Reusable INT8 linear projection.
+"""Reusable quantized linear projection.
 
-``QuantizedLinear`` is a drop-in replacement for ``nn.Linear`` on layers a model
-wants to run as symmetric INT8 with online ConvRot (Hadamard) activation rotation
-via the ``comfy_kitchen`` INT8 GEMM (``torch.ops.comfy_kitchen.int8_linear``). The
-compute path is chosen at load time: a layer that keeps its BF16 ``weight`` runs
-``F.linear``; a layer switched with ``load_int8`` runs the INT8 kernel and frees
-the BF16 weight. Quantized layers emit BF16 output, so everything downstream is
-dtype-agnostic and the rest of the model needs no changes.
+``QuantizedLinear`` is a drop-in replacement for ``nn.Linear``. A layer runs
+either BF16 (default; ``weight`` is an ``nn.Parameter``) or a quantized scheme,
+in which case ``weight`` becomes a ``comfy_kitchen.tensor.QuantizedTensor``
+buffer. The module is layout-agnostic: the INT8+ConvRot path (the current
+deployment) runs a raw-op INT8 GEMM that stays traceable inside
+``torch.compile``; any other layout (FP8 E4M3/E5M2, NVFP4, MXFP8, ...) is
+weight-only and falls back to dequantizing to the activation dtype and running a
+plain BF16 linear. Quantized layers emit BF16 output, so everything downstream
+is dtype-agnostic and the rest of the model needs no changes.
 
-INT8 weights are stored in buffers (not parameters) because PyTorch forbids
-gradients on integer tensors — ``load_state_dict(assign=True)`` cannot assign an
-int8 tensor into an ``nn.Parameter``. Loaders should use
-``thenoise.utils.int8.load_int8_state_dict`` to populate the model from a
-ComfyUI-style INT8 checkpoint.
+Quantized weights live inside a ``QuantizedTensor`` buffer (not an
+``nn.Parameter``) because PyTorch forbids gradients on integer tensors — and a
+``QuantizedTensor`` subclass cannot be a Parameter at all. Loaders should use
+``thenoise.utils.loader.load_quantized_state_dict`` to populate the model from a
+ComfyUI-style checkpoint.
 
-LoRAs on INT8 layers are *baked in* at switch time (``bake_lora``): the INT8
+LoRAs on quantized layers are *baked in* at switch time (``bake_lora``): the
 weight is dequantized to BF16, the LoRA delta is added, and the result is
-requantized back to INT8 with the layer's ConvRot profile. The runtime forward
-is therefore always a single INT8 GEMM with zero per-step LoRA cost. Undo
-reloads the original INT8 weights from the checkpoint file (see
-``thenoise.utils.int8.build_int8_restore_map``/``restore_int8_layer``).
+requantized with the layer's preserved layout profile (``requantize_from_float``
+carries over the ConvRot flag, group size, and scale granularity). The runtime
+forward is therefore a single quantized GEMM (for INT8) with zero per-step LoRA
+cost. Undo reloads the original weights from the checkpoint file (see
+``thenoise.utils.loader.build_quantized_restore_map`` / ``restore_quantized_layer``).
 """
 from __future__ import annotations
 
 import math
-from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 import comfy_kitchen
+from comfy_kitchen.tensor import QuantizedTensor
+from comfy_kitchen.tensor.int8 import TensorWiseINT8Layout
 
 
 class QuantizedLinear(nn.Module):
-    """Linear projection that runs BF16 (default) or INT8."""
+    """Linear projection that runs BF16 (default) or a quantized scheme."""
 
     def __init__(
         self,
@@ -46,10 +50,9 @@ class QuantizedLinear(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.convrot_groupsize = convrot_groupsize
-        self.convrot = True  # set from the checkpoint's comfy_quant marker at load
-        # float32 default (matching ``nn.Linear``); the model is cast to the compute
-        # dtype (bf16) by the adapter, or the weight is replaced at load time.
+        self._convrot_groupsize = convrot_groupsize
+        # float32 default (matching ``nn.Linear``); the model is cast to the
+        # compute dtype (bf16) by the adapter, or the weight is replaced at load.
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         if bias:
             self.bias = nn.Parameter(torch.empty(out_features))
@@ -62,7 +65,7 @@ class QuantizedLinear(nn.Module):
         # custom op with a fake schema) instead of the comfy_kitchen.int8_linear
         # Python wrapper keeps the call traceable inside ``torch.compile``.
         self._out_dtype_code = comfy_kitchen.DTYPE_TO_CODE[torch.bfloat16]
-        self._int8 = False
+        self._quantized = False
 
     def _reset_parameters(self) -> None:
         """Initialize like ``nn.Linear`` (kaiming on weight, uniform on bias)."""
@@ -72,33 +75,31 @@ class QuantizedLinear(nn.Module):
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
             nn.init.uniform_(self.bias, -bound, bound)
 
-    def load_int8(
-        self,
-        qweight: torch.Tensor,
-        scale: torch.Tensor,
-        convrot: bool = True,
-        convrot_groupsize: Optional[int] = None,
-    ) -> None:
-        """Switch this layer to INT8 using pre-quantized weights.
+    @property
+    def convrot(self) -> bool:
+        """ConvRot flag of the active quantized weight (True while unquantized)."""
+        return self.weight.params.convrot if self._quantized else True
 
-        Args:
-            qweight: int8 weight tensor ``[out, in]``.
-            scale: per-row F32 scale ``[out]`` (or ``[out, 1]``).
-            convrot: whether the weights were ConvRot-rotated at export and so
-                activations must be rotated at inference (from the checkpoint's
-                ``comfy_quant`` marker).
-            convrot_groupsize: Hadamard group size (defaults to 256).
+    @property
+    def convrot_groupsize(self) -> int:
+        """Hadamard group size of the active quantized weight."""
+        if self._quantized:
+            return self.weight.params.convrot_groupsize
+        return self._convrot_groupsize
+
+    def load_quantized(self, qt: QuantizedTensor) -> None:
+        """Switch this layer to a pre-quantized weight of any layout.
+
+        Frees the BF16 ``weight`` parameter and registers ``qt`` as the
+        ``weight`` buffer (the ``QuantizedTensor`` carries the layout profile —
+        scale, ConvRot flag/group size, original dtype/shape).
         """
-        self.register_buffer("qweight", qweight)
-        self.register_buffer("scale", scale)
-        self.convrot = convrot
-        if convrot_groupsize is not None:
-            self.convrot_groupsize = convrot_groupsize
-        self.register_parameter("weight", None)  # free the BF16 weights
-        self._int8 = True
+        del self.weight  # free the BF16 weights
+        self.register_buffer("weight", qt)
+        self._quantized = True
 
     def bake_lora(self, delta: torch.Tensor) -> None:
-        """Bake a BF16 LoRA delta into the INT8 weights.
+        """Bake a BF16 LoRA delta into the quantized weights (any layout).
 
         Args:
             delta: the LoRA delta ``[out, in]`` in BF16 (``multiplier * (up @
@@ -106,55 +107,45 @@ class QuantizedLinear(nn.Module):
                 delta before calling, so the layer is dequantized/requantized
                 only once.
 
-        Dequantizes ``qweight`` to BF16 (un-rotating ConvRot), adds the delta,
-        and requantizes back to INT8 with this layer's ConvRot profile. The
-        runtime forward stays a single INT8 GEMM (zero per-step LoRA cost). The
-        original weights are restored on undo by reloading from disk.
+        Dequantizes ``weight`` to BF16 (un-rotating ConvRot if active), adds the
+        delta, and requantizes back with this layer's preserved layout profile
+        (``requantize_from_float`` keeps ConvRot flag, group size, and scale
+        granularity). The runtime forward stays a single quantized GEMM (zero
+        per-step LoRA cost). The original weights are restored on undo by
+        reloading from disk.
         """
-        weight = self._dequantize()
-        self._set_int8(self._quantize(weight + delta.to(weight.dtype)))
+        qt = self.weight
+        weight = qt.dequantize()
+        self._set_quantized(qt.requantize_from_float(weight + delta.to(weight.dtype)))
 
-    def _dequantize(self) -> torch.Tensor:
-        """Return the BF16 dequantized weight (un-rotating ConvRot if active)."""
-        if self.convrot:
-            return torch.ops.comfy_kitchen.dequantize_int8_convrot_weight_dtype(
-                self.qweight, self.scale, self.convrot_groupsize, self._out_dtype_code
-            )
-        return torch.ops.comfy_kitchen.dequantize_int8_simple_dtype(
-            self.qweight, self.scale, self._out_dtype_code
-        )
+    def _set_quantized(self, qt: QuantizedTensor) -> None:
+        """Overwrite the quantized ``weight`` buffer in place (preserving identity)."""
+        self.weight.copy_(qt)
 
-    def _quantize(self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Requantize a BF16 weight to INT8 with this layer's ConvRot profile."""
-        if self.convrot:
-            return torch.ops.comfy_kitchen.quantize_int8_convrot_weight(
-                weight, self.convrot_groupsize
-            )
-        return torch.ops.comfy_kitchen.quantize_int8_rowwise(weight)
-
-    def _set_int8(self, quantized: Tuple[torch.Tensor, torch.Tensor]) -> None:
-        """Overwrite ``qweight``/``scale`` buffers in place (preserving identity)."""
-        q, s = quantized
-        self.qweight.copy_(q)
-        self.scale.copy_(s)
-
-    def forward(self, x: torch.Tensor, input_act: Optional[str] = None) -> torch.Tensor:
-        if self._int8:
-            # Call the raw custom op (traceable by torch.compile) rather than the
-            # registry-dispatching comfy_kitchen.int8_linear Python wrapper. A
-            # LoRA is baked into ``qweight`` at switch time, so this is the whole
-            # forward — no extra residual branch at runtime.
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if not self._quantized:
+            return F.linear(x, self.weight, self.bias)
+        qt = self.weight
+        if qt.layout_cls is TensorWiseINT8Layout:
+            # Raw-op INT8 GEMM (traceable by torch.compile); a LoRA is baked into
+            # the weights at switch time, so this is the whole forward. We call
+            # the custom op directly rather than the registry-dispatching
+            # comfy_kitchen wrapper.
+            qdata, scale = TensorWiseINT8Layout.get_plain_tensors(qt)
             return torch.ops.comfy_kitchen.int8_linear(
                 x,
-                self.qweight,
-                self.scale,
+                qdata,
+                scale,
                 self.bias,
                 self._out_dtype_code,
-                self.convrot,
-                self.convrot_groupsize,
-                input_act,
+                qt.params.convrot,
+                qt.params.convrot_groupsize,
             )
-        return F.linear(x, self.weight, self.bias)
+        # Any other layout (FP8 E4M3/E5M2, NVFP4, MXFP8, ...) is weight-only in
+        # this engine: dequantize to the activation dtype and run a plain bf16
+        # linear. (A faster FP8 scaled-MM activation-quant path can be added
+        # behind a hardware check when validated on-target.)
+        return F.linear(x, qt.dequantize(), self.bias)
 
 
 __all__ = ["QuantizedLinear"]

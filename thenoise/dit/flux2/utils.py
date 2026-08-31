@@ -74,7 +74,7 @@ _KLEIN_VARIANTS = {3072: Klein4BParams, 4096: Klein9BParams}
 _NORM_WEIGHT_SUFFIXES = (".norm.key_norm.weight", ".norm.query_norm.weight")
 
 
-def _flux2_int8_key_map(key: str) -> str:
+def _flux2_key_map(key: str) -> str:
     for suffix in _NORM_WEIGHT_SUFFIXES:
         if key.endswith(suffix):
             return key[: -len(".weight")] + ".scale"
@@ -120,7 +120,7 @@ def load_flux2_dit(
         dit_path,
         device=device,
         dtype=dtype,
-        int8_key_map=_flux2_int8_key_map,
+        key_map=_flux2_key_map,
     )
 
 
