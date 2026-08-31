@@ -321,7 +321,8 @@ class DiffusionModel(ABC):
                 multipliers.append(weight)
 
             self._active_lora_result = apply_lora_to_model(
-                dit, lora_sds, multipliers, torch.device(self.device)
+                dit, lora_sds, multipliers, torch.device(self.device),
+                dit_path=self.dit_path,
             )
             active_names = ", ".join(
                 self._parse_lora_spec(s)[0] for s in lora_specs

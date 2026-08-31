@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple, TypedDict, Union
 import torch
 
 from thenoise.dit.quantized import QuantizedLinear
+from thenoise.utils.int8 import restore_int8_layer
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -180,18 +181,40 @@ class LoRAApplyResult(TypedDict):
     """Result from ``apply_lora_to_model``: cached state for undo.
 
     Keeps the small rank-reduced LoRA factors in memory instead of full-sized
-    delta tensors.  On undo the deltas are recomputed from these factors.
-    ``affected_keys`` tracks exactly which model parameters were modified, so
-    undo can skip the unaffected ones without iterating the full state dict.
-    ``int8_affected`` lists the INT8 ``QuantizedLinear`` module paths whose LoRA
-    residual branch was populated (see ``thenoise.dit.quantized``); undo calls
-    ``clear_lora`` on them.
+    delta tensors. On undo the BF16 deltas are recomputed from these factors.
+    ``affected_keys`` tracks exactly which BF16 model parameters were modified,
+    so undo can skip the unaffected ones without iterating the full state dict.
+
+    For INT8 ``QuantizedLinear`` layers the LoRA is baked into the INT8 weights
+    (see ``QuantizedLinear.bake_lora``), so undo reloads the original weights
+    from disk: ``int8_affected`` lists their module paths (parallel to
+    ``int8_restore_keys``, the raw checkpoint keys), and ``dit_path`` is the
+    checkpoint file to read them back from.
     """
 
     lora_sds: List[Dict[str, torch.Tensor]]
     multipliers: List[float]
     affected_keys: Tuple[str, ...]
     int8_affected: Tuple[str, ...]
+    int8_restore_keys: Tuple[str, ...]
+    dit_path: Optional[str]
+
+
+def _lora_delta_2d(down, up, alpha, multiplier, calc_device) -> torch.Tensor:
+    """Compute the BF16 LoRA delta ``[out, in]`` for a 2D linear weight.
+
+    ``multiplier * (up @ down) * (alpha/r)``, matching ``_compute_lora_delta``'s
+    linear branch (INT8 layers are always 2D linears with no bf16 weight to
+    reference, so this avoids the fp8/conv branches there).
+    """
+    r = down.size(0)
+    if isinstance(alpha, torch.Tensor):
+        scale = float(alpha.to(calc_device)) / r * multiplier
+    else:
+        scale = alpha / r * multiplier
+    down = down.to(device=calc_device, dtype=torch.bfloat16)
+    up = up.to(device=calc_device, dtype=torch.bfloat16)
+    return up @ down * scale
 
 
 def apply_lora_to_model(
@@ -199,6 +222,7 @@ def apply_lora_to_model(
     lora_sds: List[Dict[str, torch.Tensor]],
     multipliers: List[float],
     calc_device: torch.device,
+    dit_path: Optional[str] = None,
 ) -> LoRAApplyResult:
     """Apply LoRA weights directly to a model's parameters (in-place).
 
@@ -210,7 +234,14 @@ def apply_lora_to_model(
     Param keys use the same naming as ``model.state_dict()`` (e.g. "blocks.0.attn.gate.weight").
     """
     if not lora_sds:
-        return {"lora_sds": [], "multipliers": [], "affected_keys": (), "int8_affected": ()}
+        return {
+            "lora_sds": [],
+            "multipliers": [],
+            "affected_keys": (),
+            "int8_affected": (),
+            "int8_restore_keys": (),
+            "dit_path": dit_path,
+        }
 
     if multipliers is None:
         multipliers = [1.0] * len(lora_sds)
@@ -269,9 +300,12 @@ def apply_lora_to_model(
                 lora_weight_keys.remove(alpha_key)
 
     # INT8 QuantizedLinear layers have no bf16 ``.weight`` parameter to mutate;
-    # their LoRA is applied as a separate bf16 residual branch stored on the
-    # module (``apply_lora``), keeping the int8 weight untouched. This must run
+    # their LoRA is baked into the INT8 weights at switch time (dequantize ->
+    # add delta -> requantize), so the runtime forward is a single INT8 GEMM
+    # with zero LoRA cost. Deltas from multiple LoRAs are accumulated per module
+    # and baked once, avoiding repeated lossy requantization. This must run
     # before the unused-key warning so the consumed keys are not reported.
+    int8_deltas: Dict[str, torch.Tensor] = {}
     int8_affected: List[str] = []
     for module_path, module in base_model.named_modules():
         if not isinstance(module, QuantizedLinear) or not module._int8:
@@ -282,17 +316,24 @@ def apply_lora_to_model(
             if match is None:
                 continue
             down_key, up_key, alpha_key = match
-            module.apply_lora(
+            delta = _lora_delta_2d(
                 lora_sd[down_key],
                 lora_sd[up_key],
                 lora_sd.get(alpha_key, lora_sd[down_key].size(0)),
                 multiplier,
                 calc_device,
             )
+            if module_path in int8_deltas:
+                int8_deltas[module_path] = int8_deltas[module_path] + delta
+            else:
+                int8_deltas[module_path] = delta
             lora_weight_keys.discard(down_key)
             lora_weight_keys.discard(up_key)
             lora_weight_keys.discard(alpha_key)
             int8_affected.append(module_path)
+
+    for module_path, delta in int8_deltas.items():
+        base_model.get_submodule(module_path).bake_lora(delta)
 
     # Warn about unused LoRA keys
     for i, lora_weight_keys in enumerate(lora_weight_keys_list):
@@ -306,11 +347,19 @@ def apply_lora_to_model(
                 param = base_model.get_parameter(param_key)
                 param.data.add_(delta.to(param.device, param.dtype))
 
+    # For baked INT8 LoRAs, record the raw checkpoint keys so undo can reload
+    # the original weights from disk (captured at load time in the model).
+    int8_affected_unique = tuple(dict.fromkeys(int8_affected))
+    restore_map = getattr(base_model, "_int8_restore_map", {})
+    int8_restore_keys = tuple(restore_map.get(p) for p in int8_affected_unique)
+
     return {
         "lora_sds": lora_sds,
         "multipliers": multipliers,
         "affected_keys": tuple(undo_deltas.keys()),
-        "int8_affected": tuple(dict.fromkeys(int8_affected)),
+        "int8_affected": int8_affected_unique,
+        "int8_restore_keys": int8_restore_keys,
+        "dit_path": dit_path,
     }
 
 
@@ -330,16 +379,28 @@ def undo_lora_on_model(
     multipliers = result["multipliers"]
     affected_keys = result.get("affected_keys")
     int8_affected = result.get("int8_affected")
+    int8_restore_keys = result.get("int8_restore_keys")
+    dit_path = result.get("dit_path")
     if not lora_sds and not int8_affected:
         return
 
     base_model = _unwrap_compiled(model)
 
-    # INT8 residual LoRAs: just drop the stored factors on the module.
-    for module_path in int8_affected or ():
+    # Baked INT8 LoRAs: reload the original INT8 weights from the checkpoint
+    # file (by the raw keys captured at load time) and restore them in place.
+    for module_path, raw_key in zip(int8_affected or (), int8_restore_keys or ()):
         module = base_model.get_submodule(module_path)
-        if hasattr(module, "clear_lora"):
-            module.clear_lora()
+        if raw_key is None:
+            raise RuntimeError(
+                f"cannot undo INT8 LoRA on {module_path}: no raw checkpoint key "
+                "was recorded at load time"
+            )
+        if dit_path is None:
+            raise RuntimeError(
+                f"cannot undo INT8 LoRA on {module_path}: no dit_path was "
+                "recorded at apply time"
+            )
+        restore_int8_layer(module, dit_path, raw_key)
 
     if not lora_sds or not affected_keys:
         return

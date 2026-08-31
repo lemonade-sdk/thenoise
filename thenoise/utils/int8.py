@@ -147,6 +147,62 @@ def _submodule(model: torch.nn.Module, module_path: str, key: str) -> torch.nn.M
         ) from e
 
 
+def build_int8_restore_map(
+    path: str,
+    int8_key_map: Optional[callable] = None,
+) -> dict[str, str]:
+    """Map INT8 module paths (post key-map) to their raw checkpoint weight keys.
+
+    Captured once at load time (when wrapper-prefix stripping and ``int8_key_map``
+    are already resolved) so a later LoRA undo can reload the original INT8
+    weights from disk by raw key — no re-deriving the mapping logic. Only reads
+    the safetensors header; no tensors are materialized.
+
+    Returns ``{module_path: raw_weight_key}`` for every quantized linear weight
+    in the file (an I8 tensor with a sibling ``.weight_scale``).
+    """
+    restore: dict[str, str] = {}
+    with MemoryEfficientSafeOpen(path) as f:
+        for raw_key in f.keys():
+            if f.header[raw_key]["dtype"] != "I8":
+                continue
+            if not raw_key.endswith(".weight"):
+                continue
+            if raw_key[: -len(".weight")] + _WEIGHT_SCALE_SUFFIX not in f.header:
+                continue  # not a quantized linear weight
+            stripped = raw_key
+            for prefix in WRAP_PREFIXES:
+                if stripped.startswith(prefix):
+                    stripped = stripped[len(prefix):]
+                    break
+            mapped = int8_key_map(stripped) if int8_key_map is not None else stripped
+            if not mapped.endswith(".weight"):
+                continue
+            restore[mapped[: -len(".weight")]] = raw_key
+    return restore
+
+
+def restore_int8_layer(
+    module: torch.nn.Module,
+    path: str,
+    raw_key: str,
+) -> None:
+    """Restore an INT8 layer's ``qweight``/``scale`` from a checkpoint by raw key.
+
+    Reads only the exact tensors the layer needs (the int8 ``weight`` and its
+    per-row ``.weight_scale``) straight from the file by key, avoiding a full
+    reload. Used by LoRA undo to return baked LoRAs to the original weights.
+    """
+    with MemoryEfficientSafeOpen(path) as f:
+        qweight = f.get_tensor(raw_key, device=module.qweight.device, dtype=torch.int8)
+        scale = f.get_tensor(
+            raw_key[: -len(".weight")] + _WEIGHT_SCALE_SUFFIX,
+            device=module.scale.device,
+        )
+    module.qweight = qweight
+    module.scale = scale
+
+
 def _switch_to_int8(
     module: torch.nn.Module,
     qweight: torch.Tensor,
@@ -165,4 +221,9 @@ def _switch_to_int8(
     module.load_int8(qweight, scale, convrot=convrot, convrot_groupsize=convrot_groupsize)
 
 
-__all__ = ["is_int8_checkpoint", "load_int8_state_dict"]
+__all__ = [
+    "is_int8_checkpoint",
+    "load_int8_state_dict",
+    "build_int8_restore_map",
+    "restore_int8_layer",
+]

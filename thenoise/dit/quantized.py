@@ -13,11 +13,18 @@ gradients on integer tensors — ``load_state_dict(assign=True)`` cannot assign 
 int8 tensor into an ``nn.Parameter``. Loaders should use
 ``thenoise.utils.int8.load_int8_state_dict`` to populate the model from a
 ComfyUI-style INT8 checkpoint.
+
+LoRAs on INT8 layers are *baked in* at switch time (``bake_lora``): the INT8
+weight is dequantized to BF16, the LoRA delta is added, and the result is
+requantized back to INT8 with the layer's ConvRot profile. The runtime forward
+is therefore always a single INT8 GEMM with zero per-step LoRA cost. Undo
+reloads the original INT8 weights from the checkpoint file (see
+``thenoise.utils.int8.build_int8_restore_map``/``restore_int8_layer``).
 """
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -56,13 +63,6 @@ class QuantizedLinear(nn.Module):
         # Python wrapper keeps the call traceable inside ``torch.compile``.
         self._out_dtype_code = comfy_kitchen.DTYPE_TO_CODE[torch.bfloat16]
         self._int8 = False
-        # Rank-reduced bf16 LoRA residual branch (INT8 path only): ``lora_down``
-        # is ``[r, in]`` (already scaled), ``lora_up`` is ``[out, r]``. Multiple
-        # LoRAs are concatenated along the rank dim so forward keeps one fixed
-        # structure. bf16 layers use the normal parameter-mutation LoRA path.
-        self.lora_down: Optional[torch.Tensor] = None
-        self.lora_up: Optional[torch.Tensor] = None
-        self._lora = False
 
     def _reset_parameters(self) -> None:
         """Initialize like ``nn.Linear`` (kaiming on weight, uniform on bias)."""
@@ -97,46 +97,54 @@ class QuantizedLinear(nn.Module):
         self.register_parameter("weight", None)  # free the BF16 weights
         self._int8 = True
 
-    def apply_lora(self, down, up, alpha, multiplier, calc_device) -> None:
-        """Store a rank-reduced bf16 LoRA residual branch (INT8 path only).
+    def bake_lora(self, delta: torch.Tensor) -> None:
+        """Bake a BF16 LoRA delta into the INT8 weights.
 
         Args:
-            down: LoRA-down ``[r, in]`` (bf16/fp16).
-            up: LoRA-up ``[out, r]`` (bf16/fp16).
-            alpha: LoRA alpha (scalar, int, or 0-dim tensor).
-            multiplier: LoRA weight multiplier.
-            calc_device: device to store the factors on.
+            delta: the LoRA delta ``[out, in]`` in BF16 (``multiplier * (up @
+                down) * (alpha/r)``). Multiple LoRAs should be summed into one
+                delta before calling, so the layer is dequantized/requantized
+                only once.
 
-        The residual added in ``forward`` is ``x @ down^T @ up^T * (alpha/r) *
-        multiplier``, matching ``_compute_lora_delta``'s ``multiplier * (up @
-        down) * scale``. Multiple LoRAs are concatenated along the rank dim so
-        the forward residual keeps a single fixed shape.
+        Dequantizes ``qweight`` to BF16 (un-rotating ConvRot), adds the delta,
+        and requantizes back to INT8 with this layer's ConvRot profile. The
+        runtime forward stays a single INT8 GEMM (zero per-step LoRA cost). The
+        original weights are restored on undo by reloading from disk.
         """
-        r = down.size(0)
-        scale = (
-            float(alpha.to(calc_device)) if isinstance(alpha, torch.Tensor) else float(alpha)
-        ) / r * multiplier
-        down = down.to(device=calc_device, dtype=torch.bfloat16)
-        up = up.to(device=calc_device, dtype=torch.bfloat16)
-        scaled_down = down * scale
-        if self._lora:
-            self.lora_down = torch.cat([self.lora_down, scaled_down], dim=0)
-            self.lora_up = torch.cat([self.lora_up, up], dim=1)
-        else:
-            self.lora_down = scaled_down
-            self.lora_up = up
-            self._lora = True
+        weight = self._dequantize()
+        self._set_int8(self._quantize(weight + delta.to(weight.dtype)))
 
-    def clear_lora(self) -> None:
-        self.lora_down = None
-        self.lora_up = None
-        self._lora = False
+    def _dequantize(self) -> torch.Tensor:
+        """Return the BF16 dequantized weight (un-rotating ConvRot if active)."""
+        if self.convrot:
+            return torch.ops.comfy_kitchen.dequantize_int8_convrot_weight_dtype(
+                self.qweight, self.scale, self.convrot_groupsize, self._out_dtype_code
+            )
+        return torch.ops.comfy_kitchen.dequantize_int8_simple_dtype(
+            self.qweight, self.scale, self._out_dtype_code
+        )
+
+    def _quantize(self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Requantize a BF16 weight to INT8 with this layer's ConvRot profile."""
+        if self.convrot:
+            return torch.ops.comfy_kitchen.quantize_int8_convrot_weight(
+                weight, self.convrot_groupsize
+            )
+        return torch.ops.comfy_kitchen.quantize_int8_rowwise(weight)
+
+    def _set_int8(self, quantized: Tuple[torch.Tensor, torch.Tensor]) -> None:
+        """Overwrite ``qweight``/``scale`` buffers in place (preserving identity)."""
+        q, s = quantized
+        self.qweight.copy_(q)
+        self.scale.copy_(s)
 
     def forward(self, x: torch.Tensor, input_act: Optional[str] = None) -> torch.Tensor:
         if self._int8:
             # Call the raw custom op (traceable by torch.compile) rather than the
-            # registry-dispatching comfy_kitchen.int8_linear Python wrapper.
-            out = torch.ops.comfy_kitchen.int8_linear(
+            # registry-dispatching comfy_kitchen.int8_linear Python wrapper. A
+            # LoRA is baked into ``qweight`` at switch time, so this is the whole
+            # forward — no extra residual branch at runtime.
+            return torch.ops.comfy_kitchen.int8_linear(
                 x,
                 self.qweight,
                 self.scale,
@@ -146,11 +154,6 @@ class QuantizedLinear(nn.Module):
                 self.convrot_groupsize,
                 input_act,
             )
-            if self._lora:
-                # bf16 LoRA residual branch: x @ down^T @ up^T (scale folded into
-                # lora_down). Keeps the int8 weight untouched.
-                out = out + x @ self.lora_down.t() @ self.lora_up.t()
-            return out
         return F.linear(x, self.weight, self.bias)
 
 

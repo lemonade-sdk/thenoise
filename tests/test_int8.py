@@ -52,7 +52,7 @@ def test_quantized_linear_load_int8_frees_bf16_weight():
     assert layer.weight is None  # bf16 weight dropped -> memory savings
 
 
-def test_quantized_linear_int8_lora_residual():
+def test_quantized_linear_int8_bake_lora():
     layer = QuantizedLinear(256, 512)
     layer.load_int8(
         torch.randint(-127, 127, (512, 256), dtype=torch.int8),
@@ -60,21 +60,25 @@ def test_quantized_linear_int8_lora_residual():
     )
     x = torch.randn(4, 256, dtype=torch.bfloat16)
     base = layer(x)  # without LoRA
+    orig_q = layer.qweight.clone()
 
-    # LoRA factors: down [r, in], up [out, r]
-    down = torch.randn(8, 256, dtype=torch.bfloat16)
-    up = torch.randn(512, 8, dtype=torch.bfloat16)
-    layer.apply_lora(down, up, alpha=8.0, multiplier=0.5, calc_device=torch.device("cpu"))
-    assert layer._lora is True
+    # LoRA factors: down [r, in], up [out, r]. The baked delta is
+    # (up @ down) * (alpha/r * multiplier), shaped [out, in].
+    down = torch.randn(8, 256, dtype=torch.bfloat16) * 6
+    up = torch.randn(512, 8, dtype=torch.bfloat16) * 6
+    alpha, multiplier = 8.0, 2.0
+    delta = (up @ down) * (alpha / down.size(0) * multiplier)
+    layer.bake_lora(delta)
+    assert not torch.equal(layer.qweight, orig_q)  # baked into int8 weights
 
     out = layer(x)
-    # expected residual: x @ down^T @ up^T * (alpha/r * multiplier)
-    expected = base + x @ (down * (8.0 / 8 * 0.5)).t() @ up.t()
-    assert torch.allclose(out.float(), expected.float(), rtol=1e-2, atol=1e-2)
-
-    layer.clear_lora()
-    assert layer._lora is False
-    assert torch.allclose(layer(x).float(), base.float(), rtol=1e-2, atol=1e-2)
+    # The INT8 GEMM also quantizes activations, so an exact match to
+    # base + x @ delta^T is impossible; instead verify the LoRA moves the output
+    # substantially and lands much closer to the delta expectation than to base.
+    err_to_expected = (out.float() - (base + x @ delta.t()).float()).abs().max()
+    err_to_base = (out.float() - base.float()).abs().max()
+    assert err_to_base > 1.0  # LoRA has a clear effect
+    assert err_to_expected < err_to_base  # output follows the delta direction
 
 
 class _TinyInt8Model(nn.Module):
@@ -96,24 +100,100 @@ def _int8_lora_sd():
     }
 
 
-def test_apply_lora_to_model_int8_residual():
+def test_apply_lora_to_model_int8_bake_and_restore(tmp_path):
+    from thenoise.utils.loader import load_dit
     from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
 
+    # Write an INT8 checkpoint matching ``_TinyInt8Model`` and load it through
+    # ``load_dit`` so the raw-key restore map is built on the model.
+    qweight = torch.randint(-127, 127, (512, 256), dtype=torch.int8)
+    scale = torch.rand(512, 1)
+    p = tmp_path / "int8.safetensors"
+    _write(p, {
+        "q.weight": qweight,
+        "q.weight_scale": scale,
+        "q.comfy_quant": torch.zeros(8, dtype=torch.uint8),
+        "plain.weight": torch.randn(512, 256, dtype=torch.bfloat16),
+        "plain.bias": torch.randn(512, dtype=torch.bfloat16),
+    })
     model = _TinyInt8Model()
+    load_dit(model, str(p), device="cpu", dtype=torch.bfloat16)
+    orig_q = model.q.qweight.clone()
+
     result = apply_lora_to_model(
-        model, [_int8_lora_sd()], [1.0], torch.device("cpu")
+        model, [_int8_lora_sd()], [1.0], torch.device("cpu"), dit_path=str(p)
     )
-    assert model.q._lora is True
     assert result["int8_affected"] == ("q",)
+    assert result["int8_restore_keys"] == ("q.weight",)
+    assert result["dit_path"] == str(p)
+    assert not torch.equal(model.q.qweight, orig_q)  # baked into int8 weights
+
+    # Undo reloads the original INT8 weights from disk by raw key.
+    undo_lora_on_model(model, result, torch.device("cpu"))
+    assert torch.equal(model.q.qweight, orig_q)
+    assert torch.equal(model.q.scale, scale)
+
+
+def test_apply_lora_to_model_int8_undo_without_dit_path_raises(tmp_path):
+    from thenoise.utils.loader import load_dit
+    from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
+
+    # Load a real checkpoint (restore keys captured), but apply without a
+    # dit_path so undo has no file to reload from.
+    p = tmp_path / "int8.safetensors"
+    _write(p, {
+        "q.weight": torch.randint(-127, 127, (512, 256), dtype=torch.int8),
+        "q.weight_scale": torch.rand(512, 1),
+        "q.comfy_quant": torch.zeros(8, dtype=torch.uint8),
+        "plain.weight": torch.randn(512, 256, dtype=torch.bfloat16),
+        "plain.bias": torch.randn(512, dtype=torch.bfloat16),
+    })
+    model = _TinyInt8Model()
+    load_dit(model, str(p), device="cpu", dtype=torch.bfloat16)
+
+    result = apply_lora_to_model(model, [_int8_lora_sd()], [1.0], torch.device("cpu"))
+    assert result["int8_restore_keys"] == ("q.weight",)  # captured from the model
+    with pytest.raises(RuntimeError, match="no dit_path"):
+        undo_lora_on_model(model, result, torch.device("cpu"))
+
+
+def test_apply_lora_to_model_int8_wrapped_restore(tmp_path):
+    from thenoise.utils.loader import load_dit
+    from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
+
+    # Repackaged checkpoint with the generic ``model.diffusion_model.`` prefix;
+    # the restore map must strip it so the captured raw key still finds the
+    # tensor on undo.
+    qweight = torch.randint(-127, 127, (512, 256), dtype=torch.int8)
+    scale = torch.rand(512, 1)
+    p = tmp_path / "int8_wrapped.safetensors"
+    _write(p, {
+        "model.diffusion_model.q.weight": qweight,
+        "model.diffusion_model.q.weight_scale": scale,
+        "model.diffusion_model.q.comfy_quant": torch.zeros(8, dtype=torch.uint8),
+        "model.diffusion_model.plain.weight": torch.randn(512, 256, dtype=torch.bfloat16),
+        "model.diffusion_model.plain.bias": torch.randn(512, dtype=torch.bfloat16),
+    })
+    model = _TinyInt8Model()
+    load_dit(model, str(p), device="cpu", dtype=torch.bfloat16)
+    orig_q = model.q.qweight.clone()
+
+    result = apply_lora_to_model(
+        model, [_int8_lora_sd()], [1.0], torch.device("cpu"), dit_path=str(p)
+    )
+    assert result["int8_restore_keys"] == ("model.diffusion_model.q.weight",)
+    assert not torch.equal(model.q.qweight, orig_q)
 
     undo_lora_on_model(model, result, torch.device("cpu"))
-    assert model.q._lora is False
+    assert torch.equal(model.q.qweight, orig_q)
 
 
 def test_apply_lora_to_model_mixed_int8_and_bf16():
     from thenoise.utils.lora import apply_lora_to_model
 
     model = _TinyInt8Model()
+    orig_q = model.q.qweight.clone()
+    orig_plain = model.plain.weight.clone()
     # LoRA targeting both the int8 q layer and the bf16 plain layer
     sd = {
         "q.lora_down.weight": torch.randn(8, 256, dtype=torch.bfloat16),
@@ -124,8 +204,8 @@ def test_apply_lora_to_model_mixed_int8_and_bf16():
         "plain.alpha": torch.tensor(8.0),
     }
     result = apply_lora_to_model(model, [sd], [1.0], torch.device("cpu"))
-    assert model.q._lora is True
-    assert model.plain.weight is not None  # bf16 layer mutated normally
+    assert not torch.equal(model.q.qweight, orig_q)  # int8 layer baked
+    assert not torch.equal(model.plain.weight, orig_plain)  # bf16 layer mutated
     assert "plain.weight" in result["affected_keys"]
     assert result["int8_affected"] == ("q",)
 

@@ -16,7 +16,11 @@ from typing import Callable, Optional, Union
 
 import torch
 
-from thenoise.utils.int8 import is_int8_checkpoint, load_int8_state_dict
+from thenoise.utils.int8 import (
+    build_int8_restore_map,
+    is_int8_checkpoint,
+    load_int8_state_dict,
+)
 from thenoise.utils.safetensors import load_dit_safetensors
 from thenoise.utils.setup_logging import setup_logging
 
@@ -72,6 +76,9 @@ def load_dit(
         # inference; ``load_int8_state_dict`` reads it from each layer's
         # ``comfy_quant`` marker in the state dict (defaults to convrot, 256).
         load_int8_state_dict(model, sd, dtype=dtype)
+        # Record each quantized layer's raw checkpoint key so a later LoRA undo
+        # can reload the original INT8 weights from disk by key.
+        model._int8_restore_map = build_int8_restore_map(path, int8_key_map)
         logger.info("Loaded INT8 checkpoint from %s", path)
     else:
         if dtype is not None:
