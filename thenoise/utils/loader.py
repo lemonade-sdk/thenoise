@@ -37,6 +37,7 @@ from thenoise.utils.safetensors import (
     MemoryEfficientSafeOpen,
     WRAP_PREFIXES,
     load_dit_safetensors,
+    load_safetensors,
 )
 from thenoise.utils.setup_logging import setup_logging
 
@@ -86,6 +87,69 @@ for _name, _header in (("float8_e4m3fn", "F8_E4M3"), ("float8_e5m2", "F8_E5M2"))
         _QUANT_FORMATS[getattr(torch, _name)] = (_header, _build_fp8_qt)
 _QUANT_DTYPES = tuple(_QUANT_FORMATS)
 _QUANT_HEADER_DTYPES = {header for header, _ in _QUANT_FORMATS.values()}
+
+
+def load_text_encoder_weights(
+    model: torch.nn.Module,
+    path: str,
+    *,
+    device: Union[str, torch.device],
+    dtype: Optional[torch.dtype] = None,
+    key_map: Optional[Callable[[str], str]] = None,
+) -> torch.nn.Module:
+    """Load a text-encoder checkpoint (single safetensors file), auto-selecting
+    quantized vs BF16. No sharded-file support.
+
+    Quantized (INT8/FP8) checkpoints are detected via ``is_quantized_checkpoint``
+    and land via ``load_quantized_state_dict``: each low-bit ``.weight`` +
+    ``.weight_scale`` goes to its module's ``load_quantized`` (a
+    ``QuantizedLinear``, installed via ``thenoise.dit.quantized.replace_linears``),
+    and every other leaf parameter/buffer is cast to ``dtype``. BF16/plain
+    checkpoints land via ``load_state_dict(assign=True)`` after casting.
+
+    The tied ``lm_head.weight`` (absent from quantized files, redundant in BF16 files)
+    is dropped; encoders should remove their ``lm_head`` module before calling.
+
+    Args:
+        model: the (meta-constructed, QuantizedLinear-swapped) text encoder.
+        path: single-file safetensors checkpoint.
+        device: final device.
+        dtype: dtype for full-precision (BF16-path and non-quantized) params.
+        key_map: optional transform applied to checkpoint keys before loading (e.g.
+            Krea 2's ComfyUI ``language_model.``/``visual.`` -> ``model.``
+            layout).
+
+    Returns:
+        ``model`` (loaded in place, moved to ``device``).
+    """
+    device = torch.device(device)
+
+    sd = load_safetensors(path, device=device, disable_mmap=True, dtype=None)
+    sd.pop("lm_head.weight", None)
+    if key_map is not None:
+        # A text-encoder ``key_map`` is a layout normalization (e.g. Krea 2's
+        # ComfyUI ``language_model.``/``visual.`` -> ``model.`` mapping) needed on
+        # BOTH the quantized and BF16 paths, unlike a DiT ``key_map`` (which only
+        # renames on the quantized path).
+        sd = {key_map(k): v for k, v in sd.items()}
+
+    if is_quantized_checkpoint(path):
+        load_quantized_state_dict(model, sd, dtype=dtype)
+        logger.info("Loaded quantized text encoder from %s", path)
+    else:
+        if dtype is not None:
+            sd = {k: v.to(dtype=dtype) for k, v in sd.items()}
+        info = model.load_state_dict(sd, strict=True, assign=True)
+        if info.unexpected_keys or info.missing_keys:
+            raise RuntimeError(
+                f"text encoder checkpoint {path!r} did not match the model: "
+                f"missing={info.missing_keys[:10]}, "
+                f"unexpected={info.unexpected_keys[:10]}"
+            )
+        logger.info("Loaded BF16 text encoder from %s", path)
+
+    model.to(device)
+    return model
 
 
 def load_dit(
@@ -272,6 +336,12 @@ def load_quantized_state_dict(
             if dtype is not None:
                 tensor = tensor.to(dtype=dtype)
             setattr(module, attr, torch.nn.Parameter(tensor))
+        elif isinstance(getattr(module, attr, None), torch.Tensor):
+            # Non-leaf buffer (e.g. ``rotary_emb.inv_freq``): assign in place.
+            # ``setattr`` routes buffers to the module's buffer registry.
+            if dtype is not None:
+                tensor = tensor.to(dtype=dtype)
+            setattr(module, attr, tensor)
         else:
             raise RuntimeError(f"unexpected key in quantized checkpoint: {key!r}")
 
@@ -391,6 +461,7 @@ def restore_quantized_layer(
 
 __all__ = [
     "load_dit",
+    "load_text_encoder_weights",
     "is_quantized_checkpoint",
     "load_quantized_state_dict",
     "build_quantized_restore_map",

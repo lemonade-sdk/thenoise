@@ -98,4 +98,25 @@ class QuantizedLinear(nn.Module):
         return F.linear(x, self.weight, self.bias)
 
 
-__all__ = ["QuantizedLinear"]
+def replace_linears(model: nn.Module) -> None:
+    """Replace every ``nn.Linear`` in ``model`` with a drop-in ``QuantizedLinear``.
+
+    Do this while the model is still on meta (inside ``init_empty_weights``) so the
+    fresh parameters stay meta.
+    """
+    for name, module in list(model.named_modules()):
+        if module.__class__ is nn.Linear:
+            parent_path, _, attr = name.rpartition(".")
+            parent = model.get_submodule(parent_path) if parent_path else model
+            setattr(
+                parent,
+                attr,
+                QuantizedLinear(
+                    module.in_features,
+                    module.out_features,
+                    bias=module.bias is not None,
+                ),
+            )
+
+
+__all__ = ["QuantizedLinear", "replace_linears"]

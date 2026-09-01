@@ -22,12 +22,12 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 from accelerate import init_empty_weights
 
 from thenoise.dit.flux2.models import Flux2, Flux2Params, Klein4BParams, Klein9BParams
+from thenoise.dit.quantized import replace_linears
 from thenoise.dit.zimage.utils import QWEN3_4B_CONFIG, ZIMAGE_TOKENIZER_CONFIG_DIR
-from thenoise.utils.loader import load_dit
+from thenoise.utils.loader import load_dit, load_text_encoder_weights
 from thenoise.utils.safetensors import (
     WRAP_PREFIXES,
     MemoryEfficientSafeOpen,
-    load_split_weights,
 )
 
 logger = logging.getLogger(__name__)
@@ -134,21 +134,11 @@ def _load_qwen3(
     config = Qwen3Config(**(QWEN3_8B_CONFIG if is_8b else QWEN3_4B_CONFIG))
     with init_empty_weights():
         qwen3 = Qwen3ForCausalLM._from_config(config)
+        del qwen3.lm_head
+        replace_linears(qwen3)
 
     logger.info(f"Loading Flux Klein text encoder (Qwen3-{'8B' if is_8b else '4B'}) weights from {path}")
-    sd = load_split_weights(path, device=str(device), disable_mmap=True, dtype=dtype)
-    if not is_8b:
-        # Qwen3-4B ties the LM head to the input embeddings (tie_word_embeddings=true),
-        # so the checkpoint omits lm_head.weight; re-tie so the strict load passes.
-        sd["lm_head.weight"] = sd["model.embed_tokens.weight"]
-
-    info = qwen3.load_state_dict(sd, strict=True, assign=True)
-    if info.unexpected_keys or info.missing_keys:
-        raise RuntimeError(
-            f"Flux Klein text encoder checkpoint did not match Qwen3-{'8B' if is_8b else '4B'}: "
-            f"missing={info.missing_keys[:10]}, unexpected={info.unexpected_keys[:10]}"
-        )
-    qwen3.to(device)
+    load_text_encoder_weights(qwen3, path, device=device, dtype=dtype)
     if dtype is not None:
         qwen3.to(dtype)
     return qwen3.eval().requires_grad_(False)
