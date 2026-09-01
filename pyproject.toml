@@ -15,12 +15,12 @@ dependencies = [
     "uvicorn[standard]>=0.29",
     "pydantic>=2.6",
     # model code
-    "transformers==4.57.6",
-    "safetensors==0.4.5",
-    "einops==0.7.0",
-    "accelerate==1.6.0",
+    "transformers>=4.57.6",
+    "safetensors>=0.4.5",
+    "einops>=0.7.0",
+    "accelerate>=1.6.0",
     "pillow>=11.3.0",
-    "comfy-kitchen",
+    "comfy-kitchen>=0.2.31",
     "numpy",
     "tqdm",
 ]
@@ -28,7 +28,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest"]
 # Download helpers in scripts/ (not needed at runtime).
-scripts = ["huggingface-hub==0.34.3"]
+scripts = ["huggingface-hub>=0.34.3"]
 
 [tool.setuptools]
 packages = [
