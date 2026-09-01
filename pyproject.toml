@@ -48,11 +48,11 @@ packages = [
 ]
 
 [tool.setuptools.package-data]
-# Tokenizer configs used by the Anima text encoder (loaded via __file__).
+# Tokenizer configs.
 "thenoise.dit.anima" = ["configs/**/*"]
-# Tokenizer configs used by the Z-Image text encoder (loaded via __file__).
 "thenoise.dit.zimage" = ["configs/**/*"]
-# Committed Sesqui latent upscaler weights (bf16, ~6MB).
+"thenoise.dit.krea2" = ["configs/**/*"]
+# Committed Sesqui latent upscaler weights.
 "thenoise.upscale" = ["weights/**/*"]
-# Web UI served at /
-"thenoise.ui" = ["*.html"]
+# Web UI
+"thenoise.ui" = ["**/*"]

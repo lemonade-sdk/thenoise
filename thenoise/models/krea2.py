@@ -70,7 +70,10 @@ class Krea2Model(DiffusionModel):
 
         logger.info("Loading Krea 2 text encoder from %s", config.text_encoder_path)
         self.encoder = krea2_utils.load_krea2_text_encoder(
-            config.text_encoder_path, dtype=config.dtype, device=config.device
+            config.text_encoder_path,
+            dtype=config.dtype,
+            device=config.device,
+            tokenizer_dir=krea2_utils.find_krea2_tokenizer_dir(config.text_encoder_path),
         )
 
         # Qwen-Image VAE

@@ -191,9 +191,8 @@ def load_qwen3_embedder(
 ) -> Qwen3Embedder:
     """Load the Qwen3 text encoder + tokenizer and wrap it as a context embedder.
 
-    ``path`` is a safetensors checkpoint (single file or the first ``00001-of-N``
-    shard). The tokenizer is loaded from ``tokenizer_dir`` if given, else from the
-    vendored Z-Image Qwen3 tokenizer directory.
+    ``path`` is a safetensors checkpoint.  The tokenizer is loaded from ``tokenizer_dir`` 
+    if given, else from the vendored Z-Image Qwen3 tokenizer directory.
     """
     from transformers import AutoTokenizer
 
