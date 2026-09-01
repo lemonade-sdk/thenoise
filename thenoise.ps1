@@ -87,7 +87,7 @@ $env:TORCH_BLAS_PREFER_HIPBLASLT = "1"
 # Triton (torch.compile) is not yet available on Windows ROCm (AMD's Triton
 # wheels are Linux-only), so disable it. Respect an existing override in case
 # the user has a working Windows Triton.
-if (-not $env:TORCH_COMPILE_DISABLE) { $env:TORCH_COMPILE_DISABLE = "1" }
+if (-not $env:TORCHDYNAMO_DISABLE) { $env:TORCHDYNAMO_DISABLE = "1" }
 
 # ---- 6. Launch the project, forwarding all arguments ----------------------
 & $Py -m thenoise @ForwardArgs
