@@ -13,8 +13,9 @@ instead of requiring a separate transformers/Diffusers checkpoint.
 """
 
 import logging
+import os
 from dataclasses import dataclass
-from typing import Union
+from typing import Optional, Union
 
 import torch
 from accelerate import init_empty_weights
@@ -30,6 +31,13 @@ from thenoise.dit.quantized import replace_linears
 from thenoise.utils.loader import load_text_encoder_weights
 
 logger = logging.getLogger(__name__)
+
+
+# The Qwen3-VL tokenizer config files are vendored in the package under ``configs/``
+# (mirroring the ``tokenizer/`` subfolder of the official Qwen/Qwen3-VL-4B-Instruct
+# repo). They carry the Qwen chat template used by the caption encoder, so the tokenizer
+# loads offline with ``local_files_only=True`` and is never fetched from the Hub.
+KREA2_TOKENIZER_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "configs", "tokenizer")
 
 
 # Only the tokenizer is still fetched by repo id (small, HF-cached after first use).
@@ -147,16 +155,46 @@ def load_qwen3_vl_conditioner(
     device: Union[str, torch.device],
     max_length: int = TextEncoderConfig.max_length,
     select_layers: tuple[int, ...] = TextEncoderConfig.select_layers,
+    tokenizer_dir: Optional[str] = None,
     tokenizer_repo: str = QWEN3_VL_4B_INSTRUCT_REPO_ID,
     disable_mmap: bool = True,
 ) -> "Qwen3VLConditioner":
     """Load the Qwen3-VL-4B conditioner used by K2: weights from ``model_path`` (safetensors),
-    tokenizer from ``tokenizer_repo`` (Hub id or local dir)."""
+    tokenizer from ``tokenizer_dir`` (a local directory) when given, else from the vendored
+    ``configs/tokenizer/`` directory (so no Hub access is needed), else from ``tokenizer_repo``."""
     qwen = _load_qwen3_vl_model(model_path, dtype=dtype, device=device, disable_mmap=disable_mmap)
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_repo, max_length=max_length)
-    processor = Qwen2TokenizerFast.from_pretrained(tokenizer_repo, max_length=max_length)
+    tokenizer_dir = tokenizer_dir or KREA2_TOKENIZER_CONFIG_DIR
+    if not os.path.isdir(tokenizer_dir):
+        raise FileNotFoundError(
+            f"Krea 2 tokenizer config directory not found at {tokenizer_dir}. "
+            "Expected configs/tokenizer/ with tokenizer.json, tokenizer_config.json, "
+            "vocab.json and merges.txt."
+        )
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir, max_length=max_length, local_files_only=True)
+    processor = Qwen2TokenizerFast.from_pretrained(tokenizer_dir, max_length=max_length, local_files_only=True)
     conditioner = Qwen3VLConditioner(qwen, tokenizer, processor, max_length=max_length, select_layers=select_layers)
     return conditioner.eval().requires_grad_(False)
+
+
+def find_krea2_tokenizer_dir(text_encoder_path: str, max_depth: int = 3) -> Optional[str]:
+    """Locate a local ``tokenizer/`` directory near the text encoder file.
+
+    The downloader drops the tokenizer under the output root (``<out>/tokenizer/``)
+    while the text encoder lands under ``<out>/text_encoders/``. Search ``max_depth``
+    parent directories of the text encoder for a ``tokenizer/`` dir so the tokenizer is
+    loaded offline when present. Returns ``None`` to fall back to the vendored
+    ``configs/tokenizer/`` directory.
+    """
+    base = os.path.dirname(os.path.abspath(text_encoder_path))
+    for _ in range(max_depth):
+        cand = os.path.join(base, "tokenizer")
+        if os.path.isdir(cand):
+            return cand
+        parent = os.path.dirname(base)
+        if parent == base:
+            break
+        base = parent
+    return None
 
 
 class Qwen3VLConditioner(torch.nn.Module):

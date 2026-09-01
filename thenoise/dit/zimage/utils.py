@@ -1,12 +1,7 @@
 """Z-Image model loading utilities.
 
 The DiT is the S3-DiT transformer; the text encoder is a Qwen3-4B model whose hidden
-states feed the DiT's caption embedder. The DiT accepts both single-file and sharded
-(HF) checkpoints. The text encoder is a *single file* (e.g. ComfyUI's
-``text_encoders/qwen_3_4b.safetensors``): its ``Qwen3Config`` is vendored here so no
-``config.json`` is fetched from the Hub, weights are loaded directly from the
-safetensors file, and the tokenizer config files are vendored under ``configs/`` so
-no tokenizer is fetched from the Hub either.
+states feed the DiT's caption embedder.
 """
 from __future__ import annotations
 

@@ -9,6 +9,7 @@ from thenoise.dit.krea2.encoder import (
     QWEN3_VL_4B_INSTRUCT_REPO_ID,
     Qwen3VLConditioner,
     TextEncoderConfig,
+    find_krea2_tokenizer_dir,
     load_qwen3_vl_conditioner,
 )
 from thenoise.dit.krea2.mmdit import SingleMMDiTConfig, SingleStreamDiT
@@ -65,15 +66,29 @@ def load_krea2_text_encoder(
     device: Union[str, torch.device],
     max_length: int = TextEncoderConfig.max_length,
     select_layers: tuple = TextEncoderConfig.select_layers,
+    tokenizer_dir: Optional[str] = None,
     tokenizer_repo: str = QWEN3_VL_4B_INSTRUCT_REPO_ID,
 ) -> Qwen3VLConditioner:
     """Load the Qwen3-VL-4B conditioner used by K2: weights from ``path`` (local safetensors,
-    ComfyUI or official key layout), tokenizer from ``tokenizer_repo`` (Hub id or local dir)."""
+    ComfyUI or official key layout), tokenizer from ``tokenizer_dir`` (a local directory) when
+    given, else from the vendored ``configs/tokenizer/`` directory, else from ``tokenizer_repo``."""
     return load_qwen3_vl_conditioner(
         path,
         dtype=dtype,
         device=device,
         max_length=max_length,
         select_layers=select_layers,
+        tokenizer_dir=tokenizer_dir,
         tokenizer_repo=tokenizer_repo,
     )
+
+
+__all__ = [
+    "single_mmdit_large_wide",
+    "SingleStreamDiT",
+    "load_krea2_dit",
+    "load_krea2_text_encoder",
+    "find_krea2_tokenizer_dir",
+    "Qwen3VLConditioner",
+    "TextEncoderConfig",
+]

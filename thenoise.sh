@@ -48,13 +48,18 @@ if ! "$VENV_DIR/bin/python" -c "import torch" &>/dev/null; then
         break
       fi
     done
-    case "$version" in
-      110500) echo gfx1150 ;;
-      110501) echo gfx1151 ;;
-      110502) echo gfx1152 ;;
-      110000) echo gfx1100 ;;
-      *) echo "" ;;
-    esac
+
+    # Dynamic mapping mirroring ROCm's gfx_target_version_to_arch(). The
+    # packed value is YYMMSS -> gfx{YY}{MM}{SS}, where MM and SS are encoded
+    # in hex so values >= 10 still collapse to two (or one) characters.
+    if [ -z "$version" ] || [ -n "${version//[0-9]/}" ]; then
+      return 1
+    fi
+
+    local gen=$((version / 10000))
+    local major=$(( (version / 100) % 100 ))
+    local minor=$((version % 100))
+    printf "gfx%d%x%x\n" "$gen" "$major" "$minor"
   }
 
   # An explicit GFX_ARCH env var always wins over auto-detection.

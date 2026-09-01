@@ -14,8 +14,11 @@ instead (same repo):
   DiT (Turbo)  diffusion_models/krea2_turbo_int8_convrot.safetensors
   DiT (RAW)    diffusion_models/krea2_raw_int8_convrot.safetensors
 
-The Qwen3-VL tokenizer is fetched automatically (by repo id) at first
-text-encoder load.
+The Qwen3-VL tokenizer config files are vendored
+under ``thenoise/dit/krea2/configs/tokenizer/`` (they carry the Qwen chat
+template used by the caption encoder), so no tokenizer is downloaded; the
+model's vendored config means no ``config.json`` is needed next to the text
+encoder. Loading is fully offline (``local_files_only=True``).
 
 Usage:
     python scripts/download_krea2.py --out ./models/krea2
