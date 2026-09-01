@@ -16,9 +16,9 @@ from typing import Optional, Union
 
 import torch
 
+from thenoise.dit.quantized import replace_linears
 from thenoise.dit.zimage.models import ZImageTransformer2DModel
-from thenoise.utils.loader import load_dit
-from thenoise.utils.safetensors import load_split_weights
+from thenoise.utils.loader import load_dit, load_text_encoder_weights
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,6 @@ def _load_qwen3(
     path: str,
     dtype: torch.dtype,
     device: Union[str, torch.device],
-    disable_mmap: bool = True,
 ) -> "Qwen3ForCausalLM":
     """Build Qwen3-4B from the vendored config and load weights from a single file."""
     from transformers import Qwen3Config, Qwen3ForCausalLM
@@ -113,22 +112,11 @@ def _load_qwen3(
     config = Qwen3Config(**QWEN3_4B_CONFIG)
     with init_empty_weights():
         qwen3 = Qwen3ForCausalLM._from_config(config)
+        del qwen3.lm_head
+        replace_linears(qwen3)
 
     logger.info(f"Loading Z-Image text encoder (Qwen3-4B) weights from {path}")
-    sd = load_split_weights(path, device=device, disable_mmap=disable_mmap, dtype=dtype)
-
-    # Qwen3-4B ties the LM head to the input embeddings (tie_word_embeddings=true), so
-    # the checkpoint omits lm_head.weight; re-tie so the strict load passes.
-    sd["lm_head.weight"] = sd["model.embed_tokens.weight"]
-
-    info = qwen3.load_state_dict(sd, strict=True, assign=True)
-    if info.unexpected_keys or info.missing_keys:
-        raise RuntimeError(
-            f"Z-Image text encoder checkpoint did not match Qwen3-4B: "
-            f"missing={info.missing_keys[:10]}, unexpected={info.unexpected_keys[:10]}"
-        )
-
-    qwen3.to(device)
+    load_text_encoder_weights(qwen3, path, device=device, dtype=dtype)
     if dtype is not None:
         qwen3.to(dtype)
     return qwen3.eval().requires_grad_(False)

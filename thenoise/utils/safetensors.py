@@ -1,10 +1,8 @@
-import os
-import re
 import numpy as np
 import torch
 import json
 import struct
-from typing import Dict, Any, Union, Optional
+from typing import Dict, Union, Optional
 
 from safetensors.torch import load_file
 
@@ -304,59 +302,4 @@ def load_safetensors(
         return state_dict
 
 
-def get_split_weight_filenames(file_path: str) -> Optional[list[str]]:
-    """
-    Get the list of split weight filenames (full paths) if the file name ends with 00001-of-00004 etc.
-    Returns None if the file is not split.
-    """
-    basename = os.path.basename(file_path)
-    match = re.match(r"^(.*?)(\d+)-of-(\d+)\.safetensors$", basename)
-    if match:
-        prefix = basename[: match.start(2)]
-        count = int(match.group(3))
-        filenames = []
-        for i in range(count):
-            filename = f"{prefix}{i + 1:05d}-of-{count:05d}.safetensors"
-            filepath = os.path.join(os.path.dirname(file_path), filename)
-            if os.path.exists(filepath):
-                filenames.append(filepath)
-            else:
-                raise FileNotFoundError(f"File {filepath} not found")
-        return filenames
-    else:
-        return None
-
-
-def load_split_weights(
-    file_path: str, device: Union[str, torch.device], disable_mmap: bool = False, dtype: Optional[torch.dtype] = None
-) -> Dict[str, torch.Tensor]:
-    """
-    Load split weights from a file. If the file name ends with 00001-of-00004 etc, it will load all files with the same prefix.
-    dtype is as is, no conversion is done.
-    """
-    device = torch.device(device)
-
-    # if the file name ends with 00001-of-00004 etc, we need to load the files with the same prefix
-    split_filenames = get_split_weight_filenames(file_path)
-    if split_filenames is not None:
-        state_dict = {}
-        for filename in split_filenames:
-            state_dict.update(load_safetensors(filename, device=device, disable_mmap=disable_mmap, dtype=dtype))
-    else:
-        state_dict = load_safetensors(file_path, device=device, disable_mmap=disable_mmap, dtype=dtype)
-    return state_dict
-
-
-def find_key(safetensors_file: str, starts_with: Optional[str] = None, ends_with: Optional[str] = None) -> Optional[str]:
-    """
-    Find a key in a safetensors file that starts with `starts_with` and ends with `ends_with`.
-    If `starts_with` is None, it will match any key.
-    If `ends_with` is None, it will match any key.
-    Returns the first matching key or None if no key matches.
-    """
-    with MemoryEfficientSafeOpen(safetensors_file) as f:
-        for key in f.keys():
-            if (starts_with is None or key.startswith(starts_with)) and (ends_with is None or key.endswith(ends_with)):
-                return key
-    return None
 

@@ -29,5 +29,5 @@ targets are gfx1150 and gfx1152.
 ## Workflow
 
 - Verify changes with the test suite: `.venv/bin/python -m pytest tests/ -q`
-  (tests are designed to run without torch or real weights).
+  (tests are designed to run without real weights).
 - Do not run heavy/compute-heavy commands.

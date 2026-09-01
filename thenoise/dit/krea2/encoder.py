@@ -26,7 +26,8 @@ from transformers import (
     Qwen3VLForConditionalGeneration,
 )
 
-from thenoise.utils.safetensors import load_split_weights
+from thenoise.dit.quantized import replace_linears
+from thenoise.utils.loader import load_text_encoder_weights
 
 logger = logging.getLogger(__name__)
 
@@ -96,25 +97,20 @@ class TextEncoderConfig:
     tokenizer_repo: str = QWEN3_VL_4B_INSTRUCT_REPO_ID
 
 
-def _convert_comfyui_qwen3vl_state_dict(sd: dict[str, Tensor]) -> dict[str, Tensor]:
-    """Map a ComfyUI-style (bare ``model.`` / ``visual.``) Qwen3-VL state dict onto the HF
+def _convert_comfyui_qwen3vl_state_dict(key: str) -> str:
+    """Map a ComfyUI-style (bare ``model.`` / ``visual.``) Qwen3-VL state dict key onto the HF
     ``Qwen3VLForConditionalGeneration`` layout. Official HF checkpoints already use the
     ``model.language_model.`` / ``model.visual.`` layout and pass through unchanged.
     """
-    converted: dict[str, Tensor] = {}
-    for key, value in sd.items():
-        if key.startswith("model.language_model.") or key.startswith("model.visual."):
-            new_key = key
-        elif key.startswith("visual."):
-            new_key = "model.visual." + key[len("visual.") :]
-        elif key.startswith("language_model."):
-            new_key = "model." + key
-        elif key.startswith("model."):
-            new_key = "model.language_model." + key[len("model.") :]
-        else:
-            new_key = key
-        converted[new_key] = value
-    return converted
+    if key.startswith("model.language_model.") or key.startswith("model.visual."):
+        return key
+    if key.startswith("visual."):
+        return "model.visual." + key[len("visual.") :]
+    if key.startswith("language_model."):
+        return "model." + key
+    if key.startswith("model."):
+        return "model.language_model." + key[len("model.") :]
+    return key
 
 
 def _load_qwen3_vl_model(
@@ -128,24 +124,17 @@ def _load_qwen3_vl_model(
     config = Qwen3VLConfig.from_dict(QWEN3_VL_4B_INSTRUCT_CONFIG)
     with init_empty_weights():
         model = Qwen3VLForConditionalGeneration._from_config(config)
+        del model.lm_head
+        replace_linears(model)
 
     logger.info(f"Loading Krea 2 text encoder (Qwen3-VL) weights from {model_path}")
-    sd = load_split_weights(model_path, device=device, disable_mmap=disable_mmap, dtype=dtype)
-    sd = _convert_comfyui_qwen3vl_state_dict(sd)
-
-    info = model.load_state_dict(sd, strict=False, assign=True)
-    # Qwen3-VL-4B ties the LM head to the input embeddings (tie_word_embeddings=true), so the
-    # checkpoint omits lm_head.weight; re-tie after loading to materialize it.
-    model.tie_weights()
-
-    unexpected = list(info.unexpected_keys)
-    missing = [k for k in info.missing_keys if k != "lm_head.weight"]
-    if unexpected or missing:
-        raise RuntimeError(
-            f"Qwen3-VL text encoder checkpoint did not match the model: missing={missing[:10]}, unexpected={unexpected[:10]}"
-        )
-
-    model.to(device)
+    load_text_encoder_weights(
+        model,
+        model_path,
+        device=device,
+        dtype=dtype,
+        key_map=_convert_comfyui_qwen3vl_state_dict,
+    )
     if dtype is not None:
         model.to(dtype)
     return model.eval().requires_grad_(False)
@@ -212,7 +201,7 @@ class Qwen3VLConditioner(torch.nn.Module):
             ).to(self.qwen.device, non_blocking=True)
             input_ids = torch.cat([inputs["input_ids"], suffix_ids], dim=1)
             mask = torch.cat([inputs["attention_mask"].bool(), suffix_mask], dim=1)
-            states = self.qwen(input_ids=input_ids, attention_mask=mask, output_hidden_states=True)
+            states = self.qwen.model(input_ids=input_ids, attention_mask=mask, output_hidden_states=True)
 
             hiddens = torch.stack([states.hidden_states[i] for i in self.select_layers], dim=2)
             hiddens = hiddens[:, prefix_idx:]

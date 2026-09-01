@@ -1,13 +1,13 @@
 # Anima model loading/saving utilities
 
 import os
-from typing import Dict, List, Optional, Union
+from typing import Optional, Union
 import torch
-from safetensors.torch import load_file
 from accelerate import init_empty_weights
 
 from thenoise.dit.anima import models as anima_models
-from thenoise.utils.loader import load_dit
+from thenoise.dit.quantized import replace_linears
+from thenoise.utils.loader import load_dit, load_text_encoder_weights
 from thenoise.utils.safetensors import WRAP_PREFIXES
 from thenoise.utils.setup_logging import setup_logging
 
@@ -15,6 +15,11 @@ setup_logging()
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_model_prefix(key: str) -> str:
+    """Strip a leading ``model.`` prefix from a checkpoint key (bare Qwen3Model layout)."""
+    return key[len("model.") :] if key.startswith("model.") else key
 
 
 def _count_anima_blocks(dit_path: str) -> int:
@@ -149,8 +154,6 @@ def load_qwen3_text_encoder(
     qwen3_path: str,
     dtype: Union[str, torch.device],
     device: str,
-    lora_weights: Optional[List[Dict[str, torch.Tensor]]] = None,
-    lora_multipliers: Optional[List[float]] = None,
 ):
     """Load Qwen3-0.6B text encoder.
 
@@ -181,35 +184,17 @@ def load_qwen3_text_encoder(
 
         tokenizer = AutoTokenizer.from_pretrained(config_dir, local_files_only=True)
         qwen3_config = transformers.Qwen3Config.from_pretrained(config_dir, local_files_only=True)
-        model = transformers.Qwen3ForCausalLM(qwen3_config).model
+        with init_empty_weights():
+            model = transformers.Qwen3ForCausalLM._from_config(qwen3_config).model
+            replace_linears(model)
 
-        # Load weights
-        if qwen3_path.endswith(".safetensors"):
-            if lora_weights is None:
-                state_dict = load_file(qwen3_path, device="cpu")
-            else:
-                state_dict = load_safetensors_with_lora(
-                    model_files=qwen3_path,
-                    lora_weights_list=lora_weights,
-                    lora_multipliers=lora_multipliers,
-                    calc_device=device,
-                    move_to_device=True,
-                    dit_weight_dtype=None,
-                )
-        else:
-            assert lora_weights is None, "LoRA weights merging is only supported for safetensors checkpoints"
-            state_dict = torch.load(qwen3_path, map_location="cpu", weights_only=True)
-
-        # Remove 'model.' prefix if present
-        new_sd = {}
-        for k, v in state_dict.items():
-            if k.startswith("model."):
-                new_sd[k[len("model.") :]] = v
-            else:
-                new_sd[k] = v
-
-        info = model.load_state_dict(new_sd, strict=False)
-        logger.info(f"Loaded Qwen3 state dict: {info}")
+        load_text_encoder_weights(
+            model,
+            qwen3_path,
+            device=device,
+            dtype=dtype,
+            key_map=_strip_model_prefix,
+        )
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
