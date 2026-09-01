@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 import torch
 
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 class PixelUpscalerManager:
     """Owns the pixel-domain upscaler pool: dir, scales, last-used loaded model."""
 
-    def __init__(self, upscaler_dir: str = "", device: str = "cuda"):
+    def __init__(self, upscaler_dir: str, device: Union[str, torch.device]):
         self.upscaler_dir = upscaler_dir
         self.device = device
         self._pixel_upscaler = None

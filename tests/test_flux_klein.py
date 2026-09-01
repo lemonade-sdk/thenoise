@@ -155,6 +155,142 @@ def test_flux2_vae_decode_shape():
     assert pixels.min() >= -1.0 and pixels.max() <= 1.0
 
 
+def test_flux2_vae_encode_shape():
+    """Encoder: pixels [-1,1] -> canonical packed latent (16x compression)."""
+    vae = AutoencoderKLFlux2()
+    pixels = torch.randn(1, 3, 64, 64)
+    latents = vae.encode_pixels_to_latents(pixels)
+    assert latents.shape == (1, 128, 4, 4)
+    assert latents.dtype == torch.float32
+
+
+def test_flux2_vae_quant_conv_matches_checkpoint():
+    """encoder.quant_conv is 2*z_channels -> 2*z_channels (64->64), per the
+    official flux2-vae checkpoint; the gaussian mean is taken in eval mode."""
+    vae = AutoencoderKLFlux2()
+    q = vae.encoder.quant_conv
+    assert q.weight.shape == (64, 64, 1, 1)
+    assert q.bias.shape == (64,)
+    # conv_out emits 2*z_channels (64); quant_conv preserves it.
+    assert vae.encoder.conv_out.out_channels == 64
+
+
+def test_flux2_vae_encode_decode_shape_roundtrip():
+    """Encode then decode returns the pixel shape (no weights, shape only)."""
+    vae = AutoencoderKLFlux2()
+    pixels = torch.randn(1, 3, 64, 64)
+    latents = vae.encode_pixels_to_latents(pixels)
+    out = vae.decode_to_pixels(latents)
+    assert out.shape == pixels.shape
+
+
+def test_flux2_reference_ids_via_prc_img_t_coord():
+    """Reference packing uses ``prc_img`` with t-axis = Flux2 index (10)."""
+    from thenoise.dit.flux2.sampling import prc_img
+
+    ref = torch.randn(1, 8, 4, 4)
+    _, ids = prc_img(ref, t_coord=torch.tensor([10]))
+    assert ids.shape == (1, 16, 4)
+    # The reference t-axis is the index (10), not the still-image 0.
+    assert torch.all(ids[0, :, 0] == 10)
+
+
+def test_pack_reference_latent_successive_index():
+    """Multi-ref packing assigns successive t-axes (10, 20, ...) per ComfyUI."""
+    from thenoise.dit.flux2.sampling import prc_img
+
+    ref = torch.randn(1, 8, 4, 4)
+    # First ref -> index 10, second -> 20 (REF_INDEX * position).
+    _, ids1 = prc_img(ref, t_coord=torch.tensor([10]))
+    _, ids2 = prc_img(ref, t_coord=torch.tensor([20]))
+    assert torch.all(ids1[0, :, 0] == 10)
+    assert torch.all(ids2[0, :, 0] == 20)
+    # Concatenated along the token dimension keeps both refs distinct.
+    cat = torch.cat([ids1, ids2], dim=1)
+    assert cat.shape == (1, 32, 4)
+
+
+def test_pack_reference_latent_rejects_unsupported_method():
+    """An unsupported ``ref_latents_method`` raises rather than being ignored."""
+    import pytest
+
+    model = FluxKleinModel.__new__(FluxKleinModel)  # no __init__ (no weights)
+    model.device = "cpu"
+    model.dtype = torch.float32
+    model.REF_INDEX = 10
+    ref = torch.randn(1, 8, 4, 4)
+    with pytest.raises(ValueError):
+        model.pack_reference_latent(ref, method="crop")
+
+
+
+def test_resize_to_cover_center_crop_keeps_target_size():
+    """ComfyUI-style ref resize: cover the target, center-crop; no padding."""
+    from PIL import Image
+    from thenoise.utils.image_tensor import resize_to_cover_center_crop
+
+    # Wide source into a square target: scale height to 100, width overflows, crop.
+    img = Image.new("RGB", (200, 50), "red")
+    out = resize_to_cover_center_crop(img, 100, 100)
+    assert out.size == (100, 100)
+
+    # Same aspect ratio: only resized, no crop.
+    img2 = Image.new("RGB", (200, 100), "blue")
+    out2 = resize_to_cover_center_crop(img2, 100, 50)
+    assert out2.size == (100, 50)
+
+    # Already at target size: returned unchanged.
+    img3 = Image.new("RGB", (64, 64), "green")
+    assert resize_to_cover_center_crop(img3, 64, 64) is img3
+
+
+def test_flux2_forward_with_reference_tokens():
+    """Flux2 forward consumes ref tokens+ids and slices them off the output."""
+    torch.manual_seed(0)
+    params = Flux2Params(
+        in_channels=8,
+        context_in_dim=24,
+        hidden_size=16,
+        num_heads=2,
+        depth=1,
+        depth_single_blocks=1,
+        axes_dim=[2, 2, 2, 2],
+        mlp_ratio=1.5,
+        use_guidance_embed=False,
+    )
+    model = Flux2(params)
+    model.eval()
+
+    seq = 4
+    x = torch.randn(1, seq, 8)
+    x_ids = torch.zeros(1, seq, 4, dtype=torch.long)
+    t = torch.tensor([0.5])
+    ctx = torch.randn(1, 8, 24)
+    ctx_ids = torch.zeros(1, 8, 4, dtype=torch.long)
+    ref_tokens = torch.randn(1, 6, 8)
+    ref_ids = torch.full((1, 6, 4), 10, dtype=torch.long)
+
+    with torch.no_grad():
+        out = model(
+            x=x, x_ids=x_ids, timesteps=t, ctx=ctx, ctx_ids=ctx_ids,
+            ref_tokens=ref_tokens, ref_ids=ref_ids,
+        )
+    # The reference tokens are concatenated in and sliced back off, so the
+    # output is exactly the image tokens (seq), not seq + ref tokens.
+    assert out.shape == (1, seq, 8)
+    assert torch.isfinite(out).all()
+
+    # A reference-conditioned pass must differ from the un-conditioned one.
+    with torch.no_grad():
+        base = model(x=x, x_ids=x_ids, timesteps=t, ctx=ctx, ctx_ids=ctx_ids)
+    assert not torch.allclose(out, base)
+
+
+def test_flux_klein_supports_edit():
+    assert FluxKleinModel.supports_edit is True
+    assert FluxKleinModel.REF_INDEX == 10
+
+
 def test_qwen3_8b_config_matches_klein9b_context():
     # Klein 9B context = 3 * Qwen3-8B hidden (4096).
     assert QWEN3_8B_CONFIG["hidden_size"] == 4096

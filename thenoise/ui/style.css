@@ -676,7 +676,7 @@ input[type=range]::-webkit-slider-thumb {
   background: var(--panel);
 }
 
-.hist-item img {
+.thumb-img {
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -807,6 +807,63 @@ input[type=range]::-webkit-slider-thumb {
   font-size: .85rem;
   text-align: center;
   word-break: break-all;
+}
+
+/* ---------- edit reference thumbnails ---------- */
+.ref-thumbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+  margin-top: .4rem;
+}
+
+.ref-thumb {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border: 2px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: pointer;
+  background: var(--panel-2);
+  flex: none;
+}
+
+.ref-thumb .ref-remove {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 18px;
+  height: 18px;
+  background: rgba(0, 0, 0, .65);
+  color: #fff;
+  border: none;
+  border-radius: 0 0 0 6px;
+  font-size: .7rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ref-thumb .ref-remove:hover {
+  background: var(--err);
+}
+
+.ref-thumb.first {
+  border-color: var(--accent);
+}
+
+.ref-thumb .first-badge {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, .65);
+  color: var(--accent);
+  font-size: .55rem;
+  padding: .05rem .3rem;
+  border-radius: 0 6px 0 0;
 }
 
 /* ---------- upscale single / result panels ---------- */

@@ -15,7 +15,7 @@ from thenoise.models.base import (
     Step,
     normalize_keys,
 )
-from thenoise.models.config import ModelConfig, SamplingParams
+from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.math import round_up
 from thenoise.vae import load_qwen_vae
 
@@ -89,14 +89,11 @@ class Krea2Model(DiffusionModel):
     # ------------------------------------------------------------ kernels
     def encode_prompt(
         self,
-        prompt: str,
-        negative_prompt: str = "",
-        *,
-        guidance_scale: float,
+        args: EncodePromptArgs,
     ) -> Conditioning:
-        cfg = guidance_scale > 1.0
+        cfg = args.guidance_scale > 1.0
         txt, txtmask, untxt, untxtmask = encode_prompts(
-            self.encoder, [prompt], [negative_prompt], cfg=cfg
+            self.encoder, [args.prompt], [args.negative_prompt], cfg=cfg
         )
         # Fuse the text stream ONCE here (prompt stage) so it is cached and reused
         # across denoise steps and across runs with the same prompt/LoRA config. The

@@ -16,6 +16,7 @@ The default schedule is Euler (the Flux.2 flow ODE); ER-SDE is also usable.
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 import torch
 
@@ -28,7 +29,7 @@ from thenoise.dit.flux2.utils import (
     load_qwen3_embedder,
 )
 from thenoise.models.base import Conditioning, DiffusionModel, Step, normalize_keys
-from thenoise.models.config import ModelConfig, SamplingParams
+from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.math import round_up
 from thenoise.vae import load_flux2_vae
 
@@ -51,6 +52,11 @@ class FluxKleinModel(DiffusionModel):
     # Packed-latent geometry (Flux.2 VAE): 128ch at 16x spatial compression.
     LATENT_CHANNELS = 128
     _PACK = 16  # pixel / packed-latent ratio
+
+    # Reference-latent editing: Flux2 Klein supports the ComfyUI "index" method
+    # with ``ref_index_scale = 10`` (the t-axis offset for the reference latent).
+    supports_edit = True
+    REF_INDEX = 10
 
     @staticmethod
     def detect(f) -> bool:
@@ -88,7 +94,7 @@ class FluxKleinModel(DiffusionModel):
             tokenizer_dir=find_flux2_tokenizer_dir(config.text_encoder_path),
         )
 
-        # Flux.2 VAE (decoder-only).
+        # Flux.2 VAE (encoder + decoder).
         self.vae = load_flux2_vae(self.vae_path, device=self.device, disable_mmap=True, dtype=self.dtype)
         self.vae.eval().requires_grad_(False)
 
@@ -105,15 +111,18 @@ class FluxKleinModel(DiffusionModel):
     # ------------------------------------------------------------ kernels
     def encode_prompt(
         self,
-        prompt: str,
-        negative_prompt: str = "",
-        *,
-        guidance_scale: float,
+        args: EncodePromptArgs,
     ) -> Conditioning:
-        cond = self.text_encoder(prompt)  # [1, 512, ctx_dim]
+        """Encode the edit instruction (text-only for Flux2 Klein).
+
+        ``args.image`` is accepted for the shared edit pipeline but unused here —
+        the input image is fed to the DiT purely as a reference latent, never into the
+        text encoder (unlike Qwen Image Edit).
+        """
+        cond = self.text_encoder(args.prompt)  # [1, 512, ctx_dim]
         null = None
-        if guidance_scale > 1.0:
-            null = self.text_encoder(negative_prompt)
+        if args.guidance_scale > 1.0:
+            null = self.text_encoder(args.negative_prompt)
         return Conditioning(cond=cond, null=null)
 
     def init_latents(self, params: SamplingParams) -> torch.Tensor:
@@ -127,6 +136,8 @@ class FluxKleinModel(DiffusionModel):
         latents: torch.Tensor,
         cond: Conditioning,
         params: SamplingParams,
+        ref: Optional[torch.Tensor] = None,
+        ref_method: str = "index",
     ) -> torch.Tensor:
         """Pack the canonical latent into DiT tokens and stash conditioning, ONCE.
 
@@ -134,6 +145,9 @@ class FluxKleinModel(DiffusionModel):
         plus ``[B, seq, 4]`` position ids. The text embeddings and their (fixed)
         position ids are stashed so the per-step ``denoise_step`` stays a pure DiT
         forward. Safe under the lock.
+
+        In the edit path (``ref`` given) the reference latent is packed the same
+        way and stashed as ``_ref_tokens``/``_ref_ids`` for ``denoise_step``.
         """
         dev = torch.device(self.device)
         x, x_ids = prc_img(latents.to(device=dev, dtype=self.dtype))
@@ -147,6 +161,19 @@ class FluxKleinModel(DiffusionModel):
             _, self._un_txt_ids = prc_txt(self._un_txt)
         else:
             self._un_txt = self._un_txt_ids = None
+
+        if ref is not None:
+            # Pack each ref with a successive t-axis index (REF_INDEX, 2x, ...)
+            # per ComfyUI, then concat all ref tokens+ids into one stream.
+            ref_tokens, ref_ids = [], []
+            for i, ref_latent in enumerate(ref):
+                t, ids = self.pack_reference_latent(ref_latent, ref_method, ref_index=i + 1)
+                ref_tokens.append(t)
+                ref_ids.append(ids)
+            self._ref_tokens = torch.cat(ref_tokens, dim=1)
+            self._ref_ids = torch.cat(ref_ids, dim=1)
+        else:
+            self._ref_tokens = self._ref_ids = None
 
         return x
 
@@ -175,13 +202,50 @@ class FluxKleinModel(DiffusionModel):
         dev = torch.device(self.device)
         t_full = torch.full((len(latents),), float(t), dtype=latents.dtype, device=dev)
         with torch.no_grad(), torch.autocast(device_type=dev.type, dtype=self.dtype):
-            pos = self.dit(x=latents, x_ids=self._img_ids, timesteps=t_full, ctx=self._txt, ctx_ids=self._txt_ids)
+            pos = self.dit(
+                x=latents, x_ids=self._img_ids, timesteps=t_full, ctx=self._txt,
+                ctx_ids=self._txt_ids, ref_tokens=self._ref_tokens, ref_ids=self._ref_ids,
+            )
             if guidance_scale > 1.0 and self._un_txt is not None:
-                neg = self.dit(x=latents, x_ids=self._img_ids, timesteps=t_full, ctx=self._un_txt, ctx_ids=self._un_txt_ids)
+                neg = self.dit(
+                    x=latents, x_ids=self._img_ids, timesteps=t_full, ctx=self._un_txt,
+                    ctx_ids=self._un_txt_ids, ref_tokens=self._ref_tokens, ref_ids=self._ref_ids,
+                )
                 v = neg + guidance_scale * (pos - neg)
             else:
                 v = pos
         return v
+
+    # ------------------------------------------------------------ editing
+    def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
+        """Encode input pixels (``[C,H,W]`` in [-1, 1]) -> canonical reference latent.
+
+        Returns the Flux.2 packed latent ``[1, 128, H//16, W//16]`` (normalized).
+        """
+        return self.vae.encode_pixels_to_latents(pixels.unsqueeze(0))
+
+    def pack_reference_latent(
+        self,
+        latents: torch.Tensor,
+        method: str = "index",
+        ref_index: int = 1,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Canonical reference latent -> (tokens, ids), t-axis = REF_INDEX*ref_index.
+
+        ``ref_index`` is the 1-based position (ComfyUI ``ref_index_scale``): the
+        first ref uses 10, the second 20, etc. Only the ``index`` packing method
+        is supported; anything else is rejected rather than silently ignored.
+        """
+        if method != "index":
+            raise ValueError(
+                f"unsupported ref_latents_method {method!r}; only 'index' is supported"
+            )
+        dev = torch.device(self.device)
+        index = self.REF_INDEX * ref_index
+        return prc_img(
+            latents.to(device=dev, dtype=self.dtype),
+            t_coord=torch.tensor([index], device=dev),
+        )
 
     def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:
         """Unpack the DiT tokens back to the canonical packed latent."""

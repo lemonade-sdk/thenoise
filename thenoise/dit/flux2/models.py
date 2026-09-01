@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from typing import Callable
 
 import torch
 from einops import rearrange
 from torch import Tensor, nn
 
 from thenoise.dit.quantized import QuantizedLinear
+from thenoise.dit.reference import concat_reference, slice_reference_output
 from thenoise.utils.attention import attention as sdpa_attention
 from thenoise.utils.setup_logging import setup_logging
 
@@ -143,9 +145,9 @@ def attention(qkv_list: list[Tensor], pe: Tensor) -> Tensor:
 class MLPEmbedder(nn.Module):
     def __init__(self, in_dim: int, hidden_dim: int, disable_bias: bool = False):
         super().__init__()
-        self.in_layer = nn.Linear(in_dim, hidden_dim, bias=not disable_bias)
+        self.in_layer = QuantizedLinear(in_dim, hidden_dim, bias=not disable_bias)
         self.silu = nn.SiLU()
-        self.out_layer = nn.Linear(hidden_dim, hidden_dim, bias=not disable_bias)
+        self.out_layer = QuantizedLinear(hidden_dim, hidden_dim, bias=not disable_bias)
 
     def forward(self, x: Tensor) -> Tensor:
         return self.out_layer(self.silu(self.in_layer(x)))
@@ -178,7 +180,7 @@ class Modulation(nn.Module):
         super().__init__()
         self.is_double = double
         self.multiplier = 6 if double else 3
-        self.lin = nn.Linear(dim, self.multiplier * dim, bias=not disable_bias)
+        self.lin = QuantizedLinear(dim, self.multiplier * dim, bias=not disable_bias)
 
     def forward(self, vec: torch.Tensor):
         org_dtype = vec.dtype
@@ -195,8 +197,8 @@ class LastLayer(nn.Module):
     def __init__(self, hidden_size: int, out_channels: int):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.linear = nn.Linear(hidden_size, out_channels, bias=False)
-        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=False))
+        self.linear = QuantizedLinear(hidden_size, out_channels, bias=False)
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), QuantizedLinear(hidden_size, 2 * hidden_size, bias=False))
 
     def forward(self, x: torch.Tensor, vec: torch.Tensor) -> torch.Tensor:
         org_dtype = x.dtype
@@ -239,7 +241,6 @@ class SingleStreamBlock(nn.Module):
         self.pre_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.mlp_act = SiLUActivation()
 
-    @torch.compile(fullgraph=True)
     def forward(self, x: Tensor, pe: Tensor, mod: tuple[Tensor, Tensor]) -> Tensor:
         mod_shift, mod_scale, mod_gate = mod
         x_mod = (1 + mod_scale) * self.pre_norm(x) + mod_shift
@@ -284,7 +285,6 @@ class DoubleStreamBlock(nn.Module):
             QuantizedLinear(mlp_hidden_dim, hidden_size, bias=False),
         )
 
-    @torch.compile(fullgraph=True)
     def forward(
         self,
         img: Tensor,
@@ -350,9 +350,9 @@ class Flux2(nn.Module):
         self.num_heads = params.num_heads
 
         self.pe_embedder = EmbedND(dim=pe_dim, theta=params.theta, axes_dim=params.axes_dim)
-        self.img_in = nn.Linear(self.in_channels, self.hidden_size, bias=False)
+        self.img_in = QuantizedLinear(self.in_channels, self.hidden_size, bias=False)
         self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size, disable_bias=True)
-        self.txt_in = nn.Linear(params.context_in_dim, self.hidden_size, bias=False)
+        self.txt_in = QuantizedLinear(params.context_in_dim, self.hidden_size, bias=False)
 
         self.use_guidance_embed = params.use_guidance_embed
         if self.use_guidance_embed:
@@ -374,6 +374,23 @@ class Flux2(nn.Module):
         self.num_double_blocks = len(self.double_blocks)
         self.num_single_blocks = len(self.single_blocks)
 
+        # Per-block compiled-forward cache: ``(blocks, index, dynamic)``. t2i
+        # compiles static (fixed shape); edit (variable ref count) compiles
+        # dynamic to avoid Inductor's recompile/`CantSplit` failure on the grown
+        # sequence. Keyed by the owning ModuleList + position (not ``id(block)``),
+        # which also keeps the double vs single streams from colliding.
+        self._compiled_blocks: dict[tuple[nn.ModuleList, int, bool], Callable] = {}
+
+    def _compile_block(self, blocks: nn.ModuleList, index: int, dynamic: bool) -> Callable:
+        """Cached ``torch.compile``d forward for ``blocks[index]``."""
+        block = blocks[index]
+        key = (blocks, index, dynamic)
+        fn = self._compiled_blocks.get(key)
+        if fn is None:
+            fn = torch.compile(block.forward, fullgraph=True, dynamic=dynamic)
+            self._compiled_blocks[key] = fn
+        return fn
+
     @property
     def device(self):
         return next(self.parameters()).device
@@ -390,8 +407,11 @@ class Flux2(nn.Module):
         ctx: Tensor,
         ctx_ids: Tensor,
         guidance: Tensor | None = None,
+        ref_tokens: Tensor | None = None,
+        ref_ids: Tensor | None = None,
     ) -> Tensor:
         num_txt_tokens = ctx.shape[1]
+        num_img_tokens = x.shape[1]
 
         timestep_emb = timestep_embedding(timesteps, 256)
         vec = self.time_in(timestep_emb)
@@ -403,22 +423,36 @@ class Flux2(nn.Module):
         double_block_mod_txt = self.double_stream_modulation_txt(vec)
         single_block_mod, _ = self.single_stream_modulation(vec)
 
+        # Reference-latent editing (Flux2 Klein): append the reference image
+        # tokens+ids to the image stream (in packed-latent space) so the DiT
+        # attends to them alongside the text instruction. ``None`` (plain t2i)
+        # is a no-op. Must happen before ``img_in``/``pe_embedder`` so the refs
+        # are embedded like the image tokens.
+        x, x_ids = concat_reference(x, x_ids, ref_tokens, ref_ids)
+
         img = self.img_in(x)
         txt = self.txt_in(ctx)
         pe_x = self.pe_embedder(x_ids)
         pe_ctx = self.pe_embedder(ctx_ids)
 
-        for block in self.double_blocks:
-            img, txt = block(img, txt, pe_x, pe_ctx, double_block_mod_img, double_block_mod_txt)
+        # Edit varies seq length (ref tokens appended), so compile blocks
+        # dynamically there; t2i keeps static-specialized kernels.
+        dynamic = ref_tokens is not None or ref_ids is not None
+
+        for i in range(len(self.double_blocks)):
+            fwd = self._compile_block(self.double_blocks, i, dynamic)
+            img, txt = fwd(img, txt, pe_x, pe_ctx, double_block_mod_img, double_block_mod_txt)
 
         img = torch.cat((txt, img), dim=1)
         pe = torch.cat((pe_ctx, pe_x), dim=2)
 
-        for block in self.single_blocks:
-            img = block(img, pe, single_block_mod)
+        for i in range(len(self.single_blocks)):
+            fwd = self._compile_block(self.single_blocks, i, dynamic)
+            img = fwd(img, pe, single_block_mod)
 
         img = img.to(vec.device)
-        img = img[:, num_txt_tokens:, ...]
+        img = img[:, num_txt_tokens:, ...]  # drop the text tokens
+        img = slice_reference_output(img, num_img_tokens)  # drop ref tokens
         img = self.final_layer(img, vec)
         return img
 

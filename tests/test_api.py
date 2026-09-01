@@ -84,6 +84,23 @@ def test_upscalers_available_without_model():
     assert res["upscalers"] == []
 
 
+def test_health_reports_edit_capability():
+    """/health exposes model capabilities so the UI can gate the Edit tab."""
+    runtime = _fake_runtime()
+    runtime._model = type("M", (), {"supports_edit": True})()
+    app = create_app(runtime)
+    res = _endpoint(app, "/health")()
+    assert res["models"] == ["fake"]
+    assert res["capabilities"] == {"supports_edit": True}
+
+
+def test_health_capabilities_empty_without_model():
+    app = create_app(_empty_runtime())
+    res = _endpoint(app, "/health")()
+    assert res["models"] == []
+    assert res["capabilities"] == {}
+
+
 def test_text2image_passes_pixel_upscaler(tmp_path):
     runtime = _fake_runtime(tmp_path)
     app = create_app(runtime)
@@ -156,13 +173,14 @@ def test_upscale_defaults_to_png(monkeypatch):
 
 
 def test_ui_references_external_css_and_js():
-    """index.html links static/style.css and static/app.js (single static endpoint)."""
+    """index.html links static/style.css and static/js/app.js + static/js/helpers.js."""
     from thenoise.api import _UI_DIR
     import os
 
     html = open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8").read()
     assert '<link rel="stylesheet" href="static/style.css">' in html
-    assert '<script src="static/app.js"></script>' in html
+    assert '<script src="static/js/helpers.js"></script>' in html
+    assert '<script src="static/js/app.js"></script>' in html
     assert "<style>" not in html
     assert "<script>" not in html
     assert "fonts.googleapis.com" not in html
@@ -178,10 +196,11 @@ def test_static_serves_css():
 
 def test_static_serves_js():
     app = create_app(_empty_runtime())
-    res = _endpoint(app, "/static/{filename:path}")("app.js")
-    assert res.status_code == 200
-    assert res.media_type == "text/javascript"
-    assert res.body
+    for name in ("js/app.js", "js/helpers.js"):
+        res = _endpoint(app, "/static/{filename:path}")(name)
+        assert res.status_code == 200
+        assert res.media_type == "text/javascript"
+        assert res.body
 
 
 def test_static_blocks_path_traversal():

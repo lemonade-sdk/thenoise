@@ -14,6 +14,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from thenoise.utils.device import clean_memory_on_device
+
 logger = logging.getLogger(__name__)
 
 
@@ -95,11 +97,7 @@ class Runtime:
         self._model = None
         self._model_name = None
         gc.collect()
-        try:
-            import torch
-            torch.cuda.empty_cache()
-        except Exception:  # torch may be unavailable (config-only tests)
-            pass
+        clean_memory_on_device(self._settings.device)
 
     @property
     def model(self) -> Any:
@@ -130,3 +128,12 @@ class Runtime:
 
     def available(self) -> list[str]:
         return [self._model_name] if self._model else []
+
+    def model_capabilities(self) -> dict:
+        """Capabilities of the currently loaded model (empty when none loaded).
+        """
+        if self._model is None:
+            return {}
+        return {
+            "supports_edit": bool(getattr(self._model, "supports_edit", False)),
+        }

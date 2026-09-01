@@ -453,13 +453,13 @@ class TimestepEmbedding(nn.Module):
         super().__init__()
         self.in_dim = in_features
         self.out_dim = out_features
-        self.linear_1 = nn.Linear(in_features, out_features, bias=not use_adaln_lora)
+        self.linear_1 = QuantizedLinear(in_features, out_features, bias=not use_adaln_lora)
         self.activation = nn.SiLU()
         self.use_adaln_lora = use_adaln_lora
         if use_adaln_lora:
-            self.linear_2 = nn.Linear(out_features, 3 * out_features, bias=False)
+            self.linear_2 = QuantizedLinear(out_features, 3 * out_features, bias=False)
         else:
-            self.linear_2 = nn.Linear(out_features, out_features, bias=False)
+            self.linear_2 = QuantizedLinear(out_features, out_features, bias=False)
 
         self.init_weights()
 
@@ -505,7 +505,7 @@ class PatchEmbed(nn.Module):
                 m=spatial_patch_size,
                 n=spatial_patch_size,
             ),
-            nn.Linear(in_channels * spatial_patch_size * spatial_patch_size * temporal_patch_size, out_channels, bias=False),
+            QuantizedLinear(in_channels * spatial_patch_size * spatial_patch_size * temporal_patch_size, out_channels, bias=False),
         )
         self.dim = in_channels * spatial_patch_size * spatial_patch_size * temporal_patch_size
 
@@ -541,7 +541,7 @@ class FinalLayer(nn.Module):
     ):
         super().__init__()
         self.layer_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.linear = nn.Linear(
+        self.linear = QuantizedLinear(
             hidden_size, spatial_patch_size * spatial_patch_size * temporal_patch_size * out_channels, bias=False
         )
         self.hidden_size = hidden_size
@@ -551,11 +551,11 @@ class FinalLayer(nn.Module):
         if use_adaln_lora:
             self.adaln_modulation = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(hidden_size, adaln_lora_dim, bias=False),
-                nn.Linear(adaln_lora_dim, self.n_adaln_chunks * hidden_size, bias=False),
+                QuantizedLinear(hidden_size, adaln_lora_dim, bias=False),
+                QuantizedLinear(adaln_lora_dim, self.n_adaln_chunks * hidden_size, bias=False),
             )
         else:
-            self.adaln_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, self.n_adaln_chunks * hidden_size, bias=False))
+            self.adaln_modulation = nn.Sequential(nn.SiLU(), QuantizedLinear(hidden_size, self.n_adaln_chunks * hidden_size, bias=False))
 
         self.init_weights()
 
@@ -636,23 +636,23 @@ class Block(nn.Module):
         if self.use_adaln_lora:
             self.adaln_modulation_self_attn = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(x_dim, adaln_lora_dim, bias=False),
-                nn.Linear(adaln_lora_dim, 3 * x_dim, bias=False),
+                QuantizedLinear(x_dim, adaln_lora_dim, bias=False),
+                QuantizedLinear(adaln_lora_dim, 3 * x_dim, bias=False),
             )
             self.adaln_modulation_cross_attn = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(x_dim, adaln_lora_dim, bias=False),
-                nn.Linear(adaln_lora_dim, 3 * x_dim, bias=False),
+                QuantizedLinear(x_dim, adaln_lora_dim, bias=False),
+                QuantizedLinear(adaln_lora_dim, 3 * x_dim, bias=False),
             )
             self.adaln_modulation_mlp = nn.Sequential(
                 nn.SiLU(),
-                nn.Linear(x_dim, adaln_lora_dim, bias=False),
-                nn.Linear(adaln_lora_dim, 3 * x_dim, bias=False),
+                QuantizedLinear(x_dim, adaln_lora_dim, bias=False),
+                QuantizedLinear(adaln_lora_dim, 3 * x_dim, bias=False),
             )
         else:
-            self.adaln_modulation_self_attn = nn.Sequential(nn.SiLU(), nn.Linear(x_dim, 3 * x_dim, bias=False))
-            self.adaln_modulation_cross_attn = nn.Sequential(nn.SiLU(), nn.Linear(x_dim, 3 * x_dim, bias=False))
-            self.adaln_modulation_mlp = nn.Sequential(nn.SiLU(), nn.Linear(x_dim, 3 * x_dim, bias=False))
+            self.adaln_modulation_self_attn = nn.Sequential(nn.SiLU(), QuantizedLinear(x_dim, 3 * x_dim, bias=False))
+            self.adaln_modulation_cross_attn = nn.Sequential(nn.SiLU(), QuantizedLinear(x_dim, 3 * x_dim, bias=False))
+            self.adaln_modulation_mlp = nn.Sequential(nn.SiLU(), QuantizedLinear(x_dim, 3 * x_dim, bias=False))
 
         self.init_weights()
 
@@ -1087,8 +1087,7 @@ class AdapterRotaryEmbedding(nn.Module):
         inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
         position_ids_expanded = position_ids[:, None, :].float()
 
-        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False):
+        with torch.autocast(device_type=x.device.type, enabled=False):
             freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos()
@@ -1109,15 +1108,15 @@ class LLMAdapterAttention(nn.Module):
         self.query_dim = query_dim
         self.context_dim = context_dim
 
-        self.q_proj = nn.Linear(query_dim, inner_dim, bias=False)
+        self.q_proj = QuantizedLinear(query_dim, inner_dim, bias=False)
         self.q_norm = LLMAdapterRMSNorm(self.head_dim)
 
-        self.k_proj = nn.Linear(context_dim, inner_dim, bias=False)
+        self.k_proj = QuantizedLinear(context_dim, inner_dim, bias=False)
         self.k_norm = LLMAdapterRMSNorm(self.head_dim)
 
-        self.v_proj = nn.Linear(context_dim, inner_dim, bias=False)
+        self.v_proj = QuantizedLinear(context_dim, inner_dim, bias=False)
 
-        self.o_proj = nn.Linear(inner_dim, query_dim, bias=False)
+        self.o_proj = QuantizedLinear(inner_dim, query_dim, bias=False)
 
     def forward(self, x, mask=None, context=None, position_embeddings=None, position_embeddings_context=None):
         context = x if context is None else context
@@ -1170,7 +1169,7 @@ class LLMAdapterTransformerBlock(nn.Module):
 
         self.norm_mlp = nn.LayerNorm(model_dim) if layer_norm else LLMAdapterRMSNorm(model_dim)
         self.mlp = nn.Sequential(
-            nn.Linear(model_dim, int(model_dim * mlp_ratio)), nn.GELU(), nn.Linear(int(model_dim * mlp_ratio), model_dim)
+            QuantizedLinear(model_dim, int(model_dim * mlp_ratio)), nn.GELU(), QuantizedLinear(int(model_dim * mlp_ratio), model_dim)
         )
 
     def forward(
@@ -1225,7 +1224,7 @@ class LLMAdapter(nn.Module):
         else:
             self.embed = nn.Embedding(32128, target_dim)
         if model_dim != target_dim:
-            self.in_proj = nn.Linear(target_dim, model_dim)
+            self.in_proj = QuantizedLinear(target_dim, model_dim)
         else:
             self.in_proj = nn.Identity()
         self.rotary_emb = AdapterRotaryEmbedding(model_dim // num_heads)
@@ -1235,7 +1234,7 @@ class LLMAdapter(nn.Module):
                 for _ in range(num_layers)
             ]
         )
-        self.out_proj = nn.Linear(model_dim, target_dim)
+        self.out_proj = QuantizedLinear(model_dim, target_dim)
         self.norm = LLMAdapterRMSNorm(target_dim)
 
     def forward(self, source_hidden_states, target_input_ids, target_attention_mask=None, source_attention_mask=None):

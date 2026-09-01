@@ -22,7 +22,7 @@ from thenoise.models.base import (
     Step,
     normalize_keys,
 )
-from thenoise.models.config import ModelConfig, SamplingParams
+from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.math import round_up
 from thenoise.vae import load_flux_vae
 
@@ -88,15 +88,12 @@ class ZImageModel(DiffusionModel):
     # ------------------------------------------------------------ kernels
     def encode_prompt(
         self,
-        prompt: str,
-        negative_prompt: str = "",
-        *,
-        guidance_scale: float,
+        args: EncodePromptArgs,
     ) -> Conditioning:
-        cond = self._encode_prompt(prompt)
+        cond = self._encode_prompt(args.prompt)
         null = None
-        if guidance_scale > 1.0:
-            null = self._encode_prompt(negative_prompt)
+        if args.guidance_scale > 1.0:
+            null = self._encode_prompt(args.negative_prompt)
         return Conditioning(cond=cond, null=null)
 
     def _encode_prompt(self, prompt: str) -> torch.Tensor:

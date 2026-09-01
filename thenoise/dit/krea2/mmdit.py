@@ -188,7 +188,7 @@ class LastLayer(torch.nn.Module):
     def __init__(self, features: int, patch: int, channels: int):
         super().__init__()
         self.norm = RMSNorm(features)
-        self.linear = torch.nn.Linear(features, patch * patch * channels, bias=True)
+        self.linear = QuantizedLinear(features, patch * patch * channels, bias=True)
         self.modulation = SimpleModulation(features)
 
     def forward(self, x: Tensor, tvec: Tensor) -> Tensor:
@@ -234,7 +234,7 @@ class TextFusionTransformer(torch.nn.Module):
     ):
         super().__init__()
         self.layerwise_blocks = torch.nn.ModuleList([TextFusionBlock(txt_dim, heads, multiplier, bias, kvheads) for _ in range(2)])
-        self.projector = torch.nn.Linear(num_txt_layers, 1, bias=False)
+        self.projector = QuantizedLinear(num_txt_layers, 1, bias=False)
         self.refiner_blocks = torch.nn.ModuleList([TextFusionBlock(txt_dim, heads, multiplier, bias, kvheads) for _ in range(2)])
 
     def forward(
@@ -297,7 +297,7 @@ class SingleStreamDiT(nn.Module):
         assert all(a % 2 == 0 for a in axes), f"axes = {axes}"
 
         self.posemb = PositionalEncoding(config.features, axes, theta=config.theta, ntk=1.0)
-        self.first = nn.Linear(config.channels * config.patch**2, config.features, bias=True)
+        self.first = QuantizedLinear(config.channels * config.patch**2, config.features, bias=True)
 
         self.blocks = nn.ModuleList(
             [
@@ -312,9 +312,9 @@ class SingleStreamDiT(nn.Module):
             ]
         )
         self.tmlp = nn.Sequential(
-            nn.Linear(config.tdim, config.features),
+            QuantizedLinear(config.tdim, config.features),
             nn.GELU(approximate="tanh"),
-            nn.Linear(config.features, config.features),
+            QuantizedLinear(config.features, config.features),
         )
         self.txtfusion = TextFusionTransformer(
             config.txtlayers,
@@ -326,13 +326,13 @@ class SingleStreamDiT(nn.Module):
         )
         self.txtmlp = nn.Sequential(
             RMSNorm(config.txtdim),
-            nn.Linear(config.txtdim, config.features),
+            QuantizedLinear(config.txtdim, config.features),
             nn.GELU(approximate="tanh"),
-            nn.Linear(config.features, config.features),
+            QuantizedLinear(config.features, config.features),
         )
         self.last = LastLayer(config.features, config.patch, config.channels)
 
-        self.tproj = nn.Sequential(nn.GELU(approximate="tanh"), nn.Linear(config.features, config.features * 6))
+        self.tproj = nn.Sequential(nn.GELU(approximate="tanh"), QuantizedLinear(config.features, config.features * 6))
 
     def fuse_text(self, context: Tensor, txtmask: Tensor | None) -> Tensor:
         """Run the text-fusion stream (TextFusionTransformer) + text-MLP.

@@ -37,8 +37,8 @@ single_mmdit_large_wide = SingleMMDiTConfig(
 
 def load_krea2_dit(
     dit_path: str,
-    device: Union[str, torch.device] = "cpu",
-    dtype: torch.dtype = torch.bfloat16,
+    device: Union[str, torch.device],
+    dtype: torch.dtype,
     config: SingleMMDiTConfig = single_mmdit_large_wide,
     loading_device: Optional[Union[str, torch.device]] = None,
 ) -> SingleStreamDiT:
@@ -61,8 +61,8 @@ def load_krea2_dit(
 
 def load_krea2_text_encoder(
     path: str,
-    dtype: torch.dtype = torch.bfloat16,
-    device: Union[str, torch.device] = "cpu",
+    dtype: torch.dtype,
+    device: Union[str, torch.device],
     max_length: int = TextEncoderConfig.max_length,
     select_layers: tuple = TextEncoderConfig.select_layers,
     tokenizer_repo: str = QWEN3_VL_4B_INSTRUCT_REPO_ID,

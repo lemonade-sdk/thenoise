@@ -45,9 +45,9 @@ class TimestepEmbedder(nn.Module):
         if mid_size is None:
             mid_size = out_size
         self.mlp = nn.Sequential(
-            nn.Linear(frequency_embedding_size, mid_size, bias=True),
+            QuantizedLinear(frequency_embedding_size, mid_size, bias=True),
             nn.SiLU(),
-            nn.Linear(mid_size, out_size, bias=True),
+            QuantizedLinear(mid_size, out_size, bias=True),
         )
         self.frequency_embedding_size = frequency_embedding_size
 
@@ -177,10 +177,10 @@ class FinalLayer(nn.Module):
     def __init__(self, hidden_size, out_channels):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.linear = nn.Linear(hidden_size, out_channels, bias=True)
+        self.linear = QuantizedLinear(hidden_size, out_channels, bias=True)
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(min(hidden_size, ADALN_EMBED_DIM), hidden_size, bias=True),
+            QuantizedLinear(min(hidden_size, ADALN_EMBED_DIM), hidden_size, bias=True),
         )
 
     def forward(self, x, c):
@@ -254,7 +254,7 @@ class ZImageTransformer2DModel(nn.Module):
         self.t_scale = t_scale
 
         # ComfyUI / Lumina layout: plain (single patch config) embedder + final layer.
-        self.x_embedder = nn.Linear(f_patch_size * patch_size * patch_size * in_channels, dim, bias=True)
+        self.x_embedder = QuantizedLinear(f_patch_size * patch_size * patch_size * in_channels, dim, bias=True)
         self.final_layer = FinalLayer(dim, patch_size * patch_size * f_patch_size * self.out_channels)
 
         self.noise_refiner = nn.ModuleList(
@@ -270,7 +270,7 @@ class ZImageTransformer2DModel(nn.Module):
             ]
         )
         self.t_embedder = TimestepEmbedder(min(dim, ADALN_EMBED_DIM), mid_size=1024)
-        self.cap_embedder = nn.Sequential(RMSNorm(cap_feat_dim, eps=norm_eps), nn.Linear(cap_feat_dim, dim, bias=True))
+        self.cap_embedder = nn.Sequential(RMSNorm(cap_feat_dim, eps=norm_eps), QuantizedLinear(cap_feat_dim, dim, bias=True))
 
         self.x_pad_token = nn.Parameter(torch.zeros(1, dim))
         self.cap_pad_token = nn.Parameter(torch.zeros(1, dim))

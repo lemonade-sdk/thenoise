@@ -13,6 +13,7 @@
 <div class="tabs">
   <img class="logo" src="static/logo.png" alt="TheNoise" title="TheNoise">
   <button class="tab ctrl active" data-tab="generate">Generate</button>
+  <button class="tab ctrl" data-tab="edit">Edit</button>
   <button class="tab ctrl" data-tab="upscale">Upscale</button>
 </div>
 
@@ -40,14 +41,14 @@
   <div class="swap-row">
     <div class="field">
       <label class="label" for="width">Width</label>
-      <input type="number" id="width" placeholder="auto" value="1024">
+      <input type="number" id="width" placeholder="auto" value="1024" min="0">
       <span class="hint">Max 4096</span>
     </div>
     <button class="swap ctrl" id="swap" title="Swap width and height"
       aria-label="Swap width and height">&#8646;</button>
     <div class="field">
       <label class="label" for="height">Height</label>
-      <input type="number" id="height" placeholder="auto" value="1024">
+      <input type="number" id="height" placeholder="auto" value="1024" min="0">
       <span class="hint">Max 4096</span>
     </div>
   </div>
@@ -55,11 +56,11 @@
   <div class="row">
     <div class="field">
       <label class="label" for="steps">Steps</label>
-      <input type="number" id="steps" placeholder="auto">
+      <input type="number" id="steps" placeholder="auto" min="0">
     </div>
     <div class="field">
       <label class="label" for="guidance_scale">Guidance</label>
-      <input type="number" id="guidance_scale" step="0.1" placeholder="auto">
+      <input type="number" id="guidance_scale" step="0.1" placeholder="auto" min="0">
     </div>
   </div>
 
@@ -74,7 +75,7 @@
 
   <div class="field">
     <label class="label" for="seed">Seed</label>
-    <input type="number" id="seed" placeholder="random">
+    <input type="number" id="seed" placeholder="random" min="0">
   </div>
 
   <div class="divider"></div>
@@ -155,6 +156,156 @@
 </main>
 </div><!-- /view-generate -->
 
+<div class="view hidden" id="view-edit">
+<div class="no-model hidden" id="edit_no_model">
+  <div class="no-model-title">Edit is not available</div>
+  <div class="no-model-sub">No model loaded. Start the server with
+    <span class="kbd">--dit</span>, <span class="kbd">--vae</span> and
+    <span class="kbd">--text-encoder</span> to enable it.</div>
+</div>
+<div class="no-model hidden" id="edit_no_support">
+  <div class="no-model-title">Edit is not available</div>
+  <div class="no-model-sub">The loaded model does not support image editing.</div>
+</div>
+<aside class="sidebar">
+  <div class="field">
+    <label class="label" for="edit_file">Reference image(s)</label>
+    <div class="dropzone" id="edit_dropzone">
+      <input type="file" id="edit_file" accept="image/*" multiple hidden>
+      <div class="dz-hint" id="edit_dz_hint">Drag &amp; drop one or more images here or <span class="kbd">click to browse</span></div>
+    </div>
+    <div class="ref-thumbs" id="edit_refs"></div>
+  </div>
+
+  <div class="field">
+    <label class="label" for="edit_prompt">Prompt</label>
+    <textarea id="edit_prompt" placeholder="Describe the edit…"></textarea>
+  </div>
+
+  <div class="field">
+    <label class="label" for="edit_negative_prompt">Negative prompt <span class="hint">optional</span></label>
+    <textarea id="edit_negative_prompt"></textarea>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="swap-row">
+    <div class="field">
+      <label class="label" for="edit_width">Width</label>
+      <input type="number" id="edit_width" placeholder="auto" value="" min="0">
+      <span class="hint">Max 4096</span>
+    </div>
+    <button class="swap ctrl" id="eswap" title="Swap width and height"
+      aria-label="Swap width and height">&#8646;</button>
+    <div class="field">
+      <label class="label" for="edit_height">Height</label>
+      <input type="number" id="edit_height" placeholder="auto" value="" min="0">
+      <span class="hint">Max 4096</span>
+    </div>
+  </div>
+  <span class="hint">Leave empty to resize the first reference image to 1024 on its largest side (aspect preserved).</span>
+
+  <div class="row">
+    <div class="field">
+      <label class="label" for="edit_steps">Steps</label>
+      <input type="number" id="edit_steps" placeholder="auto" min="0">
+    </div>
+    <div class="field">
+      <label class="label" for="edit_guidance_scale">Guidance</label>
+      <input type="number" id="edit_guidance_scale" step="0.1" placeholder="auto" min="0">
+    </div>
+  </div>
+
+  <div class="field">
+    <label class="label" for="edit_sampler">Sampler</label>
+    <select id="edit_sampler">
+      <option value="">auto</option>
+      <option value="er_sde">er_sde</option>
+      <option value="euler">euler</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label class="label" for="edit_seed">Seed</label>
+    <input type="number" id="edit_seed" placeholder="random" min="0">
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="range">
+    <div class="range-head">
+      <label class="label" for="edit_film_grain">Film grain</label>
+      <span class="val" id="edit_film_grain_val">0.00</span>
+    </div>
+    <input type="range" id="edit_film_grain" min="0" max="1" step="0.1" value="0">
+  </div>
+
+  <div class="range">
+    <div class="range-head">
+      <label class="label" for="edit_sharpening">Sharpening</label>
+      <span class="val" id="edit_sharpening_val">0.00</span>
+    </div>
+    <input type="range" id="edit_sharpening" min="0" max="1" step="0.05" value="0">
+  </div>
+
+  <div class="field">
+    <label class="label" for="edit_upscale_type">Upscale type</label>
+    <select id="edit_upscale_type">
+      <option value="refined">refined (latent 2x + refiner)</option>
+      <option value="no-refiner" id="edit_no_refiner_opt">no-refiner (pixel upscaler only)</option>
+    </select>
+  </div>
+
+  <div class="field" id="edit_pixel_upscaler_field">
+    <label class="label" for="edit_pixel_upscaler">Pixel upscaler <span class="hint">(from --upscaler-dir)</span></label>
+    <select id="edit_pixel_upscaler">
+      <option value="">none</option>
+    </select>
+  </div>
+
+  <div class="range">
+    <div class="range-head">
+      <label class="label" for="edit_upscale_factor">Upscale factor</label>
+      <span class="val" id="edit_upscale_factor_val">1.00</span>
+    </div>
+    <input type="range" id="edit_upscale_factor" min="1" max="8" step="0.25" value="1">
+    <span class="final-res" id="edit_final_res"></span>
+  </div>
+
+  <label class="check"><input type="checkbox" id="edit_qwen_vae_enhance"> Reduce grid pattern <span
+      class="hint">(enable when needed)</span></label>
+
+  <div class="divider"></div>
+
+  <div class="field lora-field">
+    <label class="label" for="edit_lora_specs">LoRA specs <span class="hint">type to autocomplete</span></label>
+    <textarea id="edit_lora_specs" rows="2" placeholder="e.g. style:0.8, one per line"></textarea>
+    <div class="lora-ac" id="edit_lora_ac"></div>
+  </div>
+
+  <button class="btn" id="edit_btn" disabled>Edit</button>
+</aside>
+
+<main class="main">
+  <div class="stage" id="estage">
+    <div class="placeholder" id="eplaceholder">Add reference image(s) and a prompt, then click <span class="kbd">Edit</span></div>
+    <img id="e_img" alt="edited" style="display:none">
+    <div class="actions">
+      <button class="dl ctrl" id="edownload" disabled title="Download PNG">&#8595; Download</button>
+      <button class="info ctrl" id="einfo_btn" disabled title="Edit info" aria-label="Edit info">&#9432;</button>
+    </div>
+    <div class="overlay hidden" id="eoverlay"><div class="spinner"></div></div>
+  </div>
+
+  <div class="timer" id="etimer"><span class="dot"></span><span id="etimer_text">idle</span></div>
+
+  <div class="history hidden" id="ehistory">
+    <div class="history-head label">History</div>
+    <div class="history-items" id="ehistory_items"></div>
+  </div>
+</main>
+</div><!-- /view-edit -->
+
 <div class="view hidden" id="view-upscale">
 <div class="no-model hidden" id="no_upscaler">
   <div class="no-model-title">Upscaling is not available</div>
@@ -222,6 +373,7 @@
   </div>
 </div>
 
-<script src="static/app.js"></script>
+<script src="static/js/helpers.js"></script>
+<script src="static/js/app.js"></script>
 </body>
 </html>

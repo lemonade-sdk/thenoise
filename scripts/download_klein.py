@@ -52,25 +52,7 @@ _DIT_SIZE = {"4b": "4b", "4b-base": "4b", "9b": "9b", "9b-base": "9b"}
 
 #: int8-convrot 4B DiT (HuggingFace).
 INT8_4B = ("wraps/FLUX.2-klein-4B-INT8-ConvRot-ComfyUI", "flux-2-klein-4b-int8-convrot.safetensors")
-
-#: int8-convrot 9B DiT (Civitai direct download URL + human link).
-INT8_9B_URL = "https://civitai.com/api/download/models/3079984?fileId=2959248"
-INT8_9B_LINK = "https://civitai.com/models/2738890/flux-2-klein-9b-int8"
-
-
-def download_civitai(url: str, dest: Path) -> None:
-    """Download a model from Civitai, printing the web link if login is required."""
-    import urllib.error
-    import urllib.request
-
-    try:
-        urllib.request.urlretrieve(url, dest)
-    except (urllib.error.HTTPError, urllib.error.URLError) as e:
-        if getattr(e, "code", 0) in (401, 403):
-            print("Civitai requires login to download this model.")
-            print(f"Open {INT8_9B_LINK} in your browser and download the file manually.")
-            raise SystemExit(1) from e
-        raise
+INT8_9B = ("obsxrver/ComfyUI-Native-INT8_ConvRot", "diffusion_models/flux-2-klein-9b_int8_convrot.safetensors")
 
 
 def main() -> None:
@@ -103,11 +85,8 @@ def main() -> None:
             dit_repo, dit_path = INT8_4B
             jobs = [("dit", dit_repo, dit_path)]
         else:  # 9b
-            jobs = []
-            dest = out / "flux-2-klein-9b-int8-convrot.safetensors"
-            print("Downloading 9B int8-convrot DiT from Civitai")
-            download_civitai(INT8_9B_URL, dest)
-            print(f"{'dit':13s} -> {dest}")
+            dit_repo, dit_path = INT8_9B
+            jobs = [("dit", dit_repo, dit_path)]
     else:
         dit_repo, dit_path = DITS[args.variant]
         jobs = [("dit", dit_repo, dit_path)]

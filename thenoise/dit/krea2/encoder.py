@@ -14,6 +14,7 @@ instead of requiring a separate transformers/Diffusers checkpoint.
 
 import logging
 from dataclasses import dataclass
+from typing import Union
 
 import torch
 from accelerate import init_empty_weights
@@ -120,7 +121,7 @@ def _load_qwen3_vl_model(
     model_path: str,
     *,
     dtype: torch.dtype,
-    device: torch.device | str,
+    device: Union[str, torch.device],
     disable_mmap: bool = True,
 ) -> Qwen3VLForConditionalGeneration:
     """Build Qwen3-VL-4B from the vendored config and load weights from a local safetensors."""
@@ -129,7 +130,7 @@ def _load_qwen3_vl_model(
         model = Qwen3VLForConditionalGeneration._from_config(config)
 
     logger.info(f"Loading Krea 2 text encoder (Qwen3-VL) weights from {model_path}")
-    sd = load_split_weights(model_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)
+    sd = load_split_weights(model_path, device=device, disable_mmap=disable_mmap, dtype=dtype)
     sd = _convert_comfyui_qwen3vl_state_dict(sd)
 
     info = model.load_state_dict(sd, strict=False, assign=True)
@@ -153,8 +154,8 @@ def _load_qwen3_vl_model(
 def load_qwen3_vl_conditioner(
     model_path: str,
     *,
-    dtype: torch.dtype = torch.bfloat16,
-    device: torch.device | str = "cpu",
+    dtype: torch.dtype,
+    device: Union[str, torch.device],
     max_length: int = TextEncoderConfig.max_length,
     select_layers: tuple[int, ...] = TextEncoderConfig.select_layers,
     tokenizer_repo: str = QWEN3_VL_4B_INSTRUCT_REPO_ID,

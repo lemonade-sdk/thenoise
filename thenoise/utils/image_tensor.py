@@ -47,9 +47,26 @@ def center_crop(image: Image.Image, width: int, height: int) -> Image.Image:
     return image.crop((left, top, left + width, top + height))
 
 
+def resize_to_cover_center_crop(
+    image: Image.Image, width: int, height: int
+) -> Image.Image:
+    """ComfyUI-style ref resize: scale to cover ``(width, height)``, center-crop.
+
+    Images matching the target aspect ratio are only resized; ComfyUI does not pad.
+    """
+    if (image.width, image.height) == (width, height):
+        return image
+    scale = max(width / image.width, height / image.height)
+    new_w = round(image.width * scale)
+    new_h = round(image.height * scale)
+    scaled = image.resize((new_w, new_h), Image.LANCZOS)
+    return center_crop(scaled, width, height)
+
+
 __all__ = [
     "pil_to_pixels",
     "pixels_to_pil",
     "resize_to_target",
     "center_crop",
+    "resize_to_cover_center_crop",
 ]

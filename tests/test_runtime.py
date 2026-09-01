@@ -25,11 +25,28 @@ def _runtime_with_fake_model(monkeypatch):
 def test_empty_runtime(monkeypatch):
     runtime, _ = _runtime_with_fake_model(monkeypatch)
     assert runtime.available() == []
+    assert runtime.model_capabilities() == {}
     try:
         runtime.model
         assert False, "expected NotLoadedError"
     except NotLoadedError:
         pass
+
+
+def test_model_capabilities_reports_supports_edit(monkeypatch):
+    import thenoise.models as dm
+
+    class FakeEditModel:
+        name = "fake"
+        supports_edit = True
+        def __init__(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(dm, "MODEL_CATALOG", [FakeEditModel])
+    monkeypatch.setattr(dm, "resolve", lambda path: FakeEditModel)
+    runtime = Runtime(Settings())
+    runtime.load(ModelPaths("dit", "vae", "te"))
+    assert runtime.model_capabilities() == {"supports_edit": True}
 
 
 def test_load_resolves_model_from_dit(monkeypatch):

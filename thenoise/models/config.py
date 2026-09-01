@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import torch
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional, Union
+
+if TYPE_CHECKING:  # pragma: no cover - only for annotations
+    from PIL import Image
 
 
 @dataclass
@@ -32,6 +35,23 @@ class ModelConfig:
     device: str = "cuda"
     dtype: torch.dtype = torch.bfloat16
     lora_dir: Optional[str] = None  # LoRAs mutate the DiT weights -> model concern
+
+
+@dataclass
+class EncodePromptArgs:
+    """Arguments for ``encode_prompt``, bundled into one struct.
+
+    A single structure (instead of passing each parameter separately) so adding a
+    new knob — e.g. a future ``negative_prompt`` variant or an image — never
+    changes the method signature. ``image`` is only set in the edit path
+    (``supports_edit`` models); multimodal encoders feed it as vision tokens in
+    addition to any reference latent.
+    """
+
+    prompt: str
+    negative_prompt: str = ""
+    guidance_scale: float = 0.0
+    image: Optional[Image.Image] = None
 
 
 @dataclass
@@ -58,6 +78,7 @@ class GenerateRequest:
     sharpening: float = 0.0
     lora_specs: Optional[List[str]] = None
     pixel_upscaler: Optional[str] = None
+    image: Optional[Union[Image.Image, List[Image.Image]]] = None
 
 
 @dataclass(frozen=True)
@@ -77,4 +98,4 @@ class SamplingParams:
     sampler: str
 
 
-__all__ = ["ModelConfig", "GenerateRequest", "SamplingParams"]
+__all__ = ["ModelConfig", "EncodePromptArgs", "GenerateRequest", "SamplingParams"]

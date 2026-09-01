@@ -50,11 +50,14 @@ def main(argv=None) -> None:
     elif args.command == "generate":
         from .generate import run_generate
         run_generate(args)
+    elif args.command == "edit":
+        from .generate import run_edit
+        run_edit(args)
     elif args.command == "upscale":
         from .upscale_cli import run_upscale
         run_upscale(args)
     else:  # pragma: no cover - argparse requires a subcommand
-        raise SystemExit("choose a subcommand: serve | generate | upscale")
+        raise SystemExit("choose a subcommand: serve | generate | edit | upscale")
 
 
 if __name__ == "__main__":

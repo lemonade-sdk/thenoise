@@ -75,10 +75,10 @@ def prc_img(x: torch.Tensor, t_coord: torch.Tensor | None = None) -> tuple[torch
     h = x.shape[-2]
     w = x.shape[-1]
     coords = {
-        "t": torch.arange(1) if t_coord is None else t_coord,
-        "h": torch.arange(h),
-        "w": torch.arange(w),
-        "l": torch.arange(1),
+        "t": (torch.arange(1) if t_coord is None else t_coord).to(x.device),
+        "h": torch.arange(h, device=x.device),
+        "w": torch.arange(w, device=x.device),
+        "l": torch.arange(1, device=x.device),
     }
     x_ids = torch.cartesian_prod(coords["t"], coords["h"], coords["w"], coords["l"])
     x = rearrange(x, "c h w -> (h w) c") if x.ndim == 3 else rearrange(x, "b c h w -> b (h w) c")
@@ -94,10 +94,10 @@ def prc_txt(x: torch.Tensor, t_coord: torch.Tensor | None = None) -> tuple[torch
     """
     _l = x.shape[-2]
     coords = {
-        "t": torch.arange(1) if t_coord is None else t_coord,
-        "h": torch.arange(1),  # dummy
-        "w": torch.arange(1),  # dummy
-        "l": torch.arange(_l),
+        "t": (torch.arange(1) if t_coord is None else t_coord).to(x.device),
+        "h": torch.arange(1, device=x.device),  # dummy
+        "w": torch.arange(1, device=x.device),  # dummy
+        "l": torch.arange(_l, device=x.device),
     }
     x_ids = torch.cartesian_prod(coords["t"], coords["h"], coords["w"], coords["l"])
     if x.ndim == 3:

@@ -7,8 +7,10 @@ in memory during GC windows.
 
 Stage dependency graph (upstream -> downstream):
 
-    prompt  ->  sampling  ->  decode
+    reference  ->  prompt  ->  sampling  ->  decode
 
+``reference`` caches the encoded input image (edit path only). A miss at
+``reference`` clears ``prompt``, ``sampling`` and ``decode``.
 A miss at ``prompt`` clears ``sampling`` and ``decode``.
 A miss at ``sampling`` clears ``decode``.
 A miss at ``decode`` clears nothing downstream.
@@ -51,19 +53,41 @@ class _CacheSlot:
 
 
 class PipelineCache:
-    """Three-stage pipeline cache with cascade invalidation.
+    """Four-stage pipeline cache with cascade invalidation.
 
     When any stage is invalidated (key mismatch), the old value is released
     immediately and all downstream stages are cleared. This prevents holding
     two copies of large tensors in memory simultaneously.
+
+    The optional ``reference`` stage (edit path only) sits upstream of prompt.
     """
 
-    __slots__ = ("_prompt", "_sampling", "_decode")
+    __slots__ = ("_reference", "_prompt", "_sampling", "_decode")
 
     def __init__(self) -> None:
+        self._reference = _CacheSlot()
         self._prompt = _CacheSlot()
         self._sampling = _CacheSlot()
         self._decode = _CacheSlot()
+
+    # --------------------------------------------------------------- reference
+
+    @property
+    def reference_key(self) -> Any:
+        return self._reference.key
+
+    def reference_hit(self, key: Tuple) -> bool:
+        return self._reference.is_hit(key)
+
+    def reference_get(self) -> Any:
+        return self._reference.value
+
+    def reference_store(self, key: Tuple, value: Any) -> None:
+        """Store the encoded reference latent, cascading invalidation downstream."""
+        self._reference.store(key, value)
+        self._prompt.clear()
+        self._sampling.clear()
+        self._decode.clear()
 
     # ------------------------------------------------------------------ prompt
 
@@ -120,6 +144,7 @@ class PipelineCache:
 
     def clear_all(self) -> None:
         """Release every cached value and reset all keys."""
+        self._reference.clear()
         self._prompt.clear()
         self._sampling.clear()
         self._decode.clear()

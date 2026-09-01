@@ -50,14 +50,17 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import torch
 from safetensors.torch import load_file
 
-from thenoise.models.config import ModelConfig, SamplingParams
+from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.samplers import Step
 from thenoise.upscale import load_latent_upscaler
+
+if TYPE_CHECKING:  # pragma: no cover - only for annotations
+    from PIL import Image
 from thenoise.utils.model_dir import (
     ensure_safetensors,
     resolve_in_dir,
@@ -128,6 +131,10 @@ class DiffusionModel(ABC):
     REFINE_STEPS = 1
     REFINE_DENOISE = 0.1
 
+    # Reference-latent editing capability (image + instruction -> edited image).
+    # Editing models set this True and override ``encode_reference``/``pack_reference_latent``.
+    supports_edit: bool = False
+
     @staticmethod
     @abstractmethod
     def detect(f) -> bool:
@@ -155,14 +162,14 @@ class DiffusionModel(ABC):
 
     # ------------------------------------------------------------------ hooks
     @abstractmethod
-    def encode_prompt(
-        self,
-        prompt: str,
-        negative_prompt: str = "",
-        *,
-        guidance_scale: float,
-    ) -> Conditioning:
-        """Tokenize + encode prompt (and negative) into conditioning."""
+    def encode_prompt(self, args: EncodePromptArgs) -> Conditioning:
+        """Tokenize + encode prompt (and negative) into conditioning.
+
+        Accepts a single ``EncodePromptArgs`` struct (prompt, negative_prompt,
+        guidance_scale, image) so new knobs never change the signature. ``image``
+        is only set in the edit path (``supports_edit`` models); multimodal
+        encoders feed it as vision tokens in addition to any reference latent.
+        """
 
     @abstractmethod
     def init_latents(self, params: SamplingParams) -> torch.Tensor:
@@ -173,11 +180,16 @@ class DiffusionModel(ABC):
         latents: torch.Tensor,
         cond: Conditioning,
         params: SamplingParams,
+        ref: Optional[torch.Tensor] = None,
+        ref_method: str = "index",
     ) -> torch.Tensor:
         """Canonical -> model-internal latent. Runs ONCE before the loop.
 
         Override for reshaping (e.g. Krea2 patchify, Anima frame axis); default
         is the identity (canonical == internal).
+
+        ``ref``/``ref_method`` are only passed in the edit path; editing models
+        use them to stash the reference tokens+ids that ``denoise_step`` reads.
         """
         return latents
 
@@ -218,6 +230,25 @@ class DiffusionModel(ABC):
         blows up at exactly 1). Flow models override this with their shift
         the default is a linear fallback."""
         return 1.0 - percent
+
+    # ------------------------------------------------------------ editing
+    def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
+        """Encode input pixels (``[C,H,W]`` in [-1, 1]) into the canonical latent.
+
+        Overridden by editing models (uses their VAE encoder)."""
+        raise NotImplementedError(f"{self.name} does not support reference editing")
+
+    def pack_reference_latent(
+        self,
+        latents: torch.Tensor,
+        method: str = "index",
+        ref_index: int = 1,
+    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
+        """Canonical reference latent -> model-internal (tokens, ids).
+
+        ``ref_index`` is the 1-based position among the reference images (used to
+        give each ref a distinct t-axis index). Overridden by editing models."""
+        return None
 
     # --------------------------------------------------------------- LoRA
     def _parse_lora_spec(self, spec: str) -> Tuple[str, float]:
@@ -290,7 +321,8 @@ class DiffusionModel(ABC):
                 multipliers.append(weight)
 
             self._active_lora_result = apply_lora_to_model(
-                dit, lora_sds, multipliers, torch.device(self.device)
+                dit, lora_sds, multipliers, torch.device(self.device),
+                dit_path=self.dit_path,
             )
             active_names = ", ".join(
                 self._parse_lora_spec(s)[0] for s in lora_specs
