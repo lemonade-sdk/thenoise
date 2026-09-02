@@ -58,6 +58,7 @@ from safetensors.torch import load_file
 
 from thenoise.memory import MemoryManager
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
+from thenoise.utils.device import get_device_memory
 from thenoise.samplers import Step
 from thenoise.upscale import load_latent_upscaler
 
@@ -73,6 +74,13 @@ from thenoise.utils.lora import LoRAApplyResult
 from thenoise.utils.safetensors import WRAP_PREFIXES
 
 logger = logging.getLogger(__name__)
+
+# Fraction of the compute device's VRAM that the resident *weights* (DiT + text
+# encoder + VAE) may occupy while staying resident (``offload == load``, no moves).
+# The remaining fraction is deliberately conservative headroom for the activation peak
+# (denoise, and especially VAE decode at upscaled resolutions) plus the pipeline
+# cache. This is a conservative value. The offload device can be forced via --offload-device
+_RESIDENT_VRAM_FRACTION = 0.6
 
 
 @dataclass
@@ -173,20 +181,18 @@ class DiffusionModel(ABC):
 
         The expected resident bytes are estimated from the combined sizes of the three
         checkpoint files (not 100%% accurate, close enough). If they fit the compute
-        device's VRAM with room left over for activations we stay resident
-        (``offload == load`` -> no moves); otherwise we offload to CPU.
+        device's VRAM with ``_RESIDENT_VRAM_FRACTION`` headroom left over for
+        activations we stay resident (``offload == load`` -> no moves); otherwise
+        we offload to CPU.
         """
-        try:
-            total_vram = torch.cuda.get_device_properties(config.device).total_memory
-        except Exception:
+        total_vram = get_device_memory(config.device)
+        if total_vram is None:
             return config.device
         resident = sum(
             self._file_size(p)
             for p in (config.dit_path, config.vae_path, config.text_encoder_path)
         )
-        # Weights must leave room for activations (denoise/decode peaks). 0.55 is
-        # deliberately conservative: resident weights <= ~55%% of VRAM -> keep resident.
-        if resident <= 0.55 * total_vram:
+        if resident <= _RESIDENT_VRAM_FRACTION * total_vram:
             return config.device
         return "cpu"
 
