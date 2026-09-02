@@ -33,6 +33,7 @@ class ModelConfig:
     vae_path: str
     text_encoder_path: str
     device: str = "cuda"
+    offload_device: str = ""  # empty = auto-detect from safetensors size vs VRAM
     dtype: torch.dtype = torch.bfloat16
     lora_dir: Optional[str] = None  # LoRAs mutate the DiT weights -> model concern
 

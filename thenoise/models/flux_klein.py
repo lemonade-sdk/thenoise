@@ -82,7 +82,7 @@ class FluxKleinModel(DiffusionModel):
         self.params: Flux2Params = detect_klein_params(config.dit_path)
         self.is_8b = self.params.context_in_dim == 12288
         logger.info("Loading Flux Klein DiT (%s) from %s", self.variant_label, config.dit_path)
-        self.dit = load_flux2_dit(config.dit_path, self.params, device=config.device, dtype=config.dtype)
+        self.dit = load_flux2_dit(config.dit_path, self.params, device=self.offload_device, dtype=config.dtype)
         self.dit.eval().requires_grad_(False)
 
         logger.info("Loading Flux Klein text encoder (Qwen3-%s) from %s", self.text_label, config.text_encoder_path)
@@ -90,13 +90,18 @@ class FluxKleinModel(DiffusionModel):
             config.text_encoder_path,
             is_8b=self.is_8b,
             dtype=config.dtype,
-            device=config.device,
+            device=self.offload_device,
             tokenizer_dir=find_flux2_tokenizer_dir(config.text_encoder_path),
         )
 
         # Flux.2 VAE (encoder + decoder).
         self.vae = load_flux2_vae(self.vae_path, device=self.device, disable_mmap=True, dtype=self.dtype)
         self.vae.eval().requires_grad_(False)
+
+        # Register swappable components with the memory manager.
+        self.memory.register("dit", self.dit)
+        self.memory.register("text_encoder", self.text_encoder)
+        self.memory.register("vae", self.vae)
 
         logger.info("Flux Klein model (%s) ready on %s (%s)", self.variant_label, config.device, config.dtype)
 

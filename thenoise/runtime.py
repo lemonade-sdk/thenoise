@@ -28,6 +28,7 @@ class Settings:
     model, so its directory is NOT a model-load parameter.
     """
     device: str = "cuda"      # ROCm torch aliases cuda -> hip
+    offload_device: str = ""   # empty = auto-detect from safetensors size vs VRAM
     host: str = "127.0.0.1"
     port: int = 8000
     upscaler_dir: str = ""     # directory of pixel-domain upscaler models
@@ -80,6 +81,7 @@ class Runtime:
             vae_path=paths.vae_path,
             text_encoder_path=paths.text_encoder_path,
             device=self._settings.device,
+            offload_device=self._settings.offload_device,
             lora_dir=paths.lora_dir or None,
         )
 

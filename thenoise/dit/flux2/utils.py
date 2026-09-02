@@ -155,7 +155,16 @@ class Qwen3Embedder:
         self.tokenizer = tokenizer
         self.model = model
         self.max_length = MAX_LENGTH
-        self.device = next(model.parameters()).device
+
+    @property
+    def device(self):
+        """The embedder's model device (follows the model when it is moved)."""
+        return next(self.model.parameters()).device
+
+    def to(self, device):
+        """Forward placement to the wrapped model (so the memory manager can move it)."""
+        self.model.to(device)
+        return self
 
     def __call__(self, prompt: str) -> torch.Tensor:
         messages = [{"role": "user", "content": prompt}]
@@ -169,8 +178,9 @@ class Qwen3Embedder:
             truncation=True,
             max_length=self.max_length,
         )
-        input_ids = inputs.input_ids.to(self.device)
-        attention_mask = inputs.attention_mask.to(self.device)
+        device = self.device
+        input_ids = inputs.input_ids.to(device)
+        attention_mask = inputs.attention_mask.to(device)
         with torch.no_grad():
             output = self.model(
                 input_ids=input_ids,

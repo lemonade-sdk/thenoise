@@ -58,9 +58,9 @@ class AnimaModel(DiffusionModel):
 
         logger.info("Loading Anima DiT from %s", config.dit_path)
         self.dit = anima_utils.load_anima_model(
-            config.device,
+            self.offload_device,
             config.dit_path,
-            loading_device=config.device,
+            loading_device=self.offload_device,
             dit_weight_dtype=config.dtype,
         )
         self.dit.eval().requires_grad_(False)
@@ -68,7 +68,7 @@ class AnimaModel(DiffusionModel):
         # Text encoder (Qwen3-0.6B) + tokenizers.
         logger.info("Loading Anima text encoder from %s", config.text_encoder_path)
         self.text_encoder, self.qwen3_tokenizer = anima_utils.load_qwen3_text_encoder(
-            config.text_encoder_path, dtype=config.dtype, device=config.device
+            config.text_encoder_path, dtype=config.dtype, device=self.offload_device
         )
         self.text_encoder.eval().requires_grad_(False)
         self.t5_tokenizer = anima_utils.load_t5_tokenizer(None)
@@ -90,6 +90,11 @@ class AnimaModel(DiffusionModel):
             .requires_grad_(False)
         )
 
+        # Register swappable components with the memory manager.
+        self.memory.register("dit", self.dit)
+        self.memory.register("text_encoder", self.text_encoder)
+        self.memory.register("vae", self.vae)
+
         logger.info("Anima model ready on %s (%s)", config.device, config.dtype)
 
     # ------------------------------------------------------------ kernels
@@ -97,27 +102,46 @@ class AnimaModel(DiffusionModel):
         self,
         args: EncodePromptArgs,
     ) -> Conditioning:
-        cond = self._encode_prompt(args.prompt)
-        null = None
-        if args.guidance_scale > 1.0:
-            null = self._encode_prompt(args.negative_prompt)
-        return Conditioning(cond=cond, null=null)
-
-    def _encode_prompt(self, prompt: str) -> torch.Tensor:
-        """Tokenize -> Qwen3 encode -> LLM-adapter cross-attention embedding (bf16)."""
+        """Text-encoder only: RAW Qwen3/T5 embeddings (DiT fusion in ``fuse_text``)."""
         dev = torch.device(self.device)
         with torch.no_grad():
-            tokens = self.tokenize_strategy.tokenize(prompt)
-            # [prompt_embeds, qwen3_mask, t5_ids, t5_mask]
-            embed = self.encoding_strategy.encode_tokens(self.tokenize_strategy, [self.text_encoder], tokens)
-            crossattn_emb = self.dit._preprocess_text_embeds(
-                source_hidden_states=embed[0].to(dev),
-                target_input_ids=embed[2].to(dev),
-                target_attention_mask=embed[3].to(dev),
-                source_attention_mask=embed[1].to(dev),
+            cond = self._encode_raw(args.prompt, dev)
+            null = (
+                self._encode_raw(args.negative_prompt, dev)
+                if args.guidance_scale > 1.0
+                else None
             )
-            crossattn_emb[~embed[3].bool()] = 0
-            return crossattn_emb.to(torch.bfloat16)
+        return Conditioning(cond=cond, null=null)
+
+    def _encode_raw(self, prompt: str, dev: torch.device):
+        """Tokenize -> Qwen3 encode -> raw LLM-adapter input bundle (text_encoder only).
+
+        Returns ``[prompt_embeds, qwen3_mask, t5_ids, t5_mask]``; the DiT
+        consumes it in ``fuse_text`` (which runs with the DiT resident).
+        """
+        tokens = self.tokenize_strategy.tokenize(prompt)
+        return self.encoding_strategy.encode_tokens(
+            self.tokenize_strategy, [self.text_encoder], tokens
+        )
+
+    def fuse_text(self, cond: Conditioning) -> Conditioning:
+        """DiT-side fusion: raw embeddings -> LLM-adapter cross-attention conditioning."""
+        dev = torch.device(self.device)
+        with torch.no_grad():
+            fused = self._fuse_raw(cond.cond, dev)
+            null = self._fuse_raw(cond.null, dev) if cond.null is not None else None
+        return Conditioning(cond=fused, null=null)
+
+    def _fuse_raw(self, embed, dev: torch.device) -> torch.Tensor:
+        """DiT LLM-adapter cross-attention embedding (bf16)."""
+        crossattn_emb = self.dit._preprocess_text_embeds(
+            source_hidden_states=embed[0].to(dev),
+            target_input_ids=embed[2].to(dev),
+            target_attention_mask=embed[3].to(dev),
+            source_attention_mask=embed[1].to(dev),
+        )
+        crossattn_emb[~embed[3].bool()] = 0
+        return crossattn_emb.to(torch.bfloat16)
 
     def init_latents(self, params: SamplingParams) -> torch.Tensor:
         dev = torch.device(self.device)

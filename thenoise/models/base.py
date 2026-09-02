@@ -48,13 +48,15 @@ ones. This avoids reloading the entire model from disk.
 from __future__ import annotations
 
 import logging
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
 from safetensors.torch import load_file
 
+from thenoise.memory import MemoryManager
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.samplers import Step
 from thenoise.upscale import load_latent_upscaler
@@ -142,11 +144,16 @@ class DiffusionModel(ABC):
 
     def __init__(self, *, config: ModelConfig):
         self.device = config.device
+        self.offload_device = config.offload_device or self._detect_offload_device(config)
         self.dtype = config.dtype
         self.dit_path = config.dit_path
         self.vae_path = config.vae_path
         self.text_encoder_path = config.text_encoder_path
         self.lora_dir = config.lora_dir
+
+        # Component placement: subclasses register ``dit`` / ``text_encoder`` /
+        # ``vae``; the pipeline controller ensures/offloads them by name.
+        self.memory = MemoryManager(self.device, self.offload_device)
 
         torch._dynamo.config.recompile_limit = 64
 
@@ -160,16 +167,60 @@ class DiffusionModel(ABC):
         self._upscaler = None
         self._adaptor = None
 
+    # ------------------------------------------------------------ devices
+    def _detect_offload_device(self, config: ModelConfig) -> str:
+        """Pick an offload device from safetensors size vs VRAM (or ``device``).
+
+        The expected resident bytes are estimated from the combined sizes of the three
+        checkpoint files (not 100%% accurate, close enough). If they fit the compute
+        device's VRAM with room left over for activations we stay resident
+        (``offload == load`` -> no moves); otherwise we offload to CPU.
+        """
+        try:
+            total_vram = torch.cuda.get_device_properties(config.device).total_memory
+        except Exception:
+            return config.device
+        resident = sum(
+            self._file_size(p)
+            for p in (config.dit_path, config.vae_path, config.text_encoder_path)
+        )
+        # Weights must leave room for activations (denoise/decode peaks). 0.55 is
+        # deliberately conservative: resident weights <= ~55%% of VRAM -> keep resident.
+        if resident <= 0.55 * total_vram:
+            return config.device
+        return "cpu"
+
+    @staticmethod
+    def _file_size(path: str) -> int:
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            return 0
+
     # ------------------------------------------------------------------ hooks
     @abstractmethod
-    def encode_prompt(self, args: EncodePromptArgs) -> Conditioning:
-        """Tokenize + encode prompt (and negative) into conditioning.
+    def encode_prompt(self, args: EncodePromptArgs) -> "Conditioning":
+        """Tokenize + encode prompt (and negative) into RAW conditioning.
 
-        Accepts a single ``EncodePromptArgs`` struct (prompt, negative_prompt,
-        guidance_scale, image) so new knobs never change the signature. ``image``
-        is only set in the edit path (``supports_edit`` models); multimodal
-        encoders feed it as vision tokens in addition to any reference latent.
+        Text-encoder only (the DiT is NOT needed here). Accepts a single
+        ``EncodePromptArgs`` struct (prompt, negative_prompt, guidance_scale,
+        image) so new knobs never change the signature. ``image`` is only set in
+        the edit path (``supports_edit`` models); multimodal encoders feed it as
+        vision tokens in addition to any reference latent. Returns the raw
+        conditioning, transformed into the model-internal conditioning by
+        ``fuse_text`` (which runs with the DiT resident).
         """
+
+    def fuse_text(self, cond: "Conditioning") -> "Conditioning":
+        """DiT-side text fusion: raw conditioning -> model-internal conditioning.
+
+        Runs with the DiT resident (inside the dit block), after the text encoder
+        has been offloaded. Default is the identity for models whose prompt
+        conditioning is already the final form (e.g. FluxKlein, ZImage); models
+        that fuse the text stream through the DiT (Anima's
+        ``_preprocess_text_embeds``, Krea2's ``fuse_text``) override it.
+        """
+        return cond
 
     @abstractmethod
     def init_latents(self, params: SamplingParams) -> torch.Tensor:

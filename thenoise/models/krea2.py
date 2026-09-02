@@ -63,7 +63,7 @@ class Krea2Model(DiffusionModel):
         logger.info("Loading Krea 2 DiT from %s", config.dit_path)
         self.dit = krea2_utils.load_krea2_dit(
             config.dit_path,
-            device=config.device,
+            device=self.offload_device,
             dtype=config.dtype,
         )
         self.dit.eval().requires_grad_(False)
@@ -72,7 +72,7 @@ class Krea2Model(DiffusionModel):
         self.encoder = krea2_utils.load_krea2_text_encoder(
             config.text_encoder_path,
             dtype=config.dtype,
-            device=config.device,
+            device=self.offload_device,
             tokenizer_dir=krea2_utils.find_krea2_tokenizer_dir(config.text_encoder_path),
         )
 
@@ -87,6 +87,11 @@ class Krea2Model(DiffusionModel):
         # VAE latent geometry (shared Qwen-Image VAE): 8x spatial compression.
         self._compression = self.vae.compression
 
+        # Register swappable components with the memory manager.
+        self.memory.register("dit", self.dit)
+        self.memory.register("text_encoder", self.encoder)
+        self.memory.register("vae", self.vae)
+
         logger.info("Krea 2 model ready on %s (%s)", config.device, config.dtype)
 
     # ------------------------------------------------------------ kernels
@@ -94,31 +99,40 @@ class Krea2Model(DiffusionModel):
         self,
         args: EncodePromptArgs,
     ) -> Conditioning:
+        """Text-encoder only: RAW prompt embeddings (DiT fusion in ``fuse_text``)."""
         cfg = args.guidance_scale > 1.0
         txt, txtmask, untxt, untxtmask = encode_prompts(
             self.encoder, [args.prompt], [args.negative_prompt], cfg=cfg
         )
-        # Fuse the text stream ONCE here (prompt stage) so it is cached and reused
-        # across denoise steps and across runs with the same prompt/LoRA config. The
-        # fusion is independent of image/timestep, but depends on the (LoRA-adjusted)
-        # DiT weights
+        return Conditioning(
+            cond=txt, cond_mask=txtmask, null=untxt, null_mask=untxtmask
+        )
+
+    def fuse_text(self, cond: Conditioning) -> Conditioning:
+        """DiT text fusion: raw embeddings -> cross-attention conditioning.
+
+        Runs ONCE here (inside the dit block, DiT resident) so it is cached and
+        reused across denoise steps. Fusion is independent of image/timestep, but
+        depends on the (LoRA-adjusted) DiT weights, so it runs after
+        ``switch_loras``.
+        """
         dev = torch.device(self.device)
         with torch.no_grad():
             txt_fused = self.dit.fuse_text(
-                txt.to(device=dev, dtype=self.dtype),
-                txtmask.to(device=dev),
+                cond.cond.to(device=dev, dtype=self.dtype),
+                cond.cond_mask.to(device=dev),
             )
             untxt_fused = None
-            if cfg:
+            if cond.null is not None:
                 untxt_fused = self.dit.fuse_text(
-                    untxt.to(device=dev, dtype=self.dtype),
-                    untxtmask.to(device=dev),
+                    cond.null.to(device=dev, dtype=self.dtype),
+                    cond.null_mask.to(device=dev),
                 )
         return Conditioning(
             cond=txt_fused,
-            cond_mask=txtmask,
+            cond_mask=cond.cond_mask,
             null=untxt_fused,
-            null_mask=untxtmask,
+            null_mask=cond.null_mask,
         )
 
     def init_latents(self, params: SamplingParams) -> torch.Tensor:
