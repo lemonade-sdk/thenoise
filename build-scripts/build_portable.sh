@@ -24,7 +24,7 @@
 set -euo pipefail
 
 GFX_TARGET="${1:?usage: build_portable.sh <gfx_target>}"
-GFX_ARCH="${//X/0}"
+GFX_ARCH="${GFX_TARGET//X/0}"
 ROOT="${THENOISE_ROOT:-${RUNNER_TEMP:-/tmp}/thenoise-build/thenoise}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
