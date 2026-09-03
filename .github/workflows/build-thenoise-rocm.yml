@@ -69,7 +69,7 @@ jobs:
 
       - name: Build portable bundle
         run: |
-          bash scripts/build_portable.sh "${{ matrix.gfx_target }}"
+          bash build-scripts/build_portable.sh "${{ matrix.gfx_target }}"
 
       - name: Create release archive (preserves symlinks)
         run: |
@@ -165,7 +165,7 @@ jobs:
           ROOT="$WORK/bundle"
           MODEL_DIR="$WORK/anima"
           mkdir -p "$MODEL_DIR"
-          bash scripts/qualify_thenoise.sh \
+          bash build-scripts/qualify_thenoise.sh \
             --root "$ROOT" --model-dir "$MODEL_DIR" \
             --out "$WORK/qualification-report.json"
 

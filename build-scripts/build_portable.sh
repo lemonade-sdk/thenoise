@@ -12,7 +12,6 @@
 # Triton precompile).
 #
 # Usage: build_portable.sh <gfx_target>
-#   gfx_target: gfx1151 | gfx1150 | gfx1152
 #
 # Environment overrides (all optional):
 #   THENOISE_ROOT   output bundle root  (default: $RUNNER_TEMP/thenoise-build/thenoise)
@@ -25,6 +24,7 @@
 set -euo pipefail
 
 GFX_TARGET="${1:?usage: build_portable.sh <gfx_target>}"
+GFX_ARCH="${//X/0}"
 ROOT="${THENOISE_ROOT:-${RUNNER_TEMP:-/tmp}/thenoise-build/thenoise}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -100,10 +100,10 @@ say "Installing torch ${TORCH_VER} for ${GFX_TARGET}"
 export PATH="$ROOT/bin:$PATH"
 pip_deep install --index-url "$TORCH_INDEX" \
   --extra-index-url https://pypi.org/simple/ \
-  "torch[device-${GFX_TARGET}]==${TORCH_VER}"
+  "torch[device-${GFX_ARCH}]==${TORCH_VER}"
 pip_deep install --index-url "$TORCH_INDEX" \
   --extra-index-url https://pypi.org/simple/ \
-  "torchvision==${TORCHVISION_VER}"
+  "torchvision[device-${GFX_ARCH}]==${TORCHVISION_VER}"
 
 say "Installing thenoise + dependencies (from $REPO_ROOT)"
 # torch is intentionally absent from pyproject.toml. But a constraints file is cheap insurance
