@@ -29,7 +29,7 @@ on:
       create_release:
         description: 'Create a GitHub release after successful build'
         required: false
-        default: false
+        default: true
         type: boolean
 
 env:
@@ -108,7 +108,7 @@ jobs:
           echo "torch_version=$tv" >> "$GITHUB_OUTPUT"
           echo "thenoise_version=$nv" >> "$GITHUB_OUTPUT"
 
-  # Builds each target's Windows portable bundle (scripts/build_portable.ps1).
+  # Builds each target's Windows portable bundle (build-scripts/build_portable.ps1).
   # Same dev_lab group, Windows runner label. The release archive is a zip
   # (bsdtar writes a zip when the output ends in .zip); there are no symlinks
   # on a Windows bundle so zip is fine and Explorer-friendly.
@@ -130,7 +130,7 @@ jobs:
       - name: Build portable bundle
         shell: powershell
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build_portable.ps1 "${{ matrix.gfx_target }}"
+          powershell -NoProfile -ExecutionPolicy Bypass -File build-scripts/build_portable.ps1 "${{ matrix.gfx_target }}"
 
       - name: Create release archive (zip)
         shell: powershell
@@ -244,7 +244,7 @@ jobs:
         run: rm -rf "${{ runner.temp }}/thenoise-qual" || true
 
   # Same GPU smoke test as qualify-linux, but on a Windows dev_lab runner
-  # against the Windows bundle (scripts/qualify_thenoise.ps1). torch.compile is
+  # against the Windows bundle (build-scripts/qualify_thenoise.ps1). torch.compile is
   # disabled on Windows (no Triton), so the generation runs in eager mode.
   qualify-windows:
     needs: [prepare-matrix, build-windows]
@@ -263,7 +263,7 @@ jobs:
         run: |
           $work = Join-Path $env:RUNNER_TEMP "thenoise-qual-win"
           New-Item -ItemType Directory -Force $work | Out-Null
-          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/download_artifact.ps1 `
+          powershell -NoProfile -ExecutionPolicy Bypass -File build-scripts/download_artifact.ps1 `
             -Name "thenoise-rocm-gfx1151-win-x64" `
             -Out (Join-Path $work "artifact.zip")
           # artifact.zip holds the release zip (not raw bundle contents); expand
@@ -291,7 +291,7 @@ jobs:
           $root = Join-Path $work "bundle"
           $modelDir = Join-Path $work "anima"
           New-Item -ItemType Directory -Force $modelDir | Out-Null
-          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/qualify_thenoise.ps1 `
+          powershell -NoProfile -ExecutionPolicy Bypass -File build-scripts/qualify_thenoise.ps1 `
             -Root $root -ModelDir $modelDir -Out (Join-Path $work "qualification-report.json")
 
       - name: Upload qualification report

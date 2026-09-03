@@ -7,7 +7,7 @@ rem HIP DLLs resolve (Windows uses PATH, not LD_LIBRARY_PATH), and disables
 rem torch.compile because Triton is Linux-only on ROCm for now.
 rem
 rem This file is copied to the bundle root as thenoise.bat by
-rem scripts/build_portable.ps1.
+rem build-scripts/build_portable.ps1.
 rem ===========================================================================
 setlocal
 set "ROOT=%~dp0"
@@ -18,5 +18,5 @@ set "MIOPEN_FIND_MODE=FAST"
 set "TORCH_BLAS_PREFER_HIPBLASLT=1"
 set "TORCH_COMPILE_DISABLE=1"
 set "TORCHDYNAMO_DISABLE=1"
-"%ROOT%python.exe" -m thenoise %*
+"%ROOT%python.exe" -s -m thenoise %*
 exit /b %errorlevel%

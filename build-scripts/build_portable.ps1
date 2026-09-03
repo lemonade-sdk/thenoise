@@ -8,7 +8,7 @@
 # Windows x86_64 machine with a matching AMD GPU and run `thenoise.bat` with
 # nothing installed.
 #
-# This is the Windows counterpart of scripts/build_portable.sh. Key differences
+# This is the Windows counterpart of build-scripts/build_portable.sh. Key differences
 # from the Linux build:
 #   * Portable CPython is the x86_64-pc-windows-msvc python-build-standalone
 #     build. The interpreter is python.exe at the bundle root and
@@ -23,7 +23,6 @@
 #     Linux build, _rocm_sdk_core\bin must NOT be removed.
 #
 # Usage: build_portable.ps1 <gfx_target>
-#   gfx_target: gfx1151 | gfx1150 | gfx1152
 #
 # Environment overrides (all optional):
 #   THENOISE_ROOT   output bundle root  (default: $env:RUNNER_TEMP\thenoise-build\thenoise)
@@ -40,6 +39,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# torch wheel device spec: gfx115X -> gfx1150 (mirror build_portable.sh).
+$GfxArch = $GfxTarget -replace 'X', '0'
 
 $Root = $env:THENOISE_ROOT
 if (-not $Root) {
@@ -103,10 +105,10 @@ say "Installing torch $TorchVer for $GfxTarget"
 $env:PATH = "$Root;${Root}\Scripts;$env:PATH"
 pip-deep install --index-url $TorchIndex `
   --extra-index-url https://pypi.org/simple/ `
-  "torch[device-${GfxTarget}]==${TorchVer}"
+  "torch[device-${GfxArch}]==${TorchVer}"
 pip-deep install --index-url $TorchIndex `
   --extra-index-url https://pypi.org/simple/ `
-  "torchvision==${TorchVisionVer}"
+  "torchvision[device-${GfxArch}]==${TorchVisionVer}"
 
 say "Installing thenoise + dependencies (from $RepoRoot)"
 # torch is intentionally absent from pyproject.toml. A constraints file is

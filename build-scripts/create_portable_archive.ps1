@@ -1,7 +1,7 @@
 # ===========================================================================
 # create_portable_archive.ps1 — Package existing portable thenoise bundle(s)
 # into release archive(s) the CI workflow produces, and print the intended
-# release tags. Windows counterpart of scripts/create_portable_archive.sh
+# release tags. Windows counterpart of build-scripts/create_portable_archive.sh
 # (which emits .tar.gz); this script emits .zip.
 #
 # GFX target(s) are derived automatically from the bundle root:
