@@ -19,7 +19,7 @@ on:
       gfx_target:
         description: 'AMD GPU targets (comma-separated)'
         required: false
-        default: 'gfx1151,gfx1150,gfx1152'
+        default: 'gfx1151,gfx1150,gfx1152,gfx103X,gfx110X,gfx120X'
       create_release:
         description: 'Create a GitHub release after successful build'
         required: false
