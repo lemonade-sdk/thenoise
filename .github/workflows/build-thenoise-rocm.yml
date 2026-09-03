@@ -25,7 +25,7 @@ on:
       gfx_target:
         description: 'AMD GPU targets (comma-separated)'
         required: false
-        default: 'gfx1151,gfx1150,gfx1152'
+        default: 'gfx1151,gfx1150,gfx1152,gfx103X,gfx110X,gfx120X'
       create_release:
         description: 'Create a GitHub release after successful build'
         required: false
@@ -75,7 +75,7 @@ jobs:
 
       - name: Build portable bundle
         run: |
-          bash scripts/build_portable.sh "${{ matrix.gfx_target }}"
+          bash build-scripts/build_portable.sh "${{ matrix.gfx_target }}"
 
       - name: Create release archive (preserves symlinks)
         run: |
@@ -227,7 +227,7 @@ jobs:
           ROOT="$WORK/bundle"
           MODEL_DIR="$WORK/anima"
           mkdir -p "$MODEL_DIR"
-          bash scripts/qualify_thenoise.sh \
+          bash build-scripts/qualify_thenoise.sh \
             --root "$ROOT" --model-dir "$MODEL_DIR" \
             --out "$WORK/qualification-report.json"
 

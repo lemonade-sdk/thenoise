@@ -42,7 +42,7 @@ def test_text_encoder_rejects_non_safetensors(tmp_path):
     p = tmp_path / "text_encoder"
     p.mkdir()
     try:
-        load_zimage_text_encoder(str(p), device="cpu")
+        load_zimage_text_encoder(str(p), device="cpu", dtype=torch.bfloat16)
     except ValueError as e:
         assert ".safetensors" in str(e)
     else:

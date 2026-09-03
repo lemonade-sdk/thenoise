@@ -8,7 +8,7 @@ def _serve(args) -> None:
     from .runtime import Settings, ModelPaths, Runtime
     settings = Settings(
         device=args.device, host=args.host, port=args.port,
-        upscaler_dir=args.upscaler_dir,
+        upscaler_dir=args.upscaler_dir, offload_device=args.offload_device,
     )
 
     runtime = Runtime(settings)

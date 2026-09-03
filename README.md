@@ -1,6 +1,6 @@
 # TheNoise
 
-A text-to-image diffusion inference engine. Tested on Strix Halo, Strix Point and Krackan Point.
+A diffusion inference engine. Optimized for Strix Halo. Works on most AMD iGPUs and dGPUs supporting ROCm.
 
 Loads one model at a time and generates images from text prompts. Editing-capable models can also edit existing images from a text instruction (image + prompt → edited image). Available as a CLI tool, an HTTP API (with a simple web UI).
 
@@ -78,12 +78,7 @@ This is the slow step — it downloads several GB of ROCm PyTorch wheels.
 Subsequent runs skip the torch install (detected via `import torch`).
 
 By default the script autodetects the GPU's architecture. Override with the
-`GFX_ARCH` environment variable, which applies to every `./thenoise.sh`
-invocation. Supported targets are `gfx1150`, `gfx1151`, and `gfx1152`:
-
-```bash
-GFX_ARCH=gfx1151 ./thenoise.sh --help
-```
+`GFX_ARCH` environment variable if needed.
 
 ### 4. Download a model
 
@@ -107,7 +102,7 @@ for Krea 2 (larger, higher quality) and Z-Image-Turbo (distilled 8-step).
   --dit ./models/anima/split_files/diffusion_models/anima-turbo-v1.0.safetensors \
   --vae ./models/anima/split_files/vae/qwen_image_vae.safetensors \
   --text-encoder ./models/anima/split_files/text_encoders/qwen_3_06b_base.safetensors \
-  --prompt "a fox walking in the snow" --steps 8 --guidance-scale 1 \
+  --prompt "a fox walking in the snow" \
   --out fox.png
 ```
 
@@ -122,9 +117,6 @@ directory with a standalone CPython, PyTorch ROCm, all dependencies, `thenoise`
 itself, and a bundled `clang` (so `torch.compile`/Triton JIT works with no system
 gcc). No installation, sudo, or Python needed on the target machine.
 
-- Built per GPU target (`gfx1151`, `gfx1150`, `gfx1152`) — see
-  `.github/workflows/build-thenoise-rocm.yml` and `scripts/build_portable.sh`.
-- The `gfx1151` bundle is GPU-qualified (a real Anima generation) before release.
 
 Download the release assets for your GPU and run:
 
@@ -136,7 +128,7 @@ Download the release assets for your GPU and run:
   --dit ./models/anima/split_files/diffusion_models/anima-turbo-v1.0.safetensors \
   --vae ./models/anima/split_files/vae/qwen_image_vae.safetensors \
   --text-encoder ./models/anima/split_files/text_encoders/qwen_3_06b_base.safetensors \
-  --prompt "a fox walking in the snow" --steps 8 --guidance-scale 1
+  --prompt "a fox walking in the snow" --out fox.png
 ```
 
 ### Developing on TheNoise
@@ -196,8 +188,8 @@ in the project venv created by [Setup](#setup) — a bare `python` will not work
 
 | Model | Download size | Notes | Editing |
 |-------|---------------|-------|------|
-| Anima | ~5.4 GB | 2B params; fastest to download and run | x |
-| Krea 2 | ~35 GB | Higher quality; much larger text encoder and DiT | x |
+| Anima | ~5.4 GB | 2B Cosmos-Predict2 MMDiT; Qwen3 VAE + Qwen3-06B | x |
+| Krea 2 | ~35 GB | Turbo MMDiT; Qwen3 VAE + Qwen3-VL-4B | x |
 | Z-Image-Turbo | ~21 GB | Distilled 8-step S3-DiT; Flux VAE + Qwen3 caption encoder | x |
 | Z-Image | ~21 GB | Non-distilled version of Z-Image-Turbo | x |
 | Flux.2 Klein 4B | ~12 GB | Distilled 4-step flow MMDiT; Flux.2 VAE + Qwen3-4B | ✓ |
@@ -226,8 +218,7 @@ same value in your `--dit` path:
 ```
 
 Available variants include `turbo-v1.0` (fewest steps), `aesthetic-v1.1`, and
-`base-v1.0`. Add `--int8-convrot` to fetch the int8-convrot DiT (from
-`Bedovyy/Anima-INT8`) instead of the bf16 one.
+`base-v1.0`. Add `--int8-convrot` to fetch the int8-convrot DiT instead of the bf16 one.
 
 ### Z-Image-Turbo
 
@@ -239,15 +230,6 @@ This fetches the single-file bf16 Turbo DiT (~12 GB), the Flux VAE (`ae.safetens
 and the Qwen3-4B text encoder (`qwen_3_4b.safetensors`, ~8 GB). Add
 `--int8-convrot` to fetch the int8-convrot DiT instead.
 
-```bash
-./thenoise.sh generate \
-  --dit ./models/zimage/split_files/diffusion_models/z_image_turbo_bf16.safetensors \
-  --vae ./models/zimage/split_files/vae/ae.safetensors \
-  --text-encoder ./models/zimage/split_files/text_encoders/qwen_3_4b.safetensors \
-  --prompt "a fox walking in the snow" \
-  --out /tmp/zimage.png
-```
-
 ### Flux.2 Klein
 
 ```bash
@@ -256,32 +238,8 @@ and the Qwen3-4B text encoder (`qwen_3_4b.safetensors`, ~8 GB). Add
 
 This fetches the single-file bf16 DiT, the Flux.2 VAE (`flux2-vae.safetensors`),
 and the Qwen3 text encoder (a single file from Comfy-Org). Pick `--variant` from
-`4b` / `4b-base` / `9b` / `9b-base`. The 9B DiTs come from the official
-black-forest-labs repos (they are not published as single files elsewhere).
-
-Add `--int8-convrot` to fetch the int8-convrot DiT instead. The 4B DiT comes from
-`wraps/FLUX.2-klein-4B-INT8-ConvRot-ComfyUI`; the 9B DiT is only published on
-Civitai and is downloaded directly from there (if Civitai requires login, the
-script prints the model page link). Base variants have no int8-convrot release.
-
-The DiT size (4B vs 9B) is auto-detected from the checkpoint; the matching Qwen3
-text encoder is selected automatically. The distilled variants (default) run 4
-steps with CFG off (`guidance_scale` 1.0). Base variants need explicit CFG:
-
-```bash
-./thenoise.sh generate \
-  --dit ./models/klein/split_files/diffusion_models/flux-2-klein-4b.safetensors \
-  --vae ./models/klein/split_files/vae/flux2-vae.safetensors \
-  --text-encoder ./models/klein/split_files/text_encoders/qwen_3_4b.safetensors \
-  --prompt "a fox walking in the snow" \
-  --steps 4 \
-  --sampler euler \
-  --out /tmp/klein.png
-```
-
-For a *base* checkpoint (`-base-4b` / `-base-9b`) use `--steps 50 --guidance-scale 4`
-and pass a `--negative-prompt`. The default sampler is Euler; ER-SDE is also
-selectable via `--sampler er_sde`.
+`4b` / `4b-base` / `9b` / `9b-base`. Add `--int8-convrot` to fetch the 
+int8-convrot DiT instead.
 
 ---
 

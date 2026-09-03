@@ -119,8 +119,8 @@ def _load_qwen3(
 
 def load_zimage_text_encoder(
     path: str,
-    dtype: torch.dtype = torch.bfloat16,
-    device: Union[str, torch.device] = "cpu",
+    dtype: torch.dtype,
+    device: Union[str, torch.device],
     tokenizer_dir: Optional[str] = None,
 ) -> tuple:
     """Load the Z-Image Qwen3 text encoder + tokenizer.

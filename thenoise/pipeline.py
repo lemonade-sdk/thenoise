@@ -293,9 +293,10 @@ class PipelineController:
         decode_key = self._cache_key_decode(sampling_key, r.refined)
 
         with self._lock:
-            model.switch_loras(request.lora_specs, model.dit)
+            memory = model.memory
 
             # Stage 0: reference (image) latent — deterministic per image (edit).
+            # Uses the always-resident VAE.
             ref_latents: Optional[list[torch.Tensor]] = None
             if is_edit:
                 if self._cache.reference_hit(ref_key):
@@ -310,11 +311,12 @@ class PipelineController:
                         ref_latents.append(model.encode_reference(pixels))  # [1,C,H,W]
                     self._cache.reference_store(ref_key, ref_latents)
 
-            # Stage 1: prompt conditioning (image-aware for multimodal encoders).
+            # Stage 1: prompt conditioning — text encoder only (RAW).
             if self._cache.prompt_hit(prompt_key):
                 cond = self._cache.prompt_get()
             else:
-                cond = model.encode_prompt(
+                memory.ensure("text_encoder")
+                cond_raw = model.encode_prompt(
                     EncodePromptArgs(
                         prompt=request.prompt,
                         negative_prompt=request.negative_prompt,
@@ -322,17 +324,24 @@ class PipelineController:
                         image=request.image if is_edit else None,
                     )
                 )
-                self._cache.prompt_store(prompt_key, cond)
+                memory.offload("text_encoder")
 
             params = SamplingParams(
                 height=r.height, width=r.width, steps=r.steps, seed=r.seed,
                 guidance_scale=r.guidance_scale, sampler=r.effective_sampler,
             )
 
-            # Stage 2: sampling (denoise) — ref-conditioned only in the edit path.
+            # Stage 2: sampling — the dit block. The DiT is resident here, so
+            # LoRA switching (which may requantize) and text fusion run in it too.
+            # ``ref_latents``/``ref_method`` are only set in the edit path.
             if self._cache.sampling_hit(sampling_key):
                 latents = self._cache.sampling_get()
             else:
+                memory.ensure("dit")
+                model.switch_loras(request.lora_specs, model.dit)
+                if not self._cache.prompt_hit(prompt_key):
+                    cond = model.fuse_text(cond_raw)
+                    self._cache.prompt_store(prompt_key, cond)
                 with torch.no_grad():
                     latents = self._denoise(
                         cond, params, ref_latents, ref_method or "index"
@@ -340,14 +349,22 @@ class PipelineController:
                 self._cache.sampling_store(sampling_key, latents)
 
             # Stage 3/4: upscale + decode (interleaved so cache hits skip upscale).
+            # The DiT is offloaded before the VAE decode so decode's peak (VAE +
+            # decode activations) does not also carry the DiT weights.
             if self._cache.decode_hit(decode_key):
                 pixels = self._cache.decode_get()
             else:
                 if r.refined:
+                    memory.ensure("dit")
                     latents = self._upscale_and_refine(latents, cond, params)
+                memory.offload("dit")
+                memory.ensure("vae")
                 pixels = model.decode(latents)  # fp32 GPU tensor [C,H,W]
                 self._cache.decode_store(decode_key, pixels)
 
+            # Leave every swappable component offloaded at rest (the VAE stays
+            # resident; the text encoder was already offloaded after conditioning).
+            memory.offload("dit")
             return pixels
 
     def _denoise(
