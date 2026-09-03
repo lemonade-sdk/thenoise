@@ -41,7 +41,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # torch wheel device spec: gfx115X -> gfx1150 (mirror build_portable.sh).
-$GfxArch = $GfxTarget -replace 'X', '0'
+$GfxArch = $GfxTarget -creplace 'X', '0'
 
 $Root = $env:THENOISE_ROOT
 if (-not $Root) {
