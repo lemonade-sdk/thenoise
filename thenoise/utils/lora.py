@@ -2,9 +2,9 @@ import os
 import re
 from typing import Dict, List, Optional, Tuple, TypedDict, Union
 import torch
+import torch.nn.functional as F
 
 from thenoise.dit.quantized import QuantizedLinear
-from thenoise.utils.loader import restore_quantized_layer
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -86,7 +86,7 @@ def _convert_fused_attention_lora(
       * B_qkv = block_diag(B_q, B_k, B_v)                   -> [3*dim, 3r]
     so that ``B_qkv @ A_qkv`` reproduces the per-projection block-diagonal
     delta (q rows, then k, then v) that the model's fused ``qkv`` expects.
-    Because the fused rank is ``3r``, ``_compute_lora_delta``'s default scale
+    Because the fused rank is ``3r``, ``compute_lora_delta``'s default scale
     ``alpha/dim`` with ``alpha = down.size(0) = 3r`` evaluates to 1, matching
     each original projection's ``r/r = 1`` scaling.
 
@@ -132,57 +132,49 @@ def _convert_fused_attention_lora(
     return new_sd
 
 
-def _compute_lora_delta(
-    model_weight: torch.Tensor,
+def compute_lora_delta(
     down_weight: torch.Tensor,
     up_weight: torch.Tensor,
     alpha,
     multiplier: float,
     calc_device: torch.device,
 ) -> torch.Tensor:
-    """Compute the LoRA delta for a single weight: multiplier * (up @ down) * scale.
+    """Compute a LoRA delta ``[out, in]`` for a linear or conv weight.
 
-    Returns a tensor of the same shape as model_weight.
+    ``multiplier * (up @ down) * (alpha/r)``, computed in BF16 on
+    ``calc_device``. The branch (linear vs conv 1x1 vs conv 3x3) is inferred
+    from the shape of ``down_weight``. Quantization (INT8/FP8) is handled at
+    load time via ``QuantizedTensor`` buffers, so the model weight is never
+    FP8 here — no FP8-specific handling is needed.
     """
-    dim = down_weight.size()[0]
+    r = down_weight.size(0)
     if isinstance(alpha, torch.Tensor):
-        scale = float(alpha.to(calc_device)) / dim
+        scale = float(alpha.to(calc_device)) / r * multiplier
     else:
-        scale = alpha / dim
+        scale = alpha / r * multiplier
 
-    down_weight = down_weight.to(calc_device)
-    up_weight = up_weight.to(calc_device)
+    down_weight = down_weight.to(device=calc_device, dtype=torch.bfloat16)
+    up_weight = up_weight.to(device=calc_device, dtype=torch.bfloat16)
 
-    original_dtype = model_weight.dtype
-    if original_dtype.itemsize == 1:  # fp8
-        down_weight = down_weight.to(torch.float16)
-        up_weight = up_weight.to(torch.float16)
-
-    if len(model_weight.size()) == 2:
-        # linear
-        if len(up_weight.size()) == 4:
+    if down_weight.ndim == 2:
+        # linear (LoRA factors may be stored 4D, e.g. diffusers conv-style)
+        if up_weight.ndim == 4:
             up_weight = up_weight.squeeze(3).squeeze(2)
             down_weight = down_weight.squeeze(3).squeeze(2)
-        delta = multiplier * (up_weight @ down_weight) * scale
-    elif down_weight.size()[2:4] == (1, 1):
+        delta = up_weight @ down_weight
+    elif down_weight.size(2, 3) == (1, 1):
         # conv2d 1x1
         delta = (
-            multiplier
-            * (up_weight.squeeze(3).squeeze(2) @ down_weight.squeeze(3).squeeze(2))
-            .unsqueeze(2).unsqueeze(3)
-            * scale
-        )
+            up_weight.squeeze(3).squeeze(2)
+            @ down_weight.squeeze(3).squeeze(2)
+        ).unsqueeze(2).unsqueeze(3)
     else:
         # conv2d 3x3
-        conved = torch.nn.functional.conv2d(
+        delta = F.conv2d(
             down_weight.permute(1, 0, 2, 3), up_weight
         ).permute(1, 0, 2, 3)
-        delta = multiplier * conved * scale
 
-    if original_dtype.itemsize == 1:  # fp8
-        delta = delta.to(original_dtype)
-
-    return delta
+    return delta * scale
 
 
 class LoRAApplyResult(TypedDict):
@@ -206,23 +198,6 @@ class LoRAApplyResult(TypedDict):
     quantized_affected: Tuple[str, ...]
     quantized_restore_keys: Tuple[str, ...]
     dit_path: Optional[str]
-
-
-def _lora_delta_2d(down, up, alpha, multiplier, calc_device) -> torch.Tensor:
-    """Compute the BF16 LoRA delta ``[out, in]`` for a 2D linear weight.
-
-    ``multiplier * (up @ down) * (alpha/r)``, matching ``_compute_lora_delta``'s
-    linear branch (INT8 layers are always 2D linears with no bf16 weight to
-    reference, so this avoids the fp8/conv branches there).
-    """
-    r = down.size(0)
-    if isinstance(alpha, torch.Tensor):
-        scale = float(alpha.to(calc_device)) / r * multiplier
-    else:
-        scale = alpha / r * multiplier
-    down = down.to(device=calc_device, dtype=torch.bfloat16)
-    up = up.to(device=calc_device, dtype=torch.bfloat16)
-    return up @ down * scale
 
 
 def apply_lora_to_model(
@@ -263,9 +238,12 @@ def apply_lora_to_model(
 
     # Detect whether the model uses a fused qkv attention (S3-DiT ComfyUI
     # layout). If so, convert any diffusers-layout (separate to_q/to_k/to_v)
-    # LoRA factors to match the model's parameters.
+    # LoRA factors to match the model's parameters. The detection must include
+    # buffers: quantized ``QuantizedLinear`` weights are buffers, not params.
     model_weight_keys = [
         k for k, _ in base_model.named_parameters() if k.endswith(".weight")
+    ] + [
+        k for k, _ in base_model.named_buffers() if k.endswith(".weight")
     ]
     use_fused = any(k.endswith(".attention.qkv.weight") for k in model_weight_keys)
     lora_sds = [_convert_fused_attention_lora(sd, use_fused) for sd in lora_sds]
@@ -273,99 +251,113 @@ def apply_lora_to_model(
     # Build key sets for each LoRA
     lora_weight_keys_list = [set(sd.keys()) for sd in lora_sds]
 
-    # Iterate over named parameters directly (no full state_dict copy)
-    undo_deltas: Dict[str, torch.Tensor] = {}
+    # Accumulate LoRA deltas per target module across all LoRAs (multiple
+    # LoRAs can affect the same layer). ``deltas`` maps module path -> delta.
+    deltas: Dict[str, torch.Tensor] = {}
+    affected_bf16: List[str] = []
+    affected_quantized: List[str] = []
 
+    def _accumulate(
+        module_path: str,
+        delta: torch.Tensor,
+        *,
+        quantized: bool,
+    ) -> None:
+        if module_path in deltas:
+            deltas[module_path] = deltas[module_path] + delta
+        else:
+            deltas[module_path] = delta
+        (affected_quantized if quantized else affected_bf16).append(module_path)
+
+    # BF16 path: ``.weight`` parameters (plain linears, convs, norms).
     for model_key, model_weight in base_model.named_parameters():
         if not model_key.endswith(".weight"):
             continue
+        module_path = model_key.rsplit(".", 1)[0]
+        module = base_model.get_submodule(module_path)
+        if isinstance(module, QuantizedLinear) and module._quantized:
+            continue  # quantized weight is a buffer, handled below
 
-        original_device = model_weight.device
-        weight_on_calc = model_weight if original_device == calc_device else model_weight.to(calc_device)
-
-        for lora_weight_keys, lora_sd, multiplier in zip(lora_weight_keys_list, lora_sds, multipliers):
+        for lora_weight_keys, lora_sd, multiplier in zip(
+            lora_weight_keys_list, lora_sds, multipliers
+        ):
             match = _match_lora_keys(model_key, lora_weight_keys)
             if match is None:
                 continue
 
             down_key, up_key, alpha_key = match
-            down_weight = lora_sd[down_key]
-            up_weight = lora_sd[up_key]
-            alpha = lora_sd.get(alpha_key, down_weight.size()[0])
-
-            delta = _compute_lora_delta(weight_on_calc, down_weight, up_weight, alpha, multiplier, calc_device)
-
-            # Accumulate delta (multiple LoRAs can affect the same layer)
-            if model_key in undo_deltas:
-                undo_deltas[model_key] = undo_deltas[model_key] + delta.to(undo_deltas[model_key].device, undo_deltas[model_key].dtype)
-            else:
-                undo_deltas[model_key] = delta
-
-            # Remove consumed keys
-            lora_weight_keys.remove(down_key)
-            lora_weight_keys.remove(up_key)
-            if alpha_key in lora_weight_keys:
-                lora_weight_keys.remove(alpha_key)
-
-    # Quantized QuantizedLinear layers have no bf16 ``.weight`` parameter to
-    # mutate; their LoRA is baked into the quantized weights at switch time
-    # (dequantize -> add delta -> requantize), so the runtime forward is a single
-    # quantized GEMM (for INT8) with zero LoRA cost. Deltas from multiple LoRAs
-    # are accumulated per module and baked once, avoiding repeated lossy
-    # requantization. This must run before the unused-key warning so the consumed
-    # keys are not reported.
-    quantized_deltas: Dict[str, torch.Tensor] = {}
-    quantized_affected: List[str] = []
-    for module_path, module in base_model.named_modules():
-        if not isinstance(module, QuantizedLinear) or not module._quantized:
-            continue
-        model_key = f"{module_path}.weight"
-        for lora_weight_keys, lora_sd, multiplier in zip(lora_weight_keys_list, lora_sds, multipliers):
-            match = _match_lora_keys(model_key, lora_weight_keys)
-            if match is None:
-                continue
-            down_key, up_key, alpha_key = match
-            delta = _lora_delta_2d(
+            delta = compute_lora_delta(
                 lora_sd[down_key],
                 lora_sd[up_key],
                 lora_sd.get(alpha_key, lora_sd[down_key].size(0)),
                 multiplier,
                 calc_device,
             )
-            if module_path in quantized_deltas:
-                quantized_deltas[module_path] = quantized_deltas[module_path] + delta
-            else:
-                quantized_deltas[module_path] = delta
+            _accumulate(module_path, delta, quantized=False)
+
+            # Remove consumed keys
             lora_weight_keys.discard(down_key)
             lora_weight_keys.discard(up_key)
             lora_weight_keys.discard(alpha_key)
-            quantized_affected.append(module_path)
 
-    for module_path, delta in quantized_deltas.items():
-        base_model.get_submodule(module_path).bake_lora(delta)
+    # Quantized path: quantized ``QuantizedLinear`` layers have no bf16
+    # ``.weight`` parameter to mutate; their LoRA is baked into the quantized
+    # weights at switch time (dequantize -> add delta -> requantize), so the
+    # runtime forward is a single quantized GEMM with zero LoRA cost. Deltas
+    # from multiple LoRAs are accumulated per module and baked once, avoiding
+    # repeated lossy requantization. This must run before the unused-key
+    # warning so the consumed keys are not reported.
+    for module_path, module in base_model.named_modules():
+        if not isinstance(module, QuantizedLinear) or not module._quantized:
+            continue
+        model_key = f"{module_path}.weight"
+        for lora_weight_keys, lora_sd, multiplier in zip(
+            lora_weight_keys_list, lora_sds, multipliers
+        ):
+            match = _match_lora_keys(model_key, lora_weight_keys)
+            if match is None:
+                continue
+            down_key, up_key, alpha_key = match
+            delta = compute_lora_delta(
+                lora_sd[down_key],
+                lora_sd[up_key],
+                lora_sd.get(alpha_key, lora_sd[down_key].size(0)),
+                multiplier,
+                calc_device,
+            )
+            _accumulate(module_path, delta, quantized=True)
+            lora_weight_keys.discard(down_key)
+            lora_weight_keys.discard(up_key)
+            lora_weight_keys.discard(alpha_key)
 
     # Warn about unused LoRA keys
     for i, lora_weight_keys in enumerate(lora_weight_keys_list):
         if len(lora_weight_keys) > 0:
             logger.warning("LoRA %d has unused keys: %s", i, ", ".join(list(lora_weight_keys)[:10]))
 
-    # Apply accumulated deltas to model parameters (in-place, no state_dict copy)
-    if undo_deltas:
-        with torch.no_grad():
-            for param_key, delta in undo_deltas.items():
-                param = base_model.get_parameter(param_key)
+    # Apply the accumulated delta to each target layer (in-place, no state_dict
+    # copy). Each layer owns how to mutate itself: BF16 adds the delta, quantized
+    # bakes it in.
+    with torch.no_grad():
+        for module_path, delta in deltas.items():
+            module = base_model.get_submodule(module_path)
+            if isinstance(module, QuantizedLinear):
+                module.apply_lora(delta)
+            else:
+                # Non-QuantizedLinear weight (e.g. a conv): plain in-place add.
+                param = base_model.get_parameter(f"{module_path}.weight")
                 param.data.add_(delta.to(param.device, param.dtype))
 
     # For baked quantized LoRAs, record the raw checkpoint keys so undo can
     # reload the original weights from disk (captured at load time in the model).
-    quantized_affected_unique = tuple(dict.fromkeys(quantized_affected))
+    quantized_affected_unique = tuple(dict.fromkeys(affected_quantized))
     restore_map = getattr(base_model, "_quantized_restore_map", {})
     quantized_restore_keys = tuple(restore_map.get(p) for p in quantized_affected_unique)
 
     return {
         "lora_sds": lora_sds,
         "multipliers": multipliers,
-        "affected_keys": tuple(undo_deltas.keys()),
+        "affected_keys": tuple(f"{p}.weight" for p in dict.fromkeys(affected_bf16)),
         "quantized_affected": quantized_affected_unique,
         "quantized_restore_keys": quantized_restore_keys,
         "dit_path": dit_path,
@@ -398,18 +390,9 @@ def undo_lora_on_model(
     # Baked quantized LoRAs: reload the original weights from the checkpoint
     # file (by the raw keys captured at load time) and restore them in place.
     for module_path, raw_key in zip(quantized_affected or (), quantized_restore_keys or ()):
-        module = base_model.get_submodule(module_path)
-        if raw_key is None:
-            raise RuntimeError(
-                f"cannot undo quantized LoRA on {module_path}: no raw checkpoint key "
-                "was recorded at load time"
-            )
-        if dit_path is None:
-            raise RuntimeError(
-                f"cannot undo quantized LoRA on {module_path}: no dit_path was "
-                "recorded at apply time"
-            )
-        restore_quantized_layer(module, dit_path, raw_key)
+        base_model.get_submodule(module_path).undo_lora(
+            None, raw_key=raw_key, dit_path=dit_path
+        )
 
     if not lora_sds or not affected_keys:
         return
@@ -421,9 +404,8 @@ def undo_lora_on_model(
 
     with torch.no_grad():
         for model_key in affected_keys:
-            param = base_model.get_parameter(model_key)
-            original_device = param.device
-            weight_on_calc = param if original_device == calc_device else param.to(calc_device)
+            module_path = model_key.rsplit(".", 1)[0]
+            module = base_model.get_submodule(module_path)
 
             accumulated_delta: Optional[torch.Tensor] = None
 
@@ -435,12 +417,12 @@ def undo_lora_on_model(
                     continue
 
                 down_key, up_key, alpha_key = match
-                down_weight = lora_sd[down_key]
-                up_weight = lora_sd[up_key]
-                alpha = lora_sd.get(alpha_key, down_weight.size()[0])
-
-                delta = _compute_lora_delta(
-                    weight_on_calc, down_weight, up_weight, alpha, multiplier, calc_device
+                delta = compute_lora_delta(
+                    lora_sd[down_key],
+                    lora_sd[up_key],
+                    lora_sd.get(alpha_key, lora_sd[down_key].size(0)),
+                    multiplier,
+                    calc_device,
                 )
 
                 if accumulated_delta is None:
@@ -451,5 +433,9 @@ def undo_lora_on_model(
                     )
 
             if accumulated_delta is not None:
-                param.data.sub_(accumulated_delta.to(param.device, param.dtype))
+                if isinstance(module, QuantizedLinear):
+                    module.undo_lora(accumulated_delta)
+                else:
+                    param = base_model.get_parameter(model_key)
+                    param.data.sub_(accumulated_delta.to(param.device, param.dtype))
 

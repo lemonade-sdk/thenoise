@@ -154,7 +154,7 @@ class _TinyInt8Model(nn.Module):
         self.q.load_quantized(
             _int8_qt(torch.randint(-127, 127, (512, 256), dtype=torch.int8), torch.rand(512, 1))
         )
-        self.plain = nn.Linear(256, 512)
+        self.plain = QuantizedLinear(256, 512)
 
 
 def _int8_lora_sd():
