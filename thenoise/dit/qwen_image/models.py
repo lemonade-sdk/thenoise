@@ -372,7 +372,6 @@ class Attention(nn.Module):
         txt_attn_output = self.to_add_out(txt_attn_output)
         return img_attn_output, txt_attn_output
 
-
 class QwenImageTransformerBlock(nn.Module):
     def __init__(self, dim: int, heads: int, attention_head_dim: int, eps: float = 1e-5, split_attn: bool = False, zero_cond_t: bool = False):
         super().__init__()
@@ -413,6 +412,7 @@ class QwenImageTransformerBlock(nn.Module):
             return torch.cat([x_base, x_ext], dim=1), gate
         return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1), gate.unsqueeze(1)
 
+    @torch.compile(fullgraph=True, dynamic=True)
     def forward(
         self,
         hidden_states: torch.Tensor,
