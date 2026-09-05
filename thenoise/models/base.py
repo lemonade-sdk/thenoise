@@ -145,6 +145,18 @@ class DiffusionModel(ABC):
     # Editing models set this True and override ``encode_reference``/``pack_reference_latent``.
     supports_edit: bool = False
 
+    def _lora_key_map(self, key: str) -> str:
+        """Map a LoRA key to this model's schema.
+
+        Training tools name LoRA targets differently from this repo's model
+        schema (e.g. ComfyUI Flux.2 ``transformer_blocks``/``attn`` vs the
+        repo's ``double_blocks``/``img_attn``, diffusers ``to_out.0`` vs the
+        model's ``out``). Model families with a non-canonical schema override
+        this. Default: identity (the generic naming conventions in
+        ``thenoise.utils.lora`` already resolve sd-scripts / diffusers names).
+        """
+        return key
+
     @staticmethod
     @abstractmethod
     def detect(f) -> bool:
@@ -380,6 +392,7 @@ class DiffusionModel(ABC):
             self._active_lora_result = apply_lora_to_model(
                 dit, lora_sds, multipliers, torch.device(self.device),
                 dit_path=self.dit_path,
+                key_map=self._lora_key_map,
             )
             active_names = ", ".join(
                 self._parse_lora_spec(s)[0] for s in lora_specs

@@ -44,6 +44,11 @@ class ZImageModel(DiffusionModel):
 
     MAX_SEQUENCE_LENGTH = 512
 
+    def _lora_key_map(self, key: str) -> str:
+        """Diffusers-layout LoRAs name the output projection ``to_out.0``;
+        the Z-Image model names it ``out``."""
+        return key.replace(".to_out.0", ".out")
+
     @staticmethod
     def detect(f) -> bool:
         """True if this handle is the Z-Image S3-DiT.

@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Dict, List, Optional, Tuple, TypedDict, Union
+from typing import Callable, Dict, List, Optional, Tuple, TypedDict, Union
 import torch
 import torch.nn.functional as F
 
@@ -13,17 +13,43 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _normalize_lora_suffix(lora_sd: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Rewrite LoRA factor suffixes to a canonical ``lora_A``/``lora_B`` form.
+
+    Training tools name the factors variously: sd-scripts ``lora_down``/
+    ``lora_up``, diffusers ``lora_A``/``lora_B``, ComfyUI ``lora.down``/
+    ``lora.up``. Normalizing to ``lora_A`` (down) / ``lora_B`` (up) means the
+    rest of the pipeline (fusing and matching) needs to know only one form.
+    ``.alpha`` and already-canonical keys are left unchanged.
+    """
+    out: Dict[str, torch.Tensor] = {}
+    for k, v in lora_sd.items():
+        for old, new in [
+            (".lora_down.weight", ".lora_A.weight"),
+            (".lora_up.weight", ".lora_B.weight"),
+            (".lora.down.weight", ".lora_A.weight"),
+            (".lora.up.weight", ".lora_B.weight"),
+        ]:
+            if k.endswith(old):
+                out[k[: -len(old)] + new] = v
+                break
+        else:
+            out[k] = v
+    return out
+
+
 def _match_prefixed_lora_keys(
     lora_name: str,
-    lora_weight_keys: str,
+    lora_weight_keys: set,
 ) -> Optional[Tuple[str, str, str]]:
-    for (suffix_a, suffix_b) in [(".lora_down", ".lora_up"), (".lora_A", ".lora_B")]:
-        a_key = lora_name + suffix_a + ".weight"
-        b_key = lora_name + suffix_b + ".weight"
-        alpha_key = lora_name + ".alpha"
-        if a_key in lora_weight_keys and b_key in lora_weight_keys:
-            return (a_key, b_key, alpha_key)
-    return None        
+    """Find canonical down/up/alpha keys for a LoRA target name."""
+    a_key = lora_name + ".lora_A.weight"
+    b_key = lora_name + ".lora_B.weight"
+    alpha_key = lora_name + ".alpha"
+    if a_key in lora_weight_keys and b_key in lora_weight_keys:
+        return (a_key, b_key, alpha_key)
+    return None
+
 
 def _match_lora_keys(
     model_weight_key: str,
@@ -31,7 +57,9 @@ def _match_lora_keys(
 ) -> Optional[Tuple[str, str, str]]:
     """Find matching LoRA down/up/alpha keys for a model weight key.
 
-    Returns (down_key, up_key, alpha_key) or None if no match.
+    Returns (down_key, up_key, alpha_key) or None if no match. Handles the
+    common training-tool naming conventions (sd-scripts underscore-joined,
+    diffusers/ComfyUI dotted), with the factor suffix already normalized.
     """
     if not model_weight_key.endswith(".weight"):
         return None
@@ -45,8 +73,8 @@ def _match_lora_keys(
         if res:
             return res
 
-    # diffusers-style naming: dotted path
-    for prefix in ["diffusion_model.", ""]:
+    # diffusers/ComfyUI naming: dotted path
+    for prefix in ["diffusion_model.", "transformer.", ""]:
         lora_name = prefix + lora_name_without_prefix
         res = _match_prefixed_lora_keys(lora_name, lora_weight_keys)
         if res:
@@ -55,56 +83,20 @@ def _match_lora_keys(
     return None
 
 
-def _unwrap_compiled(model: torch.nn.Module) -> torch.nn.Module:
-    """Unwrap a torch.compile OptimizedModule to get the original module.
+def _fuse_attention(lora_sd: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Fuse separate ``to_q``/``to_k``/``to_v`` LoRA factors into ``qkv``.
 
-    torch.compile wraps the model in an OptimizedModule whose state_dict()/load_state_dict()
-    may not delegate correctly. Operating on the original module ensures LoRA key matching 
-    and weight modification work correctly. The compiled kernels reference the same underlying 
-    parameter tensors, so they see updates.
+    Diffusers/ComfyUI attention LoRAs train separate q/k/v projections; models
+    with a fused ``qkv`` projection expect the factors combined as
+    ``A_qkv = cat([A_q; A_k; A_v], dim=0)`` and
+    ``B_qkv = block_diag(B_q, B_k, B_v)``. The fused rank is ``3r``, so the
+    default scale ``alpha/dim`` with ``alpha = down.size(0) = 3r`` evaluates to
+    1, matching each original projection's ``r/r`` scaling. No-op if the LoRA
+    has no separate q/k/v factors. The input is not mutated.
     """
-    while hasattr(model, "_orig_mod"):
-        model = model._orig_mod
-    return model
-
-
-def _convert_fused_attention_lora(
-    lora_sd: Dict[str, torch.Tensor],
-    use_fused: bool,
-) -> Dict[str, torch.Tensor]:
-    """Convert a diffusers-layout S3-DiT attention LoRA to the fused-qkv layout.
-
-    Diffusers' ``ZImageTransformer2DModel`` uses separate ``to_q``/``to_k``/
-    ``to_v``/``to_out`` projections, while thenoise's Z-Image port (ComfyUI /
-    Lumina layout) fuses QKV into a single ``qkv`` projection plus ``out``.
-    LoRAs trained on the diffusers layout therefore use keys that do not match
-    the model's parameters (``to_q``/``to_k``/``to_v`` -> ``qkv``, ``to_out.0``
-    -> ``out``). This helper remaps those factors so they apply correctly.
-
-    The fused q/k/v factors are combined as:
-      * A_qkv = concat([A_q; A_k; A_v], dim=0)              -> [3r, dim]
-      * B_qkv = block_diag(B_q, B_k, B_v)                   -> [3*dim, 3r]
-    so that ``B_qkv @ A_qkv`` reproduces the per-projection block-diagonal
-    delta (q rows, then k, then v) that the model's fused ``qkv`` expects.
-    Because the fused rank is ``3r``, ``compute_lora_delta``'s default scale
-    ``alpha/dim`` with ``alpha = down.size(0) = 3r`` evaluates to 1, matching
-    each original projection's ``r/r = 1`` scaling.
-
-    ``feed_forward`` (w1/w2/w3) already shares identical naming and is left
-    untouched, as is everything else. If the LoRA isn't in the diffusers
-    attention layout, it is returned unchanged. The input is not mutated.
-    """
-    if not use_fused:
-        return lora_sd
-    keys = list(lora_sd.keys())
-    if not any("attention.to_q.lora_A.weight" in k for k in keys):
-        return lora_sd
-
-    # Group the to_q/to_k/to_v factors by their shared attention prefix
-    # (e.g. "diffusion_model.layers.0.attention.").
     groups = set()
-    for k in keys:
-        m = re.match(r"^(.*?\.attention\.)to_[qkv]\.lora_[AB]\.weight$", k)
+    for k in lora_sd:
+        m = re.match(r"^(.*?)to_[qkv]\.lora_[AB]\.weight$", k)
         if m:
             groups.add(m.group(1))
     if not groups:
@@ -122,14 +114,38 @@ def _convert_fused_attention_lora(
                 new_sd[f"{prefix}qkv.lora_A.weight"] = torch.cat(parts, dim=0)
             else:
                 new_sd[f"{prefix}qkv.lora_B.weight"] = torch.block_diag(*parts)
-        # to_out.0 -> out (single projection, rename only).
-        out_a = f"{prefix}to_out.0.lora_A.weight"
-        out_b = f"{prefix}to_out.0.lora_B.weight"
-        if out_a in new_sd:
-            new_sd[f"{prefix}out.lora_A.weight"] = new_sd.pop(out_a)
-        if out_b in new_sd:
-            new_sd[f"{prefix}out.lora_B.weight"] = new_sd.pop(out_b)
     return new_sd
+
+
+def _unwrap_compiled(model: torch.nn.Module) -> torch.nn.Module:
+    """Unwrap a torch.compile OptimizedModule to get the original module.
+
+    torch.compile wraps the model in an OptimizedModule whose state_dict()/load_state_dict()
+    may not delegate correctly. Operating on the original module ensures LoRA key matching 
+    and weight modification work correctly. The compiled kernels reference the same underlying 
+    parameter tensors, so they see updates.
+    """
+    while hasattr(model, "_orig_mod"):
+        model = model._orig_mod
+    return model
+
+
+def _normalize_lora_sd(
+    lora_sd: Dict[str, torch.Tensor],
+    key_map: Optional[Callable[[str], str]],
+) -> Dict[str, torch.Tensor]:
+    """Normalize an externally-named LoRA state dict for matching.
+
+    Pipeline: normalize the factor suffix, fuse any separate q/k/v attention
+    factors, then apply the model family's ``key_map`` (schema renames, e.g.
+    ComfyUI ``transformer_blocks`` -> model ``double_blocks``).
+    """
+    lora_sd = _normalize_lora_suffix(lora_sd)
+    lora_sd = _fuse_attention(lora_sd)
+    if key_map is not None:
+        lora_sd = {key_map(k): v for k, v in lora_sd.items()}
+    return lora_sd
+
 
 
 def compute_lora_delta(
@@ -204,6 +220,7 @@ def apply_lora_to_model(
     multipliers: List[float],
     calc_device: torch.device,
     dit_path: Optional[str] = None,
+    key_map: Optional[Callable[[str], str]] = None,
 ) -> LoRAApplyResult:
     """Apply LoRA weights directly to a model's parameters (in-place).
 
@@ -234,17 +251,10 @@ def apply_lora_to_model(
 
     base_model = _unwrap_compiled(model)
 
-    # Detect whether the model uses a fused qkv attention (S3-DiT ComfyUI
-    # layout). If so, convert any diffusers-layout (separate to_q/to_k/to_v)
-    # LoRA factors to match the model's parameters. The detection must include
-    # buffers: quantized ``QuantizedLinear`` weights are buffers, not params.
-    model_weight_keys = [
-        k for k, _ in base_model.named_parameters() if k.endswith(".weight")
-    ] + [
-        k for k, _ in base_model.named_buffers() if k.endswith(".weight")
-    ]
-    use_fused = any(k.endswith(".attention.qkv.weight") for k in model_weight_keys)
-    lora_sds = [_convert_fused_attention_lora(sd, use_fused) for sd in lora_sds]
+    # Normalize each LoRA state dict to the model's naming: normalize the factor
+    # suffix, fuse separate q/k/v attention factors, then apply the model
+    # family's ``key_map`` (schema renames, e.g. ComfyUI -> repo).
+    lora_sds = [_normalize_lora_sd(sd, key_map) for sd in lora_sds]
 
     # Build key sets for each LoRA
     lora_weight_keys_list = [set(sd.keys()) for sd in lora_sds]

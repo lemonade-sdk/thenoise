@@ -58,6 +58,23 @@ class FluxKleinModel(DiffusionModel):
     supports_edit = True
     REF_INDEX = 10
 
+    def _lora_key_map(self, key: str) -> str:
+        """Map ComfyUI Flux.2 LoRA names to this repo's Flux.2 schema.
+
+        ComfyUI names the double/single stream blocks ``transformer_blocks`` /
+        ``single_transformer_blocks``, the fused single-stream projection
+        ``attn.to_qkv_mlp_proj`` and the double-stream attention ``attn`` (with
+        ``to_out.0``); the repo uses ``double_blocks``/``single_blocks``,
+        ``linear1`` and ``img_attn``/``proj``. Applied after the generic
+        q/k/v fusion in ``thenoise.utils.lora``.
+        """
+        key = key.replace(".attn.to_qkv_mlp_proj", ".linear1")
+        key = key.replace("single_transformer_blocks", "single_blocks")
+        key = key.replace(".attn.", ".img_attn.")
+        key = key.replace("transformer_blocks", "double_blocks")
+        key = key.replace(".to_out.0", ".proj")
+        return key
+
     @staticmethod
     def detect(f) -> bool:
         """True if this handle is a Flux.2 (Flux Klein) DiT.
