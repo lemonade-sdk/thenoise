@@ -26,6 +26,7 @@ from thenoise.models import (  # noqa: E402
     AnimaModel,
     FluxKleinModel,
     Krea2Model,
+    QwenImageModel,
     ZImageModel,
 )
 from thenoise.models.base import Conditioning, DiffusionModel  # noqa: E402
@@ -302,11 +303,35 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "model.diffusion_model.final_layer.adaLN_modulation.1.weight",
         ],
     ),
+    "qwen_image": (
+        QwenImageModel,
+        [
+            "img_in.weight",
+            "txt_in.weight",
+            "time_text_embed.1.weight",
+            "layers.0.img_attn.qkv.weight",
+            "layers.0.txt_attn.qkv.weight",
+            "layers.0.ff.img.0.weight",
+            "final_layer.1.weight",
+        ],
+    ),
+    "qwen_image_wrapped": (
+        QwenImageModel,
+        [
+            "model.diffusion_model.img_in.weight",
+            "model.diffusion_model.txt_in.weight",
+            "model.diffusion_model.time_text_embed.1.weight",
+            "model.diffusion_model.layers.0.img_attn.qkv.weight",
+            "model.diffusion_model.layers.0.txt_attn.qkv.weight",
+            "model.diffusion_model.layers.0.ff.img.0.weight",
+            "model.diffusion_model.final_layer.1.weight",
+        ],
+    ),
     "unknown": (None, ["some.random.key", "blocks.0.attn.gate.weight"]),
 }
 
 KEYSET_IDS = sorted(MODEL_KEYSETS)
-CATALOG_IDS = [cls.name for cls in (Krea2Model, AnimaModel, ZImageModel, FluxKleinModel)]
+CATALOG_IDS = [cls.name for cls in (Krea2Model, AnimaModel, ZImageModel, FluxKleinModel, QwenImageModel)]
 
 
 # ------------------------------------------------------------------------ stub models

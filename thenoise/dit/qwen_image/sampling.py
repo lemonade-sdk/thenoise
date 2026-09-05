@@ -28,10 +28,13 @@ def get_sigmas(steps: int, image_seq_len: int, mu: float) -> torch.Tensor:
     """Return the flow timesteps (sigmas in ``[0, 1]``) for ``steps`` denoise steps."""
     sigmas = torch.linspace(1.0, 1.0 / steps, steps)
     sigmas = _time_shift_exponential(mu, 1.0, sigmas)
-    # Stretch to terminate at the configured shift_terminal (0.02).
+    # Stretch to terminate at the configured shift_terminal (0.02). With a single
+    # step the last sigma is already 1.0 (``one_minus_z[-1] == 0``), so the
+    # terminal stretch would divide by zero; leave the grid as-is instead.
     one_minus_z = 1 - sigmas
-    scale_factor = one_minus_z[-1] / (1 - 0.02)
-    sigmas = 1 - one_minus_z / scale_factor
+    if one_minus_z[-1] > 0:
+        scale_factor = one_minus_z[-1] / (1 - 0.02)
+        sigmas = 1 - one_minus_z / scale_factor
     return sigmas
 
 

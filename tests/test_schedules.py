@@ -17,7 +17,14 @@ import pytest
 import torch
 
 from conftest import CATALOG_IDS
-from thenoise.models import MODEL_CATALOG, AnimaModel, FluxKleinModel, Krea2Model, ZImageModel
+from thenoise.models import (
+    MODEL_CATALOG,
+    AnimaModel,
+    FluxKleinModel,
+    Krea2Model,
+    QwenImageModel,
+    ZImageModel,
+)
 from thenoise.models.base import DiffusionModel
 from thenoise.models.config import SamplingParams
 
@@ -45,12 +52,13 @@ BARE = {
     "krea2": {"dit": SimpleNamespace(config=SimpleNamespace(patch=2)), "_compression": 8},
     "zimage": {"dit": SimpleNamespace(patch_size=2)},
     "flux_klein": {},
+    "qwen_image": {},
 }
 
 # The adapters whose step schedule shifts with the image token count. Krea 2 is
 # NOT one of them: it pins ``mu=DEFAULT_MU`` (the distilled checkpoint was trained
 # at a fixed shift), so its grid is resolution independent by design.
-RESOLUTION_AWARE = {"flux_klein"}
+RESOLUTION_AWARE = {"flux_klein", "qwen_image"}
 
 
 @pytest.mark.parametrize("model_cls", MODEL_CATALOG, ids=CATALOG_IDS)
@@ -119,6 +127,7 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
         (Krea2Model, False),
         (ZImageModel, False),
         (FluxKleinModel, True),
+        (QwenImageModel, True),
     ],
     ids=CATALOG_IDS,
 )
