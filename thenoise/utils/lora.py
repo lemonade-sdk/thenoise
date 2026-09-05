@@ -143,9 +143,7 @@ def compute_lora_delta(
 
     ``multiplier * (up @ down) * (alpha/r)``, computed in BF16 on
     ``calc_device``. The branch (linear vs conv 1x1 vs conv 3x3) is inferred
-    from the shape of ``down_weight``. Quantization (INT8/FP8) is handled at
-    load time via ``QuantizedTensor`` buffers, so the model weight is never
-    FP8 here — no FP8-specific handling is needed.
+    from the shape of ``down_weight``.
     """
     r = down_weight.size(0)
     if isinstance(alpha, torch.Tensor):
