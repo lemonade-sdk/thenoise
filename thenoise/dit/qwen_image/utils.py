@@ -186,25 +186,58 @@ def _resize_for_vlm(image: Image.Image, max_pixels: int = 384 * 384) -> Image.Im
     return image
 
 
+def _compute_drop_idx(input_ids: torch.Tensor) -> int:
+    """Index where the user message content begins (after ``<|im_start|>user\n``).
+
+    The edit template drops the system prompt + user header so the DiT text
+    conditioning is the image/instruction content (matching Comfy's
+    ``template_end`` logic). The user content follows the second ``<|im_start|>``
+    (the user turn); we drop through the ``user\n`` header tokens that follow it.
+    """
+    ids = input_ids[0].tolist()
+    im_start = 151644
+    count = 0
+    for i, id_ in enumerate(ids):
+        if id_ == im_start:
+            count += 1
+            if count == 2:
+                return i + 3  # ``<|im_start|>`` ``user`` ``\n``
+    return 0
+
+
 def get_qwen_prompt_embeds_with_image(
     vl_processor: Qwen2VLProcessor,
     vlm: Qwen2_5_VLForConditionalGeneration,
     prompt: Union[str, List[str]],
-    image=None,
+    images=None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Encode prompt + input image (edit) -> (prompt_embeds, mask)."""
-    prompt_template_encode = "<|im_start|>system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), then explain how the user's text instruction should alter or modify the image. Generate a new image that meets the user's requirements while maintaining consistency with the original input where appropriate.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>{}<|im_end|>\n<|im_start|>assistant\n"
-    drop_idx = 64
+    """Encode prompt + input image(s) (edit) -> (prompt_embeds, mask)."""
+    system = (
+        "<|im_start|>system\nDescribe the key features of the input image (color, shape, "
+        "size, texture, objects, background), then explain how the user's text "
+        "instruction should alter or modify the image. Generate a new image that "
+        "meets the user's requirements while maintaining consistency with the "
+        "original input where appropriate.<|im_end|>\n"
+        "<|im_start|>user\n"
+    )
+
+    if images is None:
+        images = []
+    elif isinstance(images, (list, tuple)):
+        images = list(images)
+    else:
+        images = [images]
+
+    image_prompt = "".join(
+        f"Picture {i + 1}: <|vision_start|><|image_pad|><|vision_end|>"
+        for i in range(len(images))
+    )
+    template = system + image_prompt + "{}<|im_end|>\n<|im_start|>assistant\n"
 
     prompt = [prompt] if isinstance(prompt, str) else prompt
-    if image is not None and isinstance(image, list):
-        image = image[0] if len(image) == 1 else image
-    if image is not None:
-        # Cap the vision tokens so the short edit instruction is not drowned out.
-        image = _resize_for_vlm(image)
-    vl_image_inputs = [image] if image is not None else None
+    vl_image_inputs = [_resize_for_vlm(img) for img in images] or None
 
-    txt = [prompt_template_encode.format(e) for e in prompt]
+    txt = [template.format(e) for e in prompt]
     model_inputs = vl_processor(text=txt, images=vl_image_inputs, padding=True, return_tensors="pt").to(vlm.device)
     with torch.no_grad():
         encoder_hidden_states = vlm(
@@ -216,6 +249,7 @@ def get_qwen_prompt_embeds_with_image(
         )
     hidden_states = encoder_hidden_states.hidden_states[-1]
     split_hidden_states = extract_masked_hidden(hidden_states, model_inputs.attention_mask)
+    drop_idx = _compute_drop_idx(model_inputs.input_ids)
     return _mask_and_stack(split_hidden_states, drop_idx)
 
 
