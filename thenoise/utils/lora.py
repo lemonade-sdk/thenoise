@@ -133,15 +133,18 @@ def _unwrap_compiled(model: torch.nn.Module) -> torch.nn.Module:
 def _normalize_lora_sd(
     lora_sd: Dict[str, torch.Tensor],
     key_map: Optional[Callable[[str], str]],
+    fuse_attention: bool = True,
 ) -> Dict[str, torch.Tensor]:
     """Normalize an externally-named LoRA state dict for matching.
 
-    Pipeline: normalize the factor suffix, fuse any separate q/k/v attention
-    factors, then apply the model family's ``key_map`` (schema renames, e.g.
-    ComfyUI ``transformer_blocks`` -> model ``double_blocks``).
+    Pipeline: normalize the factor suffix, optionally fuse any separate q/k/v
+    attention factors (only for models with a fused ``qkv`` projection), then
+    apply the model family's ``key_map`` (schema renames, e.g. ComfyUI
+    ``transformer_blocks`` -> model ``double_blocks``).
     """
     lora_sd = _normalize_lora_suffix(lora_sd)
-    lora_sd = _fuse_attention(lora_sd)
+    if fuse_attention:
+        lora_sd = _fuse_attention(lora_sd)
     if key_map is not None:
         lora_sd = {key_map(k): v for k, v in lora_sd.items()}
     return lora_sd
@@ -221,6 +224,7 @@ def apply_lora_to_model(
     calc_device: torch.device,
     dit_path: Optional[str] = None,
     key_map: Optional[Callable[[str], str]] = None,
+    fuse_attention: bool = True,
 ) -> LoRAApplyResult:
     """Apply LoRA weights directly to a model's parameters (in-place).
 
@@ -230,6 +234,9 @@ def apply_lora_to_model(
     model weights, so keeping them in memory is cheap.
 
     Param keys use the same naming as ``model.state_dict()`` (e.g. "blocks.0.attn.gate.weight").
+
+    ``fuse_attention`` controls whether separate ``to_q``/``to_k``/``to_v`` LoRA
+    factors are fused into a single ``qkv`` projection.
     """
     if not lora_sds:
         return {
@@ -252,9 +259,9 @@ def apply_lora_to_model(
     base_model = _unwrap_compiled(model)
 
     # Normalize each LoRA state dict to the model's naming: normalize the factor
-    # suffix, fuse separate q/k/v attention factors, then apply the model
-    # family's ``key_map`` (schema renames, e.g. ComfyUI -> repo).
-    lora_sds = [_normalize_lora_sd(sd, key_map) for sd in lora_sds]
+    # suffix, optionally fuse separate q/k/v attention factors, then apply the
+    # model family's ``key_map`` (schema renames, e.g. ComfyUI -> repo).
+    lora_sds = [_normalize_lora_sd(sd, key_map, fuse_attention) for sd in lora_sds]
 
     # Build key sets for each LoRA
     lora_weight_keys_list = [set(sd.keys()) for sd in lora_sds]

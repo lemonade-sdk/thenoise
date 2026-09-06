@@ -145,6 +145,11 @@ class DiffusionModel(ABC):
     # Editing models set this True and override ``encode_reference``/``pack_reference_latent``.
     supports_edit: bool = False
 
+    # Whether the attention projections are fused (``qkv``) or separate
+    # (``to_q``/``to_k``/``to_v``). LoRA factors are fused into a single ``qkv``
+    # only for fused-projection models
+    fused_attention: bool = True
+
     def _lora_key_map(self, key: str) -> str:
         """Map a LoRA key to this model's schema.
 
@@ -393,6 +398,7 @@ class DiffusionModel(ABC):
                 dit, lora_sds, multipliers, torch.device(self.device),
                 dit_path=self.dit_path,
                 key_map=self._lora_key_map,
+                fuse_attention=self.fused_attention,
             )
             active_names = ", ".join(
                 self._parse_lora_spec(s)[0] for s in lora_specs

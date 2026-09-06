@@ -180,7 +180,7 @@ rather keep the system interpreter.
 
 ## Supported Models
 
-Anima, Krea 2, Z-Image-Turbo, and Flux.2 Klein are supported. New models will be added. PRs adding model support are welcome.
+Anima, Krea 2, Z-Image-Turbo, Flux.2 Klein, and Qwen-Image are supported. New models will be added. PRs adding model support are welcome.
 
 All download commands use `.venv/bin/python` and need the `scripts` extra
 installed (`uv pip install -e ".[scripts]"`), because `huggingface_hub` lives
@@ -194,6 +194,7 @@ in the project venv created by [Setup](#setup) — a bare `python` will not work
 | Z-Image | ~21 GB | Non-distilled version of Z-Image-Turbo | x |
 | Flux.2 Klein 4B | ~12 GB | Distilled 4-step flow MMDiT; Flux.2 VAE + Qwen3-4B | ✓ |
 | Flux.2 Klein 9B | ~25 GB | Distilled 4-step flow MMDiT; Flux.2 VAE + Qwen3-8B | ✓ |
+| Qwen-Image / Qwen-Image-Edit | ~40 GB | Dual-stream DiT; Qwen-Image VAE + Qwen2.5-VL-7B | ✓ |
 
 
 ### Krea 2
@@ -240,6 +241,19 @@ This fetches the single-file bf16 DiT, the Flux.2 VAE (`flux2-vae.safetensors`),
 and the Qwen3 text encoder (a single file from Comfy-Org). Pick `--variant` from
 `4b` / `4b-base` / `9b` / `9b-base`. Add `--int8-convrot` to fetch the 
 int8-convrot DiT instead.
+
+### Qwen-Image / Qwen-Image-Edit
+
+```bash
+.venv/bin/python scripts/download_qwen_image.py --out ./models/qwen_image
+```
+
+This fetches the latest dated bf16 DiTs for both variants — `qwen_image_2512_bf16.safetensors`
+(image) and `qwen_image_edit_2511_bf16.safetensors` (edit) — plus the shared Qwen2.5-VL-7B
+text encoder and Qwen-Image VAE. Older/unversioned checkpoints are not downloaded. Add
+`--int8-convrot` to swap **both** DiTs for their int8-convrot checkpoints instead of bf16,
+`--image-only` / `--edit-only` to fetch just one variant's DiT (the shared text encoder
+and VAE are always included).
 
 ---
 

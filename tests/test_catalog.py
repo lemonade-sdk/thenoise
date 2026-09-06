@@ -21,6 +21,8 @@ MODEL_DEFAULTS = {
     "zimage": {"steps": 8, "guidance": 1.0, "sampler": "euler", "channels": 16},
     # Distilled: 4 steps, guidance 1.0 (CFG off), Euler, packed 128ch latent.
     "flux_klein": {"steps": 4, "guidance": 1.0, "sampler": "euler", "channels": 128},
+    # Qwen-Image: 50 steps, guidance 1.0 (CFG off), Euler, packed 16ch latent.
+    "qwen_image": {"steps": 50, "guidance": 1.0, "sampler": "euler", "channels": 16},
 }
 
 

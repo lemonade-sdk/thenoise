@@ -661,7 +661,7 @@ class AutoencoderKLQwenImage(nn.Module):
         Returns:
             torch.Tensor: Normalized latents
         """
-        pixels = pixels.to(self.dtype)
+        pixels = pixels.to(device=self.device, dtype=self.dtype)
 
         # Encode to latent space
         posterior = self.encode(pixels, return_dict=False)[0]
