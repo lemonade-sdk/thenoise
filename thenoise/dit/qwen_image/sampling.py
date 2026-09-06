@@ -12,6 +12,8 @@ from typing import List
 
 import torch
 
+from .utils import calculate_shift
+
 
 def _time_shift_exponential(mu: float, sigma: float, t: torch.Tensor) -> torch.Tensor:
     return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
@@ -32,8 +34,6 @@ def get_sigmas(steps: int, image_seq_len: int, mu: float) -> torch.Tensor:
 
 
 def compute_mu(image_seq_len: int) -> float:
-    from .utils import calculate_shift
-
     return calculate_shift(image_seq_len)
 
 

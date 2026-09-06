@@ -38,8 +38,8 @@ def _detect_zero_cond_t(dit_path: str) -> bool:
 class QwenImageModel(DiffusionModel):
     name = "qwen_image"
 
-    DEFAULT_STEPS = 50
-    DEFAULT_GUIDANCE_SCALE = 1.0
+    DEFAULT_STEPS = 28
+    DEFAULT_GUIDANCE_SCALE = 2.5
     DEFAULT_WIDTH = 1024
     DEFAULT_HEIGHT = 1024
 
@@ -193,12 +193,12 @@ class QwenImageModel(DiffusionModel):
 
         with torch.no_grad(), torch.autocast(device_type=dev.type, dtype=self.dtype):
             pos = self.dit(
-                hidden_states, self._txt, self._txt_mask, t_full, self._img_shapes, self._txt_seq_lens
+                hidden_states, self._txt, t_full, self._img_shapes, self._txt_seq_lens
             )
             pos = pos[:, : latents.shape[1], :]
             if guidance_scale > 1.0 and self._null_txt is not None:
                 neg = self.dit(
-                    hidden_states, self._null_txt, self._null_mask, t_full, self._img_shapes, self._null_seq_lens
+                    hidden_states, self._null_txt, t_full, self._img_shapes, self._null_seq_lens
                 )
                 neg = neg[:, : latents.shape[1], :]
                 v = neg + guidance_scale * (pos - neg)

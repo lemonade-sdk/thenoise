@@ -19,6 +19,7 @@ from transformers import Qwen2Tokenizer, Qwen2VLProcessor
 
 from thenoise.utils.loader import load_text_encoder_weights
 from thenoise.utils.setup_logging import setup_logging
+from thenoise.dit.quantized import replace_linears
 
 from PIL import Image
 
@@ -94,7 +95,6 @@ def load_qwen2_5_vl(
     ckpt_path: str,
     dtype: Optional[torch.dtype],
     device: Union[str, torch.device],
-    disable_mmap: bool = True,
 ) -> Qwen2_5_VLForConditionalGeneration:
     """Build and load the Qwen2.5-VL-7B text encoder from a local safetensors.
 
@@ -105,8 +105,8 @@ def load_qwen2_5_vl(
     config = Qwen2_5_VLConfig(**json.loads(QWEN2_5_VL_CONFIG_JSON))
     with init_empty_weights():
         model = Qwen2_5_VLForConditionalGeneration._from_config(config)
-        # The conditional-generation head is not used for embedding extraction.
-        model.lm_head = torch.nn.Identity()
+        del model.lm_head
+        replace_linears(model)
     logger.info("Loading Qwen2.5-VL text encoder from %s", ckpt_path)
     load_text_encoder_weights(
         model,
@@ -156,7 +156,7 @@ def get_qwen_prompt_embeds(
         txt, max_length=tokenizer_max_length + drop_idx, padding=True, truncation=True, return_tensors="pt"
     ).to(vlm.device)
     with torch.no_grad():
-        encoder_hidden_states = vlm(
+        encoder_hidden_states = vlm.model(
             input_ids=txt_tokens.input_ids, attention_mask=txt_tokens.attention_mask, output_hidden_states=True
         )
     hidden_states = encoder_hidden_states.hidden_states[-1]
@@ -234,7 +234,7 @@ def get_qwen_prompt_embeds_with_image(
     txt = [template.format(e) for e in prompt]
     model_inputs = vl_processor(text=txt, images=vl_image_inputs, padding=True, return_tensors="pt").to(vlm.device)
     with torch.no_grad():
-        encoder_hidden_states = vlm(
+        encoder_hidden_states = vlm.model(
             input_ids=model_inputs.input_ids,
             attention_mask=model_inputs.attention_mask,
             pixel_values=model_inputs.pixel_values if vl_image_inputs is not None else None,

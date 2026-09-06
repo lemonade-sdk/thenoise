@@ -285,7 +285,6 @@ class Attention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
-        encoder_hidden_states_mask: Optional[torch.Tensor],
         image_rotary_emb: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         img_query = self.to_q(hidden_states)
@@ -320,24 +319,11 @@ class Attention(nn.Module):
         joint_key = torch.cat([img_key, txt_key], dim=1)
         joint_value = torch.cat([img_value, txt_value], dim=1)
 
-        # Key-padding mask: image tokens are always valid, text tokens follow the mask.
-        if encoder_hidden_states_mask is not None:
-            attention_mask = torch.cat(
-                [
-                    torch.ones((encoder_hidden_states_mask.shape[0], seq_img), device=encoder_hidden_states_mask.device, dtype=torch.bool),
-                    encoder_hidden_states_mask.to(torch.bool),
-                ],
-                dim=1,
-            )
-            attention_mask = attention_mask[:, None, None, :]
-        else:
-            attention_mask = None
-
         joint_query = joint_query.transpose(1, 2)
         joint_key = joint_key.transpose(1, 2)
         joint_value = joint_value.transpose(1, 2)
         joint_hidden_states = F.scaled_dot_product_attention(
-            joint_query, joint_key, joint_value, attn_mask=attention_mask, dropout_p=0.0
+            joint_query, joint_key, joint_value, attn_mask=None, dropout_p=0.0
         )
         joint_hidden_states = joint_hidden_states.transpose(1, 2).flatten(2, 3)
 
@@ -393,7 +379,6 @@ class QwenImageTransformerBlock(nn.Module):
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
-        encoder_hidden_states_mask: torch.Tensor,
         temb: torch.Tensor,
         image_rotary_emb: Optional[torch.Tensor],
         timestep_zero_index: Optional[int] = None,
@@ -413,7 +398,7 @@ class QwenImageTransformerBlock(nn.Module):
         del img_mod1, txt_mod1
 
         img_attn_output, txt_attn_output = self.attn(
-            img_modulated, txt_modulated, encoder_hidden_states_mask, image_rotary_emb
+            img_modulated, txt_modulated, image_rotary_emb
         )
         del img_modulated, txt_modulated
 
@@ -484,14 +469,10 @@ class QwenImageTransformer2DModel(nn.Module):
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
-        encoder_hidden_states_mask: Optional[torch.Tensor] = None,
         timestep: torch.Tensor = None,
         img_shapes: Optional[List[Tuple[int, int, int]]] = None,
         txt_seq_lens: Optional[List[int]] = None,
     ) -> torch.Tensor:
-        if encoder_hidden_states_mask is not None and encoder_hidden_states_mask.dtype != torch.bool:
-            encoder_hidden_states_mask = encoder_hidden_states_mask.bool()
-
         hidden_states = self.img_in(hidden_states)
         timestep = timestep.to(hidden_states.dtype)
 
@@ -519,7 +500,6 @@ class QwenImageTransformer2DModel(nn.Module):
             encoder_hidden_states, hidden_states = block(
                 hidden_states=hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
-                encoder_hidden_states_mask=encoder_hidden_states_mask,
                 temb=temb,
                 image_rotary_emb=image_rotary_emb,
                 timestep_zero_index=timestep_zero_index,
@@ -567,7 +547,7 @@ def load_qwen_image_dit(
     """
     with init_empty_weights():
         model = create_model(zero_cond_t=zero_cond_t, num_layers=num_layers)
-    load_dit(model, dit_path, device=device, dtype=dtype, drop_keys=("__index_timestep_zero__"))
+    load_dit(model, dit_path, device=device, dtype=dtype, drop_keys=("__index_timestep_zero__",))
     logger.info("Loaded Qwen-Image DiT from %s", dit_path)
     return model
 
