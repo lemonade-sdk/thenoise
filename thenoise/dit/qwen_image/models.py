@@ -1,17 +1,10 @@
-"""Qwen-Image DiT — dual-stream transformer (image + text joint attention).
+"""Qwen-Image DiT — dual-stream transformer (parallel image + text joint attention).
 
-Ported from kohya-ss/musubi-tuner's ``qwen_image/qwen_image_model.py``
-(itself the Diffusers ``QwenImageTransformer2DModel``), trimmed to an
-inference-only forward. The dual-stream blocks keep a parallel image and text stream,
-each with its own QKV/norm/MLP, joined by a single joint attention over the
-concatenated token sequence (image tokens first, then text). RoPE is applied to both
-streams; the image uses 3D (frame, height, width) frequencies and the text uses
-its own frequency slice. ``zero_cond_t`` (only for the edit-2511 checkpoint,
-flagged by ``__index_timestep_zero__``) modulates the first ``base_len`` image
-tokens with a zero timestep so the reference tokens carry no time conditioning.
-
-Weights are loaded through ``thenoise.utils.loader.load_dit`` so BF16 and
-int8_convrot checkpoints both load.
+Ported from kohya-ss/musubi-tuner's ``qwen_image/qwen_image_model.py`` (itself
+Diffusers ``QwenImageTransformer2DModel``), trimmed to inference-only. RoPE uses 3D
+image frequencies; ``zero_cond_t`` (edit-2511, flagged by ``__index_timestep_zero__``)
+zeroes the timestep on the reference tokens. Weights load via ``load_dit`` (BF16 and
+int8_convrot checkpoints).
 """
 from __future__ import annotations
 
@@ -31,12 +24,6 @@ setup_logging()
 import logging
 
 logger = logging.getLogger(__name__)
-
-
-def _get_activation(act_fn: str) -> nn.Module:
-    if act_fn == "silu":
-        return nn.SiLU()
-    raise ValueError(f"unknown activation_fn {act_fn}")
 
 
 def _get_timestep_embedding(
@@ -66,10 +53,10 @@ def _get_timestep_embedding(
 
 
 class TimestepEmbedding(nn.Module):
-    def __init__(self, in_channels: int, time_embed_dim: int, act_fn: str = "silu", out_dim: Optional[int] = None):
+    def __init__(self, in_channels: int, time_embed_dim: int, out_dim: Optional[int] = None):
         super().__init__()
         self.linear_1 = QuantizedLinear(in_channels, time_embed_dim)
-        self.act = _get_activation(act_fn)
+        self.act = nn.SiLU()
         out_dim = out_dim if out_dim is not None else time_embed_dim
         self.linear_2 = QuantizedLinear(time_embed_dim, out_dim)
 
@@ -98,22 +85,14 @@ class Timesteps(nn.Module):
 
 
 class QwenTimestepProjEmbeddings(nn.Module):
-    def __init__(self, embedding_dim: int, use_additional_t_cond: bool = False):
+    def __init__(self, embedding_dim: int):
         super().__init__()
         self.time_proj = Timesteps(num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=0, scale=1000)
         self.timestep_embedder = TimestepEmbedding(in_channels=256, time_embed_dim=embedding_dim)
-        self.use_additional_t_cond = use_additional_t_cond
-        if use_additional_t_cond:
-            self.addition_t_embedding = nn.Embedding(2, embedding_dim)
 
-    def forward(self, timestep: torch.Tensor, hidden_states: torch.Tensor, additional_t_cond: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(self, timestep: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
         timesteps = timestep.to(hidden_states.dtype)
-        time_proj = self.time_proj(timesteps)
-        timesteps = self.timestep_embedder(time_proj)
-        if self.use_additional_t_cond:
-            assert additional_t_cond is not None, "additional_t_cond is required when use_additional_t_cond=True"
-            timesteps = timesteps + self.addition_t_embedding(additional_t_cond)
-        return timesteps
+        return self.timestep_embedder(self.time_proj(timesteps))
 
 
 class RMSNorm(nn.Module):
@@ -151,12 +130,11 @@ class GELU(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim: int, dim_out: Optional[int] = None, mult: int = 4, activation_fn: str = "geglu", bias: bool = True):
+    def __init__(self, dim: int, dim_out: Optional[int] = None, mult: int = 4, bias: bool = True):
         super().__init__()
         inner_dim = int(dim * mult)
         dim_out = dim_out if dim_out is not None else dim
-        # The Dropout is a no-op (p=0) but must stay so the checkpoint's
-        # ``net.1`` / ``net.2`` indices align.
+        # Dropout is a no-op (p=0) but must stay so ``net.1``/``net.2`` align with the checkpoint.
         self.net = nn.ModuleList(
             [
                 GELU(dim, inner_dim, approximate="tanh", bias=bias),
@@ -171,13 +149,14 @@ class FeedForward(nn.Module):
         return hidden_states
 
 
-def apply_rotary_emb_qwen(x: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
-    """Apply rotary embedding to ``[B, S, H, D]`` using complex ``freqs [S, D//2]``.
+def apply_rotary_emb_qwen(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """Apply rotary embedding to ``[B, S, H, D]`` using real ``cos/sin [S, D//2]``.
 
-    Implemented with real arithmetic (no ``view_as_complex``) to stay ROCm-friendly.
+    Real arithmetic throughout (no ``view_as_complex``, no complex ``freqs``) so the
+    ``torch.compile``d block never sees complex tensors -- inductor cannot codegen them.
     """
-    cos = freqs.real.to(x.device)
-    sin = freqs.imag.to(x.device)
+    cos = cos.to(x.device)
+    sin = sin.to(x.device)
     cos = cos[None, :, None, :]
     sin = sin[None, :, None, :]
     x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(-1)  # [B, S, H, D//2]
@@ -266,7 +245,9 @@ class QwenEmbedRope(nn.Module):
                 dim=1,
             ).to(device)
         vid_freqs = torch.cat(vid_freqs, dim=0)
-        return vid_freqs, txt_freqs
+        # Split the complex ``torch.polar`` freqs into real cos/sin here (outside the
+        # compiled block) so the attention kernel never sees complex tensors.
+        return (vid_freqs.real, vid_freqs.imag), (txt_freqs.real, txt_freqs.imag)
 
 
 class Attention(nn.Module):
@@ -279,14 +260,11 @@ class Attention(nn.Module):
         out_dim: int,
         added_kv_proj_dim: int,
         eps: float = 1e-5,
-        split_attn: bool = False,
     ):
         super().__init__()
         self.inner_dim = out_dim
         self.inner_kv_dim = out_dim
         self.heads = heads
-        self.scale = dim_head**-0.5
-        self.split_attn = split_attn
 
         self.norm_q = RMSNorm(dim_head, eps=eps)
         self.norm_k = RMSNorm(dim_head, eps=eps)
@@ -309,7 +287,6 @@ class Attention(nn.Module):
         encoder_hidden_states: torch.Tensor,
         encoder_hidden_states_mask: Optional[torch.Tensor],
         image_rotary_emb: Optional[torch.Tensor],
-        txt_seq_lens: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         img_query = self.to_q(hidden_states)
         img_key = self.to_k(hidden_states)
@@ -332,11 +309,11 @@ class Attention(nn.Module):
         txt_key = self.norm_added_k(txt_key)
 
         if image_rotary_emb is not None:
-            img_freqs, txt_freqs = image_rotary_emb
-            img_query = apply_rotary_emb_qwen(img_query, img_freqs)
-            img_key = apply_rotary_emb_qwen(img_key, img_freqs)
-            txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs)
-            txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs)
+            (img_cos, img_sin), (txt_cos, txt_sin) = image_rotary_emb
+            img_query = apply_rotary_emb_qwen(img_query, img_cos, img_sin)
+            img_key = apply_rotary_emb_qwen(img_key, img_cos, img_sin)
+            txt_query = apply_rotary_emb_qwen(txt_query, txt_cos, txt_sin)
+            txt_key = apply_rotary_emb_qwen(txt_key, txt_cos, txt_sin)
 
         seq_img = img_query.shape[1]
         joint_query = torch.cat([img_query, txt_query], dim=1)
@@ -373,7 +350,7 @@ class Attention(nn.Module):
         return img_attn_output, txt_attn_output
 
 class QwenImageTransformerBlock(nn.Module):
-    def __init__(self, dim: int, heads: int, attention_head_dim: int, eps: float = 1e-5, split_attn: bool = False, zero_cond_t: bool = False):
+    def __init__(self, dim: int, heads: int, attention_head_dim: int, eps: float = 1e-5, zero_cond_t: bool = False):
         super().__init__()
         self.zero_cond_t = zero_cond_t
         self.img_mod = nn.Sequential(nn.SiLU(), QuantizedLinear(dim, 6 * dim, bias=True))
@@ -382,15 +359,14 @@ class QwenImageTransformerBlock(nn.Module):
         self.img_norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
         self.txt_norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
         self.txt_norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
-        self.img_mlp = FeedForward(dim=dim, dim_out=dim, activation_fn="gelu-approximate")
-        self.txt_mlp = FeedForward(dim=dim, dim_out=dim, activation_fn="gelu-approximate")
+        self.img_mlp = FeedForward(dim=dim, dim_out=dim)
+        self.txt_mlp = FeedForward(dim=dim, dim_out=dim)
         self.attn = Attention(
             dim_head=attention_head_dim,
             heads=heads,
             out_dim=dim,
             added_kv_proj_dim=dim,
             eps=eps,
-            split_attn=split_attn,
         )
 
     def _modulate(self, x, mod_params, timestep_zero_index: Optional[int] = None):
@@ -420,7 +396,6 @@ class QwenImageTransformerBlock(nn.Module):
         encoder_hidden_states_mask: torch.Tensor,
         temb: torch.Tensor,
         image_rotary_emb: Optional[torch.Tensor],
-        txt_seq_lens: torch.Tensor,
         timestep_zero_index: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         img_mod_params = self.img_mod(temb)
@@ -438,7 +413,7 @@ class QwenImageTransformerBlock(nn.Module):
         del img_mod1, txt_mod1
 
         img_attn_output, txt_attn_output = self.attn(
-            img_modulated, txt_modulated, encoder_hidden_states_mask, image_rotary_emb, txt_seq_lens
+            img_modulated, txt_modulated, encoder_hidden_states_mask, image_rotary_emb
         )
         del img_modulated, txt_modulated
 
@@ -474,24 +449,15 @@ class QwenImageTransformer2DModel(nn.Module):
         num_attention_heads: int = 24,
         joint_attention_dim: int = 3584,
         axes_dims_rope: Tuple[int, int, int] = (16, 56, 56),
-        split_attn: bool = False,
         zero_cond_t: bool = False,
-        use_additional_t_cond: bool = False,
-        use_layer3d_rope: bool = False,
     ):
         super().__init__()
-        self.in_channels = in_channels
         self.out_channels = out_channels or in_channels
         self.inner_dim = num_attention_heads * attention_head_dim
         self.patch_size = patch_size
-        self.split_attn = split_attn
 
-        if use_layer3d_rope:
-            self.pos_embed = QwenEmbedRope(theta=10000, axes_dim=list(axes_dims_rope), scale_rope=True)
-        else:
-            self.pos_embed = QwenEmbedRope(theta=10000, axes_dim=list(axes_dims_rope), scale_rope=True)
-
-        self.time_text_embed = QwenTimestepProjEmbeddings(embedding_dim=self.inner_dim, use_additional_t_cond=use_additional_t_cond)
+        self.pos_embed = QwenEmbedRope(theta=10000, axes_dim=list(axes_dims_rope), scale_rope=True)
+        self.time_text_embed = QwenTimestepProjEmbeddings(embedding_dim=self.inner_dim)
         self.txt_norm = RMSNorm(joint_attention_dim, eps=1e-6)
         self.img_in = QuantizedLinear(in_channels, self.inner_dim)
         self.txt_in = QuantizedLinear(joint_attention_dim, self.inner_dim)
@@ -503,7 +469,6 @@ class QwenImageTransformer2DModel(nn.Module):
                     heads=num_attention_heads,
                     attention_head_dim=attention_head_dim,
                     eps=1e-5,
-                    split_attn=split_attn,
                     zero_cond_t=zero_cond_t,
                 )
                 for _ in range(num_layers)
@@ -523,8 +488,6 @@ class QwenImageTransformer2DModel(nn.Module):
         timestep: torch.Tensor = None,
         img_shapes: Optional[List[Tuple[int, int, int]]] = None,
         txt_seq_lens: Optional[List[int]] = None,
-        guidance: Optional[torch.Tensor] = None,
-        additional_t_cond=None,
     ) -> torch.Tensor:
         if encoder_hidden_states_mask is not None and encoder_hidden_states_mask.dtype != torch.bool:
             encoder_hidden_states_mask = encoder_hidden_states_mask.bool()
@@ -549,12 +512,8 @@ class QwenImageTransformer2DModel(nn.Module):
         encoder_hidden_states = self.txt_norm(encoder_hidden_states)
         encoder_hidden_states = self.txt_in(encoder_hidden_states)
 
-        if guidance is not None:
-            guidance = guidance.to(hidden_states.dtype) * 1000
-
-        temb = self.time_text_embed(timestep, hidden_states, additional_t_cond)
+        temb = self.time_text_embed(timestep, hidden_states)
         image_rotary_emb = self.pos_embed(img_shapes, txt_seq_lens, device=hidden_states.device)
-        txt_seq_lens = torch.tensor(txt_seq_lens, device=hidden_states.device) if txt_seq_lens is not None else None
 
         for block in self.transformer_blocks:
             encoder_hidden_states, hidden_states = block(
@@ -563,7 +522,6 @@ class QwenImageTransformer2DModel(nn.Module):
                 encoder_hidden_states_mask=encoder_hidden_states_mask,
                 temb=temb,
                 image_rotary_emb=image_rotary_emb,
-                txt_seq_lens=txt_seq_lens,
                 timestep_zero_index=timestep_zero_index,
             )
 
@@ -588,10 +546,7 @@ def create_model(
         num_attention_heads=24,
         joint_attention_dim=3584,
         axes_dims_rope=(16, 56, 56),
-        split_attn=False,
         zero_cond_t=zero_cond_t,
-        use_additional_t_cond=False,
-        use_layer3d_rope=False,
     )
     if dtype is not None:
         model.to(dtype)
@@ -607,10 +562,8 @@ def load_qwen_image_dit(
 ) -> QwenImageTransformer2DModel:
     """Load the Qwen-Image DiT via the central quant-aware loader.
 
-    Built with ``init_empty_weights`` (not ``torch.device("meta")``) so only
-    ``nn.Parameter``/buffers land on meta: ``pos_freqs``/``neg_freqs`` are plain
-    tensors computed from ``torch.arange``/``torch.polar`` and must stay real,
-    because ``model.to(device)`` does not move plain tensor attributes.
+    ``init_empty_weights`` (not ``torch.device("meta")``) keeps ``pos_freqs``/
+    ``neg_freqs`` as real plain tensors, since ``model.to(device)`` won't move them.
     """
     with init_empty_weights():
         model = create_model(zero_cond_t=zero_cond_t, num_layers=num_layers)

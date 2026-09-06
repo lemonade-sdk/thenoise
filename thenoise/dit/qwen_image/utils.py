@@ -9,7 +9,6 @@ the prompt together with the input image as vision tokens. Weights load through
 from __future__ import annotations
 
 import json
-import math
 import os
 from typing import List, Optional, Tuple, Union
 
@@ -27,8 +26,6 @@ setup_logging()
 import logging
 
 logger = logging.getLogger(__name__)
-
-VAE_SCALE_FACTOR = 8
 
 # Vendored Qwen2.5-VL tokenizer + processor config dir (offline-safe).
 TOKENIZER_CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs", "tokenizer")
@@ -170,12 +167,9 @@ def get_qwen_prompt_embeds(
 def _resize_for_vlm(image: Image.Image, max_pixels: int = 384 * 384) -> Image.Image:
     """Scale a PIL image to fit within ``max_pixels`` (area-based, aspect-preserving).
 
-    The Qwen2.5-VL vision encoder tokenizes each 14x14 patch into image tokens that
-    are inserted at the ``<|image_pad|>`` placeholder of the prompt. Passing the
-    full-resolution edit image injects thousands of tokens, drowning out the short
-    edit instruction and overflowing the RoPE buffer. Comfy's
-    ``TextEncodeQwenImageEditPlus`` scales the vision image to 384x384 for the same
-    reason; we mirror that here.
+    The vision encoder tokenizes each 14x14 patch into image tokens; full-resolution
+    edit images would inject thousands of tokens, drowning out the short instruction
+    and overflowing the RoPE buffer. Comfy scales to 384x384 for the same reason.
     """
     w, h = image.size
     scale = (max_pixels / (w * h)) ** 0.5

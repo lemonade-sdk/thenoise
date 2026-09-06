@@ -1,14 +1,8 @@
 """Qwen-Image adapter — dual-stream DiT + Qwen2.5-VL-7B text encoder + Qwen-Image VAE.
 
-All Qwen-Image variants are treated as edit-capable. The input image is used two ways
-in the edit path:
-
-  * **Text conditioning** — the Qwen2.5-VL encodes the prompt together with the
-    image (vision tokens), producing image-aware text embeddings.
-  * **Reference latent** — the image is also VAE-encoded and concatenated into the
-    DiT's token sequence (native Qwen-Image approach).
-
-``zero_cond_t`` (only for the edit-2511 checkpoint, flagged by
+All variants are edit-capable: the input image is both (1) encoded by Qwen2.5-VL as
+vision tokens into the text conditioning, and (2) VAE-encoded and concatenated into
+the DiT token sequence as a reference latent. ``zero_cond_t`` (edit-2511, flagged by
 ``__index_timestep_zero__``) is detected from the checkpoint.
 """
 from __future__ import annotations
@@ -139,7 +133,7 @@ class QwenImageModel(DiffusionModel):
         ref=None,
         ref_method: str = "index",
     ) -> torch.Tensor:
-        """Pack the canonical latent into DiT tokens and stash conditioning ONCE.
+        """Pack the canonical latent into DiT tokens and stash conditioning once.
 
         The reference latent (edit) is packed and concatenated into the DiT token
         sequence; the DiT's ``img_shapes`` gains one entry per reference.

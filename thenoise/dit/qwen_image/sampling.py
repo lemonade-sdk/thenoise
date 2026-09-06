@@ -12,13 +12,6 @@ from typing import List
 
 import torch
 
-from thenoise.utils.setup_logging import setup_logging
-
-setup_logging()
-import logging
-
-logger = logging.getLogger(__name__)
-
 
 def _time_shift_exponential(mu: float, sigma: float, t: torch.Tensor) -> torch.Tensor:
     return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
