@@ -90,10 +90,17 @@ class Attention(nn.Module):
         self.k_norm = RMSNorm(self.head_dim, eps=eps) if qk_norm else nn.Identity()
 
     def _apply_rotary_emb(self, x, freqs_cis):
+        # Real-arithmetic RoPE (no complex ops) so torch.compile can generate
+        # code; complex view/multiply falls back to eager in inductor.
         x_dtype = x.dtype
-        x = torch.view_as_complex(x.float().reshape(*x.shape[:-1], -1, 2))
-        freqs_cis = freqs_cis.unsqueeze(2)
-        x_out = torch.view_as_real(x * freqs_cis).flatten(3)
+        x = x.float().reshape(*x.shape[:-1], -1, 2)  # [B, L, H, D/2, 2]
+        x1, x2 = x[..., 0], x[..., 1]                # real and imaginary parts
+        cos = freqs_cis[..., 0].unsqueeze(2)         # [L, 1, D/2]
+        sin = freqs_cis[..., 1].unsqueeze(2)
+        # (x1 + i*x2) * (cos + i*sin) -> real and imaginary parts.
+        x1_out = x1 * cos - x2 * sin
+        x2_out = x1 * sin + x2 * cos
+        x_out = torch.stack([x1_out, x2_out], dim=-1).flatten(3)
         # Cast back to the activation dtype (bf16); the int8 ``out`` projection has
         # no bf16 ``weight`` to reference for the dtype.
         return x_out.to(x_dtype)
@@ -200,12 +207,14 @@ class RopeEmbedder:
     @staticmethod
     def precompute_freqs_cis(dim, end, theta):
         with torch.device("cpu"):
+            # Precompute cos/sin pairs as real tensors (no complex ops) so the
+            # compiled attention path avoids inductor's complex fallback.
             freqs_cis = []
             for d, e in zip(dim, end):
                 freqs = 1.0 / (theta ** (torch.arange(0, d, 2, dtype=torch.float64, device="cpu") / d))
                 timestep = torch.arange(e, device="cpu", dtype=torch.float64)
                 freqs = torch.outer(timestep, freqs).float()
-                freqs_cis_i = torch.polar(torch.ones_like(freqs), freqs).to(torch.complex64)
+                freqs_cis_i = torch.stack([torch.cos(freqs), torch.sin(freqs)], dim=-1)
                 freqs_cis.append(freqs_cis_i)
             return freqs_cis
 
@@ -221,7 +230,8 @@ class RopeEmbedder:
         for i in range(len(self.axes_dims)):
             index = ids[:, i]
             result.append(self.freqs_cis[i][index])
-        return torch.cat(result, dim=-1)
+        # Each entry is [L, dim/2, 2]; concatenate along the dim/2 axis.
+        return torch.cat(result, dim=1)
 
 
 class ZImageTransformer2DModel(nn.Module):
