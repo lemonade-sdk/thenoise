@@ -18,24 +18,7 @@ from torch import Tensor
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention as common_attention
-
-
-def rope(pos: Tensor, dim: int, theta: float = 1e4, ntk: float = 1.0) -> Tensor:
-    scale = torch.arange(0, dim, 2, dtype=torch.float32, device=pos.device) / dim
-    omega = 1.0 / ((theta * ntk) ** scale)
-    out = torch.einsum("...n,d->...nd", pos, omega)
-    out = torch.stack([torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)], dim=-1)
-    out = rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
-    return out
-
-
-def ropeapply(xq: Tensor, xk: Tensor, freqs: Tensor) -> tuple[Tensor, Tensor]:
-    xq_ = xq.reshape(*xq.shape[:-1], -1, 1, 2)
-    xk_ = xk.reshape(*xk.shape[:-1], -1, 1, 2)
-    freqs = freqs[:, None, :, :, :]
-    xq_ = freqs[..., 0] * xq_[..., 0] + freqs[..., 1] * xq_[..., 1]
-    xk_ = freqs[..., 0] * xk_[..., 0] + freqs[..., 1] * xk_[..., 1]
-    return xq_.reshape(*xq.shape), xk_.reshape(*xk.shape)
+from thenoise.utils.rope import apply_rope, rope
 
 
 def temb(
@@ -98,15 +81,14 @@ class DoubleSharedModulation(torch.nn.Module):
 
 
 class PositionalEncoding(torch.nn.Module):
-    def __init__(self, dim, axdims: list[int], theta: float = 1e2, ntk: float = 1.0):
+    def __init__(self, dim, axdims: list[int], theta: float = 1e2):
         super().__init__()
         self.axdims = axdims  # how to split the head dimension across the position axes
         self.theta = theta
-        self.ntk = ntk
 
     def forward(self, pos: Tensor) -> Tensor:
         return torch.cat(
-            [rope(pos[..., i], d, self.theta, self.ntk) for i, d in enumerate(self.axdims)],
+            [rope(pos[..., i], d, self.theta) for i, d in enumerate(self.axdims)],
             dim=-3,
         )
 
@@ -173,7 +155,7 @@ class Attention(torch.nn.Module):
 
         q, k, v = self.qknorm(q, k, v)
         if freqs is not None:
-            q, k = ropeapply(q, k, freqs)
+            q, k = apply_rope(q, k, freqs)
 
         # The shared attention expects [B, L, H, D] and returns [B, L, H*D]. GQA (heads != kvheads)
         # is detected and handled inside it via k/v head expansion for SDPA.
@@ -296,7 +278,7 @@ class SingleStreamDiT(nn.Module):
         assert sum(axes) == headdim, f"sum(axes) = {sum(axes)}, headdim = {headdim}"
         assert all(a % 2 == 0 for a in axes), f"axes = {axes}"
 
-        self.posemb = PositionalEncoding(config.features, axes, theta=config.theta, ntk=1.0)
+        self.posemb = PositionalEncoding(config.features, axes, theta=config.theta)
         self.first = QuantizedLinear(config.channels * config.patch**2, config.features, bias=True)
 
         self.blocks = nn.ModuleList(

@@ -29,6 +29,7 @@ from torch import Tensor, nn
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.dit.reference import concat_reference, slice_reference_output
 from thenoise.utils.attention import attention as sdpa_attention
+from thenoise.utils.rope import apply_rope, rope
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -113,25 +114,6 @@ class QKNorm(nn.Module):
         return q.to(v), k.to(v)
 
 
-def rope(pos: Tensor, dim: int, theta: int) -> Tensor:
-    """Rotary embedding for one of the 4 position axes."""
-    assert dim % 2 == 0
-    scale = torch.arange(0, dim, 2, dtype=torch.float64, device=pos.device) / dim
-    omega = 1.0 / (theta**scale)
-    out = torch.einsum("...n,d->...nd", pos, omega)
-    out = torch.stack([torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)], dim=-1)
-    out = rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
-    return out.float()
-
-
-def apply_rope(xq: Tensor, xk: Tensor, freqs_cis: Tensor) -> tuple[Tensor, Tensor]:
-    xq_ = xq.float().reshape(*xq.shape[:-1], -1, 1, 2)
-    xk_ = xk.float().reshape(*xk.shape[:-1], -1, 1, 2)
-    xq_out = freqs_cis[..., 0] * xq_[..., 0] + freqs_cis[..., 1] * xq_[..., 1]
-    xk_out = freqs_cis[..., 0] * xk_[..., 0] + freqs_cis[..., 1] * xk_[..., 1]
-    return xq_out.reshape(*xq.shape).type_as(xq), xk_out.reshape(*xk.shape).type_as(xk)
-
-
 def attention(qkv_list: list[Tensor], pe: Tensor) -> Tensor:
     """Apply RoPE then the shared SDPA attention, returning ``[B, L, H*D]``."""
     q, k, v = qkv_list
@@ -162,7 +144,7 @@ class EmbedND(nn.Module):
 
     def forward(self, ids: Tensor) -> Tensor:
         emb = torch.cat([rope(ids[..., i], self.axes_dim[i], self.theta) for i in range(len(self.axes_dim))], dim=-3)
-        return emb.unsqueeze(1)
+        return emb
 
 
 class SiLUActivation(nn.Module):
@@ -321,7 +303,7 @@ class DoubleStreamBlock(nn.Module):
         k = torch.cat((txt_k, img_k), dim=2)
         v = torch.cat((txt_v, img_v), dim=2)
 
-        pe = torch.cat((pe_ctx, pe), dim=2)
+        pe = torch.cat((pe_ctx, pe), dim=1)
         attn = attention([q, k, v], pe)
         txt_attn, img_attn = attn[:, :txt_len], attn[:, txt_len:]
 
@@ -444,7 +426,7 @@ class Flux2(nn.Module):
             img, txt = fwd(img, txt, pe_x, pe_ctx, double_block_mod_img, double_block_mod_txt)
 
         img = torch.cat((txt, img), dim=1)
-        pe = torch.cat((pe_ctx, pe_x), dim=2)
+        pe = torch.cat((pe_ctx, pe_x), dim=1)
 
         for i in range(len(self.single_blocks)):
             fwd = self._compile_block(self.single_blocks, i, dynamic)
