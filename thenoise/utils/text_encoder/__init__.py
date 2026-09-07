@@ -1,22 +1,20 @@
 """Shared text-encoder / tokenizer loading for the DiT adapters.
 
-Every adapter (Flux Klein, Z-Image, Anima, Krea 2, Qwen-Image) loads its text
-encoder and tokenizer through this module, so a new encoder only needs a config
-(see ``thenoise.utils.qwen_configs``) plus a load function here. The vendored
-tokenizer data lives under ``configs/``:
+Every adapter loads its text encoder and tokenizer through this module, so a new
+encoder only needs a config (see ``thenoise.utils.qwen_configs``) plus a load
+function here. The vendored tokenizer data lives under ``configs/``:
 
 * ``qwen25_tokenizer`` -- the single Qwen BPE tokenizer shared by all Qwen
-  variants (Flux Klein, Z-Image, Anima, Krea 2, Qwen-Image). The vocab, merges,
-  normalizer, pre/post-processor and decoder are byte-identical across variants;
-  only a few ``tokenizer_config.json`` fields differ, applied here as overrides.
-* ``t5``             -- T5 tokenizer (Anima's LLM-adapter target tokens)
+  variants. The vocab, merges, normalizer, pre/post-processor and decoder are
+  byte-identical across variants; only a few ``tokenizer_config.json`` fields
+  differ, applied here as overrides.
+* ``t5``             -- T5 tokenizer (LLM-adapter target tokens)
 
 The model configs themselves are vendored in ``thenoise.utils.qwen_configs`` so
 the encoders are built without fetching ``config.json`` from the Hub.
 """
 from __future__ import annotations
 
-import logging
 import os
 from typing import Optional, Union
 
@@ -45,8 +43,6 @@ from thenoise.utils.qwen_configs import (
     QWEN3_VL_4B_INSTRUCT_CONFIG,
 )
 
-logger = logging.getLogger(__name__)
-
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
 QWEN25_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "qwen25_tokenizer")
 T5_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "t5")
@@ -58,20 +54,20 @@ QWEN3_06B_TOKENIZER_OVERRIDES = {"eos_token": "<|endoftext|>"}
 QWEN3_VL_TOKENIZER_OVERRIDES = {"model_max_length": 262144}
 QWEN2_5_VL_TOKENIZER_OVERRIDES: dict = {}
 
-#: Shared Qwen image-description prompt template (text-to-image path) used by the
-#: Krea 2 and Qwen-Image encoders: a system prompt instructing the model to describe
+#: Shared Qwen image-description prompt template (text-to-image path): a system
+#: prompt instructing the model to describe
 #: the image, the closing ``user`` header, and the number of tokens that prefix
-#: occupies (the user content begins at ``QWEN_IMAGE_DROP_IDX``).
-QWEN_IMAGE_SYSTEM_PROMPT = (
+#: occupies (the user content begins at ``QWEN_VL_DROP_IDX``).
+QWEN_VL_SYSTEM_PROMPT = (
     "<|im_start|>system\n"
     "Describe the image by detailing the color, shape, size, texture, quantity, text, "
     "spatial relationships of the objects and background:<|im_end|>\n"
     "<|im_start|>user\n"
 )
 #: The ``assistant``-turn tail appended after the user content.
-QWEN_IMAGE_PROMPT_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n"
+QWEN_VL_PROMPT_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n"
 #: Token index where the user message content begins (after ``<|im_start|>user\n``).
-QWEN_IMAGE_DROP_IDX = 34
+QWEN_VL_DROP_IDX = 34
 
 
 def find_tokenizer_dir(text_encoder_path: str, max_depth: int = 3) -> Optional[str]:
@@ -128,7 +124,6 @@ def load_qwen3_model(
     config: dict,
     dtype: Optional[torch.dtype],
     device: Union[str, torch.device],
-    label: str,
 ) -> Qwen3ForCausalLM:
     """Build a Qwen3 (0.6B/4B/8B) text encoder from a vendored config and load weights.
 
@@ -143,7 +138,6 @@ def load_qwen3_model(
         del qwen3.lm_head
         replace_linears(qwen3)
 
-    logger.info("Loading %s text encoder (Qwen3) weights from %s", label, path)
     load_text_encoder_weights(qwen3, path, device=device, dtype=dtype)
     if dtype is not None:
         qwen3.to(dtype)
@@ -156,19 +150,15 @@ def load_qwen3_text_encoder(
     dtype: Optional[torch.dtype],
     device: Union[str, torch.device],
 ) -> tuple:
-    """Load the Anima Qwen3-0.6B text encoder + tokenizer (single safetensors file).
+    """Load a Qwen3-0.6B text encoder + tokenizer (single safetensors file).
 
     Returns ``(model, tokenizer)`` where ``model`` is the bare ``Qwen3Model``
-    (LM head dropped) whose hidden states feed the Anima LLM adapter.
+    (LM head dropped) whose hidden states feed a downstream adapter.
     """
-    qwen3 = load_qwen3_model(
-        path, config=QWEN3_0_6B_CONFIG, dtype=dtype, device=device, label="Anima"
-    )
+    qwen3 = load_qwen3_model(path, config=QWEN3_0_6B_CONFIG, dtype=dtype, device=device)
     qwen3.config.use_cache = False
     tokenizer = load_qwen3_tokenizer(overrides=QWEN3_06B_TOKENIZER_OVERRIDES)
-    model = qwen3.model
-    logger.info(f"Loaded Anima text encoder. Parameters: {sum(p.numel() for p in model.parameters()):,}")
-    return model, tokenizer
+    return qwen3.model, tokenizer
 
 
 def load_qwen3_vl_model(
@@ -177,7 +167,7 @@ def load_qwen3_vl_model(
     dtype: torch.dtype,
     device: Union[str, torch.device],
 ) -> Qwen3VLForConditionalGeneration:
-    """Build the Krea 2 Qwen3-VL-4B text encoder and load weights from a local safetensors.
+    """Build a Qwen3-VL-4B text encoder and load weights from a local safetensors.
 
     Accepts the official HF layout and ComfyUI's ``model.``/``visual.`` keys.
     """
@@ -187,7 +177,6 @@ def load_qwen3_vl_model(
         del model.lm_head
         replace_linears(model)
 
-    logger.info("Loading Krea 2 text encoder (Qwen3-VL) weights from %s", path)
     load_text_encoder_weights(
         model,
         path,
@@ -206,7 +195,7 @@ def load_qwen2_5_vl_model(
     dtype: Optional[torch.dtype],
     device: Union[str, torch.device],
 ) -> Qwen2_5_VLForConditionalGeneration:
-    """Build the Qwen-Image Qwen2.5-VL-7B text encoder and load weights.
+    """Build a Qwen2.5-VL-7B text encoder and load weights.
 
     Accepts the official HF layout and ComfyUI's ``model.``/``visual.`` keys.
     """
@@ -215,7 +204,6 @@ def load_qwen2_5_vl_model(
         model = Qwen2_5_VLForConditionalGeneration._from_config(config)
         del model.lm_head
         replace_linears(model)
-    logger.info("Loading Qwen2.5-VL text encoder from %s", path)
     load_text_encoder_weights(
         model,
         path,
@@ -231,7 +219,7 @@ def load_qwen3_tokenizer(
     *,
     overrides: Optional[dict] = None,
 ):
-    """Load a Qwen3 tokenizer and ensure a pad token (Anima's LLM adapter).
+    """Load a Qwen3 tokenizer and ensure a pad token.
 
     ``tokenizer_dir`` defaults to the shared ``qwen25_tokenizer`` vendored config;
     pass an external directory to load a tokenizer from there instead.
@@ -243,18 +231,18 @@ def load_qwen3_tokenizer(
 
 
 def load_qwen2_tokenizer(
-    tokenizer_dir: Optional[str] = None, max_length: int = 1024, *, overrides: Optional[dict] = None
+    tokenizer_dir: Optional[str] = None, *, overrides: Optional[dict] = None
 ):
-    """Load the Qwen-Image Qwen2 tokenizer (capped at 1024 tokens)."""
+    """Load a Qwen2 tokenizer."""
     return load_tokenizer(
-        tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR, max_length=max_length, overrides=overrides
+        tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR, overrides=overrides
     )
 
 
 def load_qwen3_vl_tokenizer(
     tokenizer_dir: Optional[str] = None, *, max_length: int, overrides: Optional[dict] = None
 ) -> tuple:
-    """Load the Krea 2 Qwen3-VL tokenizer + fast processor (the same AutoTokenizer)."""
+    """Load a Qwen3-VL tokenizer + fast processor (the same AutoTokenizer)."""
     tokenizer = load_tokenizer(
         tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR, max_length=max_length, overrides=overrides
     )
@@ -271,7 +259,7 @@ def load_qwen2_5_vl_processor(tokenizer):
 
 
 def load_t5_tokenizer(t5_tokenizer_path: Optional[str] = None):
-    """Load the T5 tokenizer used for Anima's LLM-adapter target tokens.
+    """Load the T5 tokenizer used for LLM-adapter target tokens.
 
     ``t5_tokenizer_path`` is an optional local directory; else the vendored
     ``configs/t5/`` is used.
@@ -328,9 +316,9 @@ __all__ = [
     "load_t5_tokenizer",
     "QWEN25_TOKENIZER_CONFIG_DIR",
     "T5_TOKENIZER_CONFIG_DIR",
-    "QWEN_IMAGE_SYSTEM_PROMPT",
-    "QWEN_IMAGE_PROMPT_SUFFIX",
-    "QWEN_IMAGE_DROP_IDX",
+    "QWEN_VL_SYSTEM_PROMPT",
+    "QWEN_VL_PROMPT_SUFFIX",
+    "QWEN_VL_DROP_IDX",
     "QWEN3_06B_TOKENIZER_OVERRIDES",
     "QWEN3_VL_TOKENIZER_OVERRIDES",
     "QWEN2_5_VL_TOKENIZER_OVERRIDES",

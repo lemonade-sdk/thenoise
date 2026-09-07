@@ -168,7 +168,6 @@ def load_qwen3_embedder(
         config=(QWEN3_8B_CONFIG if is_8b else QWEN3_4B_CONFIG),
         dtype=dtype,
         device=device,
-        label=f"Flux Klein (Qwen3-{'8B' if is_8b else '4B'})",
     )
     qwen3.config.use_cache = False
     embedder = Qwen3Embedder(tokenizer, qwen3.model)  # bare Qwen3Model -> hidden_states

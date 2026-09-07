@@ -89,9 +89,7 @@ def load_zimage_text_encoder(
             "Download it with `python scripts/download_zimage.py`."
         )
 
-    qwen3 = load_qwen3_model(
-        path, config=QWEN3_4B_CONFIG, dtype=dtype, device=device, label="Z-Image"
-    )
+    qwen3 = load_qwen3_model(path, config=QWEN3_4B_CONFIG, dtype=dtype, device=device)
 
     tokenizer_dir = tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR
     if not os.path.isdir(tokenizer_dir):

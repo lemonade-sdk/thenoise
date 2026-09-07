@@ -15,7 +15,7 @@ from transformers import Qwen2Tokenizer, Qwen2_5_VLForConditionalGeneration, Qwe
 
 from thenoise.utils.setup_logging import setup_logging
 from thenoise.utils.image_tensor import resize_to_area
-from thenoise.utils.text_encoder import QWEN_IMAGE_DROP_IDX, QWEN_IMAGE_PROMPT_SUFFIX, QWEN_IMAGE_SYSTEM_PROMPT
+from thenoise.utils.text_encoder import QWEN_VL_DROP_IDX, QWEN_VL_PROMPT_SUFFIX, QWEN_VL_SYSTEM_PROMPT
 
 setup_logging()
 import logging
@@ -47,15 +47,12 @@ def get_qwen_prompt_embeds(
     prompt: Union[str, List[str]],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Encode the prompt alone (text-to-image) -> (prompt_embeds, mask)."""
-    prompt_template_encode = QWEN_IMAGE_SYSTEM_PROMPT + "{}" + QWEN_IMAGE_PROMPT_SUFFIX
-    drop_idx = QWEN_IMAGE_DROP_IDX
-    tokenizer_max_length = 1024
+    prompt_template_encode = QWEN_VL_SYSTEM_PROMPT + "{}" + QWEN_VL_PROMPT_SUFFIX
+    drop_idx = QWEN_VL_DROP_IDX
 
     prompt = [prompt] if isinstance(prompt, str) else prompt
     txt = [prompt_template_encode.format(e) for e in prompt]
-    txt_tokens = tokenizer(
-        txt, max_length=tokenizer_max_length + drop_idx, padding=True, truncation=True, return_tensors="pt"
-    ).to(vlm.device)
+    txt_tokens = tokenizer(txt, padding=True, truncation=True, return_tensors="pt").to(vlm.device)
     with torch.no_grad():
         encoder_hidden_states = vlm.model(
             input_ids=txt_tokens.input_ids, attention_mask=txt_tokens.attention_mask, output_hidden_states=True
