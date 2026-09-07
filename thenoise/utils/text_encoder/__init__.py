@@ -58,6 +58,21 @@ QWEN3_06B_TOKENIZER_OVERRIDES = {"eos_token": "<|endoftext|>"}
 QWEN3_VL_TOKENIZER_OVERRIDES = {"model_max_length": 262144}
 QWEN2_5_VL_TOKENIZER_OVERRIDES: dict = {}
 
+#: Shared Qwen image-description prompt template (text-to-image path) used by the
+#: Krea 2 and Qwen-Image encoders: a system prompt instructing the model to describe
+#: the image, the closing ``user`` header, and the number of tokens that prefix
+#: occupies (the user content begins at ``QWEN_IMAGE_DROP_IDX``).
+QWEN_IMAGE_SYSTEM_PROMPT = (
+    "<|im_start|>system\n"
+    "Describe the image by detailing the color, shape, size, texture, quantity, text, "
+    "spatial relationships of the objects and background:<|im_end|>\n"
+    "<|im_start|>user\n"
+)
+#: The ``assistant``-turn tail appended after the user content.
+QWEN_IMAGE_PROMPT_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n"
+#: Token index where the user message content begins (after ``<|im_start|>user\n``).
+QWEN_IMAGE_DROP_IDX = 34
+
 
 def find_tokenizer_dir(text_encoder_path: str, max_depth: int = 3) -> Optional[str]:
     """Locate a local ``tokenizer/`` directory near a text encoder file.
@@ -313,6 +328,9 @@ __all__ = [
     "load_t5_tokenizer",
     "QWEN25_TOKENIZER_CONFIG_DIR",
     "T5_TOKENIZER_CONFIG_DIR",
+    "QWEN_IMAGE_SYSTEM_PROMPT",
+    "QWEN_IMAGE_PROMPT_SUFFIX",
+    "QWEN_IMAGE_DROP_IDX",
     "QWEN3_06B_TOKENIZER_OVERRIDES",
     "QWEN3_VL_TOKENIZER_OVERRIDES",
     "QWEN2_5_VL_TOKENIZER_OVERRIDES",

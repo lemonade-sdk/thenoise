@@ -15,24 +15,18 @@ DiT's 1D token sequence and back:
 
 from __future__ import annotations
 
-import math
-
 import torch
 from einops import rearrange
+
+from thenoise.utils.math import generalized_time_shift
 
 __all__ = [
     "get_schedule",
     "compute_empirical_mu",
-    "generalized_time_snr_shift",
     "prc_img",
     "prc_txt",
     "scatter_ids",
 ]
-
-
-def generalized_time_snr_shift(t: torch.Tensor, mu: float, sigma: float) -> torch.Tensor:
-    """Generalized time/SNR shift: ``exp(mu) / (exp(mu) + (1/t - 1)^sigma)``."""
-    return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
 
 
 def compute_empirical_mu(image_seq_len: int, num_steps: int) -> float:
@@ -62,7 +56,7 @@ def get_schedule(num_steps: int, image_seq_len: int, flow_shift: float | None = 
     if flow_shift is not None:
         timesteps = (timesteps * flow_shift) / (1 + (flow_shift - 1) * timesteps)
     else:
-        timesteps = generalized_time_snr_shift(timesteps, mu, 1.0)
+        timesteps = generalized_time_shift(timesteps, mu, 1.0)
     return timesteps.tolist()
 
 

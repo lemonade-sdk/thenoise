@@ -7,22 +7,17 @@ sigma schedule is needed here; the adapter's ``schedule()`` builds the project
 """
 from __future__ import annotations
 
-import math
 from typing import List
 
 import torch
 
-from thenoise.utils.math import calculate_shift
-
-
-def _time_shift_exponential(mu: float, sigma: float, t: torch.Tensor) -> torch.Tensor:
-    return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
+from thenoise.utils.math import calculate_shift, generalized_time_shift
 
 
 def get_sigmas(steps: int, image_seq_len: int, mu: float) -> torch.Tensor:
     """Return the flow timesteps (sigmas in ``[0, 1]``) for ``steps`` denoise steps."""
     sigmas = torch.linspace(1.0, 1.0 / steps, steps)
-    sigmas = _time_shift_exponential(mu, 1.0, sigmas)
+    sigmas = generalized_time_shift(sigmas, mu, 1.0)
     # Stretch to terminate at the configured shift_terminal (0.02). With a single
     # step the last sigma is already 1.0 (``one_minus_z[-1] == 0``), so the
     # terminal stretch would divide by zero; leave the grid as-is instead.

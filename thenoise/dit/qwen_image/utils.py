@@ -15,6 +15,7 @@ from transformers import Qwen2Tokenizer, Qwen2_5_VLForConditionalGeneration, Qwe
 
 from thenoise.utils.setup_logging import setup_logging
 from thenoise.utils.image_tensor import resize_to_area
+from thenoise.utils.text_encoder import QWEN_IMAGE_DROP_IDX, QWEN_IMAGE_PROMPT_SUFFIX, QWEN_IMAGE_SYSTEM_PROMPT
 
 setup_logging()
 import logging
@@ -46,8 +47,8 @@ def get_qwen_prompt_embeds(
     prompt: Union[str, List[str]],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Encode the prompt alone (text-to-image) -> (prompt_embeds, mask)."""
-    prompt_template_encode = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
-    drop_idx = 34
+    prompt_template_encode = QWEN_IMAGE_SYSTEM_PROMPT + "{}" + QWEN_IMAGE_PROMPT_SUFFIX
+    drop_idx = QWEN_IMAGE_DROP_IDX
     tokenizer_max_length = 1024
 
     prompt = [prompt] if isinstance(prompt, str) else prompt

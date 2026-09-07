@@ -42,11 +42,9 @@ def load_krea2_dit(
     device: Union[str, torch.device],
     dtype: torch.dtype,
     config: SingleMMDiTConfig = single_mmdit_large_wide,
-    loading_device: Optional[Union[str, torch.device]] = None,
 ) -> SingleStreamDiT:
     """Build the K2 single-stream MMDiT on meta and load weights."""
     device = torch.device(device)
-    loading_device = device if loading_device is None else torch.device(loading_device)
 
     logger.info(f"Loading Krea 2 DiT weights from {dit_path}")
     with init_empty_weights():
@@ -55,7 +53,7 @@ def load_krea2_dit(
     return load_dit(
         dit,
         dit_path,
-        device=loading_device,
+        device=device,
         dtype=dtype,
         drop_keys=("last.down", "last.up"),
     )

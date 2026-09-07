@@ -24,6 +24,9 @@ from torch import Tensor
 from thenoise.utils.text_encoder import (
     QWEN25_TOKENIZER_CONFIG_DIR,
     QWEN3_VL_TOKENIZER_OVERRIDES,
+    QWEN_IMAGE_DROP_IDX,
+    QWEN_IMAGE_PROMPT_SUFFIX,
+    QWEN_IMAGE_SYSTEM_PROMPT,
     load_qwen3_vl_model,
     load_qwen3_vl_tokenizer,
 )
@@ -83,9 +86,9 @@ class Qwen3VLConditioner(torch.nn.Module):
         self.processor = processor
         self.max_length = max_length
         self.select_layers = select_layers
-        self.prompt_template_encode_prefix = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n"
-        self.prompt_template_encode_suffix = "<|im_end|>\n<|im_start|>assistant\n"
-        self.prompt_template_encode_start_idx = 34
+        self.prompt_template_encode_prefix = QWEN_IMAGE_SYSTEM_PROMPT
+        self.prompt_template_encode_suffix = QWEN_IMAGE_PROMPT_SUFFIX
+        self.prompt_template_encode_start_idx = QWEN_IMAGE_DROP_IDX
         self.prompt_template_encode_suffix_start_idx = 5
 
     def forward(self, text: list[str]) -> tuple[Tensor, Tensor]:

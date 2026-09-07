@@ -6,10 +6,10 @@ text-embedding gathering. The denoising loop itself lives in the shared
 ``DiffusionModel`` base class.
 """
 
-import math
-
 import torch
 from einops import rearrange, repeat
+
+from thenoise.utils.math import generalized_time_shift
 
 
 def gather_valid_text(txt, mask):
@@ -69,7 +69,7 @@ def timesteps(seq_len, steps, x1, x2, y1=0.5, y2=1.15, sigma=1.0, mu=None):
     if mu is None:
         slope = (y2 - y1) / (x2 - x1)
         mu = slope * seq_len + (y1 - slope * x1)
-    ts = math.exp(mu) / (math.exp(mu) + (1.0 / ts - 1.0) ** sigma)
+    ts = generalized_time_shift(ts, mu, sigma)
     return ts.tolist()
 
 

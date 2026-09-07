@@ -47,21 +47,18 @@ def _count_anima_blocks(dit_path: str) -> int:
 def load_anima_model(
     device: Union[str, torch.device],
     dit_path: str,
-    loading_device: Optional[Union[str, torch.device]] = None,
     dit_weight_dtype: Optional[torch.dtype] = None,
 ) -> anima_models.Anima:
     """
     Load Anima model from the specified checkpoint.
 
     Args:
-        device (Union[str, torch.device]): Device for optimization or merging
+        device (Union[str, torch.device]): Device to load the model weights on.
         dit_path (str): Path to the DiT model checkpoint.
-        loading_device (Union[str, torch.device]): Device to load the model weights on.
         dit_weight_dtype (Optional[torch.dtype]): Data type of the DiT weights.
             If None, it will be loaded as is (same as the state_dict). if not None, model weights will be casted to this dtype.
     """
     device = torch.device(device)
-    loading_device = torch.device(device) if loading_device is None else torch.device(loading_device)
 
     # The block count varies by checkpoint (base 2.1B = 28, 2.9B tune = 40),
     # so derive it from the checkpoint instead of hardcoding.
@@ -99,12 +96,12 @@ def load_anima_model(
     with init_empty_weights():
         model = anima_models.Anima(**dit_config)
 
-    logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
+    logger.info(f"Loading DiT model from {dit_path}, device={device}")
 
     load_dit(
         model,
         dit_path,
-        device=loading_device,
+        device=device,
         dtype=dit_weight_dtype,
         expected_missing=("seq", "dim_spatial_range", "dim_temporal_range", "inv_freq"),
     )

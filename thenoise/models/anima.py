@@ -61,7 +61,6 @@ class AnimaModel(DiffusionModel):
         self.dit = anima_utils.load_anima_model(
             self.offload_device,
             config.dit_path,
-            loading_device=self.offload_device,
             dit_weight_dtype=config.dtype,
         )
         self.dit.eval().requires_grad_(False)

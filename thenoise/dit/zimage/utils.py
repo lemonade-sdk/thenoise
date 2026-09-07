@@ -47,12 +47,10 @@ def load_zimage_dit(
     dit_path: str,
     device: Union[str, torch.device],
     dtype: torch.dtype,
-    loading_device: Optional[Union[str, torch.device]] = None,
     config: Optional[dict] = None,
 ) -> ZImageTransformer2DModel:
     """Build the Z-Image S3-DiT on meta and load weights."""
     device = torch.device(device)
-    loading_device = device if loading_device is None else torch.device(loading_device)
     cfg = dict(ZIMAGE_DIT_CONFIG)
     if config:
         cfg.update(config)
@@ -61,7 +59,7 @@ def load_zimage_dit(
     with init_empty_weights():
         dit = ZImageTransformer2DModel(**cfg)
 
-    return load_dit(dit, dit_path, device=loading_device, dtype=dtype)
+    return load_dit(dit, dit_path, device=device, dtype=dtype)
 
 
 def load_zimage_text_encoder(
