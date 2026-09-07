@@ -1,25 +1,21 @@
-"""Qwen-Image text encoder (Qwen2.5-VL-7B), prompt-embedding helpers, and latents.
+"""Qwen-Image prompt-embedding helpers and latents.
 
 Ported from kohya-ss/musubi-tuner's ``qwen_image/qwen_image_utils.py``.
-The text encoder is a ``Qwen2_5_VLForConditionalGeneration`` (7B) that both
-encodes the prompt alone (text-to-image) and, when an image is supplied (edit),
-the prompt together with the input image as vision tokens. Weights load through
-``thenoise.utils.loader.load_text_encoder_weights``.
+The text encoder (a ``Qwen2_5_VLForConditionalGeneration`` 7B) and its tokenizer
+are loaded through ``thenoise.utils.text_encoder``; this module only encodes the
+prompt (alone for text-to-image, or with an input image for edits) into the DiT
+conditioning, and packs/unpacks the latent layout.
 """
 from __future__ import annotations
 
-import json
-import os
-from typing import List, Optional, Tuple, Union
+from typing import List, Tuple, Union
 
 import torch
-from accelerate import init_empty_weights
-from transformers import Qwen2_5_VLConfig, Qwen2_5_VLForConditionalGeneration
-from transformers import Qwen2Tokenizer, Qwen2VLProcessor
+from transformers import Qwen2Tokenizer, Qwen2_5_VLForConditionalGeneration, Qwen2VLProcessor
 
-from thenoise.utils.loader import load_text_encoder_weights
 from thenoise.utils.setup_logging import setup_logging
-from thenoise.dit.quantized import replace_linears
+from thenoise.utils.latents import pack_latents, unpack_latents
+from thenoise.utils.math import calculate_shift
 
 from PIL import Image
 
@@ -27,99 +23,6 @@ setup_logging()
 import logging
 
 logger = logging.getLogger(__name__)
-
-# Vendored Qwen2.5-VL tokenizer + processor config dir (offline-safe).
-TOKENIZER_CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs", "tokenizer")
-
-QWEN2_5_VL_CONFIG_JSON = """{
-  "architectures": ["Qwen2_5_VLForConditionalGeneration"],
-  "attention_dropout": 0.0,
-  "bos_token_id": 151643,
-  "eos_token_id": 151645,
-  "hidden_act": "silu",
-  "hidden_size": 3584,
-  "image_token_id": 151655,
-  "initializer_range": 0.02,
-  "intermediate_size": 18944,
-  "max_position_embeddings": 128000,
-  "max_window_layers": 28,
-  "model_type": "qwen2_5_vl",
-  "num_attention_heads": 28,
-  "num_hidden_layers": 28,
-  "num_key_value_heads": 4,
-  "rms_norm_eps": 1e-06,
-  "rope_scaling": {"mrope_section": [16, 24, 24], "rope_type": "default", "type": "default"},
-  "rope_theta": 1000000.0,
-  "sliding_window": 32768,
-  "tie_word_embeddings": false,
-  "torch_dtype": "bfloat16",
-  "transformers_version": "4.53.1",
-  "use_cache": true,
-  "use_sliding_window": false,
-  "video_token_id": 151656,
-  "vision_config": {
-    "depth": 32,
-    "fullatt_block_indexes": [7, 15, 23, 31],
-    "hidden_act": "silu",
-    "hidden_size": 1280,
-    "in_channels": 3,
-    "initializer_range": 0.02,
-    "intermediate_size": 3420,
-    "model_type": "qwen2_5_vl",
-    "num_heads": 16,
-    "out_hidden_size": 3584,
-    "patch_size": 14,
-    "spatial_merge_size": 2,
-    "spatial_patch_size": 14,
-    "temporal_patch_size": 2,
-    "tokens_per_second": 2,
-    "torch_dtype": "float32",
-    "window_size": 112
-  },
-  "vocab_size": 152064
-}"""
-
-
-def _convert_qwen2_5_vl_keys(key: str) -> str:
-    """Normalize the raw Qwen2.5-VL layout (``model.``/``visual.``) to the
-    ``Qwen2_5_VLForConditionalGeneration`` layout (``model.language_model.`` /
-    ``model.visual.``)."""
-    if key.startswith("model."):
-        return key.replace("model.", "model.language_model.", 1)
-    if key.startswith("visual."):
-        return key.replace("visual.", "model.visual.", 1)
-    return key
-
-
-def load_qwen2_5_vl(
-    ckpt_path: str,
-    dtype: Optional[torch.dtype],
-    device: Union[str, torch.device],
-) -> Qwen2_5_VLForConditionalGeneration:
-    """Build and load the Qwen2.5-VL-7B text encoder from a local safetensors.
-
-    The 7B model is constructed on ``meta`` (via ``init_empty_weights``) so only
-    the checkpoint weights are materialized; the loader assigns them directly and
-    moves the model to ``device``.
-    """
-    config = Qwen2_5_VLConfig(**json.loads(QWEN2_5_VL_CONFIG_JSON))
-    with init_empty_weights():
-        model = Qwen2_5_VLForConditionalGeneration._from_config(config)
-        del model.lm_head
-        replace_linears(model)
-    logger.info("Loading Qwen2.5-VL text encoder from %s", ckpt_path)
-    load_text_encoder_weights(
-        model,
-        ckpt_path,
-        device=device,
-        dtype=dtype,
-        key_map=_convert_qwen2_5_vl_keys,
-    )
-    return model.eval().requires_grad_(False)
-
-
-def load_qwen2_tokenizer(tokenizer_dir: str) -> Qwen2Tokenizer:
-    return Qwen2Tokenizer.from_pretrained(tokenizer_dir, max_length=1024, local_files_only=True)
 
 
 def extract_masked_hidden(hidden_states: torch.Tensor, mask: torch.Tensor):
@@ -247,56 +150,10 @@ def get_qwen_prompt_embeds_with_image(
     return _mask_and_stack(split_hidden_states, drop_idx)
 
 
-# ------------------------------------------------------------------- latents
-def pack_latents(latents: torch.Tensor) -> torch.Tensor:
-    """Pack canonical ``[B, C, H, W]`` (or ``[B, C, 1, H, W]``) -> ``[B, H//2*W//2, C*4]``."""
-    batch_size = latents.shape[0]
-    if latents.ndim == 4 or latents.shape[2] == 1:
-        num_channels_latents = latents.shape[1]
-        height = latents.shape[-2]
-        width = latents.shape[-1]
-        latents = latents.view(batch_size, num_channels_latents, height // 2, 2, width // 2, 2)
-        latents = latents.permute(0, 2, 4, 1, 3, 5)
-        return latents.reshape(batch_size, (height // 2) * (width // 2), num_channels_latents * 4)
-    num_layers = latents.shape[1]
-    num_channels_latents = latents.shape[2]
-    height = latents.shape[-2]
-    width = latents.shape[-1]
-    latents = latents.view(batch_size, num_layers, num_channels_latents, height // 2, 2, width // 2, 2)
-    latents = latents.permute(0, 1, 3, 5, 2, 4, 6)
-    return latents.reshape(batch_size, num_layers * (height // 2) * (width // 2), num_channels_latents * 4)
-
-
-def unpack_latents(latents: torch.Tensor, height: int, width: int) -> torch.Tensor:
-    """Unpack ``[B, H//2*W//2, C*4]`` -> canonical ``[B, C, H, W]``."""
-    batch_size = latents.shape[0]
-    num_channels_latents = latents.shape[2] // 4
-    height = height // 2
-    width = width // 2
-    latents = latents.reshape(batch_size, height, width, num_channels_latents, 2, 2)
-    latents = latents.permute(0, 3, 1, 4, 2, 5)
-    return latents.reshape(batch_size, num_channels_latents, height * 2, width * 2)
-
-
-def calculate_shift(
-    image_seq_len: int,
-    base_seq_len: int = 256,
-    max_seq_len: int = 8192,
-    base_shift: float = 0.5,
-    max_shift: float = 0.9,
-) -> float:
-    m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
-    b = base_shift - m * base_seq_len
-    return image_seq_len * m + b
-
-
 __all__ = [
-    "load_qwen2_5_vl",
-    "load_qwen2_tokenizer",
     "get_qwen_prompt_embeds",
     "get_qwen_prompt_embeds_with_image",
     "pack_latents",
     "unpack_latents",
     "calculate_shift",
-    "TOKENIZER_CONFIG_DIR",
 ]

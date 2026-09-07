@@ -16,6 +16,7 @@ from thenoise.models.base import (
 )
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.math import round_up
+from thenoise.utils.text_encoder import load_qwen3_text_encoder, load_t5_tokenizer
 from thenoise.vae import load_qwen_vae
 
 logger = logging.getLogger(__name__)
@@ -67,11 +68,11 @@ class AnimaModel(DiffusionModel):
 
         # Text encoder (Qwen3-0.6B) + tokenizers.
         logger.info("Loading Anima text encoder from %s", config.text_encoder_path)
-        self.text_encoder, self.qwen3_tokenizer = anima_utils.load_qwen3_text_encoder(
+        self.text_encoder, self.qwen3_tokenizer = load_qwen3_text_encoder(
             config.text_encoder_path, dtype=config.dtype, device=self.offload_device
         )
         self.text_encoder.eval().requires_grad_(False)
-        self.t5_tokenizer = anima_utils.load_t5_tokenizer(None)
+        self.t5_tokenizer = load_t5_tokenizer(None)
 
         # Tokenize / encode strategies (called directly, not through the global registry).
         self.tokenize_strategy = AnimaTokenizeStrategy(

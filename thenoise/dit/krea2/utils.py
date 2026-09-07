@@ -4,16 +4,17 @@ import logging
 from typing import Optional, Union
 
 import torch
+from accelerate import init_empty_weights
 
 from thenoise.dit.krea2.encoder import (
     QWEN3_VL_4B_INSTRUCT_REPO_ID,
     Qwen3VLConditioner,
     TextEncoderConfig,
-    find_krea2_tokenizer_dir,
     load_qwen3_vl_conditioner,
 )
 from thenoise.dit.krea2.mmdit import SingleMMDiTConfig, SingleStreamDiT
 from thenoise.utils.loader import load_dit
+from thenoise.utils.text_encoder import find_tokenizer_dir
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ def load_krea2_dit(
     loading_device = device if loading_device is None else torch.device(loading_device)
 
     logger.info(f"Loading Krea 2 DiT weights from {dit_path}")
-    with torch.device("meta"):
+    with init_empty_weights():
         dit = SingleStreamDiT(config)
 
     return load_dit(
@@ -88,7 +89,7 @@ __all__ = [
     "SingleStreamDiT",
     "load_krea2_dit",
     "load_krea2_text_encoder",
-    "find_krea2_tokenizer_dir",
+    "find_tokenizer_dir",
     "Qwen3VLConditioner",
     "TextEncoderConfig",
 ]

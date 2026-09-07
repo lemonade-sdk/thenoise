@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from conftest import write_safetensors
-from thenoise.dit.anima.utils import _count_anima_blocks, _strip_model_prefix
+from thenoise.dit.anima.utils import _count_anima_blocks
 from thenoise.dit.krea2.sampling import (
     encode_prompts,
     gather_valid_text,
@@ -149,15 +149,3 @@ def test_count_anima_blocks_requires_block_keys(tmp_path):
     with pytest.raises(ValueError, match=r"could not find any 'blocks\.\*' keys"):
         _count_anima_blocks(path)
 
-
-@pytest.mark.parametrize(
-    "key,expected",
-    [
-        ("model.layers.0.self_attn.q_proj.weight", "layers.0.self_attn.q_proj.weight"),
-        ("layers.0.self_attn.q_proj.weight", "layers.0.self_attn.q_proj.weight"),
-        ("model_only.weight", "model_only.weight"),  # not a "model." prefix
-        ("model.", ""),
-    ],
-)
-def test_strip_model_prefix(key, expected):
-    assert _strip_model_prefix(key) == expected

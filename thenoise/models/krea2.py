@@ -73,7 +73,7 @@ class Krea2Model(DiffusionModel):
             config.text_encoder_path,
             dtype=config.dtype,
             device=self.offload_device,
-            tokenizer_dir=krea2_utils.find_krea2_tokenizer_dir(config.text_encoder_path),
+            tokenizer_dir=krea2_utils.find_tokenizer_dir(config.text_encoder_path),
         )
 
         # Qwen-Image VAE

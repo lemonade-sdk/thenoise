@@ -1,13 +1,11 @@
 # Anima model loading/saving utilities
 
-import os
 from typing import Optional, Union
 import torch
 from accelerate import init_empty_weights
 
 from thenoise.dit.anima import models as anima_models
-from thenoise.dit.quantized import replace_linears
-from thenoise.utils.loader import load_dit, load_text_encoder_weights
+from thenoise.utils.loader import load_dit
 from thenoise.utils.safetensors import WRAP_PREFIXES
 from thenoise.utils.setup_logging import setup_logging
 
@@ -15,11 +13,6 @@ setup_logging()
 import logging
 
 logger = logging.getLogger(__name__)
-
-
-def _strip_model_prefix(key: str) -> str:
-    """Strip a leading ``model.`` prefix from a checkpoint key (bare Qwen3Model layout)."""
-    return key[len("model.") :] if key.startswith("model.") else key
 
 
 def _count_anima_blocks(dit_path: str) -> int:
@@ -118,115 +111,3 @@ def load_anima_model(
     logger.info("Loaded DiT model from %s", dit_path)
 
     return model
-
-
-def load_qwen3_tokenizer(qwen3_path: str):
-    """Load Qwen3 tokenizer only (without the text encoder model).
-
-    Args:
-        qwen3_path: Path to either a directory with model files or a safetensors file.
-                     If a directory, loads tokenizer from it directly.
-                     If a file, uses configs/qwen3_06b/ for tokenizer config.
-    Returns:
-        tokenizer
-    """
-    from transformers import AutoTokenizer
-
-    if os.path.isdir(qwen3_path):
-        tokenizer = AutoTokenizer.from_pretrained(qwen3_path, local_files_only=True)
-    else:
-        config_dir = os.path.join(os.path.dirname(__file__), "configs", "qwen3_06b")
-        if not os.path.exists(config_dir):
-            raise FileNotFoundError(
-                f"Qwen3 config directory not found at {config_dir}. "
-                "Expected configs/qwen3_06b/ with config.json, tokenizer.json, etc. "
-                "You can download these from the Qwen3-0.6B HuggingFace repository."
-            )
-        tokenizer = AutoTokenizer.from_pretrained(config_dir, local_files_only=True)
-
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    return tokenizer
-
-
-def load_qwen3_text_encoder(
-    qwen3_path: str,
-    dtype: Union[str, torch.device],
-    device: str,
-):
-    """Load Qwen3-0.6B text encoder.
-
-    Args:
-        qwen3_path: Path to either a directory with model files or a safetensors file
-        dtype: Model dtype
-        device: Device to load to
-
-    Returns:
-        (text_encoder_model, tokenizer)
-    """
-    import transformers
-    from transformers import AutoTokenizer
-
-    if os.path.isdir(qwen3_path):
-        # Directory with full model
-        tokenizer = AutoTokenizer.from_pretrained(qwen3_path, local_files_only=True)
-        model = transformers.AutoModelForCausalLM.from_pretrained(qwen3_path, torch_dtype=dtype, local_files_only=True).model
-    else:
-        # Single safetensors file - use configs/qwen3_06b/ for config
-        config_dir = os.path.join(os.path.dirname(__file__), "configs", "qwen3_06b")
-        if not os.path.exists(config_dir):
-            raise FileNotFoundError(
-                f"Qwen3 config directory not found at {config_dir}. "
-                "Expected configs/qwen3_06b/ with config.json, tokenizer.json, etc. "
-                "You can download these from the Qwen3-0.6B HuggingFace repository."
-            )
-
-        tokenizer = AutoTokenizer.from_pretrained(config_dir, local_files_only=True)
-        qwen3_config = transformers.Qwen3Config.from_pretrained(config_dir, local_files_only=True)
-        with init_empty_weights():
-            model = transformers.Qwen3ForCausalLM._from_config(qwen3_config).model
-            replace_linears(model)
-
-        load_text_encoder_weights(
-            model,
-            qwen3_path,
-            device=device,
-            dtype=dtype,
-            key_map=_strip_model_prefix,
-        )
-
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    model.config.use_cache = False
-    model = model.requires_grad_(False).to(device, dtype=dtype)
-
-    logger.info(f"Loaded Qwen3 text encoder. Parameters: {sum(p.numel() for p in model.parameters()):,}")
-    return model, tokenizer
-
-
-def load_t5_tokenizer(t5_tokenizer_path: Optional[str] = None):
-    """Load T5 tokenizer for LLM Adapter target tokens.
-
-    Args:
-        t5_tokenizer_path: Optional path to T5 tokenizer directory. If None, uses default configs.
-    """
-    from transformers import T5TokenizerFast
-
-    if t5_tokenizer_path is not None:
-        return T5TokenizerFast.from_pretrained(t5_tokenizer_path, local_files_only=True)
-
-    # Use bundled config
-    config_dir = os.path.join(os.path.dirname(__file__), "configs", "t5_old")
-    if os.path.exists(config_dir):
-        return T5TokenizerFast(
-            vocab_file=os.path.join(config_dir, "spiece.model"),
-            tokenizer_file=os.path.join(config_dir, "tokenizer.json"),
-        )
-
-    raise FileNotFoundError(
-        f"T5 tokenizer config directory not found at {config_dir}. "
-        "Expected configs/t5_old/ with spiece.model and tokenizer.json. "
-        "You can download these from the google/t5-v1_1-xxl HuggingFace repository."
-    )

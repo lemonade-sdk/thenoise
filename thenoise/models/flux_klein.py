@@ -24,10 +24,10 @@ from thenoise.dit.flux2.models import Flux2Params
 from thenoise.dit.flux2.sampling import get_schedule, prc_img, prc_txt, scatter_ids
 from thenoise.dit.flux2.utils import (
     detect_klein_params,
-    find_flux2_tokenizer_dir,
     load_flux2_dit,
     load_qwen3_embedder,
 )
+from thenoise.utils.text_encoder import find_tokenizer_dir
 from thenoise.models.base import Conditioning, DiffusionModel, Step, normalize_keys
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.math import round_up
@@ -108,7 +108,7 @@ class FluxKleinModel(DiffusionModel):
             is_8b=self.is_8b,
             dtype=config.dtype,
             device=self.offload_device,
-            tokenizer_dir=find_flux2_tokenizer_dir(config.text_encoder_path),
+            tokenizer_dir=find_tokenizer_dir(config.text_encoder_path),
         )
 
         # Flux.2 VAE (encoder + decoder).

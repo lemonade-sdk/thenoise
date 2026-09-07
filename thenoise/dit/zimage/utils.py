@@ -10,49 +10,18 @@ import os
 from typing import Optional, Union
 
 import torch
+from accelerate import init_empty_weights
 
-from thenoise.dit.quantized import replace_linears
 from thenoise.dit.zimage.models import ZImageTransformer2DModel
-from thenoise.utils.loader import load_dit, load_text_encoder_weights
+from thenoise.utils.loader import load_dit
+from thenoise.utils.qwen_configs import QWEN3_4B_CONFIG
+from thenoise.utils.text_encoder import (
+    QWEN3_TOKENIZER_CONFIG_DIR,
+    load_qwen3_model,
+    load_tokenizer,
+)
 
 logger = logging.getLogger(__name__)
-
-#: The Qwen3 tokenizer config files are vendored in the package under ``configs/``
-#: (mirroring the ``tokenizer/`` subfolder of the official Z-Image-Turbo repo). It
-#: carries the Qwen chat template used by the caption encoder, so the tokenizer loads
-#: offline with ``local_files_only=True`` and is never fetched from the Hub.
-ZIMAGE_TOKENIZER_CONFIG_DIR = os.path.join(os.path.dirname(__file__), "configs", "tokenizer")
-
-# Vendored copy of the Z-Image Qwen3-4B ``text_encoder/config.json`` so the text
-# encoder is built without fetching the config from the Hub. Qwen3 is natively
-# supported by transformers (no remote code), so ``Qwen3Config(**...)`` reproduces
-# ``AutoConfig.from_pretrained`` exactly.
-QWEN3_4B_CONFIG = {
-    "architectures": ["Qwen3ForCausalLM"],
-    "attention_bias": False,
-    "attention_dropout": 0.0,
-    "bos_token_id": 151643,
-    "eos_token_id": 151645,
-    "head_dim": 128,
-    "hidden_act": "silu",
-    "hidden_size": 2560,
-    "initializer_range": 0.02,
-    "intermediate_size": 9728,
-    "max_position_embeddings": 40960,
-    "max_window_layers": 36,
-    "model_type": "qwen3",
-    "num_attention_heads": 32,
-    "num_hidden_layers": 36,
-    "num_key_value_heads": 8,
-    "rms_norm_eps": 1e-06,
-    "rope_scaling": None,
-    "rope_theta": 1000000,
-    "sliding_window": None,
-    "tie_word_embeddings": True,
-    "use_cache": True,
-    "use_sliding_window": False,
-    "vocab_size": 151936,
-}
 
 
 ZIMAGE_DIT_CONFIG = dict(
@@ -89,32 +58,10 @@ def load_zimage_dit(
         cfg.update(config)
 
     logger.info(f"Loading Z-Image DiT weights from {dit_path}")
-    with torch.device("meta"):
+    with init_empty_weights():
         dit = ZImageTransformer2DModel(**cfg)
 
     return load_dit(dit, dit_path, device=loading_device, dtype=dtype)
-
-
-def _load_qwen3(
-    path: str,
-    dtype: torch.dtype,
-    device: Union[str, torch.device],
-) -> "Qwen3ForCausalLM":
-    """Build Qwen3-4B from the vendored config and load weights from a single file."""
-    from transformers import Qwen3Config, Qwen3ForCausalLM
-    from accelerate import init_empty_weights
-
-    config = Qwen3Config(**QWEN3_4B_CONFIG)
-    with init_empty_weights():
-        qwen3 = Qwen3ForCausalLM._from_config(config)
-        del qwen3.lm_head
-        replace_linears(qwen3)
-
-    logger.info(f"Loading Z-Image text encoder (Qwen3-4B) weights from {path}")
-    load_text_encoder_weights(qwen3, path, device=device, dtype=dtype)
-    if dtype is not None:
-        qwen3.to(dtype)
-    return qwen3.eval().requires_grad_(False)
 
 
 def load_zimage_text_encoder(
@@ -138,47 +85,25 @@ def load_zimage_text_encoder(
     Returns ``(text_encoder, tokenizer)`` where ``text_encoder`` is the bare Qwen3
     model (LM head dropped) whose ``hidden_states`` feed the DiT's caption embedder.
     """
-    from transformers import AutoTokenizer
-
     if not path.endswith(".safetensors"):
         raise ValueError(
             f"Z-Image text encoder must be a single .safetensors file, got {path!r}. "
             "Download it with `python scripts/download_zimage.py`."
         )
 
-    qwen3 = _load_qwen3(path, dtype=dtype, device=device)
+    qwen3 = load_qwen3_model(
+        path, config=QWEN3_4B_CONFIG, dtype=dtype, device=device, label="Z-Image"
+    )
 
-    tokenizer_dir = tokenizer_dir or ZIMAGE_TOKENIZER_CONFIG_DIR
+    tokenizer_dir = tokenizer_dir or QWEN3_TOKENIZER_CONFIG_DIR
     if not os.path.isdir(tokenizer_dir):
         raise FileNotFoundError(
             f"Z-Image tokenizer config directory not found at {tokenizer_dir}. "
-            "Expected configs/tokenizer/ with tokenizer.json, tokenizer_config.json, "
-            "vocab.json and merges.txt."
+            "Expected configs/tokenizer/ with tokenizer.json and tokenizer_config.json."
         )
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir, local_files_only=True)
+    tokenizer = load_tokenizer(tokenizer_dir)
 
     qwen3.config.use_cache = False
     model = qwen3.model  # bare Qwen3Model; hidden_states feed the caption embedder
     logger.info(f"Loaded Z-Image text encoder. Parameters: {sum(p.numel() for p in model.parameters()):,}")
     return model, tokenizer
-
-
-def find_zimage_tokenizer_dir(text_encoder_path: str, max_depth: int = 3) -> Optional[str]:
-    """Locate a local ``tokenizer/`` directory near the text encoder file.
-
-    The downloader drops the tokenizer under the output root (``<out>/tokenizer/``)
-    while the text encoder lands under ``<out>/split_files/text_encoders/``. Search
-    ``max_depth`` parent directories of the text encoder for a ``tokenizer/`` dir so
-    the tokenizer is loaded offline when present. Returns ``None`` to fall back to the
-    vendored ``configs/tokenizer/`` directory.
-    """
-    base = os.path.dirname(os.path.abspath(text_encoder_path))
-    for _ in range(max_depth):
-        cand = os.path.join(base, "tokenizer")
-        if os.path.isdir(cand):
-            return cand
-        parent = os.path.dirname(base)
-        if parent == base:
-            break
-        base = parent
-    return None

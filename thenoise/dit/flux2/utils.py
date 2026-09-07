@@ -18,16 +18,16 @@ from typing import Optional, Union
 
 import torch
 from einops import rearrange
-from transformers import Qwen3Config, Qwen3ForCausalLM
 from accelerate import init_empty_weights
 
 from thenoise.dit.flux2.models import Flux2, Flux2Params, Klein4BParams, Klein9BParams
-from thenoise.dit.quantized import replace_linears
-from thenoise.dit.zimage.utils import QWEN3_4B_CONFIG, ZIMAGE_TOKENIZER_CONFIG_DIR
-from thenoise.utils.loader import load_dit, load_text_encoder_weights
-from thenoise.utils.safetensors import (
-    WRAP_PREFIXES,
-    MemoryEfficientSafeOpen,
+from thenoise.utils.loader import load_dit
+from thenoise.utils.qwen_configs import QWEN3_4B_CONFIG, QWEN3_8B_CONFIG
+from thenoise.utils.safetensors import WRAP_PREFIXES, MemoryEfficientSafeOpen
+from thenoise.utils.text_encoder import (
+    QWEN3_TOKENIZER_CONFIG_DIR,
+    load_qwen3_model,
+    load_tokenizer,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,34 +35,6 @@ logger = logging.getLogger(__name__)
 #: Qwen3 hidden layers whose outputs are concatenated to build the DiT context.
 OUTPUT_LAYERS_QWEN3 = [9, 18, 27]
 MAX_LENGTH = 512
-
-# Vendored Qwen3-8B config (the 4B config is imported from the Z-Image package).
-QWEN3_8B_CONFIG = {
-    "architectures": ["Qwen3ForCausalLM"],
-    "attention_bias": False,
-    "attention_dropout": 0.0,
-    "bos_token_id": 151643,
-    "eos_token_id": 151645,
-    "head_dim": 128,
-    "hidden_act": "silu",
-    "hidden_size": 4096,
-    "initializer_range": 0.02,
-    "intermediate_size": 12288,
-    "max_position_embeddings": 40960,
-    "max_window_layers": 36,
-    "model_type": "qwen3",
-    "num_attention_heads": 32,
-    "num_hidden_layers": 36,
-    "num_key_value_heads": 8,
-    "rms_norm_eps": 1e-06,
-    "rope_scaling": None,
-    "rope_theta": 1000000,
-    "sliding_window": None,
-    "tie_word_embeddings": False,
-    "use_cache": True,
-    "use_sliding_window": False,
-    "vocab_size": 151936,
-}
 
 #: hidden_size -> Klein params. Used to pick the variant from the DiT checkpoint.
 _KLEIN_VARIANTS = {3072: Klein4BParams, 4096: Klein9BParams}
@@ -113,7 +85,7 @@ def load_flux2_dit(
     """Build the Flux2 DiT on meta and load the checkpoint weights."""
     device = torch.device(device)
     logger.info(f"Loading Flux Klein DiT weights from {dit_path}")
-    with torch.device("meta"):
+    with init_empty_weights():
         dit = Flux2(params)
     return load_dit(
         dit,
@@ -122,26 +94,6 @@ def load_flux2_dit(
         dtype=dtype,
         key_map=_flux2_key_map,
     )
-
-
-def _load_qwen3(
-    path: str,
-    is_8b: bool,
-    dtype: torch.dtype,
-    device: Union[str, torch.device],
-) -> "Qwen3ForCausalLM":
-    """Build Qwen3 (4B/8B) from the vendored config and load a checkpoint."""
-    config = Qwen3Config(**(QWEN3_8B_CONFIG if is_8b else QWEN3_4B_CONFIG))
-    with init_empty_weights():
-        qwen3 = Qwen3ForCausalLM._from_config(config)
-        del qwen3.lm_head
-        replace_linears(qwen3)
-
-    logger.info(f"Loading Flux Klein text encoder (Qwen3-{'8B' if is_8b else '4B'}) weights from {path}")
-    load_text_encoder_weights(qwen3, path, device=device, dtype=dtype)
-    if dtype is not None:
-        qwen3.to(dtype)
-    return qwen3.eval().requires_grad_(False)
 
 
 class Qwen3Embedder:
@@ -204,16 +156,20 @@ def load_qwen3_embedder(
     ``path`` is a safetensors checkpoint.  The tokenizer is loaded from ``tokenizer_dir`` 
     if given, else from the vendored Z-Image Qwen3 tokenizer directory.
     """
-    from transformers import AutoTokenizer
-
-    tokenizer_dir = tokenizer_dir or ZIMAGE_TOKENIZER_CONFIG_DIR
+    tokenizer_dir = tokenizer_dir or QWEN3_TOKENIZER_CONFIG_DIR
     if not os.path.isdir(tokenizer_dir):
         raise FileNotFoundError(
             f"Flux Klein tokenizer config directory not found at {tokenizer_dir}."
         )
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_dir, local_files_only=True)
+    tokenizer = load_tokenizer(tokenizer_dir)
 
-    qwen3 = _load_qwen3(path, is_8b=is_8b, dtype=dtype, device=device)
+    qwen3 = load_qwen3_model(
+        path,
+        config=(QWEN3_8B_CONFIG if is_8b else QWEN3_4B_CONFIG),
+        dtype=dtype,
+        device=device,
+        label=f"Flux Klein (Qwen3-{'8B' if is_8b else '4B'})",
+    )
     qwen3.config.use_cache = False
     embedder = Qwen3Embedder(tokenizer, qwen3.model)  # bare Qwen3Model -> hidden_states
     logger.info(
@@ -223,32 +179,10 @@ def load_qwen3_embedder(
     return embedder
 
 
-def find_flux2_tokenizer_dir(text_encoder_path: str, max_depth: int = 3) -> Optional[str]:
-    """Locate a local ``tokenizer/`` dir near the text encoder (falls back to vendored).
-
-    The downloader drops the tokenizer under the output root (``<out>/tokenizer/``)
-    while the text encoder lands under ``<out>/split_files/text_encoders/``. Searches
-    ``max_depth`` parent directories; returns ``None`` to fall back to the vendored
-    Z-Image tokenizer.
-    """
-    base = os.path.dirname(os.path.abspath(text_encoder_path))
-    for _ in range(max_depth):
-        cand = os.path.join(base, "tokenizer")
-        if os.path.isdir(cand):
-            return cand
-        parent = os.path.dirname(base)
-        if parent == base:
-            break
-        base = parent
-    return None
-
-
 __all__ = [
     "detect_klein_params",
     "load_flux2_dit",
     "load_qwen3_embedder",
-    "find_flux2_tokenizer_dir",
-    "QWEN3_8B_CONFIG",
     "OUTPUT_LAYERS_QWEN3",
     "MAX_LENGTH",
 ]

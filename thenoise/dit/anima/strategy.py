@@ -3,13 +3,16 @@
 # (tokenize + text encode) are kept. The caching strategies and their
 # training-only dependencies (accelerator_setup, numpy, VAE) are dropped.
 
-import random
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, List, Optional, Union
 
 import torch
 
-from thenoise.dit.anima import utils as anima_utils
 from thenoise.dit.anima.strategy_base import TextEncodingStrategy, TokenizeStrategy
+from thenoise.utils.text_encoder import (
+    QWEN3_06B_TOKENIZER_CONFIG_DIR,
+    load_qwen3_tokenizer,
+    load_t5_tokenizer,
+)
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -32,16 +35,13 @@ class AnimaTokenizeStrategy(TokenizeStrategy):
         t5_tokenizer=None,
         qwen3_max_length: int = 512,
         t5_max_length: int = 512,
-        qwen3_path: Optional[str] = None,
         t5_tokenizer_path: Optional[str] = None,
     ) -> None:
-        # Load tokenizers from paths if not provided directly
+        # Load tokenizers from vendored configs if not provided directly.
         if qwen3_tokenizer is None:
-            if qwen3_path is None:
-                raise ValueError("Either qwen3_tokenizer or qwen3_path must be provided")
-            qwen3_tokenizer = anima_utils.load_qwen3_tokenizer(qwen3_path)
+            qwen3_tokenizer = load_qwen3_tokenizer(QWEN3_06B_TOKENIZER_CONFIG_DIR)
         if t5_tokenizer is None:
-            t5_tokenizer = anima_utils.load_t5_tokenizer(t5_tokenizer_path)
+            t5_tokenizer = load_t5_tokenizer(t5_tokenizer_path)
 
         self.qwen3_tokenizer = qwen3_tokenizer
         self.qwen3_max_length = qwen3_max_length

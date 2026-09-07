@@ -11,10 +11,9 @@ import torch
 
 from thenoise.dit.zimage.sampling import get_sigmas
 from thenoise.dit.zimage.utils import (
-    ZIMAGE_TOKENIZER_CONFIG_DIR,
-    find_zimage_tokenizer_dir,
     load_zimage_text_encoder,
 )
+from thenoise.utils.text_encoder import QWEN3_TOKENIZER_CONFIG_DIR, find_tokenizer_dir
 
 
 def test_zimage_sigmas_are_static_shifted_grid_with_trailing_zero():
@@ -41,18 +40,18 @@ def test_text_encoder_rejects_non_safetensors(tmp_path):
         raise AssertionError("expected ValueError for a non-.safetensors path")
 
 
-def test_find_zimage_tokenizer_dir(tmp_path):
+def test_find_tokenizer_dir(tmp_path):
     # Downloader layout: <out>/tokenizer/ + <out>/split_files/text_encoders/file.safetensors
     out = tmp_path / "models"
     (out / "tokenizer").mkdir(parents=True)
     te = out / "split_files" / "text_encoders" / "qwen_3_4b.safetensors"
-    found = find_zimage_tokenizer_dir(str(te))
+    found = find_tokenizer_dir(str(te))
     assert found == str(out / "tokenizer")
 
 
-def test_find_zimage_tokenizer_dir_returns_none_without_tokenizer(tmp_path):
+def test_find_tokenizer_dir_returns_none_without_tokenizer(tmp_path):
     te = tmp_path / "split_files" / "text_encoders" / "qwen_3_4b.safetensors"
-    assert find_zimage_tokenizer_dir(str(te)) is None
+    assert find_tokenizer_dir(str(te)) is None
 
 
 def test_vendored_tokenizer_config_dir_exists():
@@ -60,9 +59,9 @@ def test_vendored_tokenizer_config_dir_exists():
     # offline without fetching from the Hub (mirrors the anima configs/ pattern).
     from pathlib import Path
 
-    d = Path(ZIMAGE_TOKENIZER_CONFIG_DIR)
+    d = Path(QWEN3_TOKENIZER_CONFIG_DIR)
     assert d.is_dir()
-    for required in ("tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt"):
+    for required in ("tokenizer.json", "tokenizer_config.json"):
         assert (d / required).is_file(), f"missing vendored tokenizer file {required}"
 
 

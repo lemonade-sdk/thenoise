@@ -12,10 +12,10 @@ import torch
 
 from thenoise.dit.zimage import sampling as zimage_sampling
 from thenoise.dit.zimage.utils import (
-    find_zimage_tokenizer_dir,
     load_zimage_dit,
     load_zimage_text_encoder,
 )
+from thenoise.utils.text_encoder import find_tokenizer_dir
 from thenoise.models.base import (
     Conditioning,
     DiffusionModel,
@@ -80,7 +80,7 @@ class ZImageModel(DiffusionModel):
             config.text_encoder_path,
             dtype=config.dtype,
             device=self.offload_device,
-            tokenizer_dir=find_zimage_tokenizer_dir(config.text_encoder_path),
+            tokenizer_dir=find_tokenizer_dir(config.text_encoder_path),
         )
         self.text_encoder.eval().requires_grad_(False)
 
