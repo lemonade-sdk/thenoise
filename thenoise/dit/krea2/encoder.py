@@ -22,7 +22,8 @@ import torch
 from torch import Tensor
 
 from thenoise.utils.text_encoder import (
-    QWEN3_VL_TOKENIZER_CONFIG_DIR,
+    QWEN25_TOKENIZER_CONFIG_DIR,
+    QWEN3_VL_TOKENIZER_OVERRIDES,
     load_qwen3_vl_model,
     load_qwen3_vl_tokenizer,
 )
@@ -54,13 +55,15 @@ def load_qwen3_vl_conditioner(
     tokenizer from ``tokenizer_dir`` (a local directory) when given, else from the vendored
     ``configs/`` directory (so no Hub access is needed), else from ``tokenizer_repo``."""
     qwen = load_qwen3_vl_model(model_path, dtype=dtype, device=device)
-    tokenizer_dir = tokenizer_dir or QWEN3_VL_TOKENIZER_CONFIG_DIR
+    tokenizer_dir = tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR
     if not os.path.isdir(tokenizer_dir):
         raise FileNotFoundError(
             f"Krea 2 tokenizer config directory not found at {tokenizer_dir}. "
-            "Expected configs/qwen3_vl/ with tokenizer.json and tokenizer_config.json."
+            "Expected configs/qwen25_tokenizer/ with tokenizer.json and tokenizer_config.json."
         )
-    tokenizer, processor = load_qwen3_vl_tokenizer(tokenizer_dir, max_length=max_length)
+    tokenizer, processor = load_qwen3_vl_tokenizer(
+        tokenizer_dir, max_length=max_length, overrides=QWEN3_VL_TOKENIZER_OVERRIDES
+    )
     conditioner = Qwen3VLConditioner(qwen, tokenizer, processor, max_length=max_length, select_layers=select_layers)
     return conditioner.eval().requires_grad_(False)
 

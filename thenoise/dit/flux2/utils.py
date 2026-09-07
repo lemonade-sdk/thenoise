@@ -25,7 +25,7 @@ from thenoise.utils.loader import load_dit
 from thenoise.utils.qwen_configs import QWEN3_4B_CONFIG, QWEN3_8B_CONFIG
 from thenoise.utils.safetensors import WRAP_PREFIXES, MemoryEfficientSafeOpen
 from thenoise.utils.text_encoder import (
-    QWEN3_TOKENIZER_CONFIG_DIR,
+    QWEN25_TOKENIZER_CONFIG_DIR,
     load_qwen3_model,
     load_tokenizer,
 )
@@ -156,7 +156,7 @@ def load_qwen3_embedder(
     ``path`` is a safetensors checkpoint.  The tokenizer is loaded from ``tokenizer_dir`` 
     if given, else from the vendored Z-Image Qwen3 tokenizer directory.
     """
-    tokenizer_dir = tokenizer_dir or QWEN3_TOKENIZER_CONFIG_DIR
+    tokenizer_dir = tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR
     if not os.path.isdir(tokenizer_dir):
         raise FileNotFoundError(
             f"Flux Klein tokenizer config directory not found at {tokenizer_dir}."

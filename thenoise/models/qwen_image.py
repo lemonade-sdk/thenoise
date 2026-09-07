@@ -10,7 +10,6 @@ from __future__ import annotations
 import logging
 
 import torch
-from transformers import Qwen2VLProcessor
 
 from thenoise.dit.qwen_image import models as qwen_models
 from thenoise.dit.qwen_image import sampling as qwen_sampling
@@ -25,8 +24,9 @@ from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.latents import pack_latents, unpack_latents
 from thenoise.utils.math import round_up
 from thenoise.utils.text_encoder import (
-    QWEN2_5_VL_TOKENIZER_CONFIG_DIR,
+    QWEN25_TOKENIZER_CONFIG_DIR,
     load_qwen2_5_vl_model,
+    load_qwen2_5_vl_processor,
     load_qwen2_tokenizer,
 )
 from thenoise.vae import load_qwen_vae
@@ -85,14 +85,14 @@ class QwenImageModel(DiffusionModel):
         )
         self.dit.eval().requires_grad_(False)
 
-        tokenizer_dir = QWEN2_5_VL_TOKENIZER_CONFIG_DIR
+        tokenizer_dir = QWEN25_TOKENIZER_CONFIG_DIR
         logger.info("Loading Qwen2.5-VL text encoder from %s", config.text_encoder_path)
         self.text_encoder = load_qwen2_5_vl_model(
             config.text_encoder_path, dtype=config.dtype, device=self.offload_device
         )
         self.text_encoder.eval().requires_grad_(False)
         self.tokenizer = load_qwen2_tokenizer(tokenizer_dir)
-        self.vl_processor = Qwen2VLProcessor.from_pretrained(tokenizer_dir, local_files_only=True)
+        self.vl_processor = load_qwen2_5_vl_processor(self.tokenizer)
 
         self.vae = load_qwen_vae(self.vae_path, device=self.device)
         self.vae.eval().requires_grad_(False)

@@ -9,7 +9,7 @@ import torch
 
 from thenoise.dit.anima.strategy_base import TextEncodingStrategy, TokenizeStrategy
 from thenoise.utils.text_encoder import (
-    QWEN3_06B_TOKENIZER_CONFIG_DIR,
+    QWEN3_06B_TOKENIZER_OVERRIDES,
     load_qwen3_tokenizer,
     load_t5_tokenizer,
 )
@@ -39,7 +39,7 @@ class AnimaTokenizeStrategy(TokenizeStrategy):
     ) -> None:
         # Load tokenizers from vendored configs if not provided directly.
         if qwen3_tokenizer is None:
-            qwen3_tokenizer = load_qwen3_tokenizer(QWEN3_06B_TOKENIZER_CONFIG_DIR)
+            qwen3_tokenizer = load_qwen3_tokenizer(overrides=QWEN3_06B_TOKENIZER_OVERRIDES)
         if t5_tokenizer is None:
             t5_tokenizer = load_t5_tokenizer(t5_tokenizer_path)
 

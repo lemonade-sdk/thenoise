@@ -17,7 +17,7 @@ from thenoise.models.qwen_image import _detect_zero_cond_t, QwenImageModel
 from thenoise.utils.image_tensor import resize_to_area
 from thenoise.utils.latents import pack_latents, unpack_latents
 from thenoise.utils.math import calculate_shift
-from thenoise.utils.text_encoder import QWEN2_5_VL_TOKENIZER_CONFIG_DIR
+from thenoise.utils.text_encoder import QWEN25_TOKENIZER_CONFIG_DIR
 from thenoise.upscale import make_wan21
 from thenoise.vae import AutoencoderKLQwenImage
 
@@ -98,7 +98,7 @@ def test_vendored_tokenizer_config_dir_exists():
     # ``configs/`` pattern).
     from pathlib import Path
 
-    d = Path(QWEN2_5_VL_TOKENIZER_CONFIG_DIR)
+    d = Path(QWEN25_TOKENIZER_CONFIG_DIR)
     assert d.is_dir()
     for required in ("tokenizer.json", "tokenizer_config.json"):
         assert (d / required).is_file(), f"missing vendored tokenizer file {required}"

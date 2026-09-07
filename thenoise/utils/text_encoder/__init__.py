@@ -3,13 +3,13 @@
 Every adapter (Flux Klein, Z-Image, Anima, Krea 2, Qwen-Image) loads its text
 encoder and tokenizer through this module, so a new encoder only needs a config
 (see ``thenoise.utils.qwen_configs``) plus a load function here. The vendored
-tokenizer data lives under ``configs/`` (one subdir per text encoder):
+tokenizer data lives under ``configs/``:
 
-* ``qwen3``      -- Qwen3 tokenizer (Flux Klein + Z-Image)
-* ``qwen3_06b``  -- Qwen3-0.6B tokenizer (Anima)
-* ``qwen3_vl``   -- Qwen3-VL tokenizer (Krea 2)
-* ``qwen2_5_vl`` -- Qwen2.5-VL tokenizer + processor (Qwen-Image)
-* ``t5``         -- T5 tokenizer (Anima's LLM-adapter target tokens)
+* ``qwen25_tokenizer`` -- the single Qwen BPE tokenizer shared by all Qwen
+  variants (Flux Klein, Z-Image, Anima, Krea 2, Qwen-Image). The vocab, merges,
+  normalizer, pre/post-processor and decoder are byte-identical across variants;
+  only a few ``tokenizer_config.json`` fields differ, applied here as overrides.
+* ``t5``             -- T5 tokenizer (Anima's LLM-adapter target tokens)
 
 The model configs themselves are vendored in ``thenoise.utils.qwen_configs`` so
 the encoders are built without fetching ``config.json`` from the Hub.
@@ -24,8 +24,9 @@ import torch
 from accelerate import init_empty_weights
 from transformers import (
     AutoTokenizer,
-    Qwen2Tokenizer,
-    Qwen2TokenizerFast,
+    Qwen2VLImageProcessor,
+    Qwen2VLProcessor,
+    Qwen2VLVideoProcessor,
     Qwen2_5_VLConfig,
     Qwen2_5_VLForConditionalGeneration,
     Qwen3Config,
@@ -39,6 +40,7 @@ from thenoise.dit.quantized import replace_linears
 from thenoise.utils.loader import load_text_encoder_weights
 from thenoise.utils.qwen_configs import (
     QWEN2_5_VL_CONFIG,
+    QWEN2_5_VL_PREPROCESSOR_CONFIG,
     QWEN3_0_6B_CONFIG,
     QWEN3_VL_4B_INSTRUCT_CONFIG,
 )
@@ -46,11 +48,15 @@ from thenoise.utils.qwen_configs import (
 logger = logging.getLogger(__name__)
 
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
-QWEN3_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "qwen3")
-QWEN3_06B_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "qwen3_06b")
-QWEN3_VL_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "qwen3_vl")
-QWEN2_5_VL_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "qwen2_5_vl")
+QWEN25_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "qwen25_tokenizer")
 T5_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "t5")
+
+# The shared ``qwen25_tokenizer`` config is the Qwen3 (Flux Klein / Z-Image) one.
+# Only these ``tokenizer_config.json`` fields differ across the other Qwen variants
+# (the vocab/merges are byte-identical), so they are applied as post-load overrides.
+QWEN3_06B_TOKENIZER_OVERRIDES = {"eos_token": "<|endoftext|>"}
+QWEN3_VL_TOKENIZER_OVERRIDES = {"model_max_length": 262144}
+QWEN2_5_VL_TOKENIZER_OVERRIDES: dict = {}
 
 
 def find_tokenizer_dir(text_encoder_path: str, max_depth: int = 3) -> Optional[str]:
@@ -75,23 +81,30 @@ def find_tokenizer_dir(text_encoder_path: str, max_depth: int = 3) -> Optional[s
 
 
 def load_tokenizer(
-    tokenizer_dir: str,
+    tokenizer_dir: str = QWEN25_TOKENIZER_CONFIG_DIR,
     *,
     max_length: Optional[int] = None,
     local_files_only: bool = True,
+    overrides: Optional[dict] = None,
 ):
     """Load a tokenizer from a local directory via HF ``AutoTokenizer``.
 
     ``tokenizer_dir`` must contain ``tokenizer.json`` (and optionally a
     ``tokenizer_config.json``); ``vocab.json``/``merges.txt`` are not required as
-    they are embedded in ``tokenizer.json``.
+    they are embedded in ``tokenizer.json``. ``overrides`` is an optional dict of
+    ``tokenizer_config.json`` fields applied after loading, used to specialize the
+    shared ``qwen25_tokenizer`` for the per-adapter Qwen variants.
     """
     kwargs = {}
     if max_length is not None:
         kwargs["max_length"] = max_length
-    return AutoTokenizer.from_pretrained(
+    tokenizer = AutoTokenizer.from_pretrained(
         tokenizer_dir, local_files_only=local_files_only, **kwargs
     )
+    if overrides:
+        for key, value in overrides.items():
+            setattr(tokenizer, key, value)
+    return tokenizer
 
 
 def load_qwen3_model(
@@ -137,7 +150,7 @@ def load_qwen3_text_encoder(
         path, config=QWEN3_0_6B_CONFIG, dtype=dtype, device=device, label="Anima"
     )
     qwen3.config.use_cache = False
-    tokenizer = load_qwen3_tokenizer(QWEN3_06B_TOKENIZER_CONFIG_DIR)
+    tokenizer = load_qwen3_tokenizer(overrides=QWEN3_06B_TOKENIZER_OVERRIDES)
     model = qwen3.model
     logger.info(f"Loaded Anima text encoder. Parameters: {sum(p.numel() for p in model.parameters()):,}")
     return model, tokenizer
@@ -198,31 +211,48 @@ def load_qwen2_5_vl_model(
     return model.eval().requires_grad_(False)
 
 
-def load_qwen3_tokenizer(tokenizer_dir: str):
-    """Load a Qwen3 tokenizer and ensure a pad token (Anima's LLM adapter)."""
-    tokenizer = load_tokenizer(tokenizer_dir)
+def load_qwen3_tokenizer(
+    tokenizer_dir: Optional[str] = None,
+    *,
+    overrides: Optional[dict] = None,
+):
+    """Load a Qwen3 tokenizer and ensure a pad token (Anima's LLM adapter).
+
+    ``tokenizer_dir`` defaults to the shared ``qwen25_tokenizer`` vendored config;
+    pass an external directory to load a tokenizer from there instead.
+    """
+    tokenizer = load_tokenizer(tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR, overrides=overrides)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
 
 
-def load_qwen2_tokenizer(tokenizer_dir: str) -> Qwen2Tokenizer:
+def load_qwen2_tokenizer(
+    tokenizer_dir: Optional[str] = None, max_length: int = 1024, *, overrides: Optional[dict] = None
+):
     """Load the Qwen-Image Qwen2 tokenizer (capped at 1024 tokens)."""
-    return Qwen2Tokenizer.from_pretrained(tokenizer_dir, max_length=1024, local_files_only=True)
+    return load_tokenizer(
+        tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR, max_length=max_length, overrides=overrides
+    )
 
 
 def load_qwen3_vl_tokenizer(
-    tokenizer_dir: str,
-    max_length: int,
+    tokenizer_dir: Optional[str] = None, *, max_length: int, overrides: Optional[dict] = None
 ) -> tuple:
-    """Load the Krea 2 Qwen3-VL tokenizer + fast processor."""
-    tokenizer = AutoTokenizer.from_pretrained(
-        tokenizer_dir, max_length=max_length, local_files_only=True
+    """Load the Krea 2 Qwen3-VL tokenizer + fast processor (the same AutoTokenizer)."""
+    tokenizer = load_tokenizer(
+        tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR, max_length=max_length, overrides=overrides
     )
-    processor = Qwen2TokenizerFast.from_pretrained(
-        tokenizer_dir, max_length=max_length, local_files_only=True
+    return tokenizer, tokenizer
+
+
+def load_qwen2_5_vl_processor(tokenizer):
+    """Build a Qwen2.5-VL image/video processor from the vendored preprocessor config."""
+    image_processor = Qwen2VLImageProcessor.from_dict(QWEN2_5_VL_PREPROCESSOR_CONFIG)
+    video_processor = Qwen2VLVideoProcessor.from_dict(QWEN2_5_VL_PREPROCESSOR_CONFIG)
+    return Qwen2VLProcessor(
+        image_processor=image_processor, tokenizer=tokenizer, video_processor=video_processor
     )
-    return tokenizer, processor
 
 
 def load_t5_tokenizer(t5_tokenizer_path: Optional[str] = None):
@@ -279,10 +309,11 @@ __all__ = [
     "load_qwen3_tokenizer",
     "load_qwen2_tokenizer",
     "load_qwen3_vl_tokenizer",
+    "load_qwen2_5_vl_processor",
     "load_t5_tokenizer",
-    "QWEN3_TOKENIZER_CONFIG_DIR",
-    "QWEN3_06B_TOKENIZER_CONFIG_DIR",
-    "QWEN3_VL_TOKENIZER_CONFIG_DIR",
-    "QWEN2_5_VL_TOKENIZER_CONFIG_DIR",
+    "QWEN25_TOKENIZER_CONFIG_DIR",
     "T5_TOKENIZER_CONFIG_DIR",
+    "QWEN3_06B_TOKENIZER_OVERRIDES",
+    "QWEN3_VL_TOKENIZER_OVERRIDES",
+    "QWEN2_5_VL_TOKENIZER_OVERRIDES",
 ]

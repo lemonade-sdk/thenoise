@@ -145,6 +145,18 @@ QWEN3_VL_4B_INSTRUCT_CONFIG = {
 
 # --------------------------------------------------------------------------- Qwen2.5-VL
 
+QWEN2_5_VL_PREPROCESSOR_CONFIG = {
+    "min_pixels": 3136,
+    "max_pixels": 12845056,
+    "patch_size": 14,
+    "temporal_patch_size": 2,
+    "merge_size": 2,
+    "image_mean": [0.48145466, 0.4578275, 0.40821073],
+    "image_std": [0.26862954, 0.26130258, 0.27577711],
+    "image_processor_type": "Qwen2VLImageProcessor",
+    "processor_class": "Qwen2_5_VLProcessor",
+}
+
 QWEN2_5_VL_CONFIG = {
     "architectures": ["Qwen2_5_VLForConditionalGeneration"],
     "attention_dropout": 0.0,
@@ -200,4 +212,5 @@ __all__ = [
     "QWEN3_8B_CONFIG",
     "QWEN3_VL_4B_INSTRUCT_CONFIG",
     "QWEN2_5_VL_CONFIG",
+    "QWEN2_5_VL_PREPROCESSOR_CONFIG",
 ]

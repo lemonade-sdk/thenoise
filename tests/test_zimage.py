@@ -13,7 +13,7 @@ from thenoise.dit.zimage.sampling import get_sigmas
 from thenoise.dit.zimage.utils import (
     load_zimage_text_encoder,
 )
-from thenoise.utils.text_encoder import QWEN3_TOKENIZER_CONFIG_DIR, find_tokenizer_dir
+from thenoise.utils.text_encoder import QWEN25_TOKENIZER_CONFIG_DIR, find_tokenizer_dir
 
 
 def test_zimage_sigmas_are_static_shifted_grid_with_trailing_zero():
@@ -59,7 +59,7 @@ def test_vendored_tokenizer_config_dir_exists():
     # offline without fetching from the Hub (mirrors the anima configs/ pattern).
     from pathlib import Path
 
-    d = Path(QWEN3_TOKENIZER_CONFIG_DIR)
+    d = Path(QWEN25_TOKENIZER_CONFIG_DIR)
     assert d.is_dir()
     for required in ("tokenizer.json", "tokenizer_config.json"):
         assert (d / required).is_file(), f"missing vendored tokenizer file {required}"

@@ -16,7 +16,7 @@ from thenoise.dit.zimage.models import ZImageTransformer2DModel
 from thenoise.utils.loader import load_dit
 from thenoise.utils.qwen_configs import QWEN3_4B_CONFIG
 from thenoise.utils.text_encoder import (
-    QWEN3_TOKENIZER_CONFIG_DIR,
+    QWEN25_TOKENIZER_CONFIG_DIR,
     load_qwen3_model,
     load_tokenizer,
 )
@@ -95,7 +95,7 @@ def load_zimage_text_encoder(
         path, config=QWEN3_4B_CONFIG, dtype=dtype, device=device, label="Z-Image"
     )
 
-    tokenizer_dir = tokenizer_dir or QWEN3_TOKENIZER_CONFIG_DIR
+    tokenizer_dir = tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR
     if not os.path.isdir(tokenizer_dir):
         raise FileNotFoundError(
             f"Z-Image tokenizer config directory not found at {tokenizer_dir}. "
