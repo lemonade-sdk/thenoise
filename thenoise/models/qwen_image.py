@@ -22,6 +22,7 @@ from thenoise.models.base import (
     normalize_keys,
 )
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
+from thenoise.utils.latents import pack_latents, unpack_latents
 from thenoise.utils.math import round_up
 from thenoise.utils.text_encoder import (
     QWEN2_5_VL_TOKENIZER_CONFIG_DIR,
@@ -144,7 +145,7 @@ class QwenImageModel(DiffusionModel):
         sequence; the DiT's ``img_shapes`` gains one entry per reference.
         """
         dev = torch.device(self.device)
-        x = qwen_utils.pack_latents(latents.to(device=dev, dtype=self.dtype))
+        x = pack_latents(latents.to(device=dev, dtype=self.dtype))
 
         self._txt = cond.cond.to(device=dev, dtype=self.dtype)
         self._txt_mask = cond.cond_mask.to(device=dev, dtype=torch.long)
@@ -154,7 +155,7 @@ class QwenImageModel(DiffusionModel):
         if ref is not None:
             ref_tokens = []
             for ref_latent in ref:
-                ref_tokens.append(qwen_utils.pack_latents(ref_latent.to(device=dev, dtype=self.dtype)))
+                ref_tokens.append(pack_latents(ref_latent.to(device=dev, dtype=self.dtype)))
                 self._img_shapes.append(
                     (1, ref_latent.shape[-2] // 2, ref_latent.shape[-1] // 2)
                 )
@@ -219,7 +220,7 @@ class QwenImageModel(DiffusionModel):
 
     def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:
         # Unpack the DiT tokens back to the canonical 4D latent.
-        return qwen_utils.unpack_latents(
+        return unpack_latents(
             latents, params.height // self._VAE_SCALE, params.width // self._VAE_SCALE
         )
 
@@ -238,7 +239,7 @@ class QwenImageModel(DiffusionModel):
         if method != "index":
             raise ValueError(f"unsupported ref_latents_method {method!r}; only 'index' is supported")
         dev = torch.device(self.device)
-        return qwen_utils.pack_latents(latents.to(device=dev, dtype=self.dtype)), None
+        return pack_latents(latents.to(device=dev, dtype=self.dtype)), None
 
     def _upscale_format(self) -> str:
         """Qwen-Image VAE -> Wan21 z-score latent format."""

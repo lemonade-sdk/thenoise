@@ -14,6 +14,9 @@ from conftest import write_safetensors
 from thenoise.dit.qwen_image import sampling as qwen_sampling
 from thenoise.dit.qwen_image import utils as qwen_utils
 from thenoise.models.qwen_image import _detect_zero_cond_t, QwenImageModel
+from thenoise.utils.image_tensor import resize_to_area
+from thenoise.utils.latents import pack_latents, unpack_latents
+from thenoise.utils.math import calculate_shift
 from thenoise.utils.text_encoder import QWEN2_5_VL_TOKENIZER_CONFIG_DIR
 from thenoise.upscale import make_wan21
 from thenoise.vae import AutoencoderKLQwenImage
@@ -50,7 +53,7 @@ def test_single_step_schedule_is_finite():
 
 
 def test_calculate_shift_increases_with_token_count():
-    assert qwen_utils.calculate_shift(256) < qwen_utils.calculate_shift(4096)
+    assert calculate_shift(256) < calculate_shift(4096)
 
 
 # ------------------------------------------------------------------ latents
@@ -59,10 +62,10 @@ def test_calculate_shift_increases_with_token_count():
 def test_pack_unpack_latents_roundtrip():
     torch.manual_seed(0)
     latent = torch.randn(1, 16, 4, 4)
-    packed = qwen_utils.pack_latents(latent)
+    packed = pack_latents(latent)
     # 4x4 grid -> 2x2 patch blocks -> 4 tokens, 16ch * 4 = 64 features each.
     assert packed.shape == (1, 4, 64)
-    back = qwen_utils.unpack_latents(packed, 4, 4)
+    back = unpack_latents(packed, 4, 4)
     assert back.shape == (1, 16, 4, 4)
     assert torch.allclose(back, latent)
 
@@ -70,9 +73,21 @@ def test_pack_unpack_latents_roundtrip():
 def test_pack_latents_accepts_frame_axis():
     """The edit path feeds a ``[B, C, 1, H, W]`` reference latent."""
     latent = torch.randn(1, 16, 1, 4, 4)
-    packed = qwen_utils.pack_latents(latent)
+    packed = pack_latents(latent)
     assert packed.shape == (1, 4, 64)
 
+
+# ------------------------------------------------------------- image resize
+
+
+def test_resize_to_area():
+    from PIL import Image
+
+    big = Image.new("RGB", (500, 1000))
+    out = resize_to_area(big, area=384 * 384)
+    # Scaled down substantially (area-based), aspect preserved (1:2).
+    assert out.width * out.height < big.width * big.height
+    assert abs(out.width / out.height - 0.5) < 0.01
 
 # ------------------------------------------------------------- vendored config
 

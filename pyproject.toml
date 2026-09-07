@@ -48,15 +48,13 @@ packages = [
     "thenoise.ui",
     "thenoise.upscale",
     "thenoise.utils",
+    "thenoise.utils.text_encoder",
     "thenoise.vae",
 ]
 
 [tool.setuptools.package-data]
-# Tokenizer configs.
-"thenoise.dit.anima" = ["configs/**/*"]
-"thenoise.dit.zimage" = ["configs/**/*"]
-"thenoise.dit.krea2" = ["configs/**/*"]
-"thenoise.dit.qwen_image" = ["configs/**/*"]
+# Vendored text-encoder tokenizer configs.
+"thenoise.utils.text_encoder" = ["configs/**/*"]
 # Committed Sesqui latent upscaler weights.
 "thenoise.upscale" = ["weights/**/*"]
 # Web UI

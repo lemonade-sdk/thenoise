@@ -14,10 +14,7 @@ import torch
 from transformers import Qwen2Tokenizer, Qwen2_5_VLForConditionalGeneration, Qwen2VLProcessor
 
 from thenoise.utils.setup_logging import setup_logging
-from thenoise.utils.latents import pack_latents, unpack_latents
-from thenoise.utils.math import calculate_shift
-
-from PIL import Image
+from thenoise.utils.image_tensor import resize_to_area
 
 setup_logging()
 import logging
@@ -65,22 +62,6 @@ def get_qwen_prompt_embeds(
     hidden_states = encoder_hidden_states.hidden_states[-1]
     split_hidden_states = extract_masked_hidden(hidden_states, txt_tokens.attention_mask)
     return _mask_and_stack(split_hidden_states, drop_idx)
-
-
-def _resize_for_vlm(image: Image.Image, max_pixels: int = 384 * 384) -> Image.Image:
-    """Scale a PIL image to fit within ``max_pixels`` (area-based, aspect-preserving).
-
-    The vision encoder tokenizes each 14x14 patch into image tokens; full-resolution
-    edit images would inject thousands of tokens, drowning out the short instruction
-    and overflowing the RoPE buffer. Comfy scales to 384x384 for the same reason.
-    """
-    w, h = image.size
-    scale = (max_pixels / (w * h)) ** 0.5
-    new_w = max(1, round(w * scale))
-    new_h = max(1, round(h * scale))
-    if (new_w, new_h) != (w, h):
-        return image.resize((new_w, new_h), Image.LANCZOS)
-    return image
 
 
 def _compute_drop_idx(input_ids: torch.Tensor) -> int:
@@ -132,7 +113,7 @@ def get_qwen_prompt_embeds_with_image(
     template = system + image_prompt + "{}<|im_end|>\n<|im_start|>assistant\n"
 
     prompt = [prompt] if isinstance(prompt, str) else prompt
-    vl_image_inputs = [_resize_for_vlm(img) for img in images] or None
+    vl_image_inputs = [resize_to_area(img) for img in images] or None
 
     txt = [template.format(e) for e in prompt]
     model_inputs = vl_processor(text=txt, images=vl_image_inputs, padding=True, return_tensors="pt").to(vlm.device)
@@ -153,7 +134,4 @@ def get_qwen_prompt_embeds_with_image(
 __all__ = [
     "get_qwen_prompt_embeds",
     "get_qwen_prompt_embeds_with_image",
-    "pack_latents",
-    "unpack_latents",
-    "calculate_shift",
 ]

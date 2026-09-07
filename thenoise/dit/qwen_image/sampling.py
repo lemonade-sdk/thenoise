@@ -12,7 +12,7 @@ from typing import List
 
 import torch
 
-from .utils import calculate_shift
+from thenoise.utils.math import calculate_shift
 
 
 def _time_shift_exponential(mu: float, sigma: float, t: torch.Tensor) -> torch.Tensor:
