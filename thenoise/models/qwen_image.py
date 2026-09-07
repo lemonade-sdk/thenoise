@@ -88,7 +88,7 @@ class QwenImageModel(DiffusionModel):
         self.tokenizer = qwen_utils.load_qwen2_tokenizer(tokenizer_dir)
         self.vl_processor = Qwen2VLProcessor.from_pretrained(tokenizer_dir, local_files_only=True)
 
-        self.vae = load_qwen_vae(self.vae_path, device=self.device, disable_mmap=True)
+        self.vae = load_qwen_vae(self.vae_path, device=self.device)
         self.vae.eval().requires_grad_(False)
 
         self.memory.register("dit", self.dit)

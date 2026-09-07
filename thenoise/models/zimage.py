@@ -85,7 +85,7 @@ class ZImageModel(DiffusionModel):
         self.text_encoder.eval().requires_grad_(False)
 
         # Flux VAE (decoder-only).
-        self.vae = load_flux_vae(self.vae_path, device=self.device, disable_mmap=True, dtype=self.dtype)
+        self.vae = load_flux_vae(self.vae_path, device=self.device, dtype=self.dtype)
         self.vae.eval().requires_grad_(False)
 
         # Register swappable components with the memory manager.

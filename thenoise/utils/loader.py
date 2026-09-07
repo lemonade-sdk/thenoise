@@ -124,7 +124,7 @@ def load_text_encoder_weights(
     """
     device = torch.device(device)
 
-    sd = load_safetensors(path, device=device, disable_mmap=True, dtype=None)
+    sd = load_safetensors(path, device=device, dtype=None)
     sd.pop("lm_head.weight", None)
     if key_map is not None:
         # A text-encoder ``key_map`` is a layout normalization (e.g. Krea 2's
@@ -188,7 +188,7 @@ def load_dit(
     # Load the state dict once (stripping generic wrapper prefixes inside
     # ``load_dit_safetensors``) and apply ``drop_keys`` before branching, so the
     # quantized and BF16 paths see the same prepared dict.
-    sd = load_dit_safetensors(path, device=device, disable_mmap=True, dtype=None)
+    sd = load_dit_safetensors(path, device=device, dtype=None)
     if drop_keys:
         sd = {k: v for k, v in sd.items() if not k.startswith(drop_keys)}
 

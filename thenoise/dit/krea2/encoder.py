@@ -126,7 +126,6 @@ def _load_qwen3_vl_model(
     *,
     dtype: torch.dtype,
     device: Union[str, torch.device],
-    disable_mmap: bool = True,
 ) -> Qwen3VLForConditionalGeneration:
     """Build Qwen3-VL-4B from the vendored config and load weights from a local safetensors."""
     config = Qwen3VLConfig.from_dict(QWEN3_VL_4B_INSTRUCT_CONFIG)
@@ -157,12 +156,11 @@ def load_qwen3_vl_conditioner(
     select_layers: tuple[int, ...] = TextEncoderConfig.select_layers,
     tokenizer_dir: Optional[str] = None,
     tokenizer_repo: str = QWEN3_VL_4B_INSTRUCT_REPO_ID,
-    disable_mmap: bool = True,
 ) -> "Qwen3VLConditioner":
     """Load the Qwen3-VL-4B conditioner used by K2: weights from ``model_path`` (safetensors),
     tokenizer from ``tokenizer_dir`` (a local directory) when given, else from the vendored
     ``configs/tokenizer/`` directory (so no Hub access is needed), else from ``tokenizer_repo``."""
-    qwen = _load_qwen3_vl_model(model_path, dtype=dtype, device=device, disable_mmap=disable_mmap)
+    qwen = _load_qwen3_vl_model(model_path, dtype=dtype, device=device)
     tokenizer_dir = tokenizer_dir or KREA2_TOKENIZER_CONFIG_DIR
     if not os.path.isdir(tokenizer_dir):
         raise FileNotFoundError(

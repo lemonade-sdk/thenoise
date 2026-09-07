@@ -78,7 +78,7 @@ class Krea2Model(DiffusionModel):
 
         # Qwen-Image VAE
         self.vae = (
-            load_qwen_vae(self.vae_path, device=self.device, disable_mmap=True)
+            load_qwen_vae(self.vae_path, device=self.device)
             .to(self.dtype)
             .eval()
             .requires_grad_(False)

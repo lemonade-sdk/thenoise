@@ -112,7 +112,7 @@ class FluxKleinModel(DiffusionModel):
         )
 
         # Flux.2 VAE (encoder + decoder).
-        self.vae = load_flux2_vae(self.vae_path, device=self.device, disable_mmap=True, dtype=self.dtype)
+        self.vae = load_flux2_vae(self.vae_path, device=self.device, dtype=self.dtype)
         self.vae.eval().requires_grad_(False)
 
         # Register swappable components with the memory manager.

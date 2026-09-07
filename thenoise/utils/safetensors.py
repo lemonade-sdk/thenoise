@@ -4,8 +4,6 @@ import json
 import struct
 from typing import Dict, Union, Optional
 
-from safetensors.torch import load_file
-
 from thenoise.utils.setup_logging import setup_logging
 from thenoise.utils.device import synchronize_device
 
@@ -21,17 +19,19 @@ class MemoryEfficientSafeOpen:
     by using memory mapping for large tensors and avoiding unnecessary copies.
     """
 
-    def __init__(self, filename, disable_numpy_memmap=False):
+    def __init__(self, filename, use_numpy_memmap=True):
         """Initialize the SafeTensor reader.
 
         Args:
             filename (str): Path to the safetensors file to read.
-            disable_numpy_memmap (bool): If True, disable numpy memory mapping for large tensors, using standard file read instead.
+            use_numpy_memmap (bool): If True, use numpy memory mapping for large
+                tensors (avoiding an intermediate CPU buffer); if False, use
+                standard file read instead.
         """
         self.filename = filename
         self.file = open(filename, "rb")
         self.header, self.header_size = self._read_header()
-        self.disable_numpy_memmap = disable_numpy_memmap
+        self.use_numpy_memmap = use_numpy_memmap
 
     def __enter__(self):
         """Enter context manager."""
@@ -113,8 +113,8 @@ class MemoryEfficientSafeOpen:
         # Use memmap for large tensors to avoid intermediate copies.
         # If device is cpu, tensor is not copied to gpu, so using memmap locks the file, which is not desired.
         # So we only use memmap if device is not cpu.
-        # If disable_numpy_memmap is True, skip numpy memory mapping to load with standard file read.
-        if not self.disable_numpy_memmap and num_bytes > 10 * 1024 * 1024 and device is not None and device.type != "cpu":
+        # If use_numpy_memmap is False, skip numpy memory mapping to load with standard file read.
+        if self.use_numpy_memmap and num_bytes > 10 * 1024 * 1024 and device is not None and device.type != "cpu":
             # Create memory map for zero-copy reading
             mm = np.memmap(self.filename, mode="c", dtype=np.uint8, offset=tensor_offset, shape=(num_bytes,))
             byte_tensor = torch.from_numpy(mm)  # zero copy
@@ -220,8 +220,6 @@ def load_dit_safetensors(
     path: str,
     device: Union[str, torch.device],
     dtype: Optional[torch.dtype] = None,
-    disable_mmap: bool = True,
-    disable_numpy_memmap: bool = False,
     drop_keys: Optional[tuple[str, ...]] = None,
 ) -> dict[str, torch.Tensor]:
     """Load a DiT checkpoint state dict.
@@ -231,13 +229,7 @@ def load_dit_safetensors(
     checkpoints load identically, and optionally drops leftover keys (e.g. Krea2's
     unused ``last.down.*``/``last.up.*``) via ``drop_keys``.
     """
-    sd = load_safetensors(
-        path,
-        device=device,
-        disable_mmap=disable_mmap,
-        disable_numpy_memmap=disable_numpy_memmap,
-        dtype=dtype,
-    )
+    sd = load_safetensors(path, device=device, dtype=dtype)
     sd = strip_wrap_prefixes(sd)
     if drop_keys:
         sd = {k: v for k, v in sd.items() if not k.startswith(drop_keys)}
@@ -247,30 +239,20 @@ def load_dit_safetensors(
 def load_safetensors(
     path: str,
     device: Union[str, torch.device],
-    disable_mmap: bool = False,
     dtype: Optional[torch.dtype] = None,
-    disable_numpy_memmap: bool = False,
 ) -> dict[str, torch.Tensor]:
-    if disable_mmap:
-        # return safetensors.torch.load(open(path, "rb").read())
-        # use experimental loader
-        # logger.info(f"Loading without mmap (experimental)")
-        state_dict = {}
-        device = torch.device(device) if device is not None else None
-        with MemoryEfficientSafeOpen(path, disable_numpy_memmap=disable_numpy_memmap) as f:
-            for key in f.keys():
-                state_dict[key] = f.get_tensor(key, device=device, dtype=dtype)
-            synchronize_device(device)
-        return state_dict
-    else:
-        try:
-            state_dict = load_file(path, device=device)
-        except:
-            state_dict = load_file(path)  # prevent device invalid Error
-        if dtype is not None:
-            for key in state_dict.keys():
-                state_dict[key] = state_dict[key].to(dtype=dtype)
-        return state_dict
+    """Load a safetensors file into a state dict using the memory-efficient reader.
+
+    All tensors are read via ``MemoryEfficientSafeOpen`` (``np.fromfile``, with
+    numpy memory mapping for large tensors bound for a non-CPU device).
+    """
+    state_dict = {}
+    device = torch.device(device) if device is not None else None
+    with MemoryEfficientSafeOpen(path) as f:
+        for key in f.keys():
+            state_dict[key] = f.get_tensor(key, device=device, dtype=dtype)
+        synchronize_device(device)
+    return state_dict
 
 
 

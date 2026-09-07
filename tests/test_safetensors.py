@@ -91,20 +91,17 @@ def test_strip_wrap_prefixes_returns_a_new_dict():
 # --------------------------------------------------------------- load helpers
 
 
-@pytest.mark.parametrize("disable_mmap", [True, False], ids=["no-mmap", "mmap"])
-def test_load_safetensors_both_strategies(tmp_path, disable_mmap):
-    """The mmap and read-into-memory paths must return identical tensors."""
+def test_load_safetensors(tmp_path):
+    """The memory-efficient reader returns the expected tensors."""
     tensors = {"w": torch.randn(4, 4), "b": torch.arange(4)}
     path = write_safetensors(tmp_path / "s.safetensors", tensors)
 
-    out = load_safetensors(path, device="cpu", disable_mmap=disable_mmap)
+    out = load_safetensors(path, device="cpu")
     assert set(out) == {"w", "b"}
     assert torch.equal(out["w"], tensors["w"])
     assert out["b"].dtype == torch.long
 
-    cast = load_safetensors(
-        path, device="cpu", disable_mmap=disable_mmap, dtype=torch.bfloat16
-    )
+    cast = load_safetensors(path, device="cpu", dtype=torch.bfloat16)
     assert all(t.dtype == torch.bfloat16 for t in cast.values())
 
 
