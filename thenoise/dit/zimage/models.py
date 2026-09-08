@@ -90,30 +90,21 @@ class Attention(nn.Module):
         self.q_norm = RMSNorm(self.head_dim, eps=eps) if qk_norm else nn.Identity()
         self.k_norm = RMSNorm(self.head_dim, eps=eps) if qk_norm else nn.Identity()
 
-    def _apply_rotary_emb(self, query, key, freqs):
-        # RoPE runs in the shared ``apply_rope`` layout ``[B, H, L, D]``; Z-Image
-        # carries q/k as ``[B, L, H, D]``, so transpose around the rotation. The
-        # shared 2x2-matrix ``freqs`` ``[B, L, dim/2, 2, 2]`` is consumed directly.
-        q = query.transpose(1, 2)
-        k = key.transpose(1, 2)
-        q, k = apply_rope(q, k, freqs)
-        return q.transpose(1, 2), k.transpose(1, 2)
-
     def forward(self, hidden_states, attention_mask=None, freqs_cis=None):
         dim = hidden_states.shape[-1]
         q, k, v = self.qkv(hidden_states).split([dim, dim, dim], dim=-1)
 
-        # q/k/v are [B, L, H, D]; the shared attention() util handles the SDPA
-        # [B, H, L, D] transpose and (future) attention-backend swapping.
-        query = q.unflatten(-1, (self.n_heads, -1))
-        key = k.unflatten(-1, (self.n_heads, -1))
-        value = v.unflatten(-1, (self.n_heads, -1))
+        # q/k/v are [B, H, L, D] (SDPA's native layout), so ``apply_rope`` and the
+        # shared attention helper consume them directly.
+        query = q.unflatten(-1, (self.n_heads, -1)).transpose(1, 2)
+        key = k.unflatten(-1, (self.n_heads, -1)).transpose(1, 2)
+        value = v.unflatten(-1, (self.n_heads, -1)).transpose(1, 2)
 
         query = self.q_norm(query)
         key = self.k_norm(key)
 
         if freqs_cis is not None:
-            query, key = self._apply_rotary_emb(query, key, freqs_cis)
+            query, key = apply_rope(query, key, freqs_cis)
 
         params = None
         if attention_mask is not None and attention_mask.ndim == 2:

@@ -162,7 +162,8 @@ class Attention(nn.Module):
         rope_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         q, k, v = self.compute_qkv(x, context, rope_emb=rope_emb)
-        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+        # The shared attention helper consumes [B, H, L, D] directly (SDPA's native
+        # layout) and returns [B, L, H*D].
         qkv = [q, k, v]
         del q, k, v
         result = attention.attention(qkv, attn_params=attn_params)

@@ -143,10 +143,6 @@ class Attention(torch.nn.Module):
         q, k, v = self.qknorm(q, k, v)
         if freqs is not None:
             q, k = apply_rope(q, k, freqs)
-
-        # The shared attention expects [B, L, H, D] and returns [B, L, H*D]. GQA (heads != kvheads)
-        # is detected and handled inside it via k/v head expansion for SDPA.
-        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
         x = common_attention([q, k, v], attn_params=attn_params)
         out = self.wo(x * F.sigmoid(gate))
 

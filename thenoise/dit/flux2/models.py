@@ -125,9 +125,6 @@ def attention(qkv_list: list[Tensor], pe: Tensor) -> Tensor:
     """Apply RoPE then the shared SDPA attention, returning ``[B, L, H*D]``."""
     q, k, v = qkv_list
     q, k = apply_rope(q, k, pe)
-    q = q.transpose(1, 2)  # B, H, L, D -> B, L, H, D
-    k = k.transpose(1, 2)
-    v = v.transpose(1, 2)
     return sdpa_attention([q, k, v])
 
 
