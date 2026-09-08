@@ -1,6 +1,6 @@
-"""Shared reference-latent editing infrastructure tests (no weights / no GPU).
+"""Flux2 reference-latent editing infrastructure tests (no weights / no GPU).
 
-Covers the generic reference helpers (``thenoise.dit.reference``), the
+Covers the Flux2 reference helpers (``thenoise.dit.flux2.models``), the
 ``PipelineCache`` reference stage, and the edit path of the pipeline: size
 derivation, per-image reference caching and the rejections a user can hit.
 """
@@ -11,7 +11,7 @@ import torch
 from PIL import Image
 
 from conftest import EditingStubModel, StubModel
-from thenoise.dit.reference import concat_reference, slice_reference_output
+from thenoise.dit.flux2.models import concat_reference, slice_reference_output
 from thenoise.models.config import EncodePromptArgs, GenerateRequest
 from thenoise.pipeline import PipelineController
 from thenoise.upscale.pixel import PixelUpscalerManager

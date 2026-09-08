@@ -27,7 +27,6 @@ from einops import rearrange
 from torch import Tensor, nn
 
 from thenoise.dit.quantized import QuantizedLinear
-from thenoise.dit.reference import concat_reference, slice_reference_output
 from thenoise.utils.attention import attention as sdpa_attention
 from thenoise.utils.rope import apply_rope, rope
 from thenoise.utils.setup_logging import setup_logging
@@ -36,6 +35,33 @@ setup_logging()
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def concat_reference(
+    img: torch.Tensor,
+    img_ids: torch.Tensor,
+    ref_tokens: torch.Tensor | None,
+    ref_ids: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Append reference tokens+ids to the image tokens+ids.
+
+    The reference stream is concatenated *after* the image tokens
+    (``torch.cat([img, ref])``), and ``slice_reference_output`` drops the trailing
+    refs. Positions stay distinct via the t-axis, so ordering does not affect
+    attention. ``ref_tokens``/``ref_ids`` of ``None`` (plain generation) return
+    ``img``/``img_ids`` unchanged.
+    """
+    if ref_tokens is None or ref_ids is None:
+        return img, img_ids
+    return torch.cat([img, ref_tokens], dim=1), torch.cat([img_ids, ref_ids], dim=1)
+
+
+def slice_reference_output(out: torch.Tensor, num_img_tokens: int) -> torch.Tensor:
+    """Drop the trailing reference tokens from a DiT output.
+
+    Reference tokens are concatenated *after* the image tokens.
+    """
+    return out[:, :num_img_tokens]
 
 
 @dataclass
@@ -444,4 +470,6 @@ __all__ = [
     "Flux2Params",
     "Klein4BParams",
     "Klein9BParams",
+    "concat_reference",
+    "slice_reference_output",
 ]
