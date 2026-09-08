@@ -149,3 +149,34 @@ def test_count_anima_blocks_requires_block_keys(tmp_path):
     with pytest.raises(ValueError, match=r"could not find any 'blocks\.\*' keys"):
         _count_anima_blocks(path)
 
+
+# -------------------------------------------------------------- anima video rope
+
+
+def test_split_half_rope_3d_patches_the_grid_and_builds_cos_sin():
+    """The Anima builder patches the raw latent grid and emits ``(cos, sin)``."""
+    from thenoise.utils.rope import split_half_rope_3d
+
+    builder = split_half_rope_3d(head_dim=64, patch_spatial=2, patch_temporal=1)
+    raw = (1, 16, 2, 8, 12)  # B, C, T, H, W
+    cos, sin = builder(raw, "cpu")
+    # Patched grid: T'=2, H'=4, W'=6 -> 48 tokens.
+    assert cos.shape == (2 * 4 * 6, 1, 1, 64)
+    assert sin.shape == cos.shape
+    assert torch.isfinite(cos).all()
+
+
+def test_apply_rope_split_half_is_orthogonal():
+    """Split-half RoPE preserves the norm of each head vector."""
+    from thenoise.utils.rope import apply_rope_split_half, split_half_rope_3d
+
+    torch.manual_seed(0)
+    builder = split_half_rope_3d(head_dim=16, patch_spatial=1, patch_temporal=1)
+    cos, sin = builder((1, 16, 1, 8, 8), "cpu")  # 8x8 grid -> 64 tokens
+    q = torch.randn(2, 64, 3, 16)
+    out = apply_rope_split_half(q, cos, sin)
+    assert out.shape == q.shape
+    # RoPE is a rotation: per-token-per-head norms are preserved.
+    assert torch.allclose(q.norm(dim=-1), out.norm(dim=-1), atol=1e-6)
+
+

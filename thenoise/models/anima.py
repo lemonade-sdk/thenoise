@@ -157,7 +157,12 @@ class AnimaModel(DiffusionModel):
         params: SamplingParams,
     ) -> torch.Tensor:
         # The Anima DiT expects a frame axis: [B, C, H, W] -> [B, C, 1, H, W].
-        return latents.unsqueeze(2)
+        # Precompute the video RoPE (cos/sin) once per prompt; it depends only on
+        # the (T, H, W) shape and is reused across every denoise step.
+        latents = latents.unsqueeze(2)
+        self.dit.pos_embedder.clear()
+        self.dit.pos_embedder.store("emb", latents.shape, latents.device, dtype=self.dtype)
+        return latents
 
     def schedule(self, params: SamplingParams) -> list[Step]:
         dev = torch.device(self.device)

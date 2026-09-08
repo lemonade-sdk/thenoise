@@ -18,7 +18,7 @@ from accelerate import init_empty_weights
 
 from thenoise.utils.loader import load_dit
 from thenoise.dit.quantized import QuantizedLinear
-from thenoise.utils.rope import RopeCache, apply_rope
+from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -378,7 +378,7 @@ class QwenImageTransformer2DModel(nn.Module):
         self.inner_dim = num_attention_heads * attention_head_dim
         self.patch_size = patch_size
 
-        self.pe_embedder = RopeCache(list(axes_dims_rope), 10000)
+        self.pe_embedder = RopeCache(matrix_rope(list(axes_dims_rope), 10000))
         self.time_text_embed = QwenTimestepProjEmbeddings(embedding_dim=self.inner_dim)
         self.txt_norm = RMSNorm(joint_attention_dim, eps=1e-6)
         self.img_in = QuantizedLinear(in_channels, self.inner_dim)

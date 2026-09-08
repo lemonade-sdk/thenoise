@@ -16,7 +16,7 @@ import torch.nn.functional as F
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention
-from thenoise.utils.rope import RopeCache, apply_rope
+from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -247,7 +247,7 @@ class ZImageTransformer2DModel(nn.Module):
             ]
         )
         self.axes_dims = list(axes_dims)
-        self.rope_embedder = RopeCache(axes_dims, rope_theta)
+        self.rope_embedder = RopeCache(matrix_rope(axes_dims, rope_theta))
 
     # ------------------------------------------------------------ patchify
     @staticmethod

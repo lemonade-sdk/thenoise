@@ -18,7 +18,7 @@ from torch import Tensor
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention as common_attention
-from thenoise.utils.rope import RopeCache, apply_rope
+from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 
 
 def temb(
@@ -265,7 +265,7 @@ class SingleStreamDiT(nn.Module):
         assert sum(axes) == headdim, f"sum(axes) = {sum(axes)}, headdim = {headdim}"
         assert all(a % 2 == 0 for a in axes), f"axes = {axes}"
 
-        self.posemb = RopeCache(axes, config.theta)
+        self.posemb = RopeCache(matrix_rope(axes, config.theta))
         self.first = QuantizedLinear(config.channels * config.patch**2, config.features, bias=True)
 
         self.blocks = nn.ModuleList(

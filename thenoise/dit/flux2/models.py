@@ -28,7 +28,7 @@ from torch import Tensor, nn
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import attention as sdpa_attention
-from thenoise.utils.rope import RopeCache, apply_rope
+from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -326,7 +326,7 @@ class Flux2(nn.Module):
         self.hidden_size = params.hidden_size
         self.num_heads = params.num_heads
 
-        self.pe_embedder = RopeCache(params.axes_dim, params.theta)
+        self.pe_embedder = RopeCache(matrix_rope(params.axes_dim, params.theta))
         self.img_in = QuantizedLinear(self.in_channels, self.hidden_size, bias=False)
         self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size, disable_bias=True)
         self.txt_in = QuantizedLinear(params.context_in_dim, self.hidden_size, bias=False)
