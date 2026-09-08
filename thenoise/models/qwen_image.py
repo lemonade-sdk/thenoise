@@ -14,6 +14,7 @@ import torch
 from thenoise.dit.qwen_image import models as qwen_models
 from thenoise.dit.qwen_image import sampling as qwen_sampling
 from thenoise.dit.qwen_image import utils as qwen_utils
+from thenoise.dit.qwen_image.models import build_txt_positions, build_video_positions
 from thenoise.models.base import (
     Conditioning,
     DiffusionModel,
@@ -142,14 +143,14 @@ class QwenImageModel(DiffusionModel):
         """Pack the canonical latent into DiT tokens and stash conditioning once.
 
         The reference latent (edit) is packed and concatenated into the DiT token
-        sequence; the DiT's ``img_shapes`` gains one entry per reference.
+        sequence; ``img_shapes`` gains one entry per reference and drives both the
+        precomputed RoPE positions and the ``zero_cond_t`` split index.
         """
         dev = torch.device(self.device)
         x = pack_latents(latents.to(device=dev, dtype=self.dtype))
 
         self._txt = cond.cond.to(device=dev, dtype=self.dtype)
-        self._txt_mask = cond.cond_mask.to(device=dev, dtype=torch.long)
-        self._txt_seq_lens = [int(m.sum().item()) for m in self._txt_mask]
+        txt_len = int(cond.cond_mask.to(device=dev).sum().item())
         self._img_shapes = [(1, params.height // self._VAE_SCALE // 2, params.width // self._VAE_SCALE // 2)]
 
         if ref is not None:
@@ -163,12 +164,34 @@ class QwenImageModel(DiffusionModel):
         else:
             self._ref_tokens = None
 
+        null_len = None
         if cond.null is not None:
             self._null_txt = cond.null.to(device=dev, dtype=self.dtype)
-            self._null_mask = cond.null_mask.to(device=dev, dtype=torch.long)
-            self._null_seq_lens = [int(m.sum().item()) for m in self._null_mask]
+            null_len = int(cond.null_mask.to(device=dev).sum().item())
         else:
-            self._null_txt = self._null_mask = self._null_seq_lens = None
+            self._null_txt = None
+
+        # Precompute the RoPE frequencies once per prompt; they are independent of
+        # image/timestep and are reused across every denoise step. The image stream
+        # covers the concatenated base+ref tokens; the text stream uses a single
+        # index (``max_vid_index + j``) advanced across all three axes.
+        self.dit.pe_embedder.clear()
+        img_pos = build_video_positions(self._img_shapes, device=dev)
+        self.dit.pe_embedder.store("img", img_pos, dtype=self.dtype)
+        max_vid_index = max(max(h // 2, w // 2) for _, h, w in self._img_shapes)
+        txt_pos = build_txt_positions(max_vid_index, txt_len, device=dev)
+        self.dit.pe_embedder.store("txt", txt_pos, dtype=self.dtype)
+        if null_len is not None:
+            null_pos = build_txt_positions(max_vid_index, null_len, device=dev)
+            self.dit.pe_embedder.store("txt_uncond", null_pos, dtype=self.dtype)
+
+        # ``zero_cond_t`` zeroes the timestep on the reference tokens; the split
+        # point is the base image token count.
+        self._timestep_zero_index = (
+            self._img_shapes[0][0] * self._img_shapes[0][1] * self._img_shapes[0][2]
+            if self.zero_cond_t
+            else None
+        )
 
         return x
 
@@ -199,12 +222,18 @@ class QwenImageModel(DiffusionModel):
 
         with torch.no_grad(), torch.autocast(device_type=dev.type, dtype=self.dtype):
             pos = self.dit(
-                hidden_states, self._txt, t_full, self._img_shapes, self._txt_seq_lens
+                hidden_states, self._txt, t_full,
+                img_pe=self.dit.pe_embedder["img"],
+                txt_pe=self.dit.pe_embedder["txt"],
+                timestep_zero_index=self._timestep_zero_index,
             )
             pos = pos[:, : latents.shape[1], :]
             if guidance_scale > 1.0 and self._null_txt is not None:
                 neg = self.dit(
-                    hidden_states, self._null_txt, t_full, self._img_shapes, self._null_seq_lens
+                    hidden_states, self._null_txt, t_full,
+                    img_pe=self.dit.pe_embedder["img"],
+                    txt_pe=self.dit.pe_embedder["txt_uncond"],
+                    timestep_zero_index=self._timestep_zero_index,
                 )
                 neg = neg[:, : latents.shape[1], :]
                 v = neg + guidance_scale * (pos - neg)

@@ -9,7 +9,7 @@ int8_convrot checkpoints).
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -18,12 +18,43 @@ from accelerate import init_empty_weights
 
 from thenoise.utils.loader import load_dit
 from thenoise.dit.quantized import QuantizedLinear
+from thenoise.utils.rope import RopeCache, apply_rope
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def build_video_positions(img_shapes, device):
+    """Build ``[1, total_tokens, 3]`` (t,h,w) positions for the image+ref stream.
+
+    ``img_shapes`` are ``(frame, height, width)``. The h/w axes use the centered
+    (``scale_rope``) convention ``pos = r - ceil(size / 2)``; the ``i``-th shape's
+    t-axis spans ``[i, i + frame)``. Tokens are ordered ``(f, h, w)`` row-major.
+    """
+    parts = []
+    for i, (frame, height, width) in enumerate(img_shapes):
+        t = torch.arange(i, i + frame, dtype=torch.float32, device=device)
+        h = torch.arange(height, dtype=torch.float32, device=device) - math.ceil(height / 2)
+        w = torch.arange(width, dtype=torch.float32, device=device) - math.ceil(width / 2)
+        # (f, h, w) row-major grid.
+        t = t[:, None, None].expand(frame, height, width).reshape(-1)
+        h = h[None, :, None].expand(frame, height, width).reshape(-1)
+        w = w[None, None, :].expand(frame, height, width).reshape(-1)
+        parts.append(torch.stack([t, h, w], dim=-1))
+    return torch.cat(parts, dim=0).unsqueeze(0)
+
+
+def build_txt_positions(max_vid_index, txt_len, device):
+    """Build ``[1, txt_len, 3]`` positions for the text stream.
+
+    Text uses a single index ``max_vid_index + j`` advanced across all three axes
+    (all coords equal), matching the original ``pos_freqs[max_vid_index + j]``.
+    """
+    k = torch.arange(max_vid_index, max_vid_index + txt_len, dtype=torch.float32, device=device)
+    return k[:, None].expand(txt_len, 3).unsqueeze(0)
 
 
 def _get_timestep_embedding(
@@ -149,107 +180,6 @@ class FeedForward(nn.Module):
         return hidden_states
 
 
-def apply_rotary_emb_qwen(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    """Apply rotary embedding to ``[B, S, H, D]`` using real ``cos/sin [S, D//2]``.
-
-    Real arithmetic throughout (no ``view_as_complex``, no complex ``freqs``) so the
-    ``torch.compile``d block never sees complex tensors -- inductor cannot codegen them.
-    """
-    cos = cos.to(x.device)
-    sin = sin.to(x.device)
-    cos = cos[None, :, None, :]
-    sin = sin[None, :, None, :]
-    x_real, x_imag = x.reshape(*x.shape[:-1], -1, 2).unbind(-1)  # [B, S, H, D//2]
-    xr = x_real * cos - x_imag * sin
-    xi = x_real * sin + x_imag * cos
-    return torch.stack([xr, xi], dim=-1).flatten(3).to(x.dtype)
-
-
-class QwenEmbedRope(nn.Module):
-    def __init__(self, theta: int, axes_dim: List[int], scale_rope: bool = False):
-        super().__init__()
-        self.theta = theta
-        self.axes_dim = axes_dim
-        pos_index = torch.arange(4096)
-        neg_index = torch.arange(4096).flip(0) * -1 - 1
-        self.pos_freqs = torch.cat(
-            [
-                self._rope_params(pos_index, self.axes_dim[0], self.theta),
-                self._rope_params(pos_index, self.axes_dim[1], self.theta),
-                self._rope_params(pos_index, self.axes_dim[2], self.theta),
-            ],
-            dim=1,
-        )
-        self.neg_freqs = torch.cat(
-            [
-                self._rope_params(neg_index, self.axes_dim[0], self.theta),
-                self._rope_params(neg_index, self.axes_dim[1], self.theta),
-                self._rope_params(neg_index, self.axes_dim[2], self.theta),
-            ],
-            dim=1,
-        )
-        self.rope_cache = {}
-        self.scale_rope = scale_rope
-
-    def _rope_params(self, index: torch.Tensor, dim: int, theta: float = 10000) -> torch.Tensor:
-        assert dim % 2 == 0
-        freqs = torch.outer(index, 1.0 / torch.pow(theta, torch.arange(0, dim, 2).to(torch.float32).div(dim)))
-        return torch.polar(torch.ones_like(freqs), freqs)
-
-    def _compute_video_freqs(self, frame: int, height: int, width: int, idx: int = 0) -> torch.Tensor:
-        freqs_pos = self.pos_freqs.split([x // 2 for x in self.axes_dim], dim=1)
-        freqs_neg = self.neg_freqs.split([x // 2 for x in self.axes_dim], dim=1)
-
-        freqs_frame = freqs_pos[0][idx : idx + frame].view(frame, 1, 1, -1).expand(frame, height, width, -1)
-        if self.scale_rope:
-            freqs_height = torch.cat([freqs_neg[1][-(height - height // 2) :], freqs_pos[1][: height // 2]], dim=0)
-            freqs_height = freqs_height.view(1, height, 1, -1).expand(frame, height, width, -1)
-            freqs_width = torch.cat([freqs_neg[2][-(width - width // 2) :], freqs_pos[2][: width // 2]], dim=0)
-            freqs_width = freqs_width.view(1, 1, width, -1).expand(frame, height, width, -1)
-        else:
-            freqs_height = freqs_pos[1][:height].view(1, height, 1, -1).expand(frame, height, width, -1)
-            freqs_width = freqs_pos[2][:width].view(1, 1, width, -1).expand(frame, height, width, -1)
-
-        freqs = torch.cat([freqs_frame, freqs_height, freqs_width], dim=-1).reshape(frame * height * width, -1)
-        return freqs.clone().contiguous()
-
-    def forward(self, video_fhw, txt_seq_lens, device):
-        if self.pos_freqs.device != device:
-            self.pos_freqs = self.pos_freqs.to(device)
-            self.neg_freqs = self.neg_freqs.to(device)
-
-        if not isinstance(video_fhw, list):
-            video_fhw = [video_fhw]
-
-        vid_freqs = []
-        max_vid_index = 0
-        for idx, fhw in enumerate(video_fhw):
-            frame, height, width = fhw
-            rope_key = f"{idx}_{frame}_{height}_{width}"
-            if rope_key not in self.rope_cache:
-                self.rope_cache[rope_key] = self._compute_video_freqs(frame, height, width, idx)
-            video_freq = self.rope_cache[rope_key].to(device)
-            vid_freqs.append(video_freq)
-            if self.scale_rope:
-                max_vid_index = max(height // 2, width // 2, max_vid_index)
-            else:
-                max_vid_index = max(height, width, max_vid_index)
-
-        max_len = max(txt_seq_lens)
-        if max_vid_index + max_len <= self.pos_freqs.size(0):
-            txt_freqs = self.pos_freqs[max_vid_index : max_vid_index + max_len, ...]
-        else:
-            index = torch.arange(max_vid_index, max_vid_index + max_len, dtype=torch.float32)
-            txt_freqs = torch.cat(
-                [self._rope_params(index, dim, self.theta) for dim in self.axes_dim],
-                dim=1,
-            ).to(device)
-        vid_freqs = torch.cat(vid_freqs, dim=0)
-        # Split the complex ``torch.polar`` freqs into real cos/sin here (outside the
-        # compiled block) so the attention kernel never sees complex tensors.
-        return (vid_freqs.real, vid_freqs.imag), (txt_freqs.real, txt_freqs.imag)
-
-
 class Attention(nn.Module):
     """Dual-stream joint attention: image + text QKV, concatenated, one SDPA."""
 
@@ -285,7 +215,8 @@ class Attention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
-        image_rotary_emb: Optional[torch.Tensor],
+        img_pe: torch.Tensor,
+        txt_pe: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         img_query = self.to_q(hidden_states)
         img_key = self.to_k(hidden_states)
@@ -307,12 +238,17 @@ class Attention(nn.Module):
         txt_query = self.norm_added_q(txt_query)
         txt_key = self.norm_added_k(txt_key)
 
-        if image_rotary_emb is not None:
-            (img_cos, img_sin), (txt_cos, txt_sin) = image_rotary_emb
-            img_query = apply_rotary_emb_qwen(img_query, img_cos, img_sin)
-            img_key = apply_rotary_emb_qwen(img_key, img_cos, img_sin)
-            txt_query = apply_rotary_emb_qwen(txt_query, txt_cos, txt_sin)
-            txt_key = apply_rotary_emb_qwen(txt_key, txt_cos, txt_sin)
+        # RoPE in [B, H, L, D] via the shared 2x2-matrix ``apply_rope``.
+        img_query, img_key = apply_rope(
+            img_query.transpose(1, 2), img_key.transpose(1, 2), img_pe
+        )
+        img_query = img_query.transpose(1, 2)
+        img_key = img_key.transpose(1, 2)
+        txt_query, txt_key = apply_rope(
+            txt_query.transpose(1, 2), txt_key.transpose(1, 2), txt_pe
+        )
+        txt_query = txt_query.transpose(1, 2)
+        txt_key = txt_key.transpose(1, 2)
 
         seq_img = img_query.shape[1]
         joint_query = torch.cat([img_query, txt_query], dim=1)
@@ -380,7 +316,8 @@ class QwenImageTransformerBlock(nn.Module):
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         temb: torch.Tensor,
-        image_rotary_emb: Optional[torch.Tensor],
+        img_pe: torch.Tensor,
+        txt_pe: torch.Tensor,
         timestep_zero_index: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         img_mod_params = self.img_mod(temb)
@@ -398,7 +335,7 @@ class QwenImageTransformerBlock(nn.Module):
         del img_mod1, txt_mod1
 
         img_attn_output, txt_attn_output = self.attn(
-            img_modulated, txt_modulated, image_rotary_emb
+            img_modulated, txt_modulated, img_pe, txt_pe
         )
         del img_modulated, txt_modulated
 
@@ -441,7 +378,7 @@ class QwenImageTransformer2DModel(nn.Module):
         self.inner_dim = num_attention_heads * attention_head_dim
         self.patch_size = patch_size
 
-        self.pos_embed = QwenEmbedRope(theta=10000, axes_dim=list(axes_dims_rope), scale_rope=True)
+        self.pe_embedder = RopeCache(list(axes_dims_rope), 10000)
         self.time_text_embed = QwenTimestepProjEmbeddings(embedding_dim=self.inner_dim)
         self.txt_norm = RMSNorm(joint_attention_dim, eps=1e-6)
         self.img_in = QuantizedLinear(in_channels, self.inner_dim)
@@ -470,38 +407,30 @@ class QwenImageTransformer2DModel(nn.Module):
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor,
         timestep: torch.Tensor = None,
-        img_shapes: Optional[List[Tuple[int, int, int]]] = None,
-        txt_seq_lens: Optional[List[int]] = None,
+        img_pe: torch.Tensor = None,
+        txt_pe: torch.Tensor = None,
+        timestep_zero_index: Optional[int] = None,
     ) -> torch.Tensor:
         hidden_states = self.img_in(hidden_states)
         timestep = timestep.to(hidden_states.dtype)
 
         if self.zero_cond_t:
-            if img_shapes is None:
-                raise ValueError("`img_shapes` must be provided when `zero_cond_t=True`.")
+            if timestep_zero_index is None:
+                raise ValueError("`timestep_zero_index` must be provided when `zero_cond_t=True`.")
             timestep = torch.cat([timestep, timestep * 0], dim=0)
-            sample = img_shapes[0]
-            if isinstance(sample, (tuple, list)) and len(sample) == 3 and all(isinstance(x, (int,)) for x in sample):
-                base_len = int(sample[0] * sample[1] * sample[2])
-            else:
-                base = sample[0]
-                base_len = int(base[0] * base[1] * base[2])
-            timestep_zero_index = base_len
-        else:
-            timestep_zero_index = None
 
         encoder_hidden_states = self.txt_norm(encoder_hidden_states)
         encoder_hidden_states = self.txt_in(encoder_hidden_states)
 
         temb = self.time_text_embed(timestep, hidden_states)
-        image_rotary_emb = self.pos_embed(img_shapes, txt_seq_lens, device=hidden_states.device)
 
         for block in self.transformer_blocks:
             encoder_hidden_states, hidden_states = block(
                 hidden_states=hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 temb=temb,
-                image_rotary_emb=image_rotary_emb,
+                img_pe=img_pe,
+                txt_pe=txt_pe,
                 timestep_zero_index=timestep_zero_index,
             )
 
@@ -540,11 +469,7 @@ def load_qwen_image_dit(
     dtype: torch.dtype,
     num_layers: int = 60,
 ) -> QwenImageTransformer2DModel:
-    """Load the Qwen-Image DiT via the central quant-aware loader.
-
-    ``init_empty_weights`` (not ``torch.device("meta")``) keeps ``pos_freqs``/
-    ``neg_freqs`` as real plain tensors, since ``model.to(device)`` won't move them.
-    """
+    """Load the Qwen-Image DiT via the central quant-aware loader."""
     with init_empty_weights():
         model = create_model(zero_cond_t=zero_cond_t, num_layers=num_layers)
     load_dit(model, dit_path, device=device, dtype=dtype, drop_keys=("__index_timestep_zero__",))
@@ -552,4 +477,4 @@ def load_qwen_image_dit(
     return model
 
 
-__all__ = ["QwenImageTransformer2DModel", "load_qwen_image_dit", "create_model"]
+__all__ = ["QwenImageTransformer2DModel", "load_qwen_image_dit", "create_model", "build_video_positions", "build_txt_positions"]
