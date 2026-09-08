@@ -16,6 +16,7 @@ import torch.nn.functional as F
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention
+from thenoise.utils.rope import RopeCache, apply_rope
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -89,21 +90,14 @@ class Attention(nn.Module):
         self.q_norm = RMSNorm(self.head_dim, eps=eps) if qk_norm else nn.Identity()
         self.k_norm = RMSNorm(self.head_dim, eps=eps) if qk_norm else nn.Identity()
 
-    def _apply_rotary_emb(self, x, freqs_cis):
-        # Real-arithmetic RoPE (no complex ops) so torch.compile can generate
-        # code; complex view/multiply falls back to eager in inductor.
-        x_dtype = x.dtype
-        x = x.float().reshape(*x.shape[:-1], -1, 2)  # [B, L, H, D/2, 2]
-        x1, x2 = x[..., 0], x[..., 1]                # real and imaginary parts
-        cos = freqs_cis[..., 0].unsqueeze(2)         # [L, 1, D/2]
-        sin = freqs_cis[..., 1].unsqueeze(2)
-        # (x1 + i*x2) * (cos + i*sin) -> real and imaginary parts.
-        x1_out = x1 * cos - x2 * sin
-        x2_out = x1 * sin + x2 * cos
-        x_out = torch.stack([x1_out, x2_out], dim=-1).flatten(3)
-        # Cast back to the activation dtype (bf16); the int8 ``out`` projection has
-        # no bf16 ``weight`` to reference for the dtype.
-        return x_out.to(x_dtype)
+    def _apply_rotary_emb(self, query, key, freqs):
+        # RoPE runs in the shared ``apply_rope`` layout ``[B, H, L, D]``; Z-Image
+        # carries q/k as ``[B, L, H, D]``, so transpose around the rotation. The
+        # shared 2x2-matrix ``freqs`` ``[B, L, dim/2, 2, 2]`` is consumed directly.
+        q = query.transpose(1, 2)
+        k = key.transpose(1, 2)
+        q, k = apply_rope(q, k, freqs)
+        return q.transpose(1, 2), k.transpose(1, 2)
 
     def forward(self, hidden_states, attention_mask=None, freqs_cis=None):
         dim = hidden_states.shape[-1]
@@ -119,8 +113,7 @@ class Attention(nn.Module):
         key = self.k_norm(key)
 
         if freqs_cis is not None:
-            query = self._apply_rotary_emb(query, freqs_cis)
-            key = self._apply_rotary_emb(key, freqs_cis)
+            query, key = self._apply_rotary_emb(query, key, freqs_cis)
 
         params = None
         if attention_mask is not None and attention_mask.ndim == 2:
@@ -197,43 +190,6 @@ class FinalLayer(nn.Module):
         return self.linear(x)
 
 
-class RopeEmbedder:
-    def __init__(self, theta=256.0, axes_dims=(16, 56, 56), axes_lens=(64, 128, 128)):
-        self.theta = theta
-        self.axes_dims = list(axes_dims)
-        self.axes_lens = list(axes_lens)
-        self.freqs_cis = None
-
-    @staticmethod
-    def precompute_freqs_cis(dim, end, theta):
-        with torch.device("cpu"):
-            # Precompute cos/sin pairs as real tensors (no complex ops) so the
-            # compiled attention path avoids inductor's complex fallback.
-            freqs_cis = []
-            for d, e in zip(dim, end):
-                freqs = 1.0 / (theta ** (torch.arange(0, d, 2, dtype=torch.float64, device="cpu") / d))
-                timestep = torch.arange(e, device="cpu", dtype=torch.float64)
-                freqs = torch.outer(timestep, freqs).float()
-                freqs_cis_i = torch.stack([torch.cos(freqs), torch.sin(freqs)], dim=-1)
-                freqs_cis.append(freqs_cis_i)
-            return freqs_cis
-
-    def __call__(self, ids):
-        assert ids.ndim == 2
-        assert ids.shape[-1] == len(self.axes_dims)
-        device = ids.device
-        if self.freqs_cis is None:
-            self.freqs_cis = self.precompute_freqs_cis(self.axes_dims, self.axes_lens, self.theta)
-        if self.freqs_cis[0].device != device:
-            self.freqs_cis = [f.to(device) for f in self.freqs_cis]
-        result = []
-        for i in range(len(self.axes_dims)):
-            index = ids[:, i]
-            result.append(self.freqs_cis[i][index])
-        # Each entry is [L, dim/2, 2]; concatenate along the dim/2 axis.
-        return torch.cat(result, dim=1)
-
-
 class ZImageTransformer2DModel(nn.Module):
     def __init__(
         self,
@@ -251,7 +207,6 @@ class ZImageTransformer2DModel(nn.Module):
         rope_theta=256.0,
         t_scale=1000.0,
         axes_dims=(32, 48, 48),
-        axes_lens=(1024, 512, 512),
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -292,8 +247,7 @@ class ZImageTransformer2DModel(nn.Module):
             ]
         )
         self.axes_dims = list(axes_dims)
-        self.axes_lens = list(axes_lens)
-        self.rope_embedder = RopeEmbedder(theta=rope_theta, axes_dims=axes_dims, axes_lens=axes_lens)
+        self.rope_embedder = RopeCache(axes_dims, rope_theta)
 
     # ------------------------------------------------------------ patchify
     @staticmethod
@@ -337,14 +291,36 @@ class ZImageTransformer2DModel(nn.Module):
 
         return padded_feat, pos_ids, pad_mask, total_len
 
+    def prepare_rope(self, x, cap_feats, patch_size=None, f_patch_size=None):
+        """Compute and cache the RoPE frequencies for a prompt (call once).
+
+        The image and caption positions depend only on the latent/caption shapes,
+        which are fixed for a prompt, so the frequencies are built once here and
+        reused by ``forward`` across every denoise step.
+        """
+        patch_size = patch_size or self.patch_size
+        f_patch_size = f_patch_size or self.f_patch_size
+        (_, _, _, x_pos_ids, cap_pos_ids, _, _) = self.patchify_and_embed(
+            x, cap_feats, patch_size, f_patch_size
+        )
+        self.rope_embedder.clear()
+        # ``rope`` expects a batch dim; the per-sample positions are concatenated and
+        # carried as a single batch, then split back per sample in ``_prepare_sequence``.
+        self.rope_embedder.store("img", torch.cat(x_pos_ids, dim=0).unsqueeze(0))
+        self.rope_embedder.store("cap", torch.cat(cap_pos_ids, dim=0).unsqueeze(0))
+
     def patchify_and_embed(self, all_image, all_cap_feats, patch_size, f_patch_size):
         device = all_image[0].device
         all_img_out, all_img_size, all_img_pos_ids, all_img_pad_mask = [], [], [], []
         all_cap_out, all_cap_pos_ids, all_cap_pad_mask = [], [], []
 
         for image, cap_feat in zip(all_image, all_cap_feats):
+            # Build the position grid for the ACTUAL caption tokens, then pad to a
+            # multiple of ``SEQ_MULTI_OF`` (matching the image path). The original
+            # used the padded length as the grid size and then padded again, so
+            # ``cap_pos_ids`` carried extra positions beyond the padded feats.
             cap_out, cap_pos_ids, cap_pad_mask, cap_len = self._pad_with_ids(
-                cap_feat, (len(cap_feat) + (-len(cap_feat)) % SEQ_MULTI_OF, 1, 1), (1, 0, 0), device
+                cap_feat, (len(cap_feat), 1, 1), (1, 0, 0), device
             )
             all_cap_out.append(cap_out)
             all_cap_pos_ids.append(cap_pos_ids)
@@ -369,7 +345,7 @@ class ZImageTransformer2DModel(nn.Module):
             all_cap_pad_mask,
         )
 
-    def _prepare_sequence(self, feats, pos_ids, inner_pad_mask, pad_token, device):
+    def _prepare_sequence(self, feats, pe, inner_pad_mask, pad_token, device):
         item_seqlens = [len(f) for f in feats]
         max_seqlen = max(item_seqlens)
         bsz = len(feats)
@@ -379,7 +355,9 @@ class ZImageTransformer2DModel(nn.Module):
         feats_cat = torch.where(mask, pad_token, feats_cat)
         feats = list(feats_cat.split(item_seqlens, dim=0))
 
-        freqs_cis = list(self.rope_embedder(torch.cat(pos_ids, dim=0)).split([len(p) for p in pos_ids], dim=0))
+        # ``pe`` is the concatenated per-token frequencies (batch dim of 1); drop that
+        # batch dim and split back into per-sample tensors, then pad to the max length.
+        freqs_cis = list(pe.squeeze(0).split(item_seqlens, dim=0))
 
         feats = nn.utils.rnn.pad_sequence(feats, batch_first=True, padding_value=0.0)
         freqs_cis = nn.utils.rnn.pad_sequence(freqs_cis, batch_first=True, padding_value=0.0)[:, : feats.shape[1]]
@@ -428,7 +406,7 @@ class ZImageTransformer2DModel(nn.Module):
 
         adaln_input = self.t_embedder(t * self.t_scale).type_as(x[0])
 
-        (x, cap_feats, x_size, x_pos_ids, cap_pos_ids, x_pad_mask, cap_pad_mask) = self.patchify_and_embed(
+        (x, cap_feats, x_size, _, _, x_pad_mask, cap_pad_mask) = self.patchify_and_embed(
             x, cap_feats, patch_size, f_patch_size
         )
 
@@ -436,7 +414,7 @@ class ZImageTransformer2DModel(nn.Module):
         x_seqlens = [len(xi) for xi in x]
         x = self.x_embedder(torch.cat(x, dim=0))
         x, x_freqs, x_mask, _ = self._prepare_sequence(
-            list(x.split(x_seqlens, dim=0)), x_pos_ids, x_pad_mask, self.x_pad_token, device
+            list(x.split(x_seqlens, dim=0)), self.rope_embedder["img"], x_pad_mask, self.x_pad_token, device
         )
         for layer in self.noise_refiner:
             x = layer(x, x_mask, x_freqs, adaln_input)
@@ -445,7 +423,7 @@ class ZImageTransformer2DModel(nn.Module):
         cap_seqlens = [len(ci) for ci in cap_feats]
         cap_feats = self.cap_embedder(torch.cat(cap_feats, dim=0))
         cap_feats, cap_freqs, cap_mask, _ = self._prepare_sequence(
-            list(cap_feats.split(cap_seqlens, dim=0)), cap_pos_ids, cap_pad_mask, self.cap_pad_token, device
+            list(cap_feats.split(cap_seqlens, dim=0)), self.rope_embedder["cap"], cap_pad_mask, self.cap_pad_token, device
         )
         for layer in self.context_refiner:
             cap_feats = layer(cap_feats, cap_mask, cap_freqs)

@@ -146,7 +146,9 @@ class ZImageModel(DiffusionModel):
         params: SamplingParams,
     ) -> torch.Tensor:
         # The DiT expects an F (frame) axis: [B, C, H, W] -> [B, C, 1, H, W].
-        return latents.unsqueeze(2)
+        latents = latents.unsqueeze(2)
+        self.dit.prepare_rope([latents[0]], [cond.cond[0]])
+        return latents
 
     def schedule(self, params: SamplingParams) -> list[Step]:
         dev = torch.device(self.device)
