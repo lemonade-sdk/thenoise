@@ -28,32 +28,13 @@ from torch import Tensor, nn
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import attention as sdpa_attention
-from thenoise.utils.rope import apply_rope, rope
+from thenoise.utils.rope import RopeCache, apply_rope
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
 import logging
 
 logger = logging.getLogger(__name__)
-
-
-def concat_reference(
-    img: torch.Tensor,
-    img_ids: torch.Tensor,
-    ref_tokens: torch.Tensor | None,
-    ref_ids: torch.Tensor | None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Append reference tokens+ids to the image tokens+ids.
-
-    The reference stream is concatenated *after* the image tokens
-    (``torch.cat([img, ref])``), and ``slice_reference_output`` drops the trailing
-    refs. Positions stay distinct via the t-axis, so ordering does not affect
-    attention. ``ref_tokens``/``ref_ids`` of ``None`` (plain generation) return
-    ``img``/``img_ids`` unchanged.
-    """
-    if ref_tokens is None or ref_ids is None:
-        return img, img_ids
-    return torch.cat([img, ref_tokens], dim=1), torch.cat([img_ids, ref_ids], dim=1)
 
 
 def slice_reference_output(out: torch.Tensor, num_img_tokens: int) -> torch.Tensor:
@@ -159,18 +140,6 @@ class MLPEmbedder(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         return self.out_layer(self.silu(self.in_layer(x)))
-
-
-class EmbedND(nn.Module):
-    def __init__(self, dim: int, theta: int, axes_dim: list[int]):
-        super().__init__()
-        self.dim = dim
-        self.theta = theta
-        self.axes_dim = axes_dim
-
-    def forward(self, ids: Tensor) -> Tensor:
-        emb = torch.cat([rope(ids[..., i], self.axes_dim[i], self.theta) for i in range(len(self.axes_dim))], dim=-3)
-        return emb
 
 
 class SiLUActivation(nn.Module):
@@ -357,7 +326,7 @@ class Flux2(nn.Module):
         self.hidden_size = params.hidden_size
         self.num_heads = params.num_heads
 
-        self.pe_embedder = EmbedND(dim=pe_dim, theta=params.theta, axes_dim=params.axes_dim)
+        self.pe_embedder = RopeCache(params.axes_dim, params.theta)
         self.img_in = QuantizedLinear(self.in_channels, self.hidden_size, bias=False)
         self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size, disable_bias=True)
         self.txt_in = QuantizedLinear(params.context_in_dim, self.hidden_size, bias=False)
@@ -410,13 +379,12 @@ class Flux2(nn.Module):
     def forward(
         self,
         x: Tensor,
-        x_ids: Tensor,
+        pe_x: Tensor,
         timesteps: Tensor,
         ctx: Tensor,
-        ctx_ids: Tensor,
+        pe_ctx: Tensor,
         guidance: Tensor | None = None,
         ref_tokens: Tensor | None = None,
-        ref_ids: Tensor | None = None,
     ) -> Tensor:
         num_txt_tokens = ctx.shape[1]
         num_img_tokens = x.shape[1]
@@ -431,21 +399,19 @@ class Flux2(nn.Module):
         double_block_mod_txt = self.double_stream_modulation_txt(vec)
         single_block_mod, _ = self.single_stream_modulation(vec)
 
-        # Reference-latent editing (Flux2 Klein): append the reference image
-        # tokens+ids to the image stream (in packed-latent space) so the DiT
-        # attends to them alongside the text instruction. ``None`` (plain t2i)
-        # is a no-op. Must happen before ``img_in``/``pe_embedder`` so the refs
-        # are embedded like the image tokens.
-        x, x_ids = concat_reference(x, x_ids, ref_tokens, ref_ids)
+        # Reference-latent editing (Flux2 Klein): append the reference tokens to the
+        # image stream (in packed-latent space). ``pe_x`` already carries the refs'
+        # positions (the adapter computes it from the concatenated image ids), so only
+        # the tokens are appended here. ``None`` (plain t2i) is a no-op.
+        if ref_tokens is not None:
+            x = torch.cat([x, ref_tokens], dim=1)
 
         img = self.img_in(x)
         txt = self.txt_in(ctx)
-        pe_x = self.pe_embedder(x_ids)
-        pe_ctx = self.pe_embedder(ctx_ids)
 
         # Edit varies seq length (ref tokens appended), so compile blocks
         # dynamically there; t2i keeps static-specialized kernels.
-        dynamic = ref_tokens is not None or ref_ids is not None
+        dynamic = ref_tokens is not None
 
         for i in range(len(self.double_blocks)):
             fwd = self._compile_block(self.double_blocks, i, dynamic)
@@ -470,6 +436,5 @@ __all__ = [
     "Flux2Params",
     "Klein4BParams",
     "Klein9BParams",
-    "concat_reference",
     "slice_reference_output",
 ]

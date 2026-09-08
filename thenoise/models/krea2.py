@@ -164,21 +164,23 @@ class Krea2Model(DiffusionModel):
         dev = torch.device(self.device)
         patch = self.dit.config.patch
 
+        # Fresh prompt: drop any stale frequency entries from the previous one.
+        self.dit.posemb.clear()
+
         txt = cond.cond.to(device=dev, dtype=self.dtype)
         txtmask = cond.cond_mask.to(device=dev)
         img, pos, mask = prepare(latents, txt.shape[1], patch, txtmask)
-        self._freqs = self.dit.posemb(pos).to(self.dtype)
-        self._txt, self._pos, self._mask = txt, pos, mask
+        self.dit.posemb.store("cond", pos, dtype=self.dtype)
+        self._txt, self._mask = txt, mask
 
         if cond.null is not None:
             untxt = cond.null.to(device=dev, dtype=self.dtype)
             untxtmask = cond.null_mask.to(device=dev)
             _, unpos, unmask = prepare(latents, untxt.shape[1], patch, untxtmask)
-            self._freqs_un = self.dit.posemb(unpos).to(self.dtype)
-            self._untxt, self._unpos, self._unmask = untxt, unpos, unmask
+            self.dit.posemb.store("uncond", unpos, dtype=self.dtype)
+            self._untxt, self._unmask = untxt, unmask
         else:
-            self._untxt = self._unpos = self._unmask = None
-            self._freqs_un = None
+            self._untxt = self._unmask = None
 
         return img
 
@@ -207,11 +209,11 @@ class Krea2Model(DiffusionModel):
         t_full = torch.full((len(latents),), t, dtype=latents.dtype, device=dev)
         with torch.autocast(device_type=device_type, dtype=self.dtype):
             cond_out = self.dit(
-                img=latents, context=self._txt, t=t_full, pos=self._pos, mask=self._mask, freqs=self._freqs
+                img=latents, context=self._txt, t=t_full, mask=self._mask, freqs=self.dit.posemb["cond"]
             )
             if guidance_scale > 1.0 and self._untxt is not None:
                 uncond = self.dit(
-                    img=latents, context=self._untxt, t=t_full, pos=self._unpos, mask=self._unmask, freqs=self._freqs_un
+                    img=latents, context=self._untxt, t=t_full, mask=self._unmask, freqs=self.dit.posemb["uncond"]
                 )
                 v = uncond + guidance_scale * (cond_out - uncond)
             else:

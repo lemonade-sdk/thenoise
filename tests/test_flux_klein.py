@@ -36,13 +36,21 @@ def tiny_flux2():
     ).eval()
 
 
-def _tiny_inputs(seq=4):
+def _tiny_inputs(tiny_flux2, seq=4):
+    x = torch.randn(1, seq, 8)
+    x_ids = torch.zeros(1, seq, 4, dtype=torch.long)
+    ctx = torch.randn(1, 8, 24)
+    ctx_ids = torch.zeros(1, 8, 4, dtype=torch.long)
+    # Precompute the RoPE frequencies via the model's RopeCache, as the adapter does.
+    tiny_flux2.pe_embedder.clear()
+    tiny_flux2.pe_embedder.store("img", x_ids)
+    tiny_flux2.pe_embedder.store("txt", ctx_ids)
     return {
-        "x": torch.randn(1, seq, 8),
-        "x_ids": torch.zeros(1, seq, 4, dtype=torch.long),
+        "x": x,
+        "pe_x": tiny_flux2.pe_embedder["img"],
         "timesteps": torch.tensor([0.5]),
-        "ctx": torch.randn(1, 8, 24),
-        "ctx_ids": torch.zeros(1, 8, 4, dtype=torch.long),
+        "ctx": ctx,
+        "pe_ctx": tiny_flux2.pe_embedder["txt"],
     }
 
 
@@ -82,21 +90,25 @@ def test_prc_txt_ids_shape():
 
 def test_flux2_forward_small_model(tiny_flux2):
     """End-to-end Flux2 forward with a tiny config (no weights, random init)."""
-    out = tiny_flux2(**_tiny_inputs())
+    out = tiny_flux2(**_tiny_inputs(tiny_flux2))
     assert out.shape == (1, 4, 8)
     # A flow-velocity output must be finite.
     assert torch.isfinite(out).all()
 
 
 def test_flux2_forward_with_reference_tokens(tiny_flux2):
-    """Flux2 forward consumes ref tokens+ids and slices them off the output."""
+    """Flux2 forward consumes ref tokens and slices them off the output."""
     torch.manual_seed(0)
-    inputs = _tiny_inputs()
+    inputs = _tiny_inputs(tiny_flux2)
     ref_tokens = torch.randn(1, 6, 8)
     ref_ids = torch.full((1, 6, 4), FluxKleinModel.REF_INDEX, dtype=torch.long)
+    # pe_x must cover the concatenated image stream (base tokens + refs).
+    img_ids = torch.cat([torch.zeros(1, 4, 4, dtype=torch.long), ref_ids], dim=1)
+    tiny_flux2.pe_embedder.store("img", img_ids)
+    inputs["pe_x"] = tiny_flux2.pe_embedder["img"]
 
     with torch.no_grad():
-        out = tiny_flux2(**inputs, ref_tokens=ref_tokens, ref_ids=ref_ids)
+        out = tiny_flux2(**inputs, ref_tokens=ref_tokens)
     # The reference tokens are concatenated in and sliced back off, so the
     # output is exactly the image tokens (seq), not seq + ref tokens.
     assert out.shape == (1, 4, 8)
@@ -105,7 +117,7 @@ def test_flux2_forward_with_reference_tokens(tiny_flux2):
     # The differential: a reference-conditioned pass must differ from the
     # un-conditioned one (otherwise conditioning is silently ignored).
     with torch.no_grad():
-        base = tiny_flux2(**inputs)
+        base = tiny_flux2(**_tiny_inputs(tiny_flux2))
     assert not torch.allclose(out, base)
 
 

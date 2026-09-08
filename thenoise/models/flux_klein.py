@@ -169,20 +169,20 @@ class FluxKleinModel(DiffusionModel):
         forward. Safe under the lock.
 
         In the edit path (``ref`` given) the reference latent is packed the same
-        way and stashed as ``_ref_tokens``/``_ref_ids`` for ``denoise_step``.
+        way and stashed as ``_ref_tokens`` for ``denoise_step``.
         """
         dev = torch.device(self.device)
         x, x_ids = prc_img(latents.to(device=dev, dtype=self.dtype))
-        self._img_ids = x_ids
+        self._img_ids = x_ids  # used by ``finalize_latent``
 
         self._txt = cond.cond.to(device=dev, dtype=self.dtype)
-        _, self._txt_ids = prc_txt(self._txt)
+        _, txt_ids = prc_txt(self._txt)
 
         if cond.null is not None:
             self._un_txt = cond.null.to(device=dev, dtype=self.dtype)
-            _, self._un_txt_ids = prc_txt(self._un_txt)
+            _, un_txt_ids = prc_txt(self._un_txt)
         else:
-            self._un_txt = self._un_txt_ids = None
+            self._un_txt = un_txt_ids = None
 
         if ref is not None:
             # Pack each ref with a successive t-axis index (REF_INDEX, 2x, ...)
@@ -193,9 +193,16 @@ class FluxKleinModel(DiffusionModel):
                 ref_tokens.append(t)
                 ref_ids.append(ids)
             self._ref_tokens = torch.cat(ref_tokens, dim=1)
-            self._ref_ids = torch.cat(ref_ids, dim=1)
+            img_ids = torch.cat([x_ids, torch.cat(ref_ids, dim=1)], dim=1)
         else:
-            self._ref_tokens = self._ref_ids = None
+            self._ref_tokens = None
+            img_ids = x_ids
+
+        self.dit.pe_embedder.clear()
+        self.dit.pe_embedder.store("img", img_ids, dtype=self.dtype)
+        self.dit.pe_embedder.store("txt", txt_ids, dtype=self.dtype)
+        if un_txt_ids is not None:
+            self.dit.pe_embedder.store("txt_uncond", un_txt_ids, dtype=self.dtype)
 
         return x
 
@@ -225,13 +232,13 @@ class FluxKleinModel(DiffusionModel):
         t_full = torch.full((len(latents),), float(t), dtype=latents.dtype, device=dev)
         with torch.no_grad(), torch.autocast(device_type=dev.type, dtype=self.dtype):
             pos = self.dit(
-                x=latents, x_ids=self._img_ids, timesteps=t_full, ctx=self._txt,
-                ctx_ids=self._txt_ids, ref_tokens=self._ref_tokens, ref_ids=self._ref_ids,
+                x=latents, pe_x=self.dit.pe_embedder["img"], timesteps=t_full, ctx=self._txt,
+                pe_ctx=self.dit.pe_embedder["txt"], ref_tokens=self._ref_tokens,
             )
             if guidance_scale > 1.0 and self._un_txt is not None:
                 neg = self.dit(
-                    x=latents, x_ids=self._img_ids, timesteps=t_full, ctx=self._un_txt,
-                    ctx_ids=self._un_txt_ids, ref_tokens=self._ref_tokens, ref_ids=self._ref_ids,
+                    x=latents, pe_x=self.dit.pe_embedder["img"], timesteps=t_full, ctx=self._un_txt,
+                    pe_ctx=self.dit.pe_embedder["txt_uncond"], ref_tokens=self._ref_tokens,
                 )
                 v = neg + guidance_scale * (pos - neg)
             else:
