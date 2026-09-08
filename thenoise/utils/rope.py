@@ -60,13 +60,31 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def apply_rope_split_half(xq: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    """Apply split-half RoPE to ``xq`` ``[B, L, H, D]`` using ``cos/sin`` ``[L, 1, 1, D]``."""
-    cos = cos.transpose(0, 1)  # [1, L, 1, D]
-    sin = sin.transpose(0, 1)
+    """Apply split-half RoPE to ``xq`` ``[B, H, L, D]`` using ``cos/sin`` ``[L, 1, 1, D]``."""
+    cos = cos.transpose(0, 2)  # [1, 1, L, D]
+    sin = sin.transpose(0, 2)
     rot_dim = cos.shape[-1]
     xq_rot, xq_pass = xq[..., :rot_dim], xq[..., rot_dim:]
     xq_rot = xq_rot * cos + _rotate_half(xq_rot) * sin
     return torch.cat((xq_rot, xq_pass), dim=-1)
+
+
+def split_half_rope_1d(head_dim: int, theta: float = 10000.0):
+    """Builder for the split-half convention over a 1D position sequence.
+
+    Returns a callable ``(seq_len, device) -> (cos, sin)`` where the result is
+    ``[seq_len, 1, 1, head_dim]`` (the ``[cos, sin]`` pair is duplicated to fill
+    the full head dim). Frequencies follow ``theta ** (2i/head_dim)``.
+    """
+    inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
+
+    def build(seq_len: int, device):
+        freqs = torch.outer(torch.arange(seq_len, device=device, dtype=torch.float32), inv_freq.to(device))
+        emb = torch.cat([freqs, freqs], dim=-1)
+        emb = emb[:, None, None, :]  # [seq_len, 1, 1, head_dim]
+        return emb.cos(), emb.sin()
+
+    return build
 
 
 def split_half_rope_3d(
@@ -167,5 +185,6 @@ __all__ = [
     "apply_rope",
     "apply_rope_split_half",
     "split_half_rope_3d",
+    "split_half_rope_1d",
     "RopeCache",
 ]

@@ -13,7 +13,7 @@ import torch.nn.functional as F
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils import attention
-from thenoise.utils.rope import RopeCache, apply_rope_split_half, split_half_rope_3d
+from thenoise.utils.rope import RopeCache, apply_rope_split_half, split_half_rope_1d, split_half_rope_3d
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -141,7 +141,7 @@ class Attention(nn.Module):
         k = self.k_proj(context)
         v = self.v_proj(context)
         q, k, v = map(
-            lambda t: t.reshape(*t.shape[:-1], self.n_heads, self.head_dim),
+            lambda t: t.reshape(*t.shape[:-1], self.n_heads, self.head_dim).transpose(1, 2),
             (q, k, v),
         )
 
@@ -162,7 +162,7 @@ class Attention(nn.Module):
         rope_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         q, k, v = self.compute_qkv(x, context, rope_emb=rope_emb)
-        # return self.compute_attention(q, k, v)
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
         qkv = [q, k, v]
         del q, k, v
         result = attention.attention(qkv, attn_params=attn_params)
@@ -871,42 +871,6 @@ class LLMAdapterRMSNorm(nn.Module):
         return self.weight * hidden_states
 
 
-def _adapter_rotate_half(x):
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def _adapter_apply_rotary_pos_emb(x, cos, sin, unsqueeze_dim=1):
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    x_embed = (x * cos) + (_adapter_rotate_half(x) * sin)
-    return x_embed
-
-
-class AdapterRotaryEmbedding(nn.Module):
-    """Rotary embedding for LLM Adapter."""
-
-    def __init__(self, head_dim):
-        super().__init__()
-        self.rope_theta = 10000
-        inv_freq = 1.0 / (self.rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.int64).to(dtype=torch.float) / head_dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-    @torch.no_grad()
-    def forward(self, x, position_ids):
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
-        position_ids_expanded = position_ids[:, None, :].float()
-
-        with torch.autocast(device_type=x.device.type, enabled=False):
-            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos()
-            sin = emb.sin()
-
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
-
-
 class LLMAdapterAttention(nn.Module):
     """Attention module for LLM Adapter with QK-norm and separate RoPE for query/key."""
 
@@ -942,10 +906,8 @@ class LLMAdapterAttention(nn.Module):
 
         if position_embeddings is not None:
             assert position_embeddings_context is not None
-            cos, sin = position_embeddings
-            query_states = _adapter_apply_rotary_pos_emb(query_states, cos, sin)
-            cos, sin = position_embeddings_context
-            key_states = _adapter_apply_rotary_pos_emb(key_states, cos, sin)
+            query_states = apply_rope_split_half(query_states, *position_embeddings)
+            key_states = apply_rope_split_half(key_states, *position_embeddings_context)
 
         attn_output = F.scaled_dot_product_attention(query_states, key_states, value_states, attn_mask=mask)
 
@@ -1038,7 +1000,7 @@ class LLMAdapter(nn.Module):
             self.in_proj = QuantizedLinear(target_dim, model_dim)
         else:
             self.in_proj = nn.Identity()
-        self.rotary_emb = AdapterRotaryEmbedding(model_dim // num_heads)
+        self.rotary_emb = RopeCache(split_half_rope_1d(model_dim // num_heads))
         self.blocks = nn.ModuleList(
             [
                 LLMAdapterTransformerBlock(source_dim, model_dim, num_heads=num_heads, self_attn=self_attn, layer_norm=layer_norm)
@@ -1061,10 +1023,8 @@ class LLMAdapter(nn.Module):
 
         x = self.in_proj(self.embed(target_input_ids))
         context = source_hidden_states
-        position_ids = torch.arange(x.shape[1], device=x.device).unsqueeze(0)
-        position_ids_context = torch.arange(context.shape[1], device=x.device).unsqueeze(0)
-        position_embeddings = self.rotary_emb(x, position_ids)
-        position_embeddings_context = self.rotary_emb(x, position_ids_context)
+        position_embeddings = self.rotary_emb.store("target", x.shape[1], x.device, dtype=x.dtype)
+        position_embeddings_context = self.rotary_emb.store("source", context.shape[1], context.device, dtype=context.dtype)
         for block in self.blocks:
             x = block(
                 x,

@@ -173,7 +173,7 @@ def test_apply_rope_split_half_is_orthogonal():
     torch.manual_seed(0)
     builder = split_half_rope_3d(head_dim=16, patch_spatial=1, patch_temporal=1)
     cos, sin = builder((1, 16, 1, 8, 8), "cpu")  # 8x8 grid -> 64 tokens
-    q = torch.randn(2, 64, 3, 16)
+    q = torch.randn(2, 3, 64, 16)  # [B, H, L, D]
     out = apply_rope_split_half(q, cos, sin)
     assert out.shape == q.shape
     # RoPE is a rotation: per-token-per-head norms are preserved.
