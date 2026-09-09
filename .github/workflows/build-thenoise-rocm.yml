@@ -1,14 +1,20 @@
 name: Build TheNoise + ROCm (portable)
 
-# Builds a relocatable "portable" thenoise bundle (standalone CPython + PyTorch
-# ROCm + all deps + thenoise + bundled clang) for each requested GPU target,
-# qualifies the gfx1151 bundle with a real generation on the dev_lab GPU box,
-# then attaches the bundles to GitHub releases. Modeled on the org's
+# Builds relocatable "portable" thenoise bundles (standalone CPython + PyTorch
+# ROCm + all deps + thenoise + bundled ROCm runtime) for each requested GPU
+# target, on BOTH Linux and Windows. Each platform's gfx1151 bundle is
+# qualified with a real generation on a dev_lab GPU box, then all platform
+# assets are attached to a single GitHub release. Modeled on the org's
 # vllm-rocm pipeline.
 #
 # Triggers:
 #   * every git tag matching v*  -> build + qualify + release
-#   * manual workflow_dispatch   -> build (+ release if requested)
+#   * manual workflow_dispatch   -> build + qualify (+ release only if the
+#     create_release toggle is enabled; it defaults to false for testing)
+#
+# The dev_lab runner group contains both Linux and Windows runners. AMD's wheel
+# index allowlists those runners' egress (not GitHub-hosted runner IPs), so the
+# build jobs run on dev_lab and need no GPU.
 
 on:
   push:
@@ -49,10 +55,10 @@ jobs:
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "Generated matrix: $matrix"
 
-  # Builds each target's portable bundle. Runs on the self-hosted dev_lab box:
-  # it needs no GPU, but AMD's wheel index allowlists that box's egress (not
-  # GitHub-hosted runner IPs). See vllm-rocm for the same constraint.
-  build:
+  # Builds each target's Linux portable bundle. Runs on the self-hosted dev_lab
+  # box: it needs no GPU, but AMD's wheel index allowlists that box's egress
+  # (not GitHub-hosted runner IPs). See vllm-rocm for the same constraint.
+  build-linux:
     needs: [prepare-matrix]
     runs-on:
       group: dev_lab
@@ -102,12 +108,68 @@ jobs:
           echo "torch_version=$tv" >> "$GITHUB_OUTPUT"
           echo "thenoise_version=$nv" >> "$GITHUB_OUTPUT"
 
+  # Builds each target's Windows portable bundle (build-scripts/build_portable.ps1).
+  # Same dev_lab group, Windows runner label. The release archive is a zip
+  # (bsdtar writes a zip when the output ends in .zip); there are no symlinks
+  # on a Windows bundle so zip is fine and Explorer-friendly.
+  build-windows:
+    needs: [prepare-matrix]
+    runs-on:
+      group: dev_lab
+      labels: [self-hosted, Windows]
+    strategy:
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
+      fail-fast: false
+    outputs:
+      torch_version: ${{ steps.outputs.outputs.torch_version }}
+      thenoise_version: ${{ steps.outputs.outputs.thenoise_version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build portable bundle
+        shell: powershell
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File build-scripts/build_portable.ps1 "${{ matrix.gfx_target }}"
+
+      - name: Create release archive (zip)
+        shell: powershell
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "thenoise-${{ matrix.gfx_target }}-win-x64.zip"
+          # -a lets bsdtar auto-detect the format from the .zip extension and
+          # write a real zip (without -a it writes a gzip tar).
+          tar -a -cf $archive -C $env:THENOISE_ROOT .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # AppendAllText writes UTF-8 without a BOM (Out-File -Encoding utf8
+          # adds a BOM in Windows PowerShell 5.1, which corrupts GITHUB_ENV).
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "ARCHIVE=$archive`r`n")
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: thenoise-rocm-${{ matrix.gfx_target }}-win-x64
+          path: ${{ env.ARCHIVE }}
+          retention-days: 30
+          compression-level: 6
+
+      - name: Set job outputs
+        id: outputs
+        shell: powershell
+        run: |
+          # DLL resolution on Windows is PATH-based.
+          $env:PATH = "$env:THENOISE_ROOT\Lib\site-packages\_rocm_sdk_core\bin;$env:THENOISE_ROOT\Lib\site-packages\torch\lib;$env:PATH"
+          $py = Join-Path $env:THENOISE_ROOT "python.exe"
+          $tv = (& $py -c "import torch; print(torch.__version__)").Trim()
+          $nv = (& $py -c "import importlib.metadata as m; print(m.version('thenoise'))").Trim()
+          [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "torch_version=$tv`r`n")
+          [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "thenoise_version=$nv`r`n")
+
   # Real GPU smoke test on the gfx1151 dev_lab box: imports + GPU visibility +
   # one end-to-end Anima generation (incl. first-run torch.compile). Runs only
   # when gfx1151 was built; gates the gfx1151 release (and, transitively via
   # build, is a release precondition for the whole run).
-  qualify:
-    needs: [prepare-matrix, build]
+  qualify-linux:
+    needs: [prepare-matrix, build-linux]
     runs-on:
       group: dev_lab
       labels: [self-hosted, Linux]
@@ -181,25 +243,89 @@ jobs:
         if: always()
         run: rm -rf "${{ runner.temp }}/thenoise-qual" || true
 
-  # Attaches every target's bundle to a single release named after the tag. All
-  # gfx-target archives are uploaded together; gfx1151's release is gated on GPU
-  # qualification (a gfx1150-only run releases on build success, qualify is
-  # 'skipped').
+  # Same GPU smoke test as qualify-linux, but on a Windows dev_lab runner
+  # against the Windows bundle (build-scripts/qualify_thenoise.ps1). torch.compile is
+  # disabled on Windows (no Triton), so the generation runs in eager mode.
+  qualify-windows:
+    needs: [prepare-matrix, build-windows]
+    runs-on:
+      group: dev_lab
+      labels: [self-hosted, Windows]
+    if: contains(needs.prepare-matrix.outputs.gfx_targets, 'gfx1151')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download gfx1151 artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: powershell
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP "thenoise-qual-win"
+          New-Item -ItemType Directory -Force $work | Out-Null
+          powershell -NoProfile -ExecutionPolicy Bypass -File build-scripts/download_artifact.ps1 `
+            -Name "thenoise-rocm-gfx1151-win-x64" `
+            -Out (Join-Path $work "artifact.zip")
+          # artifact.zip holds the release zip (not raw bundle contents); expand
+          # both with bsdtar so $work\bundle is the bundle root (python.exe,
+          # Lib\, ...). (Expand-Archive is unreliable on multi-GB archives —
+          # its internal cleanup fails on the large bundle, so use tar instead.)
+          New-Item -ItemType Directory -Force (Join-Path $work "raw") | Out-Null
+          tar -xf (Join-Path $work "artifact.zip") -C (Join-Path $work "raw")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $rel = Get-ChildItem (Join-Path $work "raw") -Filter *.zip | Select-Object -First 1
+          New-Item -ItemType Directory -Force (Join-Path $work "bundle") | Out-Null
+          tar -xf $rel.FullName -C (Join-Path $work "bundle")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item -Recurse -Force (Join-Path $work "raw") -ErrorAction SilentlyContinue
+          Remove-Item -Force (Join-Path $work "artifact.zip") -ErrorAction SilentlyContinue
+          $mb = [math]::Round((Get-ChildItem (Join-Path $work "bundle") -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
+          Write-Host "Bundle: $mb MB"
+
+      - name: Run GPU qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: powershell
+        run: |
+          $work = Join-Path $env:RUNNER_TEMP "thenoise-qual-win"
+          $root = Join-Path $work "bundle"
+          $modelDir = Join-Path $work "anima"
+          New-Item -ItemType Directory -Force $modelDir | Out-Null
+          powershell -NoProfile -ExecutionPolicy Bypass -File build-scripts/qualify_thenoise.ps1 `
+            -Root $root -ModelDir $modelDir -Out (Join-Path $work "qualification-report.json")
+
+      - name: Upload qualification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qualification-gfx1151-win
+          path: ${{ runner.temp }}/thenoise-qual-win/*.json
+          if-no-files-found: warn
+
+      - name: Clean up
+        if: always()
+        shell: powershell
+        run: Remove-Item -Recurse -Force (Join-Path $env:RUNNER_TEMP "thenoise-qual-win") -ErrorAction SilentlyContinue
+
+  # Attaches every target's Linux and Windows archives to a single release
+  # named after the tag. All assets are uploaded together; gfx1151's release is
+  # gated on GPU qualification (a gfx1150-only run releases on build success,
+  # qualify is 'skipped'). Release creation is optional: automatic on a tag
+  # push, opt-in (create_release) on a manual run.
   create-release:
-    needs: [prepare-matrix, build, qualify]
+    needs: [prepare-matrix, build-linux, build-windows, qualify-linux, qualify-windows]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     if: |
       always() &&
-      needs.build.result == 'success' &&
-      (needs.qualify.result == 'success' || needs.qualify.result == 'skipped') &&
+      needs.build-linux.result == 'success' &&
+      needs.build-windows.result == 'success' &&
+      (needs.qualify-linux.result == 'success' || needs.qualify-linux.result == 'skipped') &&
+      (needs.qualify-windows.result == 'success' || needs.qualify-windows.result == 'skipped') &&
       (
         github.event_name == 'push' ||
-        (
-          github.event_name == 'workflow_dispatch' &&
-          (github.event.inputs.create_release == 'true' || github.event.inputs.create_release == null)
-        )
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
       )
     steps:
       - name: Download all build artifacts
@@ -215,49 +341,70 @@ jobs:
           # Release tag follows the canonical scheme regardless of trigger:
           # thenoise-<version>-rocm<rocm> (e.g. thenoise-0.1.0-rocm7.14.0).
           # For a tag push, the pushed v* tag is just the trigger — the actual
-          # release tag is derived from the build outputs.
-          VERSION="${{ needs.build.outputs.thenoise_version }}"
-          TV="${{ needs.build.outputs.torch_version }}"
+          # release tag is derived from the build outputs. Linux and Windows
+          # build the same torch/thenoise versions, so either platform's
+          # outputs define the (shared) tag; use Linux.
+          VERSION="${{ needs.build-linux.outputs.thenoise_version }}"
+          TV="${{ needs.build-linux.outputs.torch_version }}"
           ROCM=$(printf '%s' "$TV" | grep -oP 'rocm[\d.]+' || echo rocm)
           TAG="thenoise-${VERSION}-${ROCM}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Generated release tag: $TAG"
 
-      - name: Create archive per target (split if >1.9 GB for GitHub release limit)
+      - name: Create archives per target (split if >1.9 GB for GitHub release limit)
         env:
           GFX_TARGETS: ${{ needs.prepare-matrix.outputs.gfx_targets }}
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
           upload_files=""
-          for target in $(echo "$GFX_TARGETS" | tr ',' ' '); do
-            target_dir="./artifacts/thenoise-rocm-${target}-x64"
-            [ -d "$target_dir" ] || { echo "::warning::artifact for ${target} not found; skipping"; continue; }
-            base="${TAG}-${target}-x64"
-            # The release archive is already built in the build job (with
-            # symlinks preserved); just reuse it here. Splitting logic stays
-            # here (GitHub 2 GB release limit).
-            src=$(find "$target_dir" -name '*.tar.gz' | head -n1)
-            if [ -z "$src" ]; then
-              echo "::warning::no release archive in artifact for ${target}; skipping"
-              continue
-            fi
-            cp "$src" "${base}.tar.gz"
-            size_mb=$(du -m "${base}.tar.gz" | cut -f1)
-            echo "Archive size: ${size_mb} MB"
+          # split_if_large <base> <ext>: copies are already done by the caller;
+          # splits <base>.<ext> into partNN-of-TT parts if it exceeds 1.9 GB.
+          split_if_large() {
+            local base ext f size_mb
+            base="$1"; ext="$2"; f="${base}.${ext}"
+            size_mb=$(du -m "$f" | cut -f1)
             if [ "$size_mb" -gt 1900 ]; then
-              echo "Splitting into parts..."
-              split -b 1900M --numeric-suffixes=1 -a 2 --additional-suffix=.tar.gz \
-                "${base}.tar.gz" "${base}.part"
-              rm "${base}.tar.gz"
-              parts=( "${base}".part*.tar.gz )
+              echo "Splitting $f into parts..."
+              split -b 1900M --numeric-suffixes=1 -a 2 --additional-suffix=.$ext \
+                "$f" "${base}.part"
+              rm "$f"
+              parts=( "${base}".part*.${ext} )
+              local total total_padded nn
               total=${#parts[@]}; total_padded=$(printf "%02d" "$total")
-              for f in "${parts[@]}"; do
-                nn="${f##*.part}"; nn="${nn%%.tar.gz}"
-                mv "$f" "${base}.part${nn}-of-${total_padded}.tar.gz"
+              for p in "${parts[@]}"; do
+                nn="${p##*.part}"; nn="${nn%%.${ext}}"
+                mv "$p" "${base}.part${nn}-of-${total_padded}.${ext}"
               done
               echo "$total" > "${base}.partcount"
             fi
-            upload_files="${upload_files} ${base}".*
+          }
+          for target in $(echo "$GFX_TARGETS" | tr ',' ' '); do
+            # Linux (tar.gz)
+            ldir="./artifacts/thenoise-rocm-${target}-x64"
+            if [ -d "$ldir" ]; then
+              src=$(find "$ldir" -name '*.tar.gz' | head -n1)
+              if [ -n "$src" ]; then
+                base="${TAG}-${target}-x64"
+                cp "$src" "${base}.tar.gz"
+                split_if_large "$base" "tar.gz"
+                upload_files="${upload_files} ${base}".*
+              fi
+            else
+              echo "::warning::linux artifact for ${target} not found; skipping"
+            fi
+            # Windows (zip)
+            wdir="./artifacts/thenoise-rocm-${target}-win-x64"
+            if [ -d "$wdir" ]; then
+              src=$(find "$wdir" -name '*.zip' | head -n1)
+              if [ -n "$src" ]; then
+                base="${TAG}-${target}-win-x64"
+                cp "$src" "${base}.zip"
+                split_if_large "$base" "zip"
+                upload_files="${upload_files} ${base}".*
+              fi
+            else
+              echo "::warning::windows artifact for ${target} not found; skipping"
+            fi
           done
           ls -la ${upload_files} 2>/dev/null || true
           echo "UPLOAD_FILES=$upload_files" >> "$GITHUB_ENV"
@@ -271,16 +418,19 @@ jobs:
           # shellcheck disable=SC2086
           gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$TAG" --repo "$REPO" \
-            --title "v${{ needs.build.outputs.thenoise_version }}" \
+            --title "v${{ needs.build-linux.outputs.thenoise_version }}" \
             --notes "**GPU Targets**: ${{ needs.prepare-matrix.outputs.gfx_targets }}
-          **TheNoise Version**: ${{ needs.build.outputs.thenoise_version }}
-          **PyTorch Version**: ${{ needs.build.outputs.torch_version }}
+          **TheNoise Version**: ${{ needs.build-linux.outputs.thenoise_version }}
+          **PyTorch Version**: ${{ needs.build-linux.outputs.torch_version }}
+          **Platforms**: Linux (x64) + Windows (x64)
           **Build Date**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 
-          Portable TheNoise builds for all GPU targets above. Includes bundled Python, PyTorch ROCm, ROCm runtime and clang. No separate installation required. Run with \`./bin/thenoise\`." \
+          Portable TheNoise builds for all GPU targets above, for Linux and Windows. Each includes bundled Python, PyTorch ROCm and the ROCm runtime. No separate installation required.
+          * Linux: run \`./bin/thenoise\`.
+          * Windows: run \`thenoise.bat\` (torch.compile is disabled on Windows — Triton is Linux-only in the AMD wheel index)." \
             $UPLOAD_FILES
 
-      - name: Attach qualification report to release (gfx1151)
+      - name: Attach qualification reports to release (gfx1151)
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -289,9 +439,19 @@ jobs:
           REPO="${{ github.repository }}"
           rm -rf qual && mkdir -p qual
           if ! gh run download "${{ github.run_id }}" -n qualification-gfx1151 -D qual --repo "$REPO"; then
-            echo "::warning::qualification artifact not found; skipping attach"; exit 0
+            echo "::warning::linux qualification artifact not found; skipping"
+          else
+            if [ -f qual/qualification-report.json ]; then
+              cp qual/qualification-report.json "qualification-report-${TAG}-linux.json"
+              gh release upload "$TAG" "qualification-report-${TAG}-linux.json" --clobber --repo "$REPO"
+            fi
           fi
-          if [ -f qual/qualification-report.json ]; then
-            cp qual/qualification-report.json "qualification-report-${TAG}.json"
-            gh release upload "$TAG" "qualification-report-${TAG}.json" --clobber --repo "$REPO"
+          rm -rf qual && mkdir -p qual
+          if ! gh run download "${{ github.run_id }}" -n qualification-gfx1151-win -D qual --repo "$REPO"; then
+            echo "::warning::windows qualification artifact not found; skipping"
+          else
+            if [ -f qual/qualification-report.json ]; then
+              cp qual/qualification-report.json "qualification-report-${TAG}-windows.json"
+              gh release upload "$TAG" "qualification-report-${TAG}-windows.json" --clobber --repo "$REPO"
+            fi
           fi
