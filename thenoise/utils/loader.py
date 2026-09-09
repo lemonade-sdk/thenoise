@@ -161,6 +161,7 @@ def load_dit(
     drop_keys: Optional[tuple[str, ...]] = None,
     expected_missing: tuple[str, ...] = (),
     key_map: Optional[Callable[[str], str]] = None,
+    value_map: Optional[Callable[[str, torch.Tensor], tuple[str, torch.Tensor]]] = None,
 ) -> torch.nn.Module:
     """Load a DiT checkpoint into ``model``, selecting quantized vs BF16 automatically.
 
@@ -176,9 +177,10 @@ def load_dit(
             checkpoint (model-internal buffers, e.g. Anima's RoPE buffers). If
             non-empty the load is non-strict and only these are tolerated;
             otherwise loading is strict.
-        key_map: optional transform applied to checkpoint keys on the
-            quantized path only (e.g. Flux Klein's ComfyUI norm ``weight`` ->
-            ``scale`` rename). BF16 checkpoints carry the canonical names already.
+        key_map: optional transform applied to checkpoint keys.
+            Applied before ``value_map``.
+        value_map: optional ``(key, tensor) -> (new_key, new_tensor)`` transform
+            applied on weights at load time. Applied after ``key_map``.
 
     Returns:
         ``model`` (loaded in place, moved to ``device``).
@@ -186,15 +188,17 @@ def load_dit(
     device = torch.device(device)
 
     # Load the state dict once (stripping generic wrapper prefixes inside
-    # ``load_dit_safetensors``) and apply ``drop_keys`` before branching, so the
-    # quantized and BF16 paths see the same prepared dict.
+    # ``load_dit_safetensors``) and apply ``drop_keys`` / ``key_map`` / ``value_map``
+    # before branching, so the quantized and BF16 paths see the same prepared dict.
     sd = load_dit_safetensors(path, device=device, dtype=None)
     if drop_keys:
         sd = {k: v for k, v in sd.items() if not k.startswith(drop_keys)}
+    if key_map is not None:
+        sd = {key_map(k): v for k, v in sd.items()}
+    if value_map is not None:
+        sd = {nk: nv for nk, nv in (value_map(k, v) for k, v in sd.items())}
 
     if is_quantized_checkpoint(path):
-        if key_map is not None:
-            sd = {key_map(k): v for k, v in sd.items()}
         # The quantization profile (ConvRot group size / rotation flag for INT8,
         # stored format for FP8) is baked into each layer's weights and scales at
         # export time and must match at inference; ``load_quantized_state_dict``

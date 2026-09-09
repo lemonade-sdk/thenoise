@@ -37,6 +37,19 @@ single_mmdit_large_wide = SingleMMDiTConfig(
 )
 
 
+def _krea2_rms_map(key: str, tensor):
+    """Reconcile Krea2's zero-centered RMSNorm ``scale`` with the shared ``weight``.
+
+    The shared ``RMSNorm`` (``thenoise.utils.rms_norm``) stores the effective weight
+    (ones-init). Krea2's checkpoint keeps a zero-centered ``scale`` where
+    ``weight = scale + 1``, so rename ``.scale -> .weight`` and shift the value up
+    by one. Applied at load time only; the runtime module is the shared one.
+    """
+    if key.endswith(".scale"):
+        return key[: -len(".scale")] + ".weight", tensor + 1.0
+    return key, tensor
+
+
 def load_krea2_dit(
     dit_path: str,
     device: Union[str, torch.device],
@@ -56,6 +69,7 @@ def load_krea2_dit(
         device=device,
         dtype=dtype,
         drop_keys=("last.down", "last.up"),
+        value_map=_krea2_rms_map,
     )
 
 

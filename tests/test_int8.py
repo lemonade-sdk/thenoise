@@ -357,6 +357,42 @@ def test_load_dit_key_map(tmp_path):
     assert model.norm.scale.dtype == torch.bfloat16
 
 
+class _WeightNorm(torch.nn.Module):
+    """A norm whose parameter is called ``weight`` (the shared RMSNorm layout)."""
+
+    def __init__(self, dim):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(dim))
+
+
+class _WeightModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.norm = _WeightNorm(OUT_F)
+
+
+def test_load_dit_value_map_on_bf16(tmp_path):
+    """value_map renames a zero-centered ``scale`` to ``weight`` and shifts by one.
+
+    Mirrors Krea2's reconciliation: the checkpoint stores ``scale`` (effective
+    ``weight = scale + 1``); the loader must rename and shift so the runtime
+    ``weight`` param is correct. Runs on the BF16 path.
+    """
+    path = write_safetensors(
+        tmp_path / "bf16.safetensors",
+        {"norm.scale": torch.full((OUT_F,), 2.0, dtype=torch.bfloat16)},
+    )
+
+    def value_map(key, tensor):
+        if key.endswith(".scale"):
+            return key[: -len(".scale")] + ".weight", tensor + 1.0
+        return key, tensor
+
+    model = load_dit(_WeightModel(), path, device="cpu", dtype=torch.bfloat16, value_map=value_map)
+
+    assert torch.equal(model.norm.weight, torch.full((OUT_F,), 3.0, dtype=torch.bfloat16))
+
+
 class _BufModel(torch.nn.Module):
     """Model with an internal buffer that is deliberately not in the checkpoint."""
 

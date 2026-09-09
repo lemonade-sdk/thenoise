@@ -40,16 +40,16 @@ MAX_LENGTH = 512
 _KLEIN_VARIANTS = {3072: Klein4BParams, 4096: Klein9BParams}
 
 
-# ComfyUI's INT8 exporter stores RMSNorm ``scale`` params under the ``weight``
-# name. Reconcile those keys so the shared loader assigns them to the model's
-# ``scale`` parameters (only the QKNorm scales carry this suffix).
-_NORM_WEIGHT_SUFFIXES = (".norm.key_norm.weight", ".norm.query_norm.weight")
+# The official Flux Klein BF16 checkpoint uses ``scale``. The shared
+# ``RMSNorm`` (from ``thenoise.utils.rms_norm``) names the parameter ``weight``,
+# so reconcile the official ``scale`` keys here.
+_NORM_SCALE_SUFFIXES = (".norm.key_norm.scale", ".norm.query_norm.scale")
 
 
 def _flux2_key_map(key: str) -> str:
-    for suffix in _NORM_WEIGHT_SUFFIXES:
+    for suffix in _NORM_SCALE_SUFFIXES:
         if key.endswith(suffix):
-            return key[: -len(".weight")] + ".scale"
+            return key[: -len(".scale")] + ".weight"
     return key
 
 

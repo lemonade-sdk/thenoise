@@ -17,6 +17,7 @@ from torch import Tensor
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention as common_attention
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
+from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.timestep import timestep_embedding
 
 
@@ -82,17 +83,6 @@ class QKNorm(torch.nn.Module):
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         return self.qnorm(q), self.knorm(k), v
-
-
-class RMSNorm(torch.nn.Module):
-    def __init__(self, features: int, eps: float = 1e-05, device: torch.device = None):
-        super().__init__()
-        self.features = features
-        self.eps = eps
-        self.scale = torch.nn.Parameter(torch.zeros(features, device=device, dtype=torch.float32))
-
-    def forward(self, x: Tensor) -> Tensor:
-        return F.rms_norm(x, (self.features,), eps=self.eps, weight=(self.scale + 1.0).to(x.dtype))
 
 
 class SwiGLU(torch.nn.Module):

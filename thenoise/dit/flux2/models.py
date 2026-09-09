@@ -23,13 +23,13 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 import torch
-import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor, nn
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import attention as sdpa_attention
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
+from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.setup_logging import setup_logging
 from thenoise.utils.timestep import timestep_embedding
 
@@ -83,25 +83,11 @@ class Klein4BParams(Flux2Params):
     use_guidance_embed: bool = False
 
 
-class RMSNorm(nn.Module):
-    def __init__(self, dim: int):
-        super().__init__()
-        self.dim = dim
-        self.scale = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x: Tensor) -> Tensor:
-        # ``scale`` is ones-initialized (a ``weight``), but the official Flux
-        # Klein BF16 checkpoint stores it under the ``scale`` name, so the
-        # parameter is kept as-is; the normalization itself uses ``F.rms_norm``
-        # (fp32 variance) like the shared ``thenoise.utils.rms_norm``.
-        return F.rms_norm(x, (self.dim,), eps=1e-6, weight=self.scale)
-
-
 class QKNorm(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
-        self.query_norm = RMSNorm(dim)
-        self.key_norm = RMSNorm(dim)
+        self.query_norm = RMSNorm(dim, eps=1e-6)
+        self.key_norm = RMSNorm(dim, eps=1e-6)
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor]:
         q = self.query_norm(q)
