@@ -357,3 +357,70 @@ def test_make_key_padding_mask_matches_zimage_reference():
     mask = make_key_padding_mask(item_seqlens, "cpu")
     assert mask[0].sum().item() == 48
     assert mask[1].sum().item() == 64
+
+
+# ------------------------------------------------------------------ position ids
+
+
+def test_grid_positions_is_row_major():
+    from thenoise.utils.positions import grid_positions
+
+    # 2x3 grid -> 6 tokens, columns (h, w).
+    pos = grid_positions([2, 3], dtype=torch.float32)
+    assert pos.shape == (6, 2)
+    # Row-major: (0,0), (0,1), (0,2), (1,0), ...
+    assert pos[:, 0].tolist() == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
+    assert pos[:, 1].tolist() == [0.0, 1.0, 2.0, 0.0, 1.0, 2.0]
+
+
+def test_grid_positions_applies_per_axis_start():
+    from thenoise.utils.positions import grid_positions
+
+    pos = grid_positions([2, 3], start=[5, 0], dtype=torch.float32)
+    assert pos[:, 0].tolist() == [5.0, 5.0, 5.0, 6.0, 6.0, 6.0]
+
+
+def test_grid_positions_centered_matches_qwen_scale_rope():
+    """Qwen-Image h/w use ``r - ceil(size / 2)`` (the ``scale_rope`` convention)."""
+    from thenoise.utils.positions import grid_positions
+
+    pos = grid_positions([1, 4, 6], centered=[False, True, True], dtype=torch.float32)
+    # h: 4 -> [-2, -1, 0, 1]; w: 6 -> [-3, -2, -1, 0, 1, 2]; t stays 0.
+    h = pos[:, 1]
+    assert sorted(h.unique().tolist()) == [-2.0, -1.0, 0.0, 1.0]
+    w = pos[:, 2]
+    assert sorted(w.unique().tolist()) == [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0]
+    assert (pos[:, 0] == 0).all()
+
+
+def test_grid_positions_preserves_int_dtype():
+    from thenoise.utils.positions import grid_positions
+
+    pos = grid_positions([2, 3], dtype=torch.int32)
+    assert pos.dtype == torch.int32
+    assert pos.shape == (6, 2)
+
+
+def test_grid_from_axes_matches_flux2_cartesian_order():
+    """Flux.2's ``cartesian_prod(t, h, w, l)`` lexicographic order."""
+    import torch
+    from thenoise.utils.positions import grid_from_axes
+
+    t = torch.arange(1)
+    h = torch.arange(2)
+    w = torch.arange(3)
+    l = torch.arange(1)
+    pos = grid_from_axes([t, h, w, l])
+    ref = torch.cartesian_prod(t, h, w, l)
+    assert torch.equal(pos, ref)
+
+
+def test_broadcast_positions_repeats_a_single_index():
+    from thenoise.utils.positions import broadcast_positions
+
+    pos = broadcast_positions(4, 3, offset=7)
+    assert pos.shape == (4, 3)
+    assert torch.equal(pos[:, 0], pos[:, 1])
+    assert torch.equal(pos[:, 1], pos[:, 2])
+    assert pos[0].tolist() == [7.0, 7.0, 7.0]
+    assert pos[3].tolist() == [10.0, 10.0, 10.0]

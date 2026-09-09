@@ -18,6 +18,7 @@ from thenoise.utils.attention import AttentionParams, attention
 from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.rms_norm import RMSNorm
+from thenoise.utils.positions import grid_positions
 from thenoise.utils.sequence import make_key_padding_mask, pad_len_to_multiple, pad_to_batch
 from thenoise.utils.setup_logging import setup_logging
 from thenoise.utils.timestep import timestep_embedding
@@ -218,11 +219,8 @@ class ZImageTransformer2DModel(nn.Module):
     # ------------------------------------------------------------ patchify
     @staticmethod
     def create_coordinate_grid(size, start=None, device=None):
-        if start is None:
-            start = (0 for _ in size)
-        axes = [torch.arange(x0, x0 + span, dtype=torch.int32, device=device) for x0, span in zip(start, size)]
-        grids = torch.meshgrid(axes, indexing="ij")
-        return torch.stack(grids, dim=-1)
+        """``[prod(size), len(size)]`` int32 row-major grid (the token positions)."""
+        return grid_positions(size, start=start, dtype=torch.int32, device=device)
 
     def _patchify_image(self, image, patch_size, f_patch_size):
         pH, pW, pF = patch_size, patch_size, f_patch_size
@@ -237,10 +235,10 @@ class ZImageTransformer2DModel(nn.Module):
         pad_len = pad_len_to_multiple(ori_len, SEQ_MULTI_OF) - ori_len
         total_len = ori_len + pad_len
 
-        ori_pos_ids = self.create_coordinate_grid(size=pos_grid_size, start=pos_start, device=device).flatten(0, 2)
+        ori_pos_ids = self.create_coordinate_grid(size=pos_grid_size, start=pos_start, device=device)
         if pad_len > 0:
             pad_pos_ids = (
-                self.create_coordinate_grid(size=(1, 1, 1), start=(0, 0, 0), device=device).flatten(0, 2).repeat(pad_len, 1)
+                self.create_coordinate_grid(size=(1, 1, 1), start=(0, 0, 0), device=device).repeat(pad_len, 1)
             )
             pos_ids = torch.cat([ori_pos_ids, pad_pos_ids], dim=0)
             padded_feat = torch.cat([feat, feat[-1:].repeat(pad_len, 1)], dim=0)

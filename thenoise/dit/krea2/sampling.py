@@ -7,9 +7,10 @@ text-embedding gathering. The denoising loop itself lives in the shared
 """
 
 import torch
-from einops import rearrange, repeat
+from einops import rearrange
 
 from thenoise.utils.math import generalized_time_shift
+from thenoise.utils.positions import grid_positions
 from thenoise.utils.sequence import make_key_padding_mask, pad_to_batch
 
 
@@ -41,10 +42,8 @@ def prepare(img, txtlen, patch, txtmask):
     """
     b, _, h, w = img.shape
     h_, w_ = h // patch, w // patch
-    imgids = torch.zeros((h_, w_, 3), device=img.device)
-    imgids[..., 1] = torch.arange(h_, device=img.device)[:, None]
-    imgids[..., 2] = torch.arange(w_, device=img.device)[None, :]
-    imgpos = repeat(imgids, "h w three -> b (h w) three", b=b, three=3)
+    # (t, h, w) grid with t=0 and a row-major h/w ordering.
+    imgpos = grid_positions([1, h_, w_], dtype=torch.float32, device=img.device).unsqueeze(0).expand(b, -1, -1)
     imgmask = torch.ones(b, h_ * w_, device=img.device, dtype=torch.bool)
     img = rearrange(img, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch, pw=patch)
 

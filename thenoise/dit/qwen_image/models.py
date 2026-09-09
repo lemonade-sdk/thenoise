@@ -8,7 +8,6 @@ int8_convrot checkpoints).
 """
 from __future__ import annotations
 
-import math
 from typing import Optional, Tuple
 
 import torch
@@ -18,6 +17,7 @@ from accelerate import init_empty_weights
 
 from thenoise.utils.loader import load_dit
 from thenoise.dit.quantized import QuantizedLinear
+from thenoise.utils.positions import broadcast_positions, grid_positions
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.setup_logging import setup_logging
@@ -38,14 +38,15 @@ def build_video_positions(img_shapes, device):
     """
     parts = []
     for i, (frame, height, width) in enumerate(img_shapes):
-        t = torch.arange(i, i + frame, dtype=torch.float32, device=device)
-        h = torch.arange(height, dtype=torch.float32, device=device) - math.ceil(height / 2)
-        w = torch.arange(width, dtype=torch.float32, device=device) - math.ceil(width / 2)
-        # (f, h, w) row-major grid.
-        t = t[:, None, None].expand(frame, height, width).reshape(-1)
-        h = h[None, :, None].expand(frame, height, width).reshape(-1)
-        w = w[None, None, :].expand(frame, height, width).reshape(-1)
-        parts.append(torch.stack([t, h, w], dim=-1))
+        parts.append(
+            grid_positions(
+                [frame, height, width],
+                start=[i, 0, 0],
+                centered=[False, True, True],
+                dtype=torch.float32,
+                device=device,
+            )
+        )
     return torch.cat(parts, dim=0).unsqueeze(0)
 
 
@@ -55,8 +56,9 @@ def build_txt_positions(max_vid_index, txt_len, device):
     Text uses a single index ``max_vid_index + j`` advanced across all three axes
     (all coords equal), matching the original ``pos_freqs[max_vid_index + j]``.
     """
-    k = torch.arange(max_vid_index, max_vid_index + txt_len, dtype=torch.float32, device=device)
-    return k[:, None].expand(txt_len, 3).unsqueeze(0)
+    return broadcast_positions(
+        txt_len, 3, offset=max_vid_index, dtype=torch.float32, device=device
+    ).unsqueeze(0)
 
 
 class TimestepEmbedding(nn.Module):

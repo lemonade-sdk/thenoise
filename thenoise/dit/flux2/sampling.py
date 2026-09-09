@@ -19,6 +19,7 @@ import torch
 from einops import rearrange
 
 from thenoise.utils.math import generalized_time_shift
+from thenoise.utils.positions import grid_from_axes
 
 __all__ = [
     "get_schedule",
@@ -68,13 +69,15 @@ def prc_img(x: torch.Tensor, t_coord: torch.Tensor | None = None) -> tuple[torch
     """
     h = x.shape[-2]
     w = x.shape[-1]
-    coords = {
-        "t": (torch.arange(1) if t_coord is None else t_coord).to(x.device),
-        "h": torch.arange(h, device=x.device),
-        "w": torch.arange(w, device=x.device),
-        "l": torch.arange(1, device=x.device),
-    }
-    x_ids = torch.cartesian_prod(coords["t"], coords["h"], coords["w"], coords["l"])
+    t = (torch.arange(1) if t_coord is None else t_coord).to(x.device)
+    x_ids = grid_from_axes(
+        [
+            t,
+            torch.arange(h, device=x.device),
+            torch.arange(w, device=x.device),
+            torch.arange(1, device=x.device),
+        ]
+    )
     x = rearrange(x, "c h w -> (h w) c") if x.ndim == 3 else rearrange(x, "b c h w -> b (h w) c")
     if x.ndim == 3:  # after rearrange
         x_ids = x_ids.unsqueeze(0).expand(x.shape[0], -1, -1)
@@ -87,13 +90,15 @@ def prc_txt(x: torch.Tensor, t_coord: torch.Tensor | None = None) -> tuple[torch
     Returns ``(x, ids [B, L, 4])``; the text tokens are unchanged.
     """
     _l = x.shape[-2]
-    coords = {
-        "t": (torch.arange(1) if t_coord is None else t_coord).to(x.device),
-        "h": torch.arange(1, device=x.device),  # dummy
-        "w": torch.arange(1, device=x.device),  # dummy
-        "l": torch.arange(_l, device=x.device),
-    }
-    x_ids = torch.cartesian_prod(coords["t"], coords["h"], coords["w"], coords["l"])
+    t = (torch.arange(1) if t_coord is None else t_coord).to(x.device)
+    x_ids = grid_from_axes(
+        [
+            t,
+            torch.arange(1, device=x.device),  # dummy
+            torch.arange(1, device=x.device),  # dummy
+            torch.arange(_l, device=x.device),
+        ]
+    )
     if x.ndim == 3:
         x_ids = x_ids.unsqueeze(0).expand(x.shape[0], -1, -1)
     return x, x_ids.to(x.device)
