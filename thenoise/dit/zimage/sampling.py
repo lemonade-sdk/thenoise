@@ -8,8 +8,8 @@ The schedule's ``Step.t`` carries this *sigma* grid (1 -> ~1/steps -> 0); the sh
 ``DiffusionModel`` Euler loop integrates ``x -= delta * velocity`` with
 ``delta = sigma - sigma_next``, reproducing the FlowMatch Euler update (where the
 velocity is the negated DiT output). The DiT's model timestep ``t = 1 - sigma``
-(in [0, 1], scaled by the internal ``t_scale`` 1000) is derived in the adapter's
-``denoise_step`` from the sigma it receives.
+(in [0, 1], scaled by the shared embedding's 1000 time factor) is derived in
+the adapter's ``denoise_step`` from the sigma it receives.
 """
 from __future__ import annotations
 

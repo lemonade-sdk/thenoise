@@ -16,6 +16,7 @@ from thenoise.utils import attention
 from thenoise.utils.rope import RopeCache, apply_rope_split_half, split_half_rope_1d, split_half_rope_3d
 from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.setup_logging import setup_logging
+from thenoise.utils.timestep import timestep_embedding
 
 setup_logging()
 import logging
@@ -226,28 +227,19 @@ class LearnablePosEmbAxis(VideoPositionEmb):
 
 # Timestep Embedding
 class Timesteps(nn.Module):
-    """Sinusoidal timestep features."""
+    """Sinusoidal timestep features.
+
+    Anima (Cosmos-Predict2) does *not* apply the 1000x time factor used by the
+    other DiT families; its timesteps arrive in ``[0, 1]`` and are embedded
+    directly, so the shared function is called with ``time_factor=1.0``.
+    """
 
     def __init__(self, num_channels: int):
         super().__init__()
         self.num_channels = num_channels
 
     def forward(self, timesteps_B_T: torch.Tensor) -> torch.Tensor:
-        assert timesteps_B_T.ndim == 2, f"Expected 2D input, got {timesteps_B_T.ndim}"
-        in_dtype = timesteps_B_T.dtype
-        timesteps = timesteps_B_T.flatten().float()
-        half_dim = self.num_channels // 2
-        exponent = -math.log(10000) * torch.arange(half_dim, dtype=torch.float32, device=timesteps.device)
-        exponent = exponent / (half_dim - 0.0)
-
-        emb = torch.exp(exponent)
-        emb = timesteps[:, None].float() * emb[None, :]
-
-        sin_emb = torch.sin(emb)
-        cos_emb = torch.cos(emb)
-        emb = torch.cat([cos_emb, sin_emb], dim=-1)
-
-        return rearrange(emb.to(dtype=in_dtype), "(b t) d -> b t d", b=timesteps_B_T.shape[0], t=timesteps_B_T.shape[1])
+        return timestep_embedding(timesteps_B_T, self.num_channels, time_factor=1.0)
 
 
 class TimestepEmbedding(nn.Module):

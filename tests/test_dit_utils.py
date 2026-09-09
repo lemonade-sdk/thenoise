@@ -7,6 +7,7 @@ as a wrong schedule or a mis-shaped token stream.
 """
 from __future__ import annotations
 
+import math
 import pytest
 import torch
 
@@ -148,6 +149,61 @@ def test_count_anima_blocks_requires_block_keys(tmp_path):
     path = write_safetensors(tmp_path / "other.safetensors", {"attn.weight": torch.zeros(1)})
     with pytest.raises(ValueError, match=r"could not find any 'blocks\.\*' keys"):
         _count_anima_blocks(path)
+
+
+# ------------------------------------------------------------------ timestep embedding
+
+
+def test_timestep_embedding_matches_reference():
+    """The shared function reproduces the reference cos/sin grid scaled by 1000."""
+    from thenoise.utils.timestep import timestep_embedding
+
+    t = torch.linspace(1, 0, 4)
+    emb = timestep_embedding(t, 16)
+    assert emb.shape == (4, 16)
+
+    half = 8
+    freqs = torch.exp(-math.log(10000) * torch.arange(half) / half)
+    args = t.float()[:, None] * 1000 * freqs[None]
+    ref = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    assert torch.allclose(emb, ref)
+
+
+def test_timestep_embedding_preserves_leading_dims():
+    from thenoise.utils.timestep import timestep_embedding
+
+    t = torch.linspace(1, 0, 6).reshape(2, 3)  # (B, T), as Anima passes
+    emb = timestep_embedding(t, 16)
+    assert emb.shape == (2, 3, 16)
+
+
+def test_timestep_embedding_pads_odd_dim():
+    from thenoise.utils.timestep import timestep_embedding
+
+    emb = timestep_embedding(torch.tensor([0.5]), 7)
+    assert emb.shape == (1, 7)
+    assert emb[0, -1] == 0.0
+
+
+def test_timestep_embedding_casts_to_input_dtype():
+    from thenoise.utils.timestep import timestep_embedding
+
+    t = torch.tensor([0.5], dtype=torch.bfloat16)
+    emb = timestep_embedding(t, 16)
+    assert emb.dtype == torch.bfloat16
+
+
+def test_timestep_embedding_time_factor_one_is_the_unscaled_grid():
+    """time_factor=1 is the fallback (no 1000x scale); used if Anima is reverted."""
+    from thenoise.utils.timestep import timestep_embedding
+
+    t = torch.tensor([1.0, 0.5])
+    emb = timestep_embedding(t, 16, time_factor=1.0)
+    half = 8
+    freqs = torch.exp(-math.log(10000) * torch.arange(half) / half)
+    args = t.float()[:, None] * freqs[None]
+    ref = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    assert torch.allclose(emb, ref)
 
 
 # -------------------------------------------------------------- anima video rope

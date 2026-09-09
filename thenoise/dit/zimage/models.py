@@ -7,7 +7,6 @@
 # Copyright 2025 Alibaba Z-Image Team and The HuggingFace Team. Licensed under
 # the Apache-2.0 License.
 
-import math
 import os
 
 import torch
@@ -19,6 +18,7 @@ from thenoise.utils.attention import AttentionParams, attention
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.setup_logging import setup_logging
+from thenoise.utils.timestep import timestep_embedding
 
 setup_logging()
 import logging
@@ -42,20 +42,8 @@ class TimestepEmbedder(nn.Module):
         )
         self.frequency_embedding_size = frequency_embedding_size
 
-    @staticmethod
-    def timestep_embedding(t, dim, max_period=10000):
-        half = dim // 2
-        freqs = torch.exp(
-            -math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32, device=t.device) / half
-        )
-        args = t[:, None].float() * freqs[None]
-        embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-        if dim % 2:
-            embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
-        return embedding
-
     def forward(self, t):
-        t_freq = self.timestep_embedding(t, self.frequency_embedding_size)
+        t_freq = timestep_embedding(t, self.frequency_embedding_size)
         # The sinusoidal embedding is computed in fp32 for precision; cast it to the
         # projection weight dtype (bf16) before the MLP to avoid a dtype mismatch.
         weight_dtype = self.mlp[0].weight.dtype
@@ -186,7 +174,6 @@ class ZImageTransformer2DModel(nn.Module):
         qk_norm=True,
         cap_feat_dim=2560,
         rope_theta=256.0,
-        t_scale=1000.0,
         axes_dims=(32, 48, 48),
     ):
         super().__init__()
@@ -197,7 +184,6 @@ class ZImageTransformer2DModel(nn.Module):
         self.dim = dim
         self.n_heads = n_heads
         self.rope_theta = rope_theta
-        self.t_scale = t_scale
 
         # ComfyUI / Lumina layout: plain (single patch config) embedder + final layer.
         self.x_embedder = QuantizedLinear(f_patch_size * patch_size * patch_size * in_channels, dim, bias=True)
@@ -375,7 +361,8 @@ class ZImageTransformer2DModel(nn.Module):
         Args:
             x: list of per-sample image latents ``[C, F, H, W]``.
             t: timestep tensor, shape ``(B,)``, in ``[0, 1]`` (``1 - sigma``). Scaled by
-                ``self.t_scale`` (1000) for the sinusoidal embedding.
+                ``t`` is the flow timestep in ``[0, 1]`` (scaled by 1000 for the
+            sinusoidal embedding).
             cap_feats: list of per-sample caption embeddings ``[seq, cap_feat_dim]``.
 
         Returns:
@@ -385,7 +372,7 @@ class ZImageTransformer2DModel(nn.Module):
         f_patch_size = f_patch_size or self.f_patch_size
         device = x[0].device
 
-        adaln_input = self.t_embedder(t * self.t_scale).type_as(x[0])
+        adaln_input = self.t_embedder(t)
 
         (x, cap_feats, x_size, _, _, x_pad_mask, cap_pad_mask) = self.patchify_and_embed(
             x, cap_feats, patch_size, f_patch_size

@@ -7,18 +7,17 @@ with the combined sequence ordered image-first so that valid tokens form a conti
 prefix per sample — this lets the shared attention machinery handle text padding.
 """
 
-import math
-from dataclasses import dataclass
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from dataclasses import dataclass
 from einops import rearrange
 from torch import Tensor
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention as common_attention
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
+from thenoise.utils.timestep import timestep_embedding
 
 
 def temb(
@@ -26,15 +25,10 @@ def temb(
     dim: int,
     period: float = 1e4,
     tfactor: float = 1e3,
-    device: torch.device = None,
-    dtype: torch.dtype = None,
 ) -> Tensor:
-    half = dim // 2
-    freqs = torch.exp(-math.log(period) * torch.arange(half, dtype=torch.float32, device=device) / half)
-    # t: (B,) -> args: (B, 1, half), so the embedding broadcasts as a per-sample vec.
-    args = (t.float() * tfactor)[:, None, None] * freqs
-    sin, cos = torch.sin(args), torch.cos(args)
-    return torch.cat((cos, sin), dim=-1).to(dtype=dtype)
+    # Shared sinusoidal embedding; K2 keeps the extra leading dim so the result
+    # broadcasts as a per-sample vector in the modulation blocks.
+    return timestep_embedding(t, dim, max_period=period, time_factor=tfactor).unsqueeze(1)
 
 
 @dataclass
@@ -325,7 +319,7 @@ class SingleStreamDiT(nn.Module):
         freqs: Tensor,
     ) -> Tensor:
         img = self.first(img)
-        t = self.tmlp(temb(t, self.config.tdim, device=img.device, dtype=img.dtype))
+        t = self.tmlp(temb(t, self.config.tdim))
         tvec = self.tproj(t)
 
         # `mask` arrives in image-first order: [img (all valid), text (valid prefix + pad)].

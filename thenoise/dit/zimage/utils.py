@@ -37,7 +37,6 @@ ZIMAGE_DIT_CONFIG = dict(
     qk_norm=True,
     cap_feat_dim=2560,
     rope_theta=256.0,
-    t_scale=1000.0,
     axes_dims=(32, 48, 48),
 )
 

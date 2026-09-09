@@ -31,6 +31,7 @@ from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import attention as sdpa_attention
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.setup_logging import setup_logging
+from thenoise.utils.timestep import timestep_embedding
 
 setup_logging()
 import logging
@@ -80,22 +81,6 @@ class Klein4BParams(Flux2Params):
     depth: int = 5
     depth_single_blocks: int = 20
     use_guidance_embed: bool = False
-
-
-def timestep_embedding(t: Tensor, dim: int, max_period: int = 10000, time_factor: float = 1000.0) -> Tensor:
-    """Sinusoidal timestep embedding (scaled by ``time_factor``, 1000.0)."""
-    t = time_factor * t
-    half = dim // 2
-    freqs = torch.exp(
-        -math.log(max_period) * torch.arange(start=0, end=half, device=t.device, dtype=torch.float32) / half
-    )
-    args = t[:, None].float() * freqs[None]
-    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-    if dim % 2:
-        embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
-    if torch.is_floating_point(t):
-        embedding = embedding.to(t)
-    return embedding
 
 
 class RMSNorm(nn.Module):

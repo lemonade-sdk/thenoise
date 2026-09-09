@@ -21,6 +21,7 @@ from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.setup_logging import setup_logging
+from thenoise.utils.timestep import timestep_embedding
 
 setup_logging()
 import logging
@@ -58,32 +59,6 @@ def build_txt_positions(max_vid_index, txt_len, device):
     return k[:, None].expand(txt_len, 3).unsqueeze(0)
 
 
-def _get_timestep_embedding(
-    timesteps: torch.Tensor,
-    embedding_dim: int,
-    flip_sin_to_cos: bool = False,
-    downscale_freq_shift: float = 0.0,
-    scale: float = 1.0,
-    max_period: int = 10000,
-) -> torch.Tensor:
-    """Sinusoidal timestep embedding (Diffusers ``get_timestep_embedding``)."""
-    half_dim = embedding_dim // 2
-    exponent = (
-        -math.log(max_period)
-        * torch.arange(start=0, end=half_dim, dtype=torch.float32, device=timesteps.device)
-        / (half_dim - downscale_freq_shift)
-    )
-    emb = torch.exp(exponent)
-    emb = timesteps[:, None].float() * emb[None, :]
-    emb = scale * emb
-    emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
-    if flip_sin_to_cos:
-        emb = torch.cat([emb[:, half_dim:], emb[:, :half_dim]], dim=-1)
-    if embedding_dim % 2 == 1:
-        emb = F.pad(emb, (0, 1, 0, 0))
-    return emb
-
-
 class TimestepEmbedding(nn.Module):
     def __init__(self, in_channels: int, time_embed_dim: int, out_dim: Optional[int] = None):
         super().__init__()
@@ -98,33 +73,14 @@ class TimestepEmbedding(nn.Module):
         return self.linear_2(sample)
 
 
-class Timesteps(nn.Module):
-    def __init__(self, num_channels: int, flip_sin_to_cos: bool, downscale_freq_shift: float, scale: float = 1.0):
-        super().__init__()
-        self.num_channels = num_channels
-        self.flip_sin_to_cos = flip_sin_to_cos
-        self.downscale_freq_shift = downscale_freq_shift
-        self.scale = scale
-
-    def forward(self, timesteps: torch.Tensor) -> torch.Tensor:
-        return _get_timestep_embedding(
-            timesteps,
-            self.num_channels,
-            flip_sin_to_cos=self.flip_sin_to_cos,
-            downscale_freq_shift=self.downscale_freq_shift,
-            scale=self.scale,
-        )
-
-
 class QwenTimestepProjEmbeddings(nn.Module):
     def __init__(self, embedding_dim: int):
         super().__init__()
-        self.time_proj = Timesteps(num_channels=256, flip_sin_to_cos=True, downscale_freq_shift=0, scale=1000)
         self.timestep_embedder = TimestepEmbedding(in_channels=256, time_embed_dim=embedding_dim)
 
     def forward(self, timestep: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
         timesteps = timestep.to(hidden_states.dtype)
-        return self.timestep_embedder(self.time_proj(timesteps))
+        return self.timestep_embedder(timestep_embedding(timesteps, 256))
 
 
 class AdaLayerNormContinuous(nn.Module):
