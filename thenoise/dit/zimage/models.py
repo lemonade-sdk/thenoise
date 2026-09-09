@@ -18,6 +18,7 @@ from thenoise.utils.attention import AttentionParams, attention
 from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.rms_norm import RMSNorm
+from thenoise.utils.sequence import make_key_padding_mask, pad_len_to_multiple, pad_to_batch
 from thenoise.utils.setup_logging import setup_logging
 from thenoise.utils.timestep import timestep_embedding
 
@@ -233,7 +234,7 @@ class ZImageTransformer2DModel(nn.Module):
 
     def _pad_with_ids(self, feat, pos_grid_size, pos_start, device):
         ori_len = len(feat)
-        pad_len = (-ori_len) % SEQ_MULTI_OF
+        pad_len = pad_len_to_multiple(ori_len, SEQ_MULTI_OF) - ori_len
         total_len = ori_len + pad_len
 
         ori_pos_ids = self.create_coordinate_grid(size=pos_grid_size, start=pos_start, device=device).flatten(0, 2)
@@ -312,29 +313,18 @@ class ZImageTransformer2DModel(nn.Module):
 
     def _prepare_sequence(self, feats, pe, inner_pad_mask, pad_token, device):
         item_seqlens = [len(f) for f in feats]
-        max_seqlen = max(item_seqlens)
-        bsz = len(feats)
-
-        feats_cat = torch.cat(feats, dim=0)
-        mask = torch.cat(inner_pad_mask).unsqueeze(-1)
-        feats_cat = torch.where(mask, pad_token, feats_cat)
-        feats = list(feats_cat.split(item_seqlens, dim=0))
 
         # ``pe`` is the concatenated per-token frequencies (batch dim of 1); drop that
-        # batch dim and split back into per-sample tensors, then pad to the max length.
-        freqs_cis = list(pe.squeeze(0).split(item_seqlens, dim=0))
+        # batch dim and split back into per-sample tensors so the shared pad helper can
+        # pad them in lockstep with the features.
+        positions = list(pe.squeeze(0).split(item_seqlens, dim=0))
 
-        feats = nn.utils.rnn.pad_sequence(feats, batch_first=True, padding_value=0.0)
-        freqs_cis = nn.utils.rnn.pad_sequence(freqs_cis, batch_first=True, padding_value=0.0)[:, : feats.shape[1]]
+        feats, positions, seqlens = pad_to_batch(
+            feats, positions, pad_token=pad_token, replace_mask=inner_pad_mask
+        )
+        mask = make_key_padding_mask(seqlens, device)
 
-        if all(seq == max_seqlen for seq in item_seqlens):
-            attn_mask = None
-        else:
-            attn_mask = torch.zeros((bsz, max_seqlen), dtype=torch.bool, device=device)
-            for i, seq_len in enumerate(item_seqlens):
-                attn_mask[i, :seq_len] = 1
-
-        return feats, freqs_cis, attn_mask, item_seqlens
+        return feats, positions, mask, seqlens
 
     def unpatchify(self, x, size, patch_size, f_patch_size):
         pH = pW = patch_size
@@ -403,16 +393,9 @@ class ZImageTransformer2DModel(nn.Module):
             unified.append(torch.cat([x[i][:x_len], cap_feats[i][:cap_len]]))
             unified_freqs.append(torch.cat([x_freqs[i][:x_len], cap_freqs[i][:cap_len]]))
         unified_seqlens = [a + b for a, b in zip(x_seqlens, cap_seqlens)]
-        max_seqlen = max(unified_seqlens)
 
-        unified = nn.utils.rnn.pad_sequence(unified, batch_first=True, padding_value=0.0)
-        unified_freqs = nn.utils.rnn.pad_sequence(unified_freqs, batch_first=True, padding_value=0.0)
-        if all(seq == max_seqlen for seq in unified_seqlens):
-            unified_mask = None
-        else:
-            unified_mask = torch.zeros((bsz, max_seqlen), dtype=torch.bool, device=device)
-            for i, seq_len in enumerate(unified_seqlens):
-                unified_mask[i, :seq_len] = 1
+        unified, unified_freqs, unified_seqlens = pad_to_batch(unified, unified_freqs)
+        unified_mask = make_key_padding_mask(unified_seqlens, device)
 
         # Main transformer layers
         for layer in self.layers:

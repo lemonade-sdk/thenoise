@@ -10,6 +10,7 @@ import torch
 from einops import rearrange, repeat
 
 from thenoise.utils.math import generalized_time_shift
+from thenoise.utils.sequence import make_key_padding_mask, pad_to_batch
 
 
 def gather_valid_text(txt, mask):
@@ -26,12 +27,8 @@ def gather_valid_text(txt, mask):
     txt: (B, seq, L, D), mask: (B, seq) bool -> (B, max_valid, L, D), (B, max_valid) bool.
     """
     valid = [txt[i][mask[i]] for i in range(txt.shape[0])]  # list of (n_i, L, D)
-    max_len = max(v.shape[0] for v in valid)
-    out = txt.new_zeros(txt.shape[0], max_len, txt.shape[2], txt.shape[3])
-    newmask = torch.zeros(txt.shape[0], max_len, device=txt.device, dtype=torch.bool)
-    for i, v in enumerate(valid):
-        out[i, : v.shape[0]] = v
-        newmask[i, : v.shape[0]] = True
+    out, _, seqlens = pad_to_batch(valid)
+    newmask = make_key_padding_mask(seqlens, txt.device, always=True)
     return out, newmask
 
 

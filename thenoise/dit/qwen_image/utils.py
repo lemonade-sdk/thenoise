@@ -15,6 +15,7 @@ from transformers import Qwen2Tokenizer, Qwen2_5_VLForConditionalGeneration, Qwe
 
 from thenoise.utils.setup_logging import setup_logging
 from thenoise.utils.image_tensor import resize_to_area
+from thenoise.utils.sequence import make_key_padding_mask, pad_to_batch
 from thenoise.utils.text_encoder import QWEN_VL_DROP_IDX, QWEN_VL_PROMPT_SUFFIX, QWEN_VL_SYSTEM_PROMPT
 
 setup_logging()
@@ -30,14 +31,8 @@ def extract_masked_hidden(hidden_states: torch.Tensor, mask: torch.Tensor):
 
 def _mask_and_stack(split_hidden_states, drop_idx: int):
     split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
-    attn_mask_list = [torch.ones(e.size(0), dtype=torch.long, device=e.device) for e in split_hidden_states]
-    max_seq_len = max([e.size(0) for e in split_hidden_states])
-    prompt_embeds = torch.stack(
-        [torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))]) for u in split_hidden_states]
-    )
-    encoder_attention_mask = torch.stack(
-        [torch.cat([u, u.new_zeros(max_seq_len - u.size(0))]) for u in attn_mask_list]
-    )
+    prompt_embeds, _, seqlens = pad_to_batch(split_hidden_states)
+    encoder_attention_mask = make_key_padding_mask(seqlens, split_hidden_states[0].device, always=True)
     return prompt_embeds, encoder_attention_mask
 
 

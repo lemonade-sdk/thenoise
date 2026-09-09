@@ -273,3 +273,87 @@ def test_qk_norm_key_map_maps_krea2_legacy_keys():
     )
 
 
+
+
+# ------------------------------------------------------------------ sequence padding
+
+
+def test_pad_len_to_multiple_rounds_up():
+    from thenoise.utils.sequence import pad_len_to_multiple
+
+    assert pad_len_to_multiple(0, 32) == 0
+    assert pad_len_to_multiple(1, 32) == 32
+    assert pad_len_to_multiple(32, 32) == 32
+    assert pad_len_to_multiple(33, 32) == 64
+    assert pad_len_to_multiple(255, 256) == 256
+
+
+def test_pad_to_batch_right_pads_to_the_max():
+    from thenoise.utils.sequence import pad_to_batch
+
+    a = torch.tensor([[1.0, 2.0], [3.0, 4.0]])  # (2, 2)
+    b = torch.tensor([[5.0, 6.0]])              # (1, 2)
+    out, positions, seqlens = pad_to_batch([a, b])
+    assert out.shape == (2, 2, 2)
+    assert torch.equal(out[0], a)
+    assert torch.equal(out[1, 0], b[0])
+    assert torch.equal(out[1, 1], torch.zeros(2))
+    assert seqlens == [2, 1]
+    assert positions is None
+
+
+def test_pad_to_batch_pads_positions_in_lockstep():
+    from thenoise.utils.sequence import pad_to_batch
+
+    a = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    b = torch.tensor([[5.0, 6.0]])
+    pos_a = torch.tensor([[0.0, 0.0, 0.0], [0.0, 1.0, 1.0]])
+    pos_b = torch.tensor([[0.0, 0.0, 0.0]])
+    out, pos, seqlens = pad_to_batch([a, b], [pos_a, pos_b])
+    assert out.shape == (2, 2, 2)
+    assert pos.shape == (2, 2, 3)
+    assert torch.equal(pos[0], pos_a)
+    assert torch.equal(pos[1, 0], pos_b[0])
+    assert torch.equal(pos[1, 1], torch.zeros(3))
+    assert seqlens == [2, 1]
+
+
+def test_pad_to_batch_replaces_pad_positions_with_pad_token():
+    """Z-Image path: pad positions (True in replace_mask) are swapped for a token."""
+    from thenoise.utils.sequence import pad_to_batch
+
+    feat = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+    replace_mask = torch.tensor([False, False, True])  # True = pad
+    pad_token = torch.tensor([[99.0, 99.0]])
+    out, _, seqlens = pad_to_batch([feat], [feat], pad_token=pad_token, replace_mask=[replace_mask])
+    assert torch.equal(out[0, 0], feat[0])
+    assert torch.equal(out[0, 1], feat[1])
+    assert torch.equal(out[0, 2], pad_token[0])
+    assert seqlens == [3]
+
+
+def test_make_key_padding_mask_is_none_on_uniform_lengths():
+    from thenoise.utils.sequence import make_key_padding_mask
+
+    assert make_key_padding_mask([3, 3], "cpu") is None
+    mask = make_key_padding_mask([3, 3], "cpu", always=True)
+    assert mask.shape == (2, 3)
+    assert mask.tolist() == [[True, True, True], [True, True, True]]
+
+
+def test_make_key_padding_mask_marks_valid_prefix():
+    from thenoise.utils.sequence import make_key_padding_mask
+
+    mask = make_key_padding_mask([3, 1], "cpu")
+    assert mask.shape == (2, 3)
+    assert mask.tolist() == [[True, True, True], [True, False, False]]
+
+
+def test_make_key_padding_mask_matches_zimage_reference():
+    """Z-Image's original ``_prepare_sequence`` built the same valid mask."""
+    from thenoise.utils.sequence import make_key_padding_mask
+
+    item_seqlens = [48, 64]  # padded-to-32 lengths
+    mask = make_key_padding_mask(item_seqlens, "cpu")
+    assert mask[0].sum().item() == 48
+    assert mask[1].sum().item() == 64
