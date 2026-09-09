@@ -17,6 +17,7 @@ import torch.nn.functional as F
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
+from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -27,17 +28,6 @@ logger = logging.getLogger(__name__)
 
 ADALN_EMBED_DIM = 256
 SEQ_MULTI_OF = 32
-
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim, eps=1e-5):
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x):
-        x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-        return x * self.weight
 
 
 class TimestepEmbedder(nn.Module):

@@ -19,6 +19,7 @@ from accelerate import init_empty_weights
 from thenoise.utils.loader import load_dit
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
+from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -124,17 +125,6 @@ class QwenTimestepProjEmbeddings(nn.Module):
     def forward(self, timestep: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
         timesteps = timestep.to(hidden_states.dtype)
         return self.timestep_embedder(self.time_proj(timesteps))
-
-
-class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float = 1e-5):
-        super().__init__()
-        self.dim = dim
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.rms_norm(x, (self.dim,), eps=self.eps, weight=self.weight)
 
 
 class AdaLayerNormContinuous(nn.Module):

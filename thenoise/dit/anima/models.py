@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils import attention
 from thenoise.utils.rope import RopeCache, apply_rope_split_half, split_half_rope_1d, split_half_rope_3d
+from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -23,22 +24,6 @@ logger = logging.getLogger(__name__)
 
 
 # Basic building blocks
-class RMSNorm(torch.nn.Module):
-    """RMS Normalization for DiT blocks."""
-
-    def __init__(self, dim: int, eps: float = 1e-5) -> None:
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def reset_parameters(self) -> None:
-        torch.nn.init.ones_(self.weight)
-
-    def _norm(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self._norm(x) * self.weight
 
 
 class GPT2FeedForward(nn.Module):
@@ -854,22 +839,7 @@ class Anima(nn.Module):
 
 
 # LLM Adapter: Bridges Qwen3 embeddings to T5-compatible space
-class LLMAdapterRMSNorm(nn.Module):
-    """RMSNorm specifically for the LLM Adapter (T5-style, no mean subtraction)."""
 
-    def __init__(self, hidden_size, eps=1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-
-        if self.weight.dtype in [torch.float16, torch.bfloat16]:
-            hidden_states = hidden_states.to(self.weight.dtype)
-
-        return self.weight * hidden_states
 
 
 class LLMAdapterAttention(nn.Module):
@@ -885,10 +855,10 @@ class LLMAdapterAttention(nn.Module):
         self.context_dim = context_dim
 
         self.q_proj = QuantizedLinear(query_dim, inner_dim, bias=False)
-        self.q_norm = LLMAdapterRMSNorm(self.head_dim)
+        self.q_norm = RMSNorm(self.head_dim, eps=1e-6)
 
         self.k_proj = QuantizedLinear(context_dim, inner_dim, bias=False)
-        self.k_norm = LLMAdapterRMSNorm(self.head_dim)
+        self.k_norm = RMSNorm(self.head_dim, eps=1e-6)
 
         self.v_proj = QuantizedLinear(context_dim, inner_dim, bias=False)
 
@@ -925,7 +895,7 @@ class LLMAdapterTransformerBlock(nn.Module):
         self.has_self_attn = self_attn
 
         if self.has_self_attn:
-            self.norm_self_attn = nn.LayerNorm(model_dim) if layer_norm else LLMAdapterRMSNorm(model_dim)
+            self.norm_self_attn = nn.LayerNorm(model_dim) if layer_norm else RMSNorm(model_dim, eps=1e-6)
             self.self_attn = LLMAdapterAttention(
                 query_dim=model_dim,
                 context_dim=model_dim,
@@ -933,7 +903,7 @@ class LLMAdapterTransformerBlock(nn.Module):
                 head_dim=model_dim // num_heads,
             )
 
-        self.norm_cross_attn = nn.LayerNorm(model_dim) if layer_norm else LLMAdapterRMSNorm(model_dim)
+        self.norm_cross_attn = nn.LayerNorm(model_dim) if layer_norm else RMSNorm(model_dim, eps=1e-6)
         self.cross_attn = LLMAdapterAttention(
             query_dim=model_dim,
             context_dim=source_dim,
@@ -941,7 +911,7 @@ class LLMAdapterTransformerBlock(nn.Module):
             head_dim=model_dim // num_heads,
         )
 
-        self.norm_mlp = nn.LayerNorm(model_dim) if layer_norm else LLMAdapterRMSNorm(model_dim)
+        self.norm_mlp = nn.LayerNorm(model_dim) if layer_norm else RMSNorm(model_dim, eps=1e-6)
         self.mlp = nn.Sequential(
             QuantizedLinear(model_dim, int(model_dim * mlp_ratio)), nn.GELU(), QuantizedLinear(int(model_dim * mlp_ratio), model_dim)
         )
@@ -1009,7 +979,7 @@ class LLMAdapter(nn.Module):
             ]
         )
         self.out_proj = QuantizedLinear(model_dim, target_dim)
-        self.norm = LLMAdapterRMSNorm(target_dim)
+        self.norm = RMSNorm(target_dim, eps=1e-6)
 
     def forward(self, source_hidden_states, target_input_ids, target_attention_mask=None, source_attention_mask=None):
         if target_attention_mask is not None:

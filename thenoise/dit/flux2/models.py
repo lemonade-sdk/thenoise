@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 import torch
+import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor, nn
 
@@ -100,13 +101,15 @@ def timestep_embedding(t: Tensor, dim: int, max_period: int = 10000, time_factor
 class RMSNorm(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
+        self.dim = dim
         self.scale = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: Tensor) -> Tensor:
-        x_dtype = x.dtype
-        x = x.float()
-        rrms = torch.rsqrt(torch.mean(x**2, dim=-1, keepdim=True) + 1e-6)
-        return (x * rrms).to(dtype=x_dtype) * self.scale
+        # ``scale`` is ones-initialized (a ``weight``), but the official Flux
+        # Klein BF16 checkpoint stores it under the ``scale`` name, so the
+        # parameter is kept as-is; the normalization itself uses ``F.rms_norm``
+        # (fp32 variance) like the shared ``thenoise.utils.rms_norm``.
+        return F.rms_norm(x, (self.dim,), eps=1e-6, weight=self.scale)
 
 
 class QKNorm(nn.Module):
