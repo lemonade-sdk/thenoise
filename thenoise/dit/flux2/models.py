@@ -28,8 +28,8 @@ from torch import Tensor, nn
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import attention as sdpa_attention
+from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
-from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.setup_logging import setup_logging
 from thenoise.utils.timestep import timestep_embedding
 
@@ -81,18 +81,6 @@ class Klein4BParams(Flux2Params):
     depth: int = 5
     depth_single_blocks: int = 20
     use_guidance_embed: bool = False
-
-
-class QKNorm(nn.Module):
-    def __init__(self, dim: int):
-        super().__init__()
-        self.query_norm = RMSNorm(dim, eps=1e-6)
-        self.key_norm = RMSNorm(dim, eps=1e-6)
-
-    def forward(self, q: Tensor, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor]:
-        q = self.query_norm(q)
-        k = self.key_norm(k)
-        return q.to(v), k.to(v)
 
 
 def attention(qkv_list: list[Tensor], pe: Tensor) -> Tensor:
@@ -168,7 +156,7 @@ class SelfAttention(nn.Module):
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.qkv = QuantizedLinear(dim, dim * 3, bias=False)
-        self.norm = QKNorm(head_dim)
+        self.norm = QKNorm(head_dim, eps=1e-6)
         self.proj = QuantizedLinear(dim, dim, bias=False)
 
 
@@ -184,7 +172,7 @@ class SingleStreamBlock(nn.Module):
 
         self.linear1 = QuantizedLinear(hidden_size, hidden_size * 3 + self.mlp_hidden_dim * self.mlp_mult_factor, bias=False)
         self.linear2 = QuantizedLinear(hidden_size + self.mlp_hidden_dim, hidden_size, bias=False)
-        self.norm = QKNorm(head_dim)
+        self.norm = QKNorm(head_dim, eps=1e-6)
         self.hidden_size = hidden_size
         self.pre_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.mlp_act = SiLUActivation()
@@ -197,7 +185,7 @@ class SingleStreamBlock(nn.Module):
             self.linear1(x_mod), [3 * self.hidden_size, self.mlp_hidden_dim * self.mlp_mult_factor], dim=-1
         )
         q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
-        q, k = self.norm(q, k, v)
+        q, k = self.norm(q, k)
 
         attn = attention([q, k, v], pe)
 
@@ -255,14 +243,14 @@ class DoubleStreamBlock(nn.Module):
         img_modulated = (1 + img_mod1_scale) * img_modulated + img_mod1_shift
         img_qkv = self.img_attn.qkv(img_modulated)
         img_q, img_k, img_v = rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
-        img_q, img_k = self.img_attn.norm(img_q, img_k, img_v)
+        img_q, img_k = self.img_attn.norm(img_q, img_k)
 
         # text attention
         txt_modulated = self.txt_norm1(txt)
         txt_modulated = (1 + txt_mod1_scale) * txt_modulated + txt_mod1_shift
         txt_qkv = self.txt_attn.qkv(txt_modulated)
         txt_q, txt_k, txt_v = rearrange(txt_qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
-        txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k, txt_v)
+        txt_q, txt_k = self.txt_attn.norm(txt_q, txt_k)
 
         txt_len = txt_q.shape[2]
         q = torch.cat((txt_q, img_q), dim=2)

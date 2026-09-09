@@ -16,6 +16,7 @@ from torch import Tensor
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention as common_attention
+from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.timestep import timestep_embedding
@@ -75,16 +76,6 @@ class DoubleSharedModulation(torch.nn.Module):
         return prescale, preshift, pregate, postscale, postshift, postgate
 
 
-class QKNorm(torch.nn.Module):
-    def __init__(self, dim: int):
-        super().__init__()
-        self.qnorm = RMSNorm(dim)
-        self.knorm = RMSNorm(dim)
-
-    def forward(self, q: Tensor, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        return self.qnorm(q), self.knorm(k), v
-
-
 class SwiGLU(torch.nn.Module):
     def __init__(self, features: int, multiplier: int, bias: bool = False, multiple: int = 128):
         super().__init__()
@@ -111,7 +102,7 @@ class Attention(torch.nn.Module):
         self.wk = QuantizedLinear(dim, self.headdim * self.kvheads, bias=bias)
         self.wv = QuantizedLinear(dim, self.headdim * self.kvheads, bias=bias)
         self.gate = QuantizedLinear(dim, dim, bias=bias)
-        self.qknorm = QKNorm(self.headdim)
+        self.qk_norm = QKNorm(self.headdim)
         self.wo = QuantizedLinear(dim, dim, bias=bias)
 
     def forward(self, qkv: Tensor, freqs: Tensor | None = None, attn_params: AttentionParams | None = None) -> Tensor:
@@ -124,7 +115,7 @@ class Attention(torch.nn.Module):
             rearrange(v, "B L (H D) -> B H L D", H=self.kvheads),
         )
 
-        q, k, v = self.qknorm(q, k, v)
+        q, k = self.qk_norm(q, k)
         if freqs is not None:
             q, k = apply_rope(q, k, freqs)
         x = common_attention([q, k, v], attn_params=attn_params)

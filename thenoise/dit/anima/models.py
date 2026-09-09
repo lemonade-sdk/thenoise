@@ -13,6 +13,7 @@ import torch.nn.functional as F
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils import attention
+from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.rope import RopeCache, apply_rope_split_half, split_half_rope_1d, split_half_rope_3d
 from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.setup_logging import setup_logging
@@ -86,13 +87,9 @@ class Attention(nn.Module):
         self.context_dim = context_dim
 
         self.q_proj = QuantizedLinear(query_dim, inner_dim, bias=False)
-        self.q_norm = RMSNorm(self.head_dim, eps=1e-6)
-
         self.k_proj = QuantizedLinear(context_dim, inner_dim, bias=False)
-        self.k_norm = RMSNorm(self.head_dim, eps=1e-6)
-
         self.v_proj = QuantizedLinear(context_dim, inner_dim, bias=False)
-        self.v_norm = nn.Identity()
+        self.qk_norm = QKNorm(self.head_dim, eps=1e-6)
 
         self.output_proj = QuantizedLinear(inner_dim, query_dim, bias=False)
         self.output_dropout = nn.Dropout(dropout) if dropout > 1e-4 else nn.Identity()
@@ -112,9 +109,7 @@ class Attention(nn.Module):
         std = 1.0 / math.sqrt(self._inner_dim)
         torch.nn.init.trunc_normal_(self.output_proj.weight, std=std, a=-3 * std, b=3 * std)
 
-        for layer in self.q_norm, self.k_norm, self.v_norm:
-            if hasattr(layer, "reset_parameters"):
-                layer.reset_parameters()
+        self.qk_norm.reset_parameters()
 
     def compute_qkv(
         self,
@@ -131,9 +126,7 @@ class Attention(nn.Module):
             (q, k, v),
         )
 
-        q = self.q_norm(q)
-        k = self.k_norm(k)
-        v = self.v_norm(v)
+        q, k = self.qk_norm(q, k)
         if self.is_selfattn and rope_emb is not None:
             q = apply_rope_split_half(q, *rope_emb)
             k = apply_rope_split_half(k, *rope_emb)
@@ -847,12 +840,9 @@ class LLMAdapterAttention(nn.Module):
         self.context_dim = context_dim
 
         self.q_proj = QuantizedLinear(query_dim, inner_dim, bias=False)
-        self.q_norm = RMSNorm(self.head_dim, eps=1e-6)
-
         self.k_proj = QuantizedLinear(context_dim, inner_dim, bias=False)
-        self.k_norm = RMSNorm(self.head_dim, eps=1e-6)
-
         self.v_proj = QuantizedLinear(context_dim, inner_dim, bias=False)
+        self.qk_norm = QKNorm(self.head_dim, eps=1e-6)
 
         self.o_proj = QuantizedLinear(inner_dim, query_dim, bias=False)
 
@@ -863,8 +853,11 @@ class LLMAdapterAttention(nn.Module):
         context_shape = context.shape[:-1]
         kv_shape = (*context_shape, self.n_heads, self.head_dim)
 
-        query_states = self.q_norm(self.q_proj(x).view(q_shape)).transpose(1, 2)
-        key_states = self.k_norm(self.k_proj(context).view(kv_shape)).transpose(1, 2)
+        query_states, key_states = self.qk_norm(
+            self.q_proj(x).view(q_shape), self.k_proj(context).view(kv_shape)
+        )
+        query_states = query_states.transpose(1, 2)
+        key_states = key_states.transpose(1, 2)
         value_states = self.v_proj(context).view(kv_shape).transpose(1, 2)
 
         if position_embeddings is not None:

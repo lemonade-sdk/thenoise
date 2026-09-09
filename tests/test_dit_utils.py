@@ -236,3 +236,40 @@ def test_apply_rope_split_half_is_orthogonal():
     assert torch.allclose(q.norm(dim=-1), out.norm(dim=-1), atol=1e-6)
 
 
+# ------------------------------------------------------------------ QK-norm key map
+
+
+def test_qk_norm_key_map_maps_anima_zimage_legacy_keys():
+    """The shared ``QKNorm`` stores ``query_norm``/``key_norm``; Anima/Z-Image
+    checkpoints store ``q_norm``/``k_norm`` on the attention module."""
+    from thenoise.utils.qk_norm import qk_norm_key_map
+
+    assert (
+        qk_norm_key_map("blocks.0.self_attn.q_norm.weight")
+        == "blocks.0.self_attn.qk_norm.query_norm.weight"
+    )
+    assert (
+        qk_norm_key_map("blocks.0.self_attn.k_norm.weight")
+        == "blocks.0.self_attn.qk_norm.key_norm.weight"
+    )
+    assert (
+        qk_norm_key_map("layers.0.attention.q_norm.weight")
+        == "layers.0.attention.qk_norm.query_norm.weight"
+    )
+
+
+def test_qk_norm_key_map_maps_krea2_legacy_keys():
+    """Krea 2 checkpoints store ``qnorm``/``knorm`` (the ``scale``->``weight``
+    rename is handled by the loader's value map)."""
+    from thenoise.utils.qk_norm import qk_norm_key_map
+
+    assert (
+        qk_norm_key_map("blocks.0.attn.qnorm.scale", "qnorm", "knorm")
+        == "blocks.0.attn.qk_norm.query_norm.scale"
+    )
+    assert (
+        qk_norm_key_map("blocks.0.attn.knorm.scale", "qnorm", "knorm")
+        == "blocks.0.attn.qk_norm.key_norm.scale"
+    )
+
+

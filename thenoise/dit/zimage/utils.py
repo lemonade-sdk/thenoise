@@ -14,6 +14,7 @@ from accelerate import init_empty_weights
 
 from thenoise.dit.zimage.models import ZImageTransformer2DModel
 from thenoise.utils.loader import load_dit
+from thenoise.utils.qk_norm import qk_norm_key_map
 from thenoise.utils.qwen_configs import QWEN3_4B_CONFIG
 from thenoise.utils.text_encoder import (
     QWEN25_TOKENIZER_CONFIG_DIR,
@@ -34,7 +35,6 @@ ZIMAGE_DIT_CONFIG = dict(
     n_heads=30,
     n_kv_heads=30,
     norm_eps=1e-5,
-    qk_norm=True,
     cap_feat_dim=2560,
     rope_theta=256.0,
     axes_dims=(32, 48, 48),
@@ -57,7 +57,7 @@ def load_zimage_dit(
     with init_empty_weights():
         dit = ZImageTransformer2DModel(**cfg)
 
-    return load_dit(dit, dit_path, device=device, dtype=dtype)
+    return load_dit(dit, dit_path, device=device, dtype=dtype, key_map=qk_norm_key_map)
 
 
 def load_zimage_text_encoder(

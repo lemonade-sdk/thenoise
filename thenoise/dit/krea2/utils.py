@@ -14,6 +14,7 @@ from thenoise.dit.krea2.encoder import (
 )
 from thenoise.dit.krea2.mmdit import SingleMMDiTConfig, SingleStreamDiT
 from thenoise.utils.loader import load_dit
+from thenoise.utils.qk_norm import qk_norm_key_map
 from thenoise.utils.text_encoder import find_tokenizer_dir
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,7 @@ def load_krea2_dit(
         dit_path,
         device=device,
         dtype=dtype,
+        key_map=lambda k: qk_norm_key_map(k, "qknorm.qnorm", "qknorm.knorm"),
         drop_keys=("last.down", "last.up"),
         value_map=_krea2_rms_map,
     )

@@ -6,6 +6,7 @@ from accelerate import init_empty_weights
 
 from thenoise.dit.anima import models as anima_models
 from thenoise.utils.loader import load_dit
+from thenoise.utils.qk_norm import qk_norm_key_map
 from thenoise.utils.safetensors import WRAP_PREFIXES
 from thenoise.utils.setup_logging import setup_logging
 
@@ -103,6 +104,7 @@ def load_anima_model(
         dit_path,
         device=device,
         dtype=dit_weight_dtype,
+        key_map=qk_norm_key_map,
         expected_missing=("seq", "dim_spatial_range", "dim_temporal_range", "inv_freq"),
     )
     logger.info("Loaded DiT model from %s", dit_path)

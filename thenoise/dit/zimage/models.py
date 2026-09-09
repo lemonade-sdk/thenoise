@@ -15,6 +15,7 @@ import torch.nn.functional as F
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention
+from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.setup_logging import setup_logging
@@ -59,14 +60,13 @@ class Attention(nn.Module):
     per-head RMSNorm on query/key, and an ``out`` projection.
     """
 
-    def __init__(self, dim, n_heads, qk_norm, eps):
+    def __init__(self, dim, n_heads, eps):
         super().__init__()
         self.n_heads = n_heads
         self.head_dim = dim // n_heads
         self.qkv = QuantizedLinear(dim, 3 * dim, bias=False)
         self.out = QuantizedLinear(dim, dim, bias=False)
-        self.q_norm = RMSNorm(self.head_dim, eps=eps) if qk_norm else nn.Identity()
-        self.k_norm = RMSNorm(self.head_dim, eps=eps) if qk_norm else nn.Identity()
+        self.qk_norm = QKNorm(self.head_dim, eps=eps)
 
     def forward(self, hidden_states, attention_mask=None, freqs_cis=None):
         dim = hidden_states.shape[-1]
@@ -78,8 +78,7 @@ class Attention(nn.Module):
         key = k.unflatten(-1, (self.n_heads, -1)).transpose(1, 2)
         value = v.unflatten(-1, (self.n_heads, -1)).transpose(1, 2)
 
-        query = self.q_norm(query)
-        key = self.k_norm(key)
+        query, key = self.qk_norm(query, key)
 
         if freqs_cis is not None:
             query, key = apply_rope(query, key, freqs_cis)
@@ -108,10 +107,10 @@ class FeedForward(nn.Module):
 
 
 class ZImageTransformerBlock(nn.Module):
-    def __init__(self, layer_id, dim, n_heads, n_kv_heads, norm_eps, qk_norm, modulation=True):
+    def __init__(self, layer_id, dim, n_heads, n_kv_heads, norm_eps, modulation=True):
         super().__init__()
         self.dim = dim
-        self.attention = Attention(dim=dim, n_heads=n_heads, qk_norm=qk_norm, eps=norm_eps)
+        self.attention = Attention(dim=dim, n_heads=n_heads, eps=norm_eps)
         self.feed_forward = FeedForward(dim=dim, hidden_dim=int(dim / 3 * 8))
         self.layer_id = layer_id
 
@@ -171,7 +170,6 @@ class ZImageTransformer2DModel(nn.Module):
         n_heads=30,
         n_kv_heads=30,
         norm_eps=1e-5,
-        qk_norm=True,
         cap_feat_dim=2560,
         rope_theta=256.0,
         axes_dims=(32, 48, 48),
@@ -191,13 +189,13 @@ class ZImageTransformer2DModel(nn.Module):
 
         self.noise_refiner = nn.ModuleList(
             [
-                ZImageTransformerBlock(1000 + lid, dim, n_heads, n_kv_heads, norm_eps, qk_norm, modulation=True)
+                ZImageTransformerBlock(1000 + lid, dim, n_heads, n_kv_heads, norm_eps, modulation=True)
                 for lid in range(n_refiner_layers)
             ]
         )
         self.context_refiner = nn.ModuleList(
             [
-                ZImageTransformerBlock(lid, dim, n_heads, n_kv_heads, norm_eps, qk_norm, modulation=False)
+                ZImageTransformerBlock(lid, dim, n_heads, n_kv_heads, norm_eps, modulation=False)
                 for lid in range(n_refiner_layers)
             ]
         )
@@ -209,7 +207,7 @@ class ZImageTransformer2DModel(nn.Module):
 
         self.layers = nn.ModuleList(
             [
-                ZImageTransformerBlock(lid, dim, n_heads, n_kv_heads, norm_eps, qk_norm)
+                ZImageTransformerBlock(lid, dim, n_heads, n_kv_heads, norm_eps)
                 for lid in range(n_layers)
             ]
         )
