@@ -1,6 +1,6 @@
 # TheNoise
 
-A diffusion inference engine. Optimized for Strix Halo. Works on most AMD iGPUs and dGPUs supporting ROCm.
+A fast diffusion model engine for image generation and editing. Optimized for Strix Halo. Works on most AMD iGPUs and dGPUs supporting ROCm.
 
 Loads one model at a time and generates images from text prompts. Editing-capable models can also edit existing images from a text instruction (image + prompt → edited image). Available as a CLI tool, an HTTP API (with a simple web UI).
 
