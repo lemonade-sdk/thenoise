@@ -164,7 +164,7 @@ Below a short list of what you can expect in terms of perfomance. The times repo
 - Krea 2 Turbo (BF16) @ 8 Steps: ~26 secs
 - Krea 2 Turbo (INT8-ConvRot) @ 8 Steps: ~19 secs
 - Anima Turbo @ 8 Steps: ~5 secs
-- Anima Base @ 8 Steps, CFG 4: ~20 secs
+- Anima Base @ 20 Steps, CFG 4: ~20 secs
 - Z-Image Turbo @ 8 Steps: ~10 secs
 - Flux Klein 9B (INT8-ConvRot) @ 4 Steps: ~9 secs
 - Flux Klein 9B Editing (INT8-ConvRot) @ 4 Steps: ~15 secs
