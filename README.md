@@ -157,24 +157,19 @@ You will also see some warnings on the console, these are normal.
 All subsequent generations use the cached compiled code and run at full speed. 
 Compilation is transparent — no configuration needed.
 
-### Troubleshooting: `InductorError` / `Python.h: No such file or directory`
+Below a short list of what you can expect in terms of perfomance. The times reported are after a first warmup run.
 
-If the first generation aborts with an `InductorError` wrapping a `gcc` failure
-that references `-I/usr/include/python3.13`, the venv was built against a
-**system** Python 3.13 whose development headers are not installed. Triton
-JIT-compiles its HIP driver module at runtime and needs `Python.h`.
+### Strix Halo (1024x768)
 
-`thenoise.sh` avoids this by passing `--managed-python`, so uv uses its own
-standalone CPython build (which always ships headers). If you have a venv
-created before that fix, rebuild it:
-
-```bash
-rm -rf .venv
-./thenoise.sh --help
-```
-
-Installing your distro's `python3.13-dev` package also works, if you would
-rather keep the system interpreter.
+- Krea 2 Turbo (BF16) @ 8 Steps: ~26 secs
+- Krea 2 Turbo (INT8-ConvRot) @ 8 Steps: ~19 secs
+- Anima Turbo @ 8 Steps: ~5 secs
+- Anima Base @ 8 Steps, CFG 4: ~20 secs
+- Z-Image Turbo @ 8 Steps: ~10 secs
+- Flux Klein 9B (INT8-ConvRot) @ 4 Steps: ~9 secs
+- Flux Klein 9B Editing (INT8-ConvRot) @ 4 Steps: ~15 secs
+- Qwen Image Edit 2511 (BF16) @ 4 Steps: ~8 secs
+- Qwen Image Edit 2511 Editing (BF16) @ 4 Steps: ~19 secs
 
 ---
 
@@ -308,31 +303,13 @@ You may provide one or many reference images. Without an explicit `width`/`heigh
 
 ### Serve a model over HTTP
 
-Anima (matches the model downloaded in [Setup](#setup)):
-
-```bash
-./thenoise.sh serve \
-  --dit ./models/anima/split_files/diffusion_models/anima-turbo-v1.0.safetensors \
-  --vae ./models/anima/split_files/vae/qwen_image_vae.safetensors \
-  --text-encoder ./models/anima/split_files/text_encoders/qwen_3_06b_base.safetensors \
-  --host 127.0.0.1 --port 8000
-```
-
-Krea 2:
+Example using Krea 2:
 
 ```bash
 ./thenoise.sh serve \
   --dit ./models/krea2/diffusion_models/krea2_turbo_bf16.safetensors \
   --vae ./models/krea2/vae/qwen_image_vae.safetensors \
   --text-encoder ./models/krea2/text_encoders/qwen3vl_4b_bf16.safetensors \
-  --host 127.0.0.1 --port 8000
-```
-
-```bash
-./thenoise.sh serve \
-  --dit ./models/zimage/split_files/diffusion_models/z_image_turbo_bf16.safetensors \
-  --vae ./models/zimage/split_files/vae/ae.safetensors \
-  --text-encoder ./models/zimage/split_files/text_encoders/qwen_3_4b.safetensors \
   --host 127.0.0.1 --port 8000
 ```
 
