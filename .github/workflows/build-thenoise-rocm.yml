@@ -33,7 +33,7 @@ on:
         type: boolean
 
 env:
-  GFX_TARGETS: ${{ github.event.inputs.gfx_target || 'gfx1151,gfx1150,gfx1152' }}
+  GFX_TARGETS: ${{ github.event.inputs.gfx_target || 'gfx1151,gfx1150,gfx1152,gfx103X,gfx110X,gfx120X' }}
 
 jobs:
   prepare-matrix:

@@ -1,86 +1,84 @@
-"""Runtime tests using a fake model class (no torch adapters, no real weights)."""
+"""Runtime tests using fake catalog entries (no adapters, no real weights)."""
 from __future__ import annotations
 
-import types
+import pytest
 
-from thenoise.runtime import Settings, ModelPaths, NotLoadedError, Runtime
-
-
-def _runtime_with_fake_model(monkeypatch):
-    import thenoise.models as dm
-
-    constructed = []
-
-    class FakeModel:
-        name = "fake"
-
-        def __init__(self, **kwargs):
-            constructed.append(kwargs)
-
-    monkeypatch.setattr(dm, "MODEL_CATALOG", [FakeModel])
-    monkeypatch.setattr(dm, "resolve", lambda path: FakeModel)
-    return Runtime(Settings()), constructed
+import thenoise.models as model_catalog
+from thenoise.runtime import ModelPaths, NotLoadedError, Runtime, Settings
 
 
-def test_empty_runtime(monkeypatch):
-    runtime, _ = _runtime_with_fake_model(monkeypatch)
+@pytest.fixture
+def catalog(monkeypatch, fake_model_cls):
+    """Replace the model catalog with a single fake entry and record construction."""
+
+    def install(**attrs):
+        constructed: list = []
+        cls = fake_model_cls(constructed=constructed, **attrs)
+        monkeypatch.setattr(model_catalog, "MODEL_CATALOG", [cls])
+        monkeypatch.setattr(model_catalog, "resolve", lambda path: cls)
+        return constructed
+
+    return install
+
+
+def test_empty_runtime(catalog):
+    catalog()
+    runtime = Runtime(Settings())
     assert runtime.available() == []
     assert runtime.model_capabilities() == {}
-    try:
-        runtime.model
-        assert False, "expected NotLoadedError"
-    except NotLoadedError:
-        pass
+    with pytest.raises(NotLoadedError):
+        _ = runtime.model
+    with pytest.raises(NotLoadedError):
+        _ = runtime.model_name
+    assert runtime.pipeline is None
 
 
-def test_model_capabilities_reports_supports_edit(monkeypatch):
-    import thenoise.models as dm
+def test_load_resolves_the_model_from_the_dit(catalog):
+    constructed = catalog()
+    runtime = Runtime(Settings())
+    runtime.load(ModelPaths("dit", "vae", "te"))
 
-    class FakeEditModel:
-        name = "fake"
-        supports_edit = True
-        def __init__(self, **kwargs):
-            pass
+    assert runtime.available() == ["fake"]
+    assert runtime.model_name == "fake"
+    config = constructed[0]["config"]
+    assert (config.dit_path, config.vae_path, config.text_encoder_path) == ("dit", "vae", "te")
+    assert runtime.pipeline is not None
 
-    monkeypatch.setattr(dm, "MODEL_CATALOG", [FakeEditModel])
-    monkeypatch.setattr(dm, "resolve", lambda path: FakeEditModel)
+
+def test_model_capabilities_reports_supports_edit(catalog):
+    catalog(supports_edit=True)
     runtime = Runtime(Settings())
     runtime.load(ModelPaths("dit", "vae", "te"))
     assert runtime.model_capabilities() == {"supports_edit": True}
 
 
-def test_load_resolves_model_from_dit(monkeypatch):
-    runtime, constructed = _runtime_with_fake_model(monkeypatch)
+def test_loading_swaps_the_single_resident_model(catalog):
+    constructed = catalog()
+    runtime = Runtime(Settings())
     runtime.load(ModelPaths("dit", "vae", "te"))
-    assert runtime.available() == ["fake"]
-    assert runtime.model_name == "fake"
-    assert constructed[0]["config"].dit_path == "dit"
-    assert runtime.pipeline is not None
-
-
-def test_load_swaps_single_model(monkeypatch):
-    runtime, constructed = _runtime_with_fake_model(monkeypatch)
-    runtime.load(ModelPaths("dit", "vae", "te"))
-    # Loading a second model swaps (unloads) the first -- still one resident.
+    # Loading a second model unloads the first -- still exactly one resident.
     runtime.load(ModelPaths("dit2", "vae2", "te2"))
+
     assert runtime.available() == ["fake"]
     assert len(constructed) == 2
     assert constructed[1]["config"].dit_path == "dit2"
 
 
-def test_upscaler_dir_is_server_config(monkeypatch, tmp_path):
-    """upscaler_dir comes from Settings (server config), not ModelPaths."""
-    import thenoise.models as dm
+def test_load_passes_device_offload_device_and_lora_dir(catalog):
+    constructed = catalog()
+    runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
+    runtime.load(ModelPaths("dit", "vae", "te", lora_dir="/loras"))
 
-    class FakeModel:
-        name = "fake"
-        def __init__(self, **kwargs):
-            pass
+    config = constructed[0]["config"]
+    assert (config.device, config.offload_device, config.lora_dir) == ("cpu", "cpu", "/loras")
 
-    monkeypatch.setattr(dm, "MODEL_CATALOG", [FakeModel])
-    monkeypatch.setattr(dm, "resolve", lambda path: FakeModel)
 
+def test_upscaler_dir_is_server_config(catalog, tmp_path):
+    """``upscaler_dir`` comes from ``Settings`` (server config), not ``ModelPaths``."""
+    catalog()
     runtime = Runtime(Settings(upscaler_dir=str(tmp_path)))
     assert runtime.pixel_upscalers.upscaler_dir == str(tmp_path)
+
     runtime.load(ModelPaths("dit", "vae", "te"))
-    assert runtime.pipeline is not None
+    # The pipeline shares the runtime's single upscaler pool (no second copy).
+    assert runtime.pipeline._pixel_upscalers is runtime.pixel_upscalers

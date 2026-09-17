@@ -10,19 +10,9 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from thenoise.dit.quantized import replace_linears
+from conftest import comfy_quant, write_safetensors
+from thenoise.dit.quantized import QuantizedLinear, replace_linears
 from thenoise.utils.loader import load_text_encoder_weights
-
-
-def _comfy_quant(convrot=True, groupsize=256):
-    """Build a ``comfy_quant`` marker tensor like ComfyUI's INT8 exporter."""
-    import json
-
-    conf = {"convrot": bool(convrot), "per_row": True}
-    if convrot:
-        conf["convrot_groupsize"] = int(groupsize)
-    data = json.dumps(conf).encode("utf-8")
-    return torch.tensor(list(data), dtype=torch.uint8)
 
 
 class _FakeLayer(nn.Module):
@@ -56,12 +46,6 @@ def _build_model():
     return model
 
 
-def _write(path, tensors):
-    from safetensors.torch import save_file
-
-    save_file(tensors, str(path))
-
-
 def _complete_bf16_state_dict(model):
     """Return a full bf16 state dict so the strict BF16 load passes."""
     return {k: v.to(torch.bfloat16) for k, v in model.state_dict().items()}
@@ -71,8 +55,6 @@ def _complete_bf16_state_dict(model):
 
 
 def test_replace_linears_swaps_nn_linear_instances():
-    from thenoise.dit.quantized import QuantizedLinear
-
     model = _FakeQwen()
     # Before the swap the linears are plain nn.Linear.
     assert isinstance(model.model.layers[0].q_proj, nn.Linear)
@@ -95,8 +77,6 @@ def test_replace_linears_preserves_bias():
 
     m = _HasBias()
     replace_linears(m)
-    from thenoise.dit.quantized import QuantizedLinear
-
     assert isinstance(m.proj, QuantizedLinear)
     assert m.proj.bias is not None
 
@@ -106,10 +86,10 @@ def test_replace_linears_preserves_bias():
 
 def test_load_text_encoder_weights_quantized_int8(tmp_path):
     p = tmp_path / "te_int8.safetensors"
-    _write(p, {
+    write_safetensors(p, {
         "model.layers.0.q_proj.weight": torch.randint(-127, 127, (64, 64), dtype=torch.int8),
         "model.layers.0.q_proj.weight_scale": torch.rand(64, 1),
-        "model.layers.0.q_proj.comfy_quant": _comfy_quant(convrot=True, groupsize=64),
+        "model.layers.0.q_proj.comfy_quant": comfy_quant(groupsize=64),
         "model.embed_tokens.weight": torch.randn(128, 64, dtype=torch.bfloat16),
         "model.norm.weight": torch.randn(64, dtype=torch.bfloat16),
         "model.norm.bias": torch.randn(64, dtype=torch.bfloat16),
@@ -129,7 +109,7 @@ def test_load_text_encoder_weights_quantized_int8(tmp_path):
 
 def test_load_text_encoder_weights_quantized_fp8(tmp_path):
     p = tmp_path / "te_fp8.safetensors"
-    _write(p, {
+    write_safetensors(p, {
         "model.layers.0.k_proj.weight": torch.randn(64, 64, dtype=torch.bfloat16).to(torch.float8_e4m3fn),
         "model.layers.0.k_proj.weight_scale": torch.tensor(0.5, dtype=torch.float32),
         "model.layers.0.k_proj.comfy_quant": torch.zeros(8, dtype=torch.uint8),
@@ -147,7 +127,7 @@ def test_load_text_encoder_weights_bf16(tmp_path):
     model = _build_model()
     sd = _complete_bf16_state_dict(model)
     p = tmp_path / "te_bf16.safetensors"
-    _write(p, sd)
+    write_safetensors(p, sd)
 
     load_text_encoder_weights(model, str(p), device="cpu", dtype=torch.bfloat16)
     # BF16 checkpoint keeps the QuantizedLinear in its plain (un-quantized) mode.
@@ -173,7 +153,7 @@ def test_load_text_encoder_weights_drops_tied_lm_head(tmp_path):
     del model.lm_head  # unused (we consume .model only)
 
     p = tmp_path / "te_lmhead.safetensors"
-    _write(p, sd)
+    write_safetensors(p, sd)
 
     load_text_encoder_weights(model, str(p), device="cpu", dtype=torch.bfloat16)
     assert model.model.layers[0].q_proj.weight.shape == (64, 64)
@@ -191,10 +171,10 @@ def test_load_text_encoder_weights_model_prefix_key_map(tmp_path):
             self.norm = nn.LayerNorm(64)
 
     p = tmp_path / "te_prefix.safetensors"
-    _write(p, {
+    write_safetensors(p, {
         "model.layers.0.q_proj.weight": torch.randint(-127, 127, (64, 64), dtype=torch.int8),
         "model.layers.0.q_proj.weight_scale": torch.rand(64, 1),
-        "model.layers.0.q_proj.comfy_quant": _comfy_quant(),
+        "model.layers.0.q_proj.comfy_quant": comfy_quant(),
         "model.embed_tokens.weight": torch.randn(128, 64, dtype=torch.bfloat16),
     })
     model = _Bare()

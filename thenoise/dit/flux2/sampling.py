@@ -15,24 +15,19 @@ DiT's 1D token sequence and back:
 
 from __future__ import annotations
 
-import math
-
 import torch
 from einops import rearrange
+
+from thenoise.utils.math import generalized_time_shift
+from thenoise.utils.positions import grid_from_axes
 
 __all__ = [
     "get_schedule",
     "compute_empirical_mu",
-    "generalized_time_snr_shift",
     "prc_img",
     "prc_txt",
     "scatter_ids",
 ]
-
-
-def generalized_time_snr_shift(t: torch.Tensor, mu: float, sigma: float) -> torch.Tensor:
-    """Generalized time/SNR shift: ``exp(mu) / (exp(mu) + (1/t - 1)^sigma)``."""
-    return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
 
 
 def compute_empirical_mu(image_seq_len: int, num_steps: int) -> float:
@@ -62,7 +57,7 @@ def get_schedule(num_steps: int, image_seq_len: int, flow_shift: float | None = 
     if flow_shift is not None:
         timesteps = (timesteps * flow_shift) / (1 + (flow_shift - 1) * timesteps)
     else:
-        timesteps = generalized_time_snr_shift(timesteps, mu, 1.0)
+        timesteps = generalized_time_shift(timesteps, mu, 1.0)
     return timesteps.tolist()
 
 
@@ -74,13 +69,15 @@ def prc_img(x: torch.Tensor, t_coord: torch.Tensor | None = None) -> tuple[torch
     """
     h = x.shape[-2]
     w = x.shape[-1]
-    coords = {
-        "t": (torch.arange(1) if t_coord is None else t_coord).to(x.device),
-        "h": torch.arange(h, device=x.device),
-        "w": torch.arange(w, device=x.device),
-        "l": torch.arange(1, device=x.device),
-    }
-    x_ids = torch.cartesian_prod(coords["t"], coords["h"], coords["w"], coords["l"])
+    t = (torch.arange(1) if t_coord is None else t_coord).to(x.device)
+    x_ids = grid_from_axes(
+        [
+            t,
+            torch.arange(h, device=x.device),
+            torch.arange(w, device=x.device),
+            torch.arange(1, device=x.device),
+        ]
+    )
     x = rearrange(x, "c h w -> (h w) c") if x.ndim == 3 else rearrange(x, "b c h w -> b (h w) c")
     if x.ndim == 3:  # after rearrange
         x_ids = x_ids.unsqueeze(0).expand(x.shape[0], -1, -1)
@@ -93,13 +90,15 @@ def prc_txt(x: torch.Tensor, t_coord: torch.Tensor | None = None) -> tuple[torch
     Returns ``(x, ids [B, L, 4])``; the text tokens are unchanged.
     """
     _l = x.shape[-2]
-    coords = {
-        "t": (torch.arange(1) if t_coord is None else t_coord).to(x.device),
-        "h": torch.arange(1, device=x.device),  # dummy
-        "w": torch.arange(1, device=x.device),  # dummy
-        "l": torch.arange(_l, device=x.device),
-    }
-    x_ids = torch.cartesian_prod(coords["t"], coords["h"], coords["w"], coords["l"])
+    t = (torch.arange(1) if t_coord is None else t_coord).to(x.device)
+    x_ids = grid_from_axes(
+        [
+            t,
+            torch.arange(1, device=x.device),  # dummy
+            torch.arange(1, device=x.device),  # dummy
+            torch.arange(_l, device=x.device),
+        ]
+    )
     if x.ndim == 3:
         x_ids = x_ids.unsqueeze(0).expand(x.shape[0], -1, -1)
     return x, x_ids.to(x.device)

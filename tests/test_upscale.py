@@ -31,27 +31,38 @@ def _make_controller(upscaler_scales=None):
 
 
 # ------------------------------------------------------------- manager: scale
-def test_pixel_upscaler_scale_mapping_with_4x():
-    c = _make_controller(upscaler_scales={"x4": 4})
-    # refined: latent gives 2x, pixel upscaler 4x only above the latent 2x.
-    assert c._pixel_upscaler_scale_for(1.0, "refined", "x4") == 0
-    assert c._pixel_upscaler_scale_for(2.0, "refined", "x4") == 0
-    assert c._pixel_upscaler_scale_for(2.5, "refined", "x4") == 4
-    assert c._pixel_upscaler_scale_for(8.0, "refined", "x4") == 4
-    assert c._pixel_upscaler_scale_for(0.5, "refined", "x4") == 0
-    # no-refiner: no latent multiplier, always pixel upscaler for any upscale.
-    assert c._pixel_upscaler_scale_for(1.5, "no-refiner", "x4") == 4
-    assert c._pixel_upscaler_scale_for(4.0, "no-refiner", "x4") == 4
-    assert c._pixel_upscaler_scale_for(0.5, "no-refiner", "x4") == 0
-
-
-def test_pixel_upscaler_scale_mapping_with_2x():
-    c = _make_controller(upscaler_scales={"x2": 2})
-    assert c._pixel_upscaler_scale_for(2.0, "refined", "x2") == 0
-    assert c._pixel_upscaler_scale_for(2.5, "refined", "x2") == 2
-    assert c._pixel_upscaler_scale_for(4.0, "refined", "x2") == 2
-    assert c._pixel_upscaler_scale_for(1.5, "no-refiner", "x2") == 2
-    assert c._pixel_upscaler_scale_for(2.0, "no-refiner", "x2") == 2
+@pytest.mark.parametrize(
+    "model_scale,upscaler_scale,factor,upscale_type,expected",
+    [
+        # refined: the latent path gives 2x, so the pixel upscaler is only needed
+        # above that.
+        (2, 4, 1.0, "refined", 0),
+        (2, 4, 2.0, "refined", 0),
+        (2, 4, 2.5, "refined", 4),
+        (2, 4, 8.0, "refined", 4),
+        (2, 4, 0.5, "refined", 0),  # sub-unit factor: no upscale at all
+        # no-refiner: no latent multiplier, so any upscale needs the pixel model.
+        (2, 4, 1.5, "no-refiner", 4),
+        (2, 4, 4.0, "no-refiner", 4),
+        (2, 4, 0.5, "no-refiner", 0),
+        (2, 2, 2.0, "refined", 0),
+        (2, 2, 2.5, "refined", 2),
+        (2, 2, 4.0, "refined", 2),
+        (2, 2, 1.5, "no-refiner", 2),
+        (2, 2, 2.0, "no-refiner", 2),
+        # A model with a bigger latent scale (4) moves the refined threshold.
+        (4, 4, 4.0, "refined", 0),
+        (4, 4, 4.5, "refined", 4),
+        # No pixel upscaler selected -> never applied.
+        (2, 0, 4.0, "refined", 0),
+    ],
+)
+def test_pixel_upscaler_scale_mapping(model_scale, upscaler_scale, factor, upscale_type, expected):
+    scales = {} if not upscaler_scale else {"up": upscaler_scale}
+    controller = _make_controller(scales)
+    controller.model.UPSCALE_SCALE = model_scale
+    name = "up" if upscaler_scale else None
+    assert controller._pixel_upscaler_scale_for(factor, upscale_type, name) == expected
 
 
 # ------------------------------------------------------------- controller: resolve
@@ -130,37 +141,27 @@ def _make_upscale_controller(upscaler_dir="/tmp", scales=None):
     return PixelUpscaleController(m)
 
 
-def test_upscale_controller_rejects_bad_factor(tmp_path):
-    (tmp_path / "x4.safetensors").write_text("x")
-    c = _make_upscale_controller(upscaler_dir=str(tmp_path), scales={"x4": 4})
-    # factor > native scale -> reject
-    with pytest.raises(ValueError, match="upscale_factor"):
-        c.upscale(object(), 5, "x4")
-    # factor 0.5 (a positive sub-unit factor, not the 0 sentinel) -> reject
-    with pytest.raises(ValueError, match="upscale_factor"):
-        c.upscale(object(), 0.5, "x4")
-
-
-def test_upscale_controller_zero_factor_uses_detected_scale(tmp_path, monkeypatch):
+def test_upscale_controller_factor_validation(tmp_path, monkeypatch):
+    """The 0.0 sentinel means "native scale"; anything outside [1, scale] is out."""
     (tmp_path / "x4.safetensors").write_text("x")
     c = _make_upscale_controller(upscaler_dir=str(tmp_path), scales={"x4": 4})
 
-    # Stub the pixel conversion so we can observe whether validation passed
-    # (the controller would otherwise try to load the model onto a device).
+    # Stub the pixel conversion so we can observe whether validation passed (the
+    # controller would otherwise try to load the model onto a device).
     def _boom(_img):
         raise RuntimeError("reached-pixels")
 
     monkeypatch.setattr("thenoise.upscale_controller.pil_to_pixels", _boom)
 
-    # 0.0 sentinel resolves to the detected scale (4) and passes validation,
-    # so the flow proceeds past validation to the pixel conversion step.
+    # 0.0 resolves to the detected scale (4) and passes validation, so the flow
+    # proceeds past validation into the pixel conversion.
     with pytest.raises(RuntimeError, match="reached-pixels"):
         c.upscale(object(), 0.0, "x4")
-    # a positive sub-unit factor is still rejected before reaching pixels.
-    with pytest.raises(ValueError, match="upscale_factor"):
-        c.upscale(object(), 0.5, "x4")
-    with pytest.raises(ValueError, match="upscale_factor"):
-        c.upscale(object(), 5.0, "x4")
+    # A factor above the native scale, and a positive sub-unit factor, are both
+    # rejected before any pixel work.
+    for bad in (5, 5.0, 0.5):
+        with pytest.raises(ValueError, match="upscale_factor"):
+            c.upscale(object(), bad, "x4")
 
 
 def test_upscale_controller_attaches_resolved_factor(tmp_path, monkeypatch):

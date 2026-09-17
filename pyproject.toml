@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "thenoise"
-version = "0.5.1"
+version = "0.7.2"
 description = "Diffusion inference engine targeting ROCm"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,7 +20,7 @@ dependencies = [
     "einops>=0.7.0",
     "accelerate>=1.6.0",
     "pillow>=11.3.0",
-    "comfy-kitchen>=0.2.31",
+    "comfy-kitchen>=0.2.34",
     "numpy",
     "tqdm",
 ]
@@ -30,11 +30,15 @@ dev = ["pytest"]
 # Download helpers in scripts/ (not needed at runtime).
 scripts = ["huggingface-hub>=0.34.3"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.setuptools]
 packages = [
     "thenoise",
     "thenoise.dit",
     "thenoise.dit.krea2",
+    "thenoise.dit.qwen_image",
     "thenoise.dit.anima",
     "thenoise.dit.zimage",
     "thenoise.dit.flux2",
@@ -44,14 +48,13 @@ packages = [
     "thenoise.ui",
     "thenoise.upscale",
     "thenoise.utils",
+    "thenoise.utils.text_encoder",
     "thenoise.vae",
 ]
 
 [tool.setuptools.package-data]
-# Tokenizer configs.
-"thenoise.dit.anima" = ["configs/**/*"]
-"thenoise.dit.zimage" = ["configs/**/*"]
-"thenoise.dit.krea2" = ["configs/**/*"]
+# Vendored text-encoder tokenizer configs.
+"thenoise.utils.text_encoder" = ["configs/**/*"]
 # Committed Sesqui latent upscaler weights.
 "thenoise.upscale" = ["weights/**/*"]
 # Web UI

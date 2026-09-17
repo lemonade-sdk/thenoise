@@ -16,6 +16,7 @@ from thenoise.models.base import (
 )
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.math import round_up
+from thenoise.utils.text_encoder import load_qwen3_text_encoder, load_t5_tokenizer
 from thenoise.vae import load_qwen_vae
 
 logger = logging.getLogger(__name__)
@@ -60,18 +61,17 @@ class AnimaModel(DiffusionModel):
         self.dit = anima_utils.load_anima_model(
             self.offload_device,
             config.dit_path,
-            loading_device=self.offload_device,
             dit_weight_dtype=config.dtype,
         )
         self.dit.eval().requires_grad_(False)
 
         # Text encoder (Qwen3-0.6B) + tokenizers.
         logger.info("Loading Anima text encoder from %s", config.text_encoder_path)
-        self.text_encoder, self.qwen3_tokenizer = anima_utils.load_qwen3_text_encoder(
+        self.text_encoder, self.qwen3_tokenizer = load_qwen3_text_encoder(
             config.text_encoder_path, dtype=config.dtype, device=self.offload_device
         )
         self.text_encoder.eval().requires_grad_(False)
-        self.t5_tokenizer = anima_utils.load_t5_tokenizer(None)
+        self.t5_tokenizer = load_t5_tokenizer(None)
 
         # Tokenize / encode strategies (called directly, not through the global registry).
         self.tokenize_strategy = AnimaTokenizeStrategy(
@@ -84,7 +84,7 @@ class AnimaModel(DiffusionModel):
 
         # Qwen-Image VAE (single-frame decode).
         self.vae = (
-            load_qwen_vae(self.vae_path, device=self.device, disable_mmap=True)
+            load_qwen_vae(self.vae_path, device=self.device)
             .to(self.dtype)
             .eval()
             .requires_grad_(False)
@@ -157,7 +157,12 @@ class AnimaModel(DiffusionModel):
         params: SamplingParams,
     ) -> torch.Tensor:
         # The Anima DiT expects a frame axis: [B, C, H, W] -> [B, C, 1, H, W].
-        return latents.unsqueeze(2)
+        # Precompute the video RoPE (cos/sin) once per prompt; it depends only on
+        # the (T, H, W) shape and is reused across every denoise step.
+        latents = latents.unsqueeze(2)
+        self.dit.pos_embedder.clear()
+        self.dit.pos_embedder.store("emb", latents.shape, latents.device, dtype=self.dtype)
+        return latents
 
     def schedule(self, params: SamplingParams) -> list[Step]:
         dev = torch.device(self.device)

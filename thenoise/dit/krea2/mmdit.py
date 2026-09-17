@@ -7,35 +7,19 @@ with the combined sequence ordered image-first so that valid tokens form a conti
 prefix per sample — this lets the shared attention machinery handle text padding.
 """
 
-import math
-from dataclasses import dataclass
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from dataclasses import dataclass
 from einops import rearrange
 from torch import Tensor
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention as common_attention
-
-
-def rope(pos: Tensor, dim: int, theta: float = 1e4, ntk: float = 1.0) -> Tensor:
-    scale = torch.arange(0, dim, 2, dtype=torch.float32, device=pos.device) / dim
-    omega = 1.0 / ((theta * ntk) ** scale)
-    out = torch.einsum("...n,d->...nd", pos, omega)
-    out = torch.stack([torch.cos(out), -torch.sin(out), torch.sin(out), torch.cos(out)], dim=-1)
-    out = rearrange(out, "b n d (i j) -> b n d i j", i=2, j=2)
-    return out
-
-
-def ropeapply(xq: Tensor, xk: Tensor, freqs: Tensor) -> tuple[Tensor, Tensor]:
-    xq_ = xq.reshape(*xq.shape[:-1], -1, 1, 2)
-    xk_ = xk.reshape(*xk.shape[:-1], -1, 1, 2)
-    freqs = freqs[:, None, :, :, :]
-    xq_ = freqs[..., 0] * xq_[..., 0] + freqs[..., 1] * xq_[..., 1]
-    xk_ = freqs[..., 0] * xk_[..., 0] + freqs[..., 1] * xk_[..., 1]
-    return xq_.reshape(*xq.shape), xk_.reshape(*xk.shape)
+from thenoise.utils.qk_norm import QKNorm
+from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
+from thenoise.utils.rms_norm import RMSNorm
+from thenoise.utils.timestep import timestep_embedding
 
 
 def temb(
@@ -43,15 +27,10 @@ def temb(
     dim: int,
     period: float = 1e4,
     tfactor: float = 1e3,
-    device: torch.device = None,
-    dtype: torch.dtype = None,
 ) -> Tensor:
-    half = dim // 2
-    freqs = torch.exp(-math.log(period) * torch.arange(half, dtype=torch.float32, device=device) / half)
-    # t: (B,) -> args: (B, 1, half), so the embedding broadcasts as a per-sample vec.
-    args = (t.float() * tfactor)[:, None, None] * freqs
-    sin, cos = torch.sin(args), torch.cos(args)
-    return torch.cat((cos, sin), dim=-1).to(dtype=dtype)
+    # Shared sinusoidal embedding; K2 keeps the extra leading dim so the result
+    # broadcasts as a per-sample vector in the modulation blocks.
+    return timestep_embedding(t, dim, max_period=period, time_factor=tfactor).unsqueeze(1)
 
 
 @dataclass
@@ -97,41 +76,6 @@ class DoubleSharedModulation(torch.nn.Module):
         return prescale, preshift, pregate, postscale, postshift, postgate
 
 
-class PositionalEncoding(torch.nn.Module):
-    def __init__(self, dim, axdims: list[int], theta: float = 1e2, ntk: float = 1.0):
-        super().__init__()
-        self.axdims = axdims  # how to split the head dimension across the position axes
-        self.theta = theta
-        self.ntk = ntk
-
-    def forward(self, pos: Tensor) -> Tensor:
-        return torch.cat(
-            [rope(pos[..., i], d, self.theta, self.ntk) for i, d in enumerate(self.axdims)],
-            dim=-3,
-        )
-
-
-class QKNorm(torch.nn.Module):
-    def __init__(self, dim: int):
-        super().__init__()
-        self.qnorm = RMSNorm(dim)
-        self.knorm = RMSNorm(dim)
-
-    def forward(self, q: Tensor, k: Tensor, v: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        return self.qnorm(q), self.knorm(k), v
-
-
-class RMSNorm(torch.nn.Module):
-    def __init__(self, features: int, eps: float = 1e-05, device: torch.device = None):
-        super().__init__()
-        self.features = features
-        self.eps = eps
-        self.scale = torch.nn.Parameter(torch.zeros(features, device=device, dtype=torch.float32))
-
-    def forward(self, x: Tensor) -> Tensor:
-        return F.rms_norm(x, (self.features,), eps=self.eps, weight=(self.scale + 1.0).to(x.dtype))
-
-
 class SwiGLU(torch.nn.Module):
     def __init__(self, features: int, multiplier: int, bias: bool = False, multiple: int = 128):
         super().__init__()
@@ -158,7 +102,7 @@ class Attention(torch.nn.Module):
         self.wk = QuantizedLinear(dim, self.headdim * self.kvheads, bias=bias)
         self.wv = QuantizedLinear(dim, self.headdim * self.kvheads, bias=bias)
         self.gate = QuantizedLinear(dim, dim, bias=bias)
-        self.qknorm = QKNorm(self.headdim)
+        self.qk_norm = QKNorm(self.headdim)
         self.wo = QuantizedLinear(dim, dim, bias=bias)
 
     def forward(self, qkv: Tensor, freqs: Tensor | None = None, attn_params: AttentionParams | None = None) -> Tensor:
@@ -171,13 +115,9 @@ class Attention(torch.nn.Module):
             rearrange(v, "B L (H D) -> B H L D", H=self.kvheads),
         )
 
-        q, k, v = self.qknorm(q, k, v)
+        q, k = self.qk_norm(q, k)
         if freqs is not None:
-            q, k = ropeapply(q, k, freqs)
-
-        # The shared attention expects [B, L, H, D] and returns [B, L, H*D]. GQA (heads != kvheads)
-        # is detected and handled inside it via k/v head expansion for SDPA.
-        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+            q, k = apply_rope(q, k, freqs)
         x = common_attention([q, k, v], attn_params=attn_params)
         out = self.wo(x * F.sigmoid(gate))
 
@@ -296,7 +236,7 @@ class SingleStreamDiT(nn.Module):
         assert sum(axes) == headdim, f"sum(axes) = {sum(axes)}, headdim = {headdim}"
         assert all(a % 2 == 0 for a in axes), f"axes = {axes}"
 
-        self.posemb = PositionalEncoding(config.features, axes, theta=config.theta, ntk=1.0)
+        self.posemb = RopeCache(matrix_rope(axes, config.theta))
         self.first = QuantizedLinear(config.channels * config.patch**2, config.features, bias=True)
 
         self.blocks = nn.ModuleList(
@@ -356,15 +296,14 @@ class SingleStreamDiT(nn.Module):
         img: Tensor,
         context: Tensor,
         t: Tensor,
-        pos: Tensor,
         mask: Tensor | None,
         freqs: Tensor,
     ) -> Tensor:
         img = self.first(img)
-        t = self.tmlp(temb(t, self.config.tdim, device=img.device, dtype=img.dtype))
+        t = self.tmlp(temb(t, self.config.tdim))
         tvec = self.tproj(t)
 
-        # `mask`/`pos` arrive in image-first order: [img (all valid), text (valid prefix + pad)].
+        # `mask` arrives in image-first order: [img (all valid), text (valid prefix + pad)].
         # The text-only key-padding mask is therefore the tail beyond the image tokens.
         imglen = img.shape[1]
         txtmask = mask[:, imglen:]  # (B, txt_len) bool
@@ -380,7 +319,6 @@ class SingleStreamDiT(nn.Module):
         padlen = (-fulllen) % 256
         if padlen > 0:
             combined = F.pad(combined, (0, 0, 0, padlen))
-            pos = F.pad(pos, (0, 0, 0, padlen))
             txtmask = F.pad(txtmask, (0, padlen), value=False)
             freqs = F.pad(freqs, (0, 0, 0, 0, 0, 0, 0, padlen, 0, 0))
 

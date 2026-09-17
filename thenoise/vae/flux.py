@@ -184,7 +184,6 @@ class AutoencoderKLFlux(nn.Module):
 def load_flux_vae(
     vae_path: str,
     device: Union[str, torch.device],
-    disable_mmap: bool = False,
     dtype: Optional[torch.dtype] = None,
 ) -> AutoencoderKLFlux:
     """Load the Flux VAE decoder weights from ``vae_path`` (e.g. flux-dev/ae.safetensors).
@@ -194,7 +193,7 @@ def load_flux_vae(
     """
     device = torch.device(device)
     logger.info("Loading Flux VAE from %s", vae_path)
-    state_dict = load_safetensors(vae_path, device=device, disable_mmap=disable_mmap)
+    state_dict = load_safetensors(vae_path, device=device)
 
     vae = AutoencoderKLFlux()
     # Keep only the decoder side and strip the ``decoder.`` prefix so keys line up

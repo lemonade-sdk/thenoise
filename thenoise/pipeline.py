@@ -645,8 +645,8 @@ class PipelineController:
         noised = strength * noise + (1.0 - strength) * z
 
         # NOTE: this refine pass runs WITHOUT the reference image. ``ref`` is not
-        # forwarded, so ``prepare_latent`` stashes ``_ref_tokens``/``_ref_ids`` = None
-        # and the refine denoise is completely unconditioned on the edit reference.
+        # forwarded, so ``prepare_latent`` stashes ``_ref_tokens`` = None and the
+        # refine denoise is completely unconditioned on the edit reference.
         # For FluxKlein this is a deliberate simplification — in practice the
         # low-strength refine shows no visible ill effect — but keep it in mind if
         # the refine quality is ever revisited.

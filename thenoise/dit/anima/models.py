@@ -2,7 +2,7 @@
 # Original code: NVIDIA CORPORATION & AFFILIATES, licensed under Apache-2.0
 
 import math
-from typing import Any, Optional, Tuple, Union
+from typing import Any, Optional, Tuple
 
 import numpy as np
 import torch
@@ -13,8 +13,11 @@ import torch.nn.functional as F
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils import attention
-
+from thenoise.utils.qk_norm import QKNorm
+from thenoise.utils.rope import RopeCache, apply_rope_split_half, split_half_rope_1d, split_half_rope_3d
+from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.setup_logging import setup_logging
+from thenoise.utils.timestep import timestep_embedding
 
 setup_logging()
 import logging
@@ -22,109 +25,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-# Utility functions: RoPE for DiT
-def _rotate_half(x: torch.Tensor, interleaved: bool) -> torch.Tensor:
-    if not interleaved:
-        x1, x2 = torch.chunk(x, 2, dim=-1)
-        return torch.cat((-x2, x1), dim=-1)
-    x1 = x[:, :, :, ::2]
-    x2 = x[:, :, :, 1::2]
-    x_new = torch.stack((-x2, x1), dim=-1)
-    return x_new.view(x_new.shape[0], x_new.shape[1], x_new.shape[2], -1)
-
-
-def _apply_rotary_pos_emb_base(
-    t: torch.Tensor,
-    freqs: torch.Tensor,
-    start_positions: torch.Tensor = None,
-    tensor_format: str = "sbhd",
-    interleaved: bool = False,
-) -> torch.Tensor:
-    max_seq_len = freqs.shape[0]
-    cur_seq_len = t.shape[1] if tensor_format == "bshd" else t.shape[0]
-
-    if start_positions is not None:
-        max_offset = torch.max(start_positions)
-        assert max_offset + cur_seq_len <= max_seq_len, f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
-        freqs = torch.concatenate([freqs[i : i + cur_seq_len] for i in start_positions], dim=1)
-
-    assert cur_seq_len <= max_seq_len, f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
-    freqs = freqs[:cur_seq_len]
-
-    if tensor_format == "bshd":
-        freqs = freqs.transpose(0, 1)
-    cos_ = torch.cos(freqs).to(t.dtype)
-    sin_ = torch.sin(freqs).to(t.dtype)
-
-    rot_dim = freqs.shape[-1]
-    t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
-    t = (t * cos_) + (_rotate_half(t, interleaved) * sin_)
-    return torch.cat((t, t_pass), dim=-1)
-
-
-def apply_rotary_pos_emb(
-    t: torch.Tensor,
-    freqs: torch.Tensor,
-    tensor_format: str = "sbhd",
-    start_positions: Union[torch.Tensor, None] = None,
-    interleaved: bool = False,
-    fused: bool = False,
-    cu_seqlens: Union[torch.Tensor, None] = None,
-    cp_size: int = 1,
-) -> torch.Tensor:
-    assert not (cp_size > 1 and start_positions is not None), "start_positions != None with CP SIZE > 1 is not supported!"
-
-    assert tensor_format != "thd" or cu_seqlens is not None, "cu_seqlens must not be None when tensor_format is 'thd'."
-
-    assert fused == False
-
-    if tensor_format == "thd":
-        cu_seqlens = cu_seqlens // cp_size
-        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-        return torch.cat(
-            [
-                _apply_rotary_pos_emb_base(
-                    x.unsqueeze(1),
-                    freqs,
-                    start_positions=(start_positions[idx : idx + 1] if start_positions is not None else None),
-                    interleaved=interleaved,
-                )
-                for idx, x in enumerate(torch.split(t, seqlens))
-            ]
-        ).squeeze(1)
-
-    if tensor_format == "sbhd":
-        seqlen = t.size(0)
-    elif tensor_format == "bshd":
-        seqlen = t.size(1)
-    else:
-        raise ValueError(f"Unsupported tensor_format: {tensor_format}.")
-    return _apply_rotary_pos_emb_base(
-        t,
-        freqs,
-        start_positions,
-        tensor_format,
-        interleaved=interleaved,
-    )
-
-
 # Basic building blocks
-class RMSNorm(torch.nn.Module):
-    """RMS Normalization for DiT blocks."""
-
-    def __init__(self, dim: int, eps: float = 1e-5) -> None:
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def reset_parameters(self) -> None:
-        torch.nn.init.ones_(self.weight)
-
-    def _norm(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self._norm(x) * self.weight
 
 
 class GPT2FeedForward(nn.Module):
@@ -186,13 +87,9 @@ class Attention(nn.Module):
         self.context_dim = context_dim
 
         self.q_proj = QuantizedLinear(query_dim, inner_dim, bias=False)
-        self.q_norm = RMSNorm(self.head_dim, eps=1e-6)
-
         self.k_proj = QuantizedLinear(context_dim, inner_dim, bias=False)
-        self.k_norm = RMSNorm(self.head_dim, eps=1e-6)
-
         self.v_proj = QuantizedLinear(context_dim, inner_dim, bias=False)
-        self.v_norm = nn.Identity()
+        self.qk_norm = QKNorm(self.head_dim, eps=1e-6)
 
         self.output_proj = QuantizedLinear(inner_dim, query_dim, bias=False)
         self.output_dropout = nn.Dropout(dropout) if dropout > 1e-4 else nn.Identity()
@@ -212,31 +109,27 @@ class Attention(nn.Module):
         std = 1.0 / math.sqrt(self._inner_dim)
         torch.nn.init.trunc_normal_(self.output_proj.weight, std=std, a=-3 * std, b=3 * std)
 
-        for layer in self.q_norm, self.k_norm, self.v_norm:
-            if hasattr(layer, "reset_parameters"):
-                layer.reset_parameters()
+        self.qk_norm.reset_parameters()
 
     def compute_qkv(
         self,
         x: torch.Tensor,
         context: Optional[torch.Tensor] = None,
-        rope_emb: Optional[torch.Tensor] = None,
+        rope_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> tuple:
         q = self.q_proj(x)
         context = x if context is None else context
         k = self.k_proj(context)
         v = self.v_proj(context)
         q, k, v = map(
-            lambda t: t.reshape(*t.shape[:-1], self.n_heads, self.head_dim),
+            lambda t: t.reshape(*t.shape[:-1], self.n_heads, self.head_dim).transpose(1, 2),
             (q, k, v),
         )
 
-        q = self.q_norm(q)
-        k = self.k_norm(k)
-        v = self.v_norm(v)
+        q, k = self.qk_norm(q, k)
         if self.is_selfattn and rope_emb is not None:
-            q = apply_rotary_pos_emb(q, rope_emb, tensor_format=self.qkv_format, fused=False)
-            k = apply_rotary_pos_emb(k, rope_emb, tensor_format=self.qkv_format, fused=False)
+            q = apply_rope_split_half(q, *rope_emb)
+            k = apply_rope_split_half(k, *rope_emb)
 
         return q, k, v
 
@@ -245,10 +138,11 @@ class Attention(nn.Module):
         x: torch.Tensor,
         attn_params: attention.AttentionParams,
         context: Optional[torch.Tensor] = None,
-        rope_emb: Optional[torch.Tensor] = None,
+        rope_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         q, k, v = self.compute_qkv(x, context, rope_emb=rope_emb)
-        # return self.compute_attention(q, k, v)
+        # The shared attention helper consumes [B, H, L, D] directly (SDPA's native
+        # layout) and returns [B, L, H*D].
         qkv = [q, k, v]
         del q, k, v
         result = attention.attention(qkv, attn_params=attn_params)
@@ -271,102 +165,6 @@ class VideoPositionEmb(nn.Module):
 
     def generate_embeddings(self, B_T_H_W_C: torch.Size) -> Any:
         raise NotImplementedError
-
-
-class VideoRopePosition3DEmb(VideoPositionEmb):
-    """3D Rotary Position Embedding for video (T, H, W) dimensions."""
-
-    def __init__(
-        self,
-        *,
-        head_dim: int,
-        len_h: int,
-        len_w: int,
-        len_t: int,
-        h_extrapolation_ratio: float = 1.0,
-        w_extrapolation_ratio: float = 1.0,
-        t_extrapolation_ratio: float = 1.0,
-        **kwargs,
-    ):
-        del kwargs
-        super().__init__()
-        self.register_buffer("seq", torch.arange(max(len_h, len_w, len_t), dtype=torch.float))
-        self.max_h = len_h
-        self.max_w = len_w
-        self.max_t = len_t
-        dim = head_dim
-        dim_h = dim // 6 * 2
-        dim_w = dim_h
-        dim_t = dim - 2 * dim_h
-        assert dim == dim_h + dim_w + dim_t, f"bad dim: {dim} != {dim_h} + {dim_w} + {dim_t}"
-        self.register_buffer(
-            "dim_spatial_range",
-            torch.arange(0, dim_h, 2)[: (dim_h // 2)].float() / dim_h,
-            persistent=True,
-        )
-        self.register_buffer(
-            "dim_temporal_range",
-            torch.arange(0, dim_t, 2)[: (dim_t // 2)].float() / dim_t,
-            persistent=True,
-        )
-        self._dim_h = dim_h
-        self._dim_t = dim_t
-
-        self.h_ntk_factor = h_extrapolation_ratio ** (dim_h / (dim_h - 2))
-        self.w_ntk_factor = w_extrapolation_ratio ** (dim_w / (dim_w - 2))
-        self.t_ntk_factor = t_extrapolation_ratio ** (dim_t / (dim_t - 2))
-        self.reset_parameters()
-
-    def reset_parameters(self) -> None:
-        dim_h = self._dim_h
-        dim_t = self._dim_t
-
-        self.seq = torch.arange(max(self.max_h, self.max_w, self.max_t)).float().to(self.dim_spatial_range.device)
-        self.dim_spatial_range = torch.arange(0, dim_h, 2)[: (dim_h // 2)].float().to(self.dim_spatial_range.device) / dim_h
-        self.dim_temporal_range = torch.arange(0, dim_t, 2)[: (dim_t // 2)].float().to(self.dim_spatial_range.device) / dim_t
-
-    def generate_embeddings(
-        self,
-        B_T_H_W_C: torch.Size,
-        h_ntk_factor: Optional[float] = None,
-        w_ntk_factor: Optional[float] = None,
-        t_ntk_factor: Optional[float] = None,
-    ) -> torch.Tensor:
-        h_ntk_factor = h_ntk_factor if h_ntk_factor is not None else self.h_ntk_factor
-        w_ntk_factor = w_ntk_factor if w_ntk_factor is not None else self.w_ntk_factor
-        t_ntk_factor = t_ntk_factor if t_ntk_factor is not None else self.t_ntk_factor
-
-        h_theta = 10000.0 * h_ntk_factor
-        w_theta = 10000.0 * w_ntk_factor
-        t_theta = 10000.0 * t_ntk_factor
-
-        h_spatial_freqs = 1.0 / (h_theta**self.dim_spatial_range)
-        w_spatial_freqs = 1.0 / (w_theta**self.dim_spatial_range)
-        temporal_freqs = 1.0 / (t_theta**self.dim_temporal_range)
-
-        _, T, H, W, _ = B_T_H_W_C
-        assert (
-            H <= self.max_h and W <= self.max_w
-        ), f"Input dimensions (H={H}, W={W}) exceed the maximum dimensions (max_h={self.max_h}, max_w={self.max_w})"
-        half_emb_h = torch.outer(self.seq[:H], h_spatial_freqs)
-        half_emb_w = torch.outer(self.seq[:W], w_spatial_freqs)
-        half_emb_t = torch.outer(self.seq[:T], temporal_freqs)
-
-        em_T_H_W_D = torch.cat(
-            [
-                repeat(half_emb_t, "t d -> t h w d", h=H, w=W),
-                repeat(half_emb_h, "h d -> t h w d", t=T, w=W),
-                repeat(half_emb_w, "w d -> t h w d", t=T, h=H),
-            ]
-            * 2,
-            dim=-1,
-        )
-
-        return rearrange(em_T_H_W_D, "t h w d -> (t h w) 1 1 d").float()
-
-    @property
-    def seq_dim(self) -> int:
-        return 0
 
 
 class LearnablePosEmbAxis(VideoPositionEmb):
@@ -422,28 +220,19 @@ class LearnablePosEmbAxis(VideoPositionEmb):
 
 # Timestep Embedding
 class Timesteps(nn.Module):
-    """Sinusoidal timestep features."""
+    """Sinusoidal timestep features.
+
+    Anima (Cosmos-Predict2) does *not* apply the 1000x time factor used by the
+    other DiT families; its timesteps arrive in ``[0, 1]`` and are embedded
+    directly, so the shared function is called with ``time_factor=1.0``.
+    """
 
     def __init__(self, num_channels: int):
         super().__init__()
         self.num_channels = num_channels
 
     def forward(self, timesteps_B_T: torch.Tensor) -> torch.Tensor:
-        assert timesteps_B_T.ndim == 2, f"Expected 2D input, got {timesteps_B_T.ndim}"
-        in_dtype = timesteps_B_T.dtype
-        timesteps = timesteps_B_T.flatten().float()
-        half_dim = self.num_channels // 2
-        exponent = -math.log(10000) * torch.arange(half_dim, dtype=torch.float32, device=timesteps.device)
-        exponent = exponent / (half_dim - 0.0)
-
-        emb = torch.exp(exponent)
-        emb = timesteps[:, None].float() * emb[None, :]
-
-        sin_emb = torch.sin(emb)
-        cos_emb = torch.cos(emb)
-        emb = torch.cat([cos_emb, sin_emb], dim=-1)
-
-        return rearrange(emb.to(dtype=in_dtype), "(b t) d -> b t d", b=timesteps_B_T.shape[0], t=timesteps_B_T.shape[1])
+        return timestep_embedding(timesteps_B_T, self.num_channels, time_factor=1.0)
 
 
 class TimestepEmbedding(nn.Module):
@@ -686,7 +475,7 @@ class Block(nn.Module):
         emb_B_T_D: torch.Tensor,
         crossattn_emb: torch.Tensor,
         attn_params: attention.AttentionParams,
-        rope_emb_L_1_1_D: Optional[torch.Tensor] = None,
+        rope_cos_sin: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         adaln_lora_B_T_3D: Optional[torch.Tensor] = None,
         extra_per_block_pos_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -737,7 +526,7 @@ class Block(nn.Module):
                 rearrange(normalized_x, "b t h w d -> b (t h w) d"),
                 attn_params,
                 None,
-                rope_emb=rope_emb_L_1_1_D,
+                rope_emb=rope_cos_sin,
             ),
             "b (t h w) d -> b t h w d",
             t=T,
@@ -753,7 +542,7 @@ class Block(nn.Module):
                 rearrange(normalized_x, "b t h w d -> b (t h w) d"),
                 attn_params,
                 crossattn_emb,
-                rope_emb=rope_emb_L_1_1_D,
+                rope_emb=rope_cos_sin,
             ),
             "b (t h w) d -> b t h w d",
             t=T,
@@ -776,7 +565,7 @@ class Block(nn.Module):
         emb_B_T_D: torch.Tensor,
         crossattn_emb: torch.Tensor,
         attn_params: attention.AttentionParams,
-        rope_emb_L_1_1_D: Optional[torch.Tensor] = None,
+        rope_cos_sin: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         adaln_lora_B_T_3D: Optional[torch.Tensor] = None,
         extra_per_block_pos_emb: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -785,7 +574,7 @@ class Block(nn.Module):
             emb_B_T_D,
             crossattn_emb,
             attn_params,
-            rope_emb_L_1_1_D,
+            rope_cos_sin,
             adaln_lora_B_T_3D,
             extra_per_block_pos_emb,
         )
@@ -899,7 +688,6 @@ class Anima(nn.Module):
 
     def init_weights(self) -> None:
         self.x_embedder.init_weights()
-        self.pos_embedder.reset_parameters()
         if self.extra_per_block_abs_pos_emb:
             self.extra_pos_embedder.reset_parameters()
         self.t_embedder[1].init_weights()
@@ -927,29 +715,27 @@ class Anima(nn.Module):
 
     def build_pos_embed(self) -> None:
         if self.pos_emb_cls == "rope3d":
-            cls_type = VideoRopePosition3DEmb
+            self.pos_embedder = RopeCache(
+                split_half_rope_3d(
+                    self.model_channels // self.num_heads,
+                    self.patch_spatial,
+                    self.patch_temporal,
+                    self.rope_h_extrapolation_ratio,
+                    self.rope_w_extrapolation_ratio,
+                    self.rope_t_extrapolation_ratio,
+                )
+            )
         else:
             raise ValueError(f"Unknown pos_emb_cls {self.pos_emb_cls}")
 
-        kwargs = dict(
-            model_channels=self.model_channels,
-            len_h=self.max_img_h // self.patch_spatial,
-            len_w=self.max_img_w // self.patch_spatial,
-            len_t=self.max_frames // self.patch_temporal,
-            is_learnable=self.pos_emb_learnable,
-            interpolation=self.pos_emb_interpolation,
-            head_dim=self.model_channels // self.num_heads,
-            h_extrapolation_ratio=self.rope_h_extrapolation_ratio,
-            w_extrapolation_ratio=self.rope_w_extrapolation_ratio,
-            t_extrapolation_ratio=self.rope_t_extrapolation_ratio,
-        )
-        self.pos_embedder = cls_type(**kwargs)
-
         if self.extra_per_block_abs_pos_emb:
-            kwargs["h_extrapolation_ratio"] = self.extra_h_extrapolation_ratio
-            kwargs["w_extrapolation_ratio"] = self.extra_w_extrapolation_ratio
-            kwargs["t_extrapolation_ratio"] = self.extra_t_extrapolation_ratio
-            self.extra_pos_embedder = LearnablePosEmbAxis(**kwargs)
+            self.extra_pos_embedder = LearnablePosEmbAxis(
+                interpolation=self.pos_emb_interpolation,
+                model_channels=self.model_channels,
+                len_h=self.max_img_h // self.patch_spatial,
+                len_w=self.max_img_w // self.patch_spatial,
+                len_t=self.max_frames // self.patch_temporal,
+            )
 
     def prepare_embedded_sequence(
         self,
@@ -975,11 +761,7 @@ class Anima(nn.Module):
         else:
             extra_pos_emb = None
 
-        if "rope" in self.pos_emb_cls.lower():
-            return x_B_T_H_W_D, self.pos_embedder(x_B_T_H_W_D), extra_pos_emb
-        x_B_T_H_W_D = x_B_T_H_W_D + self.pos_embedder(x_B_T_H_W_D)
-
-        return x_B_T_H_W_D, None, extra_pos_emb
+        return x_B_T_H_W_D, self.pos_embedder["emb"], extra_pos_emb
 
     def unpatchify(self, x_B_T_H_W_M: torch.Tensor) -> torch.Tensor:
         x_B_C_Tt_Hp_Wp = rearrange(
@@ -1003,7 +785,7 @@ class Anima(nn.Module):
     ) -> torch.Tensor:
         context = self._preprocess_text_embeds(context, target_input_ids, target_attention_mask, source_attention_mask)
 
-        x_B_T_H_W_D, rope_emb_L_1_1_D, extra_pos_emb = self.prepare_embedded_sequence(x)
+        x_B_T_H_W_D, rope_cos_sin, extra_pos_emb = self.prepare_embedded_sequence(x)
 
         if timesteps.ndim == 1:
             timesteps = timesteps.unsqueeze(1)
@@ -1011,7 +793,7 @@ class Anima(nn.Module):
         t_embedding_B_T_D = self.t_embedding_norm(t_embedding_B_T_D)
 
         block_kwargs = {
-            "rope_emb_L_1_1_D": rope_emb_L_1_1_D,
+            "rope_cos_sin": rope_cos_sin,
             "adaln_lora_B_T_3D": adaln_lora_B_T_3D,
             "extra_per_block_pos_emb": extra_pos_emb,
         }
@@ -1042,58 +824,7 @@ class Anima(nn.Module):
 
 
 # LLM Adapter: Bridges Qwen3 embeddings to T5-compatible space
-class LLMAdapterRMSNorm(nn.Module):
-    """RMSNorm specifically for the LLM Adapter (T5-style, no mean subtraction)."""
 
-    def __init__(self, hidden_size, eps=1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states):
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-
-        if self.weight.dtype in [torch.float16, torch.bfloat16]:
-            hidden_states = hidden_states.to(self.weight.dtype)
-
-        return self.weight * hidden_states
-
-
-def _adapter_rotate_half(x):
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-
-def _adapter_apply_rotary_pos_emb(x, cos, sin, unsqueeze_dim=1):
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
-    x_embed = (x * cos) + (_adapter_rotate_half(x) * sin)
-    return x_embed
-
-
-class AdapterRotaryEmbedding(nn.Module):
-    """Rotary embedding for LLM Adapter."""
-
-    def __init__(self, head_dim):
-        super().__init__()
-        self.rope_theta = 10000
-        inv_freq = 1.0 / (self.rope_theta ** (torch.arange(0, head_dim, 2, dtype=torch.int64).to(dtype=torch.float) / head_dim))
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-
-    @torch.no_grad()
-    def forward(self, x, position_ids):
-        inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
-        position_ids_expanded = position_ids[:, None, :].float()
-
-        with torch.autocast(device_type=x.device.type, enabled=False):
-            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos()
-            sin = emb.sin()
-
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
 class LLMAdapterAttention(nn.Module):
@@ -1109,12 +840,9 @@ class LLMAdapterAttention(nn.Module):
         self.context_dim = context_dim
 
         self.q_proj = QuantizedLinear(query_dim, inner_dim, bias=False)
-        self.q_norm = LLMAdapterRMSNorm(self.head_dim)
-
         self.k_proj = QuantizedLinear(context_dim, inner_dim, bias=False)
-        self.k_norm = LLMAdapterRMSNorm(self.head_dim)
-
         self.v_proj = QuantizedLinear(context_dim, inner_dim, bias=False)
+        self.qk_norm = QKNorm(self.head_dim, eps=1e-6)
 
         self.o_proj = QuantizedLinear(inner_dim, query_dim, bias=False)
 
@@ -1125,16 +853,17 @@ class LLMAdapterAttention(nn.Module):
         context_shape = context.shape[:-1]
         kv_shape = (*context_shape, self.n_heads, self.head_dim)
 
-        query_states = self.q_norm(self.q_proj(x).view(q_shape)).transpose(1, 2)
-        key_states = self.k_norm(self.k_proj(context).view(kv_shape)).transpose(1, 2)
+        query_states, key_states = self.qk_norm(
+            self.q_proj(x).view(q_shape), self.k_proj(context).view(kv_shape)
+        )
+        query_states = query_states.transpose(1, 2)
+        key_states = key_states.transpose(1, 2)
         value_states = self.v_proj(context).view(kv_shape).transpose(1, 2)
 
         if position_embeddings is not None:
             assert position_embeddings_context is not None
-            cos, sin = position_embeddings
-            query_states = _adapter_apply_rotary_pos_emb(query_states, cos, sin)
-            cos, sin = position_embeddings_context
-            key_states = _adapter_apply_rotary_pos_emb(key_states, cos, sin)
+            query_states = apply_rope_split_half(query_states, *position_embeddings)
+            key_states = apply_rope_split_half(key_states, *position_embeddings_context)
 
         attn_output = F.scaled_dot_product_attention(query_states, key_states, value_states, attn_mask=mask)
 
@@ -1151,7 +880,7 @@ class LLMAdapterTransformerBlock(nn.Module):
         self.has_self_attn = self_attn
 
         if self.has_self_attn:
-            self.norm_self_attn = nn.LayerNorm(model_dim) if layer_norm else LLMAdapterRMSNorm(model_dim)
+            self.norm_self_attn = nn.LayerNorm(model_dim) if layer_norm else RMSNorm(model_dim, eps=1e-6)
             self.self_attn = LLMAdapterAttention(
                 query_dim=model_dim,
                 context_dim=model_dim,
@@ -1159,7 +888,7 @@ class LLMAdapterTransformerBlock(nn.Module):
                 head_dim=model_dim // num_heads,
             )
 
-        self.norm_cross_attn = nn.LayerNorm(model_dim) if layer_norm else LLMAdapterRMSNorm(model_dim)
+        self.norm_cross_attn = nn.LayerNorm(model_dim) if layer_norm else RMSNorm(model_dim, eps=1e-6)
         self.cross_attn = LLMAdapterAttention(
             query_dim=model_dim,
             context_dim=source_dim,
@@ -1167,7 +896,7 @@ class LLMAdapterTransformerBlock(nn.Module):
             head_dim=model_dim // num_heads,
         )
 
-        self.norm_mlp = nn.LayerNorm(model_dim) if layer_norm else LLMAdapterRMSNorm(model_dim)
+        self.norm_mlp = nn.LayerNorm(model_dim) if layer_norm else RMSNorm(model_dim, eps=1e-6)
         self.mlp = nn.Sequential(
             QuantizedLinear(model_dim, int(model_dim * mlp_ratio)), nn.GELU(), QuantizedLinear(int(model_dim * mlp_ratio), model_dim)
         )
@@ -1227,7 +956,7 @@ class LLMAdapter(nn.Module):
             self.in_proj = QuantizedLinear(target_dim, model_dim)
         else:
             self.in_proj = nn.Identity()
-        self.rotary_emb = AdapterRotaryEmbedding(model_dim // num_heads)
+        self.rotary_emb = RopeCache(split_half_rope_1d(model_dim // num_heads))
         self.blocks = nn.ModuleList(
             [
                 LLMAdapterTransformerBlock(source_dim, model_dim, num_heads=num_heads, self_attn=self_attn, layer_norm=layer_norm)
@@ -1235,7 +964,7 @@ class LLMAdapter(nn.Module):
             ]
         )
         self.out_proj = QuantizedLinear(model_dim, target_dim)
-        self.norm = LLMAdapterRMSNorm(target_dim)
+        self.norm = RMSNorm(target_dim, eps=1e-6)
 
     def forward(self, source_hidden_states, target_input_ids, target_attention_mask=None, source_attention_mask=None):
         if target_attention_mask is not None:
@@ -1250,10 +979,8 @@ class LLMAdapter(nn.Module):
 
         x = self.in_proj(self.embed(target_input_ids))
         context = source_hidden_states
-        position_ids = torch.arange(x.shape[1], device=x.device).unsqueeze(0)
-        position_ids_context = torch.arange(context.shape[1], device=x.device).unsqueeze(0)
-        position_embeddings = self.rotary_emb(x, position_ids)
-        position_embeddings_context = self.rotary_emb(x, position_ids_context)
+        position_embeddings = self.rotary_emb.store("target", x.shape[1], x.device, dtype=x.dtype)
+        position_embeddings_context = self.rotary_emb.store("source", context.shape[1], context.device, dtype=context.dtype)
         for block in self.blocks:
             x = block(
                 x,

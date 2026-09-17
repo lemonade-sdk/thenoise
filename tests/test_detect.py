@@ -1,168 +1,37 @@
 """Model-type detection tests.
 
-Detection reads safetensors header keys only (no tensors, no weights). We test the
-``detect(f)`` logic against a fake handle with synthetic keys, plus the catalog
-``resolve()`` against a tiny real safetensors file.
+Detection reads safetensors header *names* only (no tensors, no weights), so the
+whole matrix is checked against synthetic key-sets from ``conftest.MODEL_KEYSETS``
+plus the catalog ``resolve()`` against throwaway one-scalar files.
 """
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
 import pytest
 
-from thenoise.models import AnimaModel, Krea2Model, ZImageModel, resolve
+from conftest import CATALOG_IDS, MODEL_KEYSETS, FakeHandle, write_key_checkpoint
+from thenoise.models import MODEL_CATALOG, resolve
 
 
-class _FakeHandle:
-    """Mimics ``safetensors.safe_open``'s ``keys()`` for detection."""
+@pytest.mark.parametrize("keyset", MODEL_KEYSETS)
+@pytest.mark.parametrize("model", MODEL_CATALOG, ids=CATALOG_IDS)
+def test_detection_matrix(model, keyset):
+    """Every model claims exactly its own key-sets and rejects every other one.
 
-    def __init__(self, keys):
-        self._keys = keys
-
-    def keys(self):
-        return self._keys
-
-
-_ANIMA_KEYS = [
-    "model.diffusion_model.blocks.0.adaln_modulation_self_attn.1.weight",
-    "model.diffusion_model.llm_adapter.layers.0.weight",
-    "model.diffusion_model.x_embedder.linear.weight",
-]
-
-# A transformer DiT with adaln modulation but WITHOUT Anima's LLM adapter —
-# e.g. a generic adaLN-style block. Must NOT be claimed as Anima.
-_ADALN_ONLY_KEYS = [
-    "model.diffusion_model.blocks.0.adaln_modulation_self_attn.1.weight",
-    "model.diffusion_model.blocks.0.mlp.gate.weight",
-]
-
-_KREA2_KEYS = [
-    "x_embedder.linear.weight",
-    "txtfusion.layerwise_blocks.0.attn.q_proj.weight",
-    "blocks.0.mod.lin.weight",
-    "txtmlp.1.weight",
-]
-
-_ZIMAGE_KEYS = [
-    "x_embedder.weight",
-    "cap_embedder.1.weight",
-    "context_refiner.0.attention_norm1.weight",
-    "t_embedder.mlp.0.weight",
-    "layers.0.attention_norm1.weight",
-]
-
-# Z-Image repackaged under ComfyUI's generic "model.diffusion_model." wrapper.
-_ZIMAGE_WRAPPED_KEYS = [
-    "model.diffusion_model.x_embedder.weight",
-    "model.diffusion_model.cap_embedder.1.weight",
-    "model.diffusion_model.context_refiner.0.attention_norm1.weight",
-    "model.diffusion_model.layers.0.attention_norm1.weight",
-]
+    The key-sets include the ``model.diffusion_model.``-wrapped repackagings, so
+    the prefix-stripping and the Anima false-positive guard stay covered, and new
+    models/key-sets are covered automatically by being added to the table.
+    """
+    owner, keys = MODEL_KEYSETS[keyset]
+    assert model.detect(FakeHandle(keys)) is (model is owner)
 
 
-def test_anima_detect_true():
-    assert AnimaModel.detect(_FakeHandle(_ANIMA_KEYS)) is True
-
-
-def test_anima_rejects_adaln_without_llm_adapter():
-    # adaln modulation alone is not enough — Anima requires its LLM adapter.
-    assert AnimaModel.detect(_FakeHandle(_ADALN_ONLY_KEYS)) is False
-
-
-def test_krea2_detect_true():
-    assert Krea2Model.detect(_FakeHandle(_KREA2_KEYS)) is True
-
-
-def test_krea2_rejects_anima_keys():
-    assert Krea2Model.detect(_FakeHandle(_ANIMA_KEYS)) is False
-
-
-def test_anima_rejects_krea2_keys():
-    assert AnimaModel.detect(_FakeHandle(_KREA2_KEYS)) is False
-
-
-def test_zimage_detect_true():
-    assert ZImageModel.detect(_FakeHandle(_ZIMAGE_KEYS)) is True
-
-
-def test_zimage_detect_true_on_wrapped_repackaged_keys():
-    assert ZImageModel.detect(_FakeHandle(_ZIMAGE_WRAPPED_KEYS)) is True
-
-
-def test_zimage_rejects_anima_keys():
-    assert ZImageModel.detect(_FakeHandle(_ANIMA_KEYS)) is False
-
-
-def test_zimage_rejects_krea2_keys():
-    assert ZImageModel.detect(_FakeHandle(_KREA2_KEYS)) is False
-
-
-def test_anima_rejects_zimage_keys():
-    assert AnimaModel.detect(_FakeHandle(_ZIMAGE_KEYS)) is False
-
-
-# A Krea2 checkpoint repackaged under ComfyUI's generic "model.diffusion_model."
-# wrapper. The prefix is NOT a Krea2/Anima signature — it must be stripped
-# before matching, otherwise Krea2 fails and Anima false-positives on it.
-_KREA2_WRAPPED_KEYS = [
-    "model.diffusion_model.x_embedder.linear.weight",
-    "model.diffusion_model.txtfusion.layerwise_blocks.0.attn.q_proj.weight",
-    "model.diffusion_model.blocks.0.mod.lin.weight",
-    "model.diffusion_model.txtmlp.1.weight",
-]
-
-
-def test_krea2_detect_true_on_wrapped_repackaged_keys():
-    assert Krea2Model.detect(_FakeHandle(_KREA2_WRAPPED_KEYS)) is True
-
-
-def test_anima_does_not_false_positive_on_wrapped_krea2_keys():
-    assert AnimaModel.detect(_FakeHandle(_KREA2_WRAPPED_KEYS)) is False
-
-
-def test_resolve_wrapped_krea2(tmp_path):
-    p = tmp_path / "krea2-wrapped.safetensors"
-    _write_safetensors(p, _KREA2_WRAPPED_KEYS)
-    assert resolve(str(p)) is Krea2Model
-
-
-def _write_safetensors(path: Path, keys: dict) -> None:
-    import torch
-    from safetensors.torch import save_file
-    save_file({k: torch.zeros(1) for k in keys}, str(path))
-
-
-def test_resolve_anima(tmp_path):
-    p = tmp_path / "anima.safetensors"
-    _write_safetensors(p, _ANIMA_KEYS)
-    assert resolve(str(p)) is AnimaModel
-
-
-def test_resolve_krea2(tmp_path):
-    p = tmp_path / "krea2.safetensors"
-    _write_safetensors(p, _KREA2_KEYS)
-    assert resolve(str(p)) is Krea2Model
-
-
-def test_resolve_zimage(tmp_path):
-    p = tmp_path / "zimage.safetensors"
-    _write_safetensors(p, _ZIMAGE_WRAPPED_KEYS)
-    assert resolve(str(p)) is ZImageModel
-
-
-def test_resolve_unknown_raises(tmp_path):
-    p = tmp_path / "unknown.safetensors"
-    _write_safetensors(p, {"some.random.key": 0})
-    with pytest.raises(ValueError):
-        resolve(str(p))
-
-
-@pytest.mark.skipif(
-    not os.path.exists("models/anima/split_files/diffusion_models/anima-turbo-v1.0.safetensors"),
-    reason="real Anima checkpoint not present",
-)
-def test_resolve_real_anima_checkpoint():
-    """Sanity-check the detector against the real Anima DiT on disk."""
-    p = "models/anima/split_files/diffusion_models/anima-turbo-v1.0.safetensors"
-    assert resolve(p) is AnimaModel
+@pytest.mark.parametrize("keyset", MODEL_KEYSETS)
+def test_resolve(keyset, tmp_path):
+    """``resolve()`` iterates the catalog and returns the single claimant."""
+    owner, keys = MODEL_KEYSETS[keyset]
+    path = write_key_checkpoint(tmp_path / f"{keyset}.safetensors", keys)
+    if owner is None:
+        with pytest.raises(ValueError, match="could not determine model type"):
+            resolve(path)
+    else:
+        assert resolve(path) is owner

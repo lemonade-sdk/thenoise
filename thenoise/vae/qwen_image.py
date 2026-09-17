@@ -661,7 +661,7 @@ class AutoencoderKLQwenImage(nn.Module):
         Returns:
             torch.Tensor: Normalized latents
         """
-        pixels = pixels.to(self.dtype)
+        pixels = pixels.to(device=self.device, dtype=self.dtype)
 
         # Encode to latent space
         posterior = self.encode(pixels, return_dict=False)[0]
@@ -828,7 +828,6 @@ def load_qwen_vae(
     vae_path: str,
     device: Union[str, torch.device],
     input_channels: int = 3,
-    disable_mmap: bool = False,
 ) -> AutoencoderKLQwenImage:
     """Load the Qwen-Image VAE from a given path."""
     VAE_CONFIG_JSON = """
@@ -898,7 +897,7 @@ def load_qwen_vae(
     )
 
     logger.info(f"Loading VAE from {vae_path}")
-    state_dict = load_safetensors(vae_path, device=device, disable_mmap=disable_mmap)
+    state_dict = load_safetensors(vae_path, device=device)
 
     # Convert ComfyUI VAE keys to official VAE keys
     state_dict = convert_comfyui_state_dict(state_dict)

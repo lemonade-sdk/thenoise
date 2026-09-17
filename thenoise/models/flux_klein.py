@@ -24,10 +24,10 @@ from thenoise.dit.flux2.models import Flux2Params
 from thenoise.dit.flux2.sampling import get_schedule, prc_img, prc_txt, scatter_ids
 from thenoise.dit.flux2.utils import (
     detect_klein_params,
-    find_flux2_tokenizer_dir,
     load_flux2_dit,
     load_qwen3_embedder,
 )
+from thenoise.utils.text_encoder import find_tokenizer_dir
 from thenoise.models.base import Conditioning, DiffusionModel, Step, normalize_keys
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.math import round_up
@@ -57,6 +57,23 @@ class FluxKleinModel(DiffusionModel):
     # with ``ref_index_scale = 10`` (the t-axis offset for the reference latent).
     supports_edit = True
     REF_INDEX = 10
+
+    def _lora_key_map(self, key: str) -> str:
+        """Map ComfyUI Flux.2 LoRA names to this repo's Flux.2 schema.
+
+        ComfyUI names the double/single stream blocks ``transformer_blocks`` /
+        ``single_transformer_blocks``, the fused single-stream projection
+        ``attn.to_qkv_mlp_proj`` and the double-stream attention ``attn`` (with
+        ``to_out.0``); the repo uses ``double_blocks``/``single_blocks``,
+        ``linear1`` and ``img_attn``/``proj``. Applied after the generic
+        q/k/v fusion in ``thenoise.utils.lora``.
+        """
+        key = key.replace(".attn.to_qkv_mlp_proj", ".linear1")
+        key = key.replace("single_transformer_blocks", "single_blocks")
+        key = key.replace(".attn.", ".img_attn.")
+        key = key.replace("transformer_blocks", "double_blocks")
+        key = key.replace(".to_out.0", ".proj")
+        return key
 
     @staticmethod
     def detect(f) -> bool:
@@ -91,11 +108,11 @@ class FluxKleinModel(DiffusionModel):
             is_8b=self.is_8b,
             dtype=config.dtype,
             device=self.offload_device,
-            tokenizer_dir=find_flux2_tokenizer_dir(config.text_encoder_path),
+            tokenizer_dir=find_tokenizer_dir(config.text_encoder_path),
         )
 
         # Flux.2 VAE (encoder + decoder).
-        self.vae = load_flux2_vae(self.vae_path, device=self.device, disable_mmap=True, dtype=self.dtype)
+        self.vae = load_flux2_vae(self.vae_path, device=self.device, dtype=self.dtype)
         self.vae.eval().requires_grad_(False)
 
         # Register swappable components with the memory manager.
@@ -152,20 +169,20 @@ class FluxKleinModel(DiffusionModel):
         forward. Safe under the lock.
 
         In the edit path (``ref`` given) the reference latent is packed the same
-        way and stashed as ``_ref_tokens``/``_ref_ids`` for ``denoise_step``.
+        way and stashed as ``_ref_tokens`` for ``denoise_step``.
         """
         dev = torch.device(self.device)
         x, x_ids = prc_img(latents.to(device=dev, dtype=self.dtype))
-        self._img_ids = x_ids
+        self._img_ids = x_ids  # used by ``finalize_latent``
 
         self._txt = cond.cond.to(device=dev, dtype=self.dtype)
-        _, self._txt_ids = prc_txt(self._txt)
+        _, txt_ids = prc_txt(self._txt)
 
         if cond.null is not None:
             self._un_txt = cond.null.to(device=dev, dtype=self.dtype)
-            _, self._un_txt_ids = prc_txt(self._un_txt)
+            _, un_txt_ids = prc_txt(self._un_txt)
         else:
-            self._un_txt = self._un_txt_ids = None
+            self._un_txt = un_txt_ids = None
 
         if ref is not None:
             # Pack each ref with a successive t-axis index (REF_INDEX, 2x, ...)
@@ -176,9 +193,16 @@ class FluxKleinModel(DiffusionModel):
                 ref_tokens.append(t)
                 ref_ids.append(ids)
             self._ref_tokens = torch.cat(ref_tokens, dim=1)
-            self._ref_ids = torch.cat(ref_ids, dim=1)
+            img_ids = torch.cat([x_ids, torch.cat(ref_ids, dim=1)], dim=1)
         else:
-            self._ref_tokens = self._ref_ids = None
+            self._ref_tokens = None
+            img_ids = x_ids
+
+        self.dit.pe_embedder.clear()
+        self.dit.pe_embedder.store("img", img_ids, dtype=self.dtype)
+        self.dit.pe_embedder.store("txt", txt_ids, dtype=self.dtype)
+        if un_txt_ids is not None:
+            self.dit.pe_embedder.store("txt_uncond", un_txt_ids, dtype=self.dtype)
 
         return x
 
@@ -208,13 +232,13 @@ class FluxKleinModel(DiffusionModel):
         t_full = torch.full((len(latents),), float(t), dtype=latents.dtype, device=dev)
         with torch.no_grad(), torch.autocast(device_type=dev.type, dtype=self.dtype):
             pos = self.dit(
-                x=latents, x_ids=self._img_ids, timesteps=t_full, ctx=self._txt,
-                ctx_ids=self._txt_ids, ref_tokens=self._ref_tokens, ref_ids=self._ref_ids,
+                x=latents, pe_x=self.dit.pe_embedder["img"], timesteps=t_full, ctx=self._txt,
+                pe_ctx=self.dit.pe_embedder["txt"], ref_tokens=self._ref_tokens,
             )
             if guidance_scale > 1.0 and self._un_txt is not None:
                 neg = self.dit(
-                    x=latents, x_ids=self._img_ids, timesteps=t_full, ctx=self._un_txt,
-                    ctx_ids=self._un_txt_ids, ref_tokens=self._ref_tokens, ref_ids=self._ref_ids,
+                    x=latents, pe_x=self.dit.pe_embedder["img"], timesteps=t_full, ctx=self._un_txt,
+                    pe_ctx=self.dit.pe_embedder["txt_uncond"], ref_tokens=self._ref_tokens,
                 )
                 v = neg + guidance_scale * (pos - neg)
             else:

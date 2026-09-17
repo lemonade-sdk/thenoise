@@ -1,4 +1,9 @@
-"""CLI parsing tests (no torch / ROCm required, no real weights)."""
+"""CLI parsing tests (no torch / ROCm required, no real weights).
+
+Only argparse itself is exercised here: the arg -> ``Settings``/``ModelPaths``/
+``Runtime`` wiring is covered in ``test_entrypoints.py``, and the LoRA spec/path
+helpers live in ``test_lora.py``.
+"""
 from __future__ import annotations
 
 import pytest
@@ -6,143 +11,16 @@ import pytest
 from thenoise.cli import build_parser
 
 
-def test_parse_lora_spec_no_suffix():
-    """_parse_lora_spec auto-appends .safetensors when no extension."""
-    # We test the logic directly without instantiating a model
-    from thenoise.models.base import DiffusionModel
-    # Create a minimal concrete subclass for testing
-    class _TestModel(DiffusionModel):
-        name = "test"
-        @staticmethod
-        def detect(f): return False
-        def encode_prompt(self, prompt, negative_prompt="", *, guidance_scale): pass
-        def init_latents(self, height, width, seed): pass
-        def schedule(self, steps, height, width): pass
-        def denoise_step(self, latents, t, cond, guidance_scale, i): pass
-        def _upscale_format(self): return "wan21"
-
-    # Can't fully instantiate (needs VAE), but we can test the pure parsing
-    # by calling the method directly with a mock object
-    import types
-    model = object.__new__(_TestModel)
-    model.lora_dir = "/tmp/loras"
-
-    # No extension → auto-append
-    filename, weight = model._parse_lora_spec("style")
-    assert filename == "style.safetensors"
-    assert weight == 1.0
-
-    # No extension with weight
-    filename, weight = model._parse_lora_spec("style:0.8")
-    assert filename == "style.safetensors"
-    assert weight == 0.8
-
-    # Subdirectory allowed
-    filename, weight = model._parse_lora_spec("sub/style:0.7")
-    assert filename == "sub/style.safetensors"
-    assert weight == 0.7
+@pytest.fixture
+def parse():
+    return lambda argv: build_parser().parse_args(argv)
 
 
-def test_resolve_lora_path_blocks_traversal():
-    """_resolve_lora_path rejects .. escape attempts."""
-    import tempfile, os
-    from thenoise.models.base import DiffusionModel
-
-    class _TestModel(DiffusionModel):
-        name = "test"
-        @staticmethod
-        def detect(f): return False
-        def encode_prompt(self, prompt, negative_prompt="", *, guidance_scale): pass
-        def init_latents(self, height, width, seed): pass
-        def schedule(self, steps, height, width): pass
-        def denoise_step(self, latents, t, cond, guidance_scale, i): pass
-        def _upscale_format(self): return "wan21"
-
-    model = object.__new__(_TestModel)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        model.lora_dir = tmpdir
-
-        # Normal file → OK
-        path = model._resolve_lora_path("style.safetensors")
-        assert path == os.path.join(tmpdir, "style.safetensors")
-
-        # Subdirectory → OK
-        path = model._resolve_lora_path("sub/style.safetensors")
-        assert "sub/style.safetensors" in path
-
-        # .. escape → ValueError
-        with pytest.raises(ValueError, match="escapes base directory"):
-            model._resolve_lora_path("../etc/passwd")
-
-        with pytest.raises(ValueError, match="escapes base directory"):
-            model._resolve_lora_path("sub/../../etc/passwd")
+# ------------------------------------------------------------------ serve
 
 
-def test_lora_spec_hash():
-    """_make_lora_spec_hash produces consistent hashes."""
-    from thenoise.models.base import DiffusionModel
-
-    class _TestModel(DiffusionModel):
-        name = "test"
-        @staticmethod
-        def detect(f): return False
-        def encode_prompt(self, prompt, negative_prompt="", *, guidance_scale): pass
-        def init_latents(self, height, width, seed): pass
-        def schedule(self, steps, height, width): pass
-        def denoise_step(self, latents, t, cond, guidance_scale, i): pass
-        def _upscale_format(self): return "wan21"
-
-    model = object.__new__(_TestModel)
-    model.lora_dir = "/tmp/loras"
-
-    assert model._make_lora_spec_hash(None) == "__none__"
-    assert model._make_lora_spec_hash([]) == "__none__"
-
-    h1 = model._make_lora_spec_hash(["a:0.5", "b:1.0"])
-    h2 = model._make_lora_spec_hash(["b:1.0", "a:0.5"])  # different order
-    assert h1 == h2  # sorted, so same hash
-
-
-def test_list_loras_returns_short_names_recursive():
-    """list_loras strips .safetensors and scans subdirectories."""
-    import tempfile, os
-    from thenoise.models.base import DiffusionModel
-
-    class _TestModel(DiffusionModel):
-        name = "test"
-        @staticmethod
-        def detect(f): return False
-        def encode_prompt(self, prompt, negative_prompt="", *, guidance_scale): pass
-        def init_latents(self, height, width, seed): pass
-        def schedule(self, steps, height, width): pass
-        def denoise_step(self, latents, t, cond, guidance_scale, i): pass
-        def _upscale_format(self): return "wan21"
-
-    model = object.__new__(_TestModel)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        os.makedirs(os.path.join(tmpdir, "sub"))
-        for rel in ["12345_something.safetensors",
-                    "67890_other.safetensors",
-                    "sub/style.safetensors",
-                    "not_a_lora.txt"]:
-            with open(os.path.join(tmpdir, rel), "w") as f:
-                f.write("x")
-
-        model.lora_dir = tmpdir
-        assert model.list_loras() == [
-            "12345_something",
-            "67890_other",
-            "sub/style",
-        ]
-
-        model.lora_dir = ""
-        assert model.list_loras() == []
-
-
-def test_cli_serve_parses_model_paths():
-    args = build_parser().parse_args([
+def test_cli_serve_parses_model_paths(parse):
+    args = parse([
         "serve",
         "--dit", "dit.safetensors",
         "--vae", "vae.safetensors",
@@ -155,88 +33,41 @@ def test_cli_serve_parses_model_paths():
     assert args.dit == "dit.safetensors"
     assert args.lora_dir == "/path/to/loras"
     assert args.upscaler_dir == "/path/to/upscalers"
-    assert args.host == "0.0.0.0"
-    assert args.port == 9000
-    assert args.device == "hip"
+    assert (args.host, args.port, args.device) == ("0.0.0.0", 9000, "hip")
 
 
-def test_cli_serve_has_no_pixel_upscaler():
-    args = build_parser().parse_args([
+def test_cli_serve_defaults(parse):
+    args = parse([
         "serve",
         "--dit", "d.safetensors",
         "--vae", "v.safetensors",
         "--text-encoder", "te.safetensors",
     ])
+    assert (args.host, args.port, args.device) == ("127.0.0.1", 8000, "cuda")
     assert args.upscaler_dir == ""
+    assert args.offload_device == ""
+    # A one-shot server has no pixel-upscaler flag (it takes a directory instead).
     assert not hasattr(args, "pixel_upscaler")
 
 
-def test_cli_generate_parses_pixel_upscaler_and_type():
-    args = build_parser().parse_args([
-        "generate",
-        "--dit", "d.safetensors",
-        "--vae", "v.safetensors",
-        "--text-encoder", "te.safetensors",
-        "--prompt", "a fox",
-        "--pixel-upscaler", "/models/RealESRGAN_x4.safetensors",
-        "--upscale-type", "no-refiner",
-    ])
-    assert args.pixel_upscaler == "/models/RealESRGAN_x4.safetensors"
-    assert args.upscale_type == "no-refiner"
-    assert not hasattr(args, "upscaler_dir")
-
-
-def test_cli_generate_rejects_fast_and_old_flags():
-    # 'fast' type and '--esrgan' are removed.
-    with pytest.raises(SystemExit):
-        build_parser().parse_args([
-            "generate",
-            "--dit", "d.safetensors",
-            "--vae", "v.safetensors",
-            "--text-encoder", "te.safetensors",
-            "--prompt", "a fox", "--upscale-type", "fast",
-        ])
-    with pytest.raises(SystemExit):
-        build_parser().parse_args([
-            "generate",
-            "--dit", "d.safetensors",
-            "--vae", "v.safetensors",
-            "--text-encoder", "te.safetensors",
-            "--prompt", "a fox", "--esrgan", "/models/x.safetensors",
-        ])
-
-
-def test_cli_serve_defaults():
-    args = build_parser().parse_args([
-        "serve",
-        "--dit", "d.safetensors",
-        "--vae", "v.safetensors",
-        "--text-encoder", "te.safetensors",
-    ])
-    assert args.host == "127.0.0.1"
-    assert args.port == 8000
-    assert args.device == "cuda"
-    assert args.upscaler_dir == ""
-
-
-def test_cli_serve_requires_paths():
-    """serve model paths are optional; a bare `serve` must parse cleanly."""
-    args = build_parser().parse_args(["serve"])
+def test_cli_serve_model_paths_are_optional(parse):
+    """A bare ``serve`` must parse: the server runs model-free (upscale only)."""
+    args = parse(["serve"])
     assert args.command == "serve"
-    assert args.dit is None
-    assert args.vae is None
-    assert args.text_encoder is None
+    assert args.dit is None and args.vae is None and args.text_encoder is None
 
 
-def test_cli_serve_partial_paths_parse():
-    """Partial model paths still parse at the CLI level (validated at runtime)."""
-    args = build_parser().parse_args(["serve", "--dit", "d.safetensors"])
-    assert args.dit == "d.safetensors"
-    assert args.vae is None
+def test_cli_rejects_removed_flags(parse):
+    """``--model`` and ``--dtype`` are gone: everything is auto-detected / bf16."""
+    with pytest.raises(SystemExit):
+        parse(["serve", "--model", "krea2"])
 
 
-def test_cli_generate_parses():
-    args = build_parser().parse_args([
+# --------------------------------------------------------------- generate/edit
+
+
+def test_cli_generate_parses(parse):
+    args = parse([
         "generate",
         "--dit", "d.safetensors",
         "--vae", "v.safetensors",
@@ -251,8 +82,8 @@ def test_cli_generate_parses():
     assert args.device == "cuda"
 
 
-def test_cli_generate_parses_lora():
-    args = build_parser().parse_args([
+def test_cli_generate_parses_repeated_loras(parse):
+    args = parse([
         "generate",
         "--dit", "d.safetensors",
         "--vae", "v.safetensors",
@@ -264,8 +95,33 @@ def test_cli_generate_parses_lora():
     assert args.lora == ["style.safetensors:0.8", "pose.safetensors:1.0"]
 
 
-def test_cli_edit_parses_required_image_and_width_height():
-    args = build_parser().parse_args([
+def test_cli_generate_parses_one_shot_pixel_upscaler_and_type(parse):
+    args = parse([
+        "generate",
+        "--dit", "d.safetensors",
+        "--vae", "v.safetensors",
+        "--text-encoder", "te.safetensors",
+        "--prompt", "a fox",
+        "--pixel-upscaler", "/models/RealESRGAN_x4.safetensors",
+        "--upscale-type", "no-refiner",
+    ])
+    assert args.pixel_upscaler == "/models/RealESRGAN_x4.safetensors"
+    assert args.upscale_type == "no-refiner"
+    # ``generate`` takes a one-shot path, not a server directory.
+    assert not hasattr(args, "upscaler_dir")
+
+
+def test_cli_generate_rejects_removed_types_and_flags(parse):
+    """The 'fast' upscale type and '--esrgan' are removed."""
+    base = ["generate", "--dit", "d", "--vae", "v", "--text-encoder", "t", "--prompt", "x"]
+    with pytest.raises(SystemExit):
+        parse(base + ["--upscale-type", "fast"])
+    with pytest.raises(SystemExit):
+        parse(base + ["--esrgan", "/models/x.safetensors"])
+
+
+def test_cli_edit_parses_required_image_and_size(parse):
+    args = parse([
         "edit",
         "--dit", "d.safetensors",
         "--vae", "v.safetensors",
@@ -279,15 +135,14 @@ def test_cli_edit_parses_required_image_and_width_height():
     ])
     assert args.command == "edit"
     assert args.image == ["in.png"]
-    assert args.width == 1024
-    assert args.height == 512
+    assert (args.width, args.height) == (1024, 512)
     assert args.prompt == "make it sunny"
-    assert args.out == "e.png"
-    assert args.seed == 9
+    assert (args.out, args.seed) == ("e.png", 9)
 
 
-def test_cli_edit_defaults_out_and_width_height():
-    args = build_parser().parse_args([
+def test_cli_edit_defaults_out_and_leaves_size_unset(parse):
+    """No size on the CLI -> the pipeline derives it from the image."""
+    args = parse([
         "edit",
         "--dit", "d.safetensors",
         "--vae", "v.safetensors",
@@ -296,13 +151,12 @@ def test_cli_edit_defaults_out_and_width_height():
         "--image", "in.png",
     ])
     assert args.out == "out_edit.png"
-    assert args.width is None
-    assert args.height is None
+    assert args.width is None and args.height is None
 
 
-def test_cli_edit_requires_image():
+def test_cli_edit_requires_an_image(parse):
     with pytest.raises(SystemExit):
-        build_parser().parse_args([
+        parse([
             "edit",
             "--dit", "d.safetensors",
             "--vae", "v.safetensors",
@@ -311,29 +165,24 @@ def test_cli_edit_requires_image():
         ])
 
 
-def test_out_defaults_to_png_when_no_extension():
-    """A bare --out with no extension gets .png appended before save."""
-    from thenoise.utils.paths import ensure_png_extension
-    assert ensure_png_extension("out") == "out.png"
-    assert ensure_png_extension("dir/out") == "dir/out.png"
-    assert ensure_png_extension("out.png") == "out.png"
-    assert ensure_png_extension("out.jpg") == "out.jpg"
-    assert ensure_png_extension("out.tar.gz") == "out.tar.gz"
+def test_cli_edit_accepts_repeated_images(parse):
+    args = parse([
+        "edit",
+        "--dit", "d.safetensors",
+        "--vae", "v.safetensors",
+        "--text-encoder", "te.safetensors",
+        "--prompt", "x",
+        "--image", "a.png",
+        "--image", "b.png",
+    ])
+    assert args.image == ["a.png", "b.png"]
 
 
-def test_cli_rejects_unknown_flags():
-    # --model and --dtype are gone: everything is auto-detected / fixed bf16.
-    with pytest.raises(SystemExit):
-        build_parser().parse_args([
-            "serve", "--model", "krea2",
-            "--dit", "d.safetensors",
-            "--vae", "v.safetensors",
-            "--text-encoder", "te.safetensors",
-        ])
+# -------------------------------------------------------------------- upscale
 
 
-def test_cli_upscale_parses():
-    args = build_parser().parse_args([
+def test_cli_upscale_parses(parse):
+    args = parse([
         "upscale",
         "--pixel-upscaler", "/models/RealESRGAN_x4.safetensors",
         "--input", "in.png",
@@ -343,14 +192,13 @@ def test_cli_upscale_parses():
     ])
     assert args.command == "upscale"
     assert args.pixel_upscaler == "/models/RealESRGAN_x4.safetensors"
-    assert args.input == "in.png"
-    assert args.upscale_factor == 4
-    assert args.out == "out.png"
-    assert args.device == "hip"
+    assert (args.input, args.upscale_factor, args.out, args.device) == (
+        "in.png", 4, "out.png", "hip",
+    )
 
 
-def test_cli_upscale_defaults_and_is_model_free():
-    args = build_parser().parse_args([
+def test_cli_upscale_defaults_and_is_model_free(parse):
+    args = parse([
         "upscale",
         "--pixel-upscaler", "/models/x.safetensors",
         "--input", "in.png",
@@ -363,6 +211,30 @@ def test_cli_upscale_defaults_and_is_model_free():
     assert not hasattr(args, "prompt")
 
 
-def test_cli_upscale_requires_pixel_upscaler_and_input():
+def test_cli_upscale_requires_pixel_upscaler_and_input(parse):
     with pytest.raises(SystemExit):
-        build_parser().parse_args(["upscale"])
+        parse(["upscale"])
+
+
+def test_cli_requires_a_subcommand(parse):
+    with pytest.raises(SystemExit):
+        parse([])
+
+
+# ----------------------------------------------------------------------- paths
+
+
+@pytest.mark.parametrize(
+    "out,expected",
+    [
+        ("out", "out.png"),          # PIL cannot infer a format from a bare name
+        ("dir/out", "dir/out.png"),
+        ("out.png", "out.png"),
+        ("out.jpg", "out.jpg"),      # an explicit format is respected
+        ("out.tar.gz", "out.tar.gz"),
+    ],
+)
+def test_out_defaults_to_png_when_no_extension(out, expected):
+    from thenoise.utils.paths import ensure_png_extension
+
+    assert ensure_png_extension(out) == expected

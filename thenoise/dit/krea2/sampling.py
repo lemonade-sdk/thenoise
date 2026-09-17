@@ -6,10 +6,12 @@ text-embedding gathering. The denoising loop itself lives in the shared
 ``DiffusionModel`` base class.
 """
 
-import math
-
 import torch
-from einops import rearrange, repeat
+from einops import rearrange
+
+from thenoise.utils.math import generalized_time_shift
+from thenoise.utils.positions import grid_positions
+from thenoise.utils.sequence import make_key_padding_mask, pad_to_batch
 
 
 def gather_valid_text(txt, mask):
@@ -26,12 +28,8 @@ def gather_valid_text(txt, mask):
     txt: (B, seq, L, D), mask: (B, seq) bool -> (B, max_valid, L, D), (B, max_valid) bool.
     """
     valid = [txt[i][mask[i]] for i in range(txt.shape[0])]  # list of (n_i, L, D)
-    max_len = max(v.shape[0] for v in valid)
-    out = txt.new_zeros(txt.shape[0], max_len, txt.shape[2], txt.shape[3])
-    newmask = torch.zeros(txt.shape[0], max_len, device=txt.device, dtype=torch.bool)
-    for i, v in enumerate(valid):
-        out[i, : v.shape[0]] = v
-        newmask[i, : v.shape[0]] = True
+    out, _, seqlens = pad_to_batch(valid)
+    newmask = make_key_padding_mask(seqlens, txt.device, always=True)
     return out, newmask
 
 
@@ -44,10 +42,8 @@ def prepare(img, txtlen, patch, txtmask):
     """
     b, _, h, w = img.shape
     h_, w_ = h // patch, w // patch
-    imgids = torch.zeros((h_, w_, 3), device=img.device)
-    imgids[..., 1] = torch.arange(h_, device=img.device)[:, None]
-    imgids[..., 2] = torch.arange(w_, device=img.device)[None, :]
-    imgpos = repeat(imgids, "h w three -> b (h w) three", b=b, three=3)
+    # (t, h, w) grid with t=0 and a row-major h/w ordering.
+    imgpos = grid_positions([1, h_, w_], dtype=torch.float32, device=img.device).unsqueeze(0).expand(b, -1, -1)
     imgmask = torch.ones(b, h_ * w_, device=img.device, dtype=torch.bool)
     img = rearrange(img, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch, pw=patch)
 
@@ -69,7 +65,7 @@ def timesteps(seq_len, steps, x1, x2, y1=0.5, y2=1.15, sigma=1.0, mu=None):
     if mu is None:
         slope = (y2 - y1) / (x2 - x1)
         mu = slope * seq_len + (y1 - slope * x1)
-    ts = math.exp(mu) / (math.exp(mu) + (1.0 / ts - 1.0) ** sigma)
+    ts = generalized_time_shift(ts, mu, sigma)
     return ts.tolist()
 
 

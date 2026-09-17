@@ -63,10 +63,27 @@ def resize_to_cover_center_crop(
     return center_crop(scaled, width, height)
 
 
+def resize_to_area(image: Image.Image, area: int = 384 * 384) -> Image.Image:
+    """Scale a PIL image to ``area`` (area-based, aspect-preserving).
+
+    Vision encoders tokenize each patch (e.g. 14x14 for Qwen2.5-VL) into image
+    tokens; full-resolution edit images would inject thousands of tokens, drowning
+    out a short instruction and overflowing the RoPE buffer.
+    """
+    w, h = image.size
+    scale = (area / (w * h)) ** 0.5
+    new_w = max(1, round(w * scale))
+    new_h = max(1, round(h * scale))
+    if (new_w, new_h) != (w, h):
+        return image.resize((new_w, new_h), Image.LANCZOS)
+    return image
+
+
 __all__ = [
     "pil_to_pixels",
     "pixels_to_pil",
     "resize_to_target",
     "center_crop",
     "resize_to_cover_center_crop",
+    "resize_to_max_pixels",
 ]

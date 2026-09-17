@@ -1,7 +1,9 @@
 """Z-Image adapter tests (no real weights / no GPU needed).
 
-Covers the sampler schedule (sigma-based Step.t), the single-file text-encoder
-validation, tokenizer-directory discovery, and the default guidance-scale.
+Covers the sigma-based step schedule, the single-file text-encoder validation,
+tokenizer-directory discovery and the Flux (Z-Image) latent upscaler. Model
+defaults and the upscale-format registration are covered catalog-wide in
+``test_catalog.py``.
 """
 from __future__ import annotations
 
@@ -9,11 +11,9 @@ import torch
 
 from thenoise.dit.zimage.sampling import get_sigmas
 from thenoise.dit.zimage.utils import (
-    ZIMAGE_TOKENIZER_CONFIG_DIR,
-    find_zimage_tokenizer_dir,
     load_zimage_text_encoder,
 )
-from thenoise.models import ZImageModel
+from thenoise.utils.text_encoder import QWEN25_TOKENIZER_CONFIG_DIR, find_tokenizer_dir
 
 
 def test_zimage_sigmas_are_static_shifted_grid_with_trailing_zero():
@@ -29,15 +29,6 @@ def test_zimage_sigmas_are_static_shifted_grid_with_trailing_zero():
     assert torch.allclose(sigmas[:-1], expected)
 
 
-def test_zimage_default_guidance_is_one():
-    # ComfyUI's "off" convention: guidance scale 1.0 means no CFG.
-    assert ZImageModel.DEFAULT_GUIDANCE_SCALE == 1.0
-
-
-def test_zimage_sampler_defaults_to_euler():
-    assert ZImageModel.SAMPLER == "euler"
-
-
 def test_text_encoder_rejects_non_safetensors(tmp_path):
     p = tmp_path / "text_encoder"
     p.mkdir()
@@ -49,18 +40,18 @@ def test_text_encoder_rejects_non_safetensors(tmp_path):
         raise AssertionError("expected ValueError for a non-.safetensors path")
 
 
-def test_find_zimage_tokenizer_dir(tmp_path):
+def test_find_tokenizer_dir(tmp_path):
     # Downloader layout: <out>/tokenizer/ + <out>/split_files/text_encoders/file.safetensors
     out = tmp_path / "models"
     (out / "tokenizer").mkdir(parents=True)
     te = out / "split_files" / "text_encoders" / "qwen_3_4b.safetensors"
-    found = find_zimage_tokenizer_dir(str(te))
+    found = find_tokenizer_dir(str(te))
     assert found == str(out / "tokenizer")
 
 
-def test_find_zimage_tokenizer_dir_returns_none_without_tokenizer(tmp_path):
+def test_find_tokenizer_dir_returns_none_without_tokenizer(tmp_path):
     te = tmp_path / "split_files" / "text_encoders" / "qwen_3_4b.safetensors"
-    assert find_zimage_tokenizer_dir(str(te)) is None
+    assert find_tokenizer_dir(str(te)) is None
 
 
 def test_vendored_tokenizer_config_dir_exists():
@@ -68,25 +59,24 @@ def test_vendored_tokenizer_config_dir_exists():
     # offline without fetching from the Hub (mirrors the anima configs/ pattern).
     from pathlib import Path
 
-    d = Path(ZIMAGE_TOKENIZER_CONFIG_DIR)
+    d = Path(QWEN25_TOKENIZER_CONFIG_DIR)
     assert d.is_dir()
-    for required in ("tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt"):
+    for required in ("tokenizer.json", "tokenizer_config.json"):
         assert (d / required).is_file(), f"missing vendored tokenizer file {required}"
 
 
 def test_zimage_upscale_format_is_flux():
-    # Z-Image uses the Flux VAE -> the affine shift/scale latent format is registered.
-    from thenoise.upscale import _UPSCALER_FORMATS
+    # Z-Image uses the Flux VAE -> the affine shift/scale latent format, whose
+    # constants must match the VAE's own decode normalization.
+    from thenoise.upscale import make_flux
+    from thenoise.vae import AutoencoderKLFlux
 
-    assert "flux" in _UPSCALER_FORMATS
-    assert _UPSCALER_FORMATS["flux"][1] == "upscaler_flux.safetensors"
-    # And the adapter declares the flux format for its upscale path.
-    assert ZImageModel._upscale_format is not None
+    adaptor = make_flux()
+    assert adaptor.scale == AutoencoderKLFlux.scaling_factor
+    assert adaptor.shift == AutoencoderKLFlux.shift_factor
 
 
 def test_flux_upscaler_loads_and_runs():
-    import torch
-
     from thenoise.upscale import load_latent_upscaler
 
     model, adaptor = load_latent_upscaler("flux", device="cpu", dtype=torch.bfloat16)
@@ -100,7 +90,6 @@ def test_flux_upscaler_loads_and_runs():
 
 def test_load_upscaler_rejects_unknown_format():
     import pytest
-    import torch
 
     from thenoise.upscale import load_latent_upscaler
 

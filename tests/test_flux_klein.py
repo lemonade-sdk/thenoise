@@ -1,84 +1,57 @@
 """Flux.2 (Flux Klein) adapter tests (no real weights / no GPU needed).
 
-Covers detection, the flow schedule, the token-position pack/unpack helpers, a
-small end-to-end DiT forward, the Flux.2 VAE decode, the variant picker, and the
-Flux2 latent-upscaler registration.
+Covers the flow schedule, the token-position pack/unpack helpers, a small
+end-to-end DiT forward (eager — see ``conftest``), the Flux.2 VAE shapes, the
+reference-token packing and the Flux2 latent-upscaler round-trip.
+
+Detection and the per-model defaults live in the catalog-wide tables of
+``test_detect.py`` / ``test_catalog.py``.
 """
 from __future__ import annotations
 
+import pytest
 import torch
 
 from thenoise.dit.flux2.models import Flux2, Flux2Params
 from thenoise.dit.flux2.sampling import get_schedule, prc_img, prc_txt, scatter_ids
-from thenoise.dit.flux2.utils import QWEN3_8B_CONFIG
-from thenoise.models import FluxKleinModel, resolve
-from thenoise.vae import AutoencoderKLFlux2
+from thenoise.models import FluxKleinModel
 
 
-class _FakeHandle:
-    def __init__(self, keys):
-        self._keys = keys
-
-    def keys(self):
-        return self._keys
-
-
-_FLUX_KLEIN_KEYS = [
-    "double_stream_modulation_img.lin.weight",
-    "double_stream_modulation_txt.lin.weight",
-    "single_stream_modulation.lin.weight",
-    "img_in.weight",
-    "txt_in.weight",
-    "final_layer.adaLN_modulation.1.weight",
-]
-
-_FLUX_KLEIN_WRAPPED_KEYS = [
-    "model.diffusion_model.double_stream_modulation_img.lin.weight",
-    "model.diffusion_model.double_stream_modulation_txt.lin.weight",
-    "model.diffusion_model.single_stream_modulation.lin.weight",
-    "model.diffusion_model.img_in.weight",
-    "model.diffusion_model.final_layer.adaLN_modulation.1.weight",
-]
+@pytest.fixture
+def tiny_flux2():
+    """A random-init Flux2 with the smallest sensible config."""
+    torch.manual_seed(0)
+    return Flux2(
+        Flux2Params(
+            in_channels=8,
+            context_in_dim=24,
+            hidden_size=16,
+            num_heads=2,
+            depth=1,
+            depth_single_blocks=1,
+            axes_dim=[2, 2, 2, 2],
+            mlp_ratio=1.5,
+            use_guidance_embed=False,
+        )
+    ).eval()
 
 
-def test_detect_flux_klein():
-    assert FluxKleinModel.detect(_FakeHandle(_FLUX_KLEIN_KEYS)) is True
-
-
-def test_detect_flux_klein_wrapped():
-    assert FluxKleinModel.detect(_FakeHandle(_FLUX_KLEIN_WRAPPED_KEYS)) is True
-
-
-def test_detect_rejects_other_models():
-    # Z-Image keys must not be claimed by Flux Klein (and vice versa).
-    from tests.test_detect import _ANIMA_KEYS, _KREA2_KEYS, _ZIMAGE_KEYS
-
-    assert FluxKleinModel.detect(_FakeHandle(_ANIMA_KEYS)) is False
-    assert FluxKleinModel.detect(_FakeHandle(_KREA2_KEYS)) is False
-    assert FluxKleinModel.detect(_FakeHandle(_ZIMAGE_KEYS)) is False
-
-    from thenoise.models import AnimaModel, Krea2Model, ZImageModel
-
-    assert AnimaModel.detect(_FakeHandle(_FLUX_KLEIN_KEYS)) is False
-    assert Krea2Model.detect(_FakeHandle(_FLUX_KLEIN_KEYS)) is False
-    assert ZImageModel.detect(_FakeHandle(_FLUX_KLEIN_KEYS)) is False
-
-
-def test_resolve_flux_klein(tmp_path):
-    import torch
-    from safetensors.torch import save_file
-
-    p = tmp_path / "klein.safetensors"
-    save_file({k: torch.zeros(1) for k in _FLUX_KLEIN_WRAPPED_KEYS}, str(p))
-    assert resolve(str(p)) is FluxKleinModel
-
-
-def test_flux_klein_defaults():
-    # Distilled defaults: 4 steps, guidance 1.0 (CFG off), Euler sampler.
-    assert FluxKleinModel.DEFAULT_STEPS == 4
-    assert FluxKleinModel.DEFAULT_GUIDANCE_SCALE == 1.0
-    assert FluxKleinModel.SAMPLER == "euler"
-    assert FluxKleinModel.LATENT_CHANNELS == 128
+def _tiny_inputs(tiny_flux2, seq=4):
+    x = torch.randn(1, seq, 8)
+    x_ids = torch.zeros(1, seq, 4, dtype=torch.long)
+    ctx = torch.randn(1, 8, 24)
+    ctx_ids = torch.zeros(1, 8, 4, dtype=torch.long)
+    # Precompute the RoPE frequencies via the model's RopeCache, as the adapter does.
+    tiny_flux2.pe_embedder.clear()
+    tiny_flux2.pe_embedder.store("img", x_ids)
+    tiny_flux2.pe_embedder.store("txt", ctx_ids)
+    return {
+        "x": x,
+        "pe_x": tiny_flux2.pe_embedder["img"],
+        "timesteps": torch.tensor([0.5]),
+        "ctx": ctx,
+        "pe_ctx": tiny_flux2.pe_embedder["txt"],
+    }
 
 
 def test_schedule_is_flow_grid_1_to_0():
@@ -115,198 +88,97 @@ def test_prc_txt_ids_shape():
     assert ids.shape == (1, 512, 4)
 
 
-def test_flux2_forward_small_model():
+def test_flux2_forward_small_model(tiny_flux2):
     """End-to-end Flux2 forward with a tiny config (no weights, random init)."""
-    torch.manual_seed(0)
-    params = Flux2Params(
-        in_channels=8,
-        context_in_dim=24,
-        hidden_size=16,
-        num_heads=2,
-        depth=1,
-        depth_single_blocks=1,
-        axes_dim=[2, 2, 2, 2],
-        mlp_ratio=1.5,
-        use_guidance_embed=False,
-    )
-    model = Flux2(params)
-    model.eval()
-
-    seq = 4
-    x = torch.randn(1, seq, 8)
-    x_ids = torch.zeros(1, seq, 4, dtype=torch.long)
-    t = torch.tensor([0.5])
-    ctx = torch.randn(1, 8, 24)
-    ctx_ids = torch.zeros(1, 8, 4, dtype=torch.long)
-
-    with torch.no_grad():
-        out = model(x=x, x_ids=x_ids, timesteps=t, ctx=ctx, ctx_ids=ctx_ids)
-    assert out.shape == (1, seq, 8)
+    out = tiny_flux2(**_tiny_inputs(tiny_flux2))
+    assert out.shape == (1, 4, 8)
     # A flow-velocity output must be finite.
     assert torch.isfinite(out).all()
 
 
-def test_flux2_vae_decode_shape():
-    vae = AutoencoderKLFlux2()
+def test_flux2_forward_with_reference_tokens(tiny_flux2):
+    """Flux2 forward consumes ref tokens and slices them off the output."""
+    torch.manual_seed(0)
+    inputs = _tiny_inputs(tiny_flux2)
+    ref_tokens = torch.randn(1, 6, 8)
+    ref_ids = torch.full((1, 6, 4), FluxKleinModel.REF_INDEX, dtype=torch.long)
+    # pe_x must cover the concatenated image stream (base tokens + refs).
+    img_ids = torch.cat([torch.zeros(1, 4, 4, dtype=torch.long), ref_ids], dim=1)
+    tiny_flux2.pe_embedder.store("img", img_ids)
+    inputs["pe_x"] = tiny_flux2.pe_embedder["img"]
+
+    with torch.no_grad():
+        out = tiny_flux2(**inputs, ref_tokens=ref_tokens)
+    # The reference tokens are concatenated in and sliced back off, so the
+    # output is exactly the image tokens (seq), not seq + ref tokens.
+    assert out.shape == (1, 4, 8)
+    assert torch.isfinite(out).all()
+
+    # The differential: a reference-conditioned pass must differ from the
+    # un-conditioned one (otherwise conditioning is silently ignored).
+    with torch.no_grad():
+        base = tiny_flux2(**_tiny_inputs(tiny_flux2))
+    assert not torch.allclose(out, base)
+
+
+def test_flux2_vae_decode_shape(flux2_vae):
     latents = torch.randn(1, 128, 4, 4)
-    pixels = vae.decode_to_pixels(latents)
+    pixels = flux2_vae.decode_to_pixels(latents)
     # 16x spatial compression in packed space -> 4 -> 64 px.
     assert pixels.shape == (1, 3, 64, 64)
     assert pixels.min() >= -1.0 and pixels.max() <= 1.0
 
 
-def test_flux2_vae_encode_shape():
+def test_flux2_vae_encode_shape(flux2_vae):
     """Encoder: pixels [-1,1] -> canonical packed latent (16x compression)."""
-    vae = AutoencoderKLFlux2()
     pixels = torch.randn(1, 3, 64, 64)
-    latents = vae.encode_pixels_to_latents(pixels)
+    latents = flux2_vae.encode_pixels_to_latents(pixels)
     assert latents.shape == (1, 128, 4, 4)
     assert latents.dtype == torch.float32
 
 
-def test_flux2_vae_quant_conv_matches_checkpoint():
-    """encoder.quant_conv is 2*z_channels -> 2*z_channels (64->64), per the
-    official flux2-vae checkpoint; the gaussian mean is taken in eval mode."""
-    vae = AutoencoderKLFlux2()
-    q = vae.encoder.quant_conv
-    assert q.weight.shape == (64, 64, 1, 1)
-    assert q.bias.shape == (64,)
-    # conv_out emits 2*z_channels (64); quant_conv preserves it.
-    assert vae.encoder.conv_out.out_channels == 64
-
-
-def test_flux2_vae_encode_decode_shape_roundtrip():
-    """Encode then decode returns the pixel shape (no weights, shape only)."""
-    vae = AutoencoderKLFlux2()
-    pixels = torch.randn(1, 3, 64, 64)
-    latents = vae.encode_pixels_to_latents(pixels)
-    out = vae.decode_to_pixels(latents)
-    assert out.shape == pixels.shape
-
-
-def test_flux2_reference_ids_via_prc_img_t_coord():
-    """Reference packing uses ``prc_img`` with t-axis = Flux2 index (10)."""
-    from thenoise.dit.flux2.sampling import prc_img
-
+def test_flux2_reference_ids_use_the_ref_index_t_coord():
+    """Reference packing puts ``REF_INDEX`` on the t-axis, not the still-image 0."""
     ref = torch.randn(1, 8, 4, 4)
-    _, ids = prc_img(ref, t_coord=torch.tensor([10]))
+    _, ids = prc_img(ref, t_coord=torch.tensor([FluxKleinModel.REF_INDEX]))
     assert ids.shape == (1, 16, 4)
-    # The reference t-axis is the index (10), not the still-image 0.
-    assert torch.all(ids[0, :, 0] == 10)
+    assert torch.all(ids[0, :, 0] == FluxKleinModel.REF_INDEX)
 
 
-def test_pack_reference_latent_successive_index():
-    """Multi-ref packing assigns successive t-axes (10, 20, ...) per ComfyUI."""
-    from thenoise.dit.flux2.sampling import prc_img
-
+def test_multi_ref_packing_assigns_successive_indices():
+    """Multi-ref packing uses successive t-axes (10, 20, ...) per ComfyUI."""
     ref = torch.randn(1, 8, 4, 4)
-    # First ref -> index 10, second -> 20 (REF_INDEX * position).
-    _, ids1 = prc_img(ref, t_coord=torch.tensor([10]))
-    _, ids2 = prc_img(ref, t_coord=torch.tensor([20]))
-    assert torch.all(ids1[0, :, 0] == 10)
-    assert torch.all(ids2[0, :, 0] == 20)
+    index = FluxKleinModel.REF_INDEX
+    _, ids1 = prc_img(ref, t_coord=torch.tensor([index]))
+    _, ids2 = prc_img(ref, t_coord=torch.tensor([2 * index]))
+    assert torch.all(ids1[0, :, 0] == index)
+    assert torch.all(ids2[0, :, 0] == 2 * index)
     # Concatenated along the token dimension keeps both refs distinct.
-    cat = torch.cat([ids1, ids2], dim=1)
-    assert cat.shape == (1, 32, 4)
+    assert torch.cat([ids1, ids2], dim=1).shape == (1, 32, 4)
 
 
 def test_pack_reference_latent_rejects_unsupported_method():
     """An unsupported ``ref_latents_method`` raises rather than being ignored."""
-    import pytest
-
     model = FluxKleinModel.__new__(FluxKleinModel)  # no __init__ (no weights)
     model.device = "cpu"
     model.dtype = torch.float32
-    model.REF_INDEX = 10
-    ref = torch.randn(1, 8, 4, 4)
-    with pytest.raises(ValueError):
-        model.pack_reference_latent(ref, method="crop")
-
+    with pytest.raises(ValueError, match="unsupported ref_latents_method"):
+        model.pack_reference_latent(torch.randn(1, 8, 4, 4), method="crop")
 
 
 def test_resize_to_cover_center_crop_keeps_target_size():
     """ComfyUI-style ref resize: cover the target, center-crop; no padding."""
     from PIL import Image
+
     from thenoise.utils.image_tensor import resize_to_cover_center_crop
 
     # Wide source into a square target: scale height to 100, width overflows, crop.
-    img = Image.new("RGB", (200, 50), "red")
-    out = resize_to_cover_center_crop(img, 100, 100)
-    assert out.size == (100, 100)
-
+    assert resize_to_cover_center_crop(Image.new("RGB", (200, 50), "red"), 100, 100).size == (100, 100)
     # Same aspect ratio: only resized, no crop.
-    img2 = Image.new("RGB", (200, 100), "blue")
-    out2 = resize_to_cover_center_crop(img2, 100, 50)
-    assert out2.size == (100, 50)
-
+    assert resize_to_cover_center_crop(Image.new("RGB", (200, 100), "blue"), 100, 50).size == (100, 50)
     # Already at target size: returned unchanged.
-    img3 = Image.new("RGB", (64, 64), "green")
-    assert resize_to_cover_center_crop(img3, 64, 64) is img3
-
-
-def test_flux2_forward_with_reference_tokens():
-    """Flux2 forward consumes ref tokens+ids and slices them off the output."""
-    torch.manual_seed(0)
-    params = Flux2Params(
-        in_channels=8,
-        context_in_dim=24,
-        hidden_size=16,
-        num_heads=2,
-        depth=1,
-        depth_single_blocks=1,
-        axes_dim=[2, 2, 2, 2],
-        mlp_ratio=1.5,
-        use_guidance_embed=False,
-    )
-    model = Flux2(params)
-    model.eval()
-
-    seq = 4
-    x = torch.randn(1, seq, 8)
-    x_ids = torch.zeros(1, seq, 4, dtype=torch.long)
-    t = torch.tensor([0.5])
-    ctx = torch.randn(1, 8, 24)
-    ctx_ids = torch.zeros(1, 8, 4, dtype=torch.long)
-    ref_tokens = torch.randn(1, 6, 8)
-    ref_ids = torch.full((1, 6, 4), 10, dtype=torch.long)
-
-    with torch.no_grad():
-        out = model(
-            x=x, x_ids=x_ids, timesteps=t, ctx=ctx, ctx_ids=ctx_ids,
-            ref_tokens=ref_tokens, ref_ids=ref_ids,
-        )
-    # The reference tokens are concatenated in and sliced back off, so the
-    # output is exactly the image tokens (seq), not seq + ref tokens.
-    assert out.shape == (1, seq, 8)
-    assert torch.isfinite(out).all()
-
-    # A reference-conditioned pass must differ from the un-conditioned one.
-    with torch.no_grad():
-        base = model(x=x, x_ids=x_ids, timesteps=t, ctx=ctx, ctx_ids=ctx_ids)
-    assert not torch.allclose(out, base)
-
-
-def test_flux_klein_supports_edit():
-    assert FluxKleinModel.supports_edit is True
-    assert FluxKleinModel.REF_INDEX == 10
-
-
-def test_qwen3_8b_config_matches_klein9b_context():
-    # Klein 9B context = 3 * Qwen3-8B hidden (4096).
-    assert QWEN3_8B_CONFIG["hidden_size"] == 4096
-
-
-def test_flux2_upscale_format_registered():
-    from thenoise.upscale import _UPSCALER_FORMATS, load_latent_upscaler
-
-    assert "flux2" in _UPSCALER_FORMATS
-    assert _UPSCALER_FORMATS["flux2"][1] == "upscaler_flux2.safetensors"
-    assert _UPSCALER_FORMATS["flux2"][2] == 32  # raw VAE latent channels
-
-    # The model declares the flux2 format for its upscale path (abstract method,
-    # needs an instance; check it exists on the class).
-    assert hasattr(FluxKleinModel, "_upscale_format")
-    assert "flux2" in _UPSCALER_FORMATS
+    img = Image.new("RGB", (64, 64), "green")
+    assert resize_to_cover_center_crop(img, 64, 64) is img
 
 
 def test_flux2_upscaler_loads_and_runs():

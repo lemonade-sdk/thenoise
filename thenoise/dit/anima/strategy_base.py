@@ -82,7 +82,7 @@ class TokenizeStrategy:
         """
 
         def parse_prompt_attention(text):
-            """
+            r"""
             Parses a string with attention tokens and returns a list of pairs: text and its associated weight.
             Accepted tokens are:
             (abc) - increases attention to abc by a multiplier of 1.1

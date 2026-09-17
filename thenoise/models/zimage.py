@@ -12,10 +12,10 @@ import torch
 
 from thenoise.dit.zimage import sampling as zimage_sampling
 from thenoise.dit.zimage.utils import (
-    find_zimage_tokenizer_dir,
     load_zimage_dit,
     load_zimage_text_encoder,
 )
+from thenoise.utils.text_encoder import find_tokenizer_dir
 from thenoise.models.base import (
     Conditioning,
     DiffusionModel,
@@ -43,6 +43,11 @@ class ZImageModel(DiffusionModel):
     SAMPLER = "euler"
 
     MAX_SEQUENCE_LENGTH = 512
+
+    def _lora_key_map(self, key: str) -> str:
+        """Diffusers-layout LoRAs name the output projection ``to_out.0``;
+        the Z-Image model names it ``out``."""
+        return key.replace(".to_out.0", ".out")
 
     @staticmethod
     def detect(f) -> bool:
@@ -75,12 +80,12 @@ class ZImageModel(DiffusionModel):
             config.text_encoder_path,
             dtype=config.dtype,
             device=self.offload_device,
-            tokenizer_dir=find_zimage_tokenizer_dir(config.text_encoder_path),
+            tokenizer_dir=find_tokenizer_dir(config.text_encoder_path),
         )
         self.text_encoder.eval().requires_grad_(False)
 
         # Flux VAE (decoder-only).
-        self.vae = load_flux_vae(self.vae_path, device=self.device, disable_mmap=True, dtype=self.dtype)
+        self.vae = load_flux_vae(self.vae_path, device=self.device, dtype=self.dtype)
         self.vae.eval().requires_grad_(False)
 
         # Register swappable components with the memory manager.
@@ -141,7 +146,9 @@ class ZImageModel(DiffusionModel):
         params: SamplingParams,
     ) -> torch.Tensor:
         # The DiT expects an F (frame) axis: [B, C, H, W] -> [B, C, 1, H, W].
-        return latents.unsqueeze(2)
+        latents = latents.unsqueeze(2)
+        self.dit.prepare_rope([latents[0]], [cond.cond[0]])
+        return latents
 
     def schedule(self, params: SamplingParams) -> list[Step]:
         dev = torch.device(self.device)

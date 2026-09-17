@@ -26,12 +26,15 @@ reloads the original weights from the checkpoint file (see
 from __future__ import annotations
 
 import math
+from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from comfy_kitchen.tensor import QuantizedTensor
+
+from thenoise.utils.loader import restore_quantized_layer
 
 
 class QuantizedLinear(nn.Module):
@@ -93,6 +96,48 @@ class QuantizedLinear(nn.Module):
     def _set_quantized(self, qt: QuantizedTensor) -> None:
         """Overwrite the quantized ``weight`` buffer in place (preserving identity)."""
         self.weight.copy_(qt)
+
+    def apply_lora(self, delta: torch.Tensor) -> None:
+        """Apply a LoRA delta ``[out, in]`` in place.
+
+        BF16 layers add ``delta`` to the weight parameter directly. Quantized
+        layers bake it in (``bake_lora``), so the runtime forward stays a single
+        quantized GEMM with zero per-step LoRA cost.
+        """
+        if self._quantized:
+            self.bake_lora(delta)
+        else:
+            self.weight.data.add_(delta.to(self.weight.dtype))
+
+    def undo_lora(
+        self,
+        delta: Optional[torch.Tensor],
+        *,
+        raw_key: Optional[str] = None,
+        dit_path: Optional[str] = None,
+    ) -> None:
+        """Undo a previously applied LoRA delta.
+
+        BF16 layers subtract ``delta`` from the weight parameter (exact, no
+        compounding). Quantized layers reload the original quantized weights
+        from the checkpoint file by ``raw_key`` (avoids compounding
+        quantization errors from repeated dequantize/requantize). ``delta`` is
+        unused for quantized layers.
+        """
+        if self._quantized:
+            if raw_key is None:
+                raise RuntimeError(
+                    "cannot undo quantized LoRA: no raw checkpoint key was "
+                    "recorded at load time"
+                )
+            if dit_path is None:
+                raise RuntimeError(
+                    "cannot undo quantized LoRA: no dit_path was recorded at "
+                    "apply time"
+                )
+            restore_quantized_layer(self, dit_path, raw_key)
+        else:
+            self.weight.data.sub_(delta.to(self.weight.dtype))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.linear(x, self.weight, self.bias)

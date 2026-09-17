@@ -12,12 +12,14 @@ from .anima import AnimaModel
 from .flux_klein import FluxKleinModel
 from .krea2 import Krea2Model
 from .zimage import ZImageModel
+from .qwen_image import QwenImageModel
 
 MODEL_CATALOG: List[Type[DiffusionModel]] = [
     Krea2Model,
     AnimaModel,
     ZImageModel,
     FluxKleinModel,
+    QwenImageModel,
 ]
 
 
