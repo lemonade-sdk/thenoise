@@ -478,3 +478,10 @@ def test_build_upscale_pnginfo_carries_over_and_replaces():
         "upscale_factor": 4.0,
     }
 
+
+
+def test_kv_cache_requires_an_edit_request():
+    """``kv_cache`` is a reference-latent optimization: it needs a reference image."""
+    controller = _controller()
+    with pytest.raises(ValueError, match="requires an edit request"):
+        controller.generate(_request(kv_cache=True))

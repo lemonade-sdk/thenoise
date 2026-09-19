@@ -27,6 +27,8 @@ from thenoise.dit.flux2.utils import (
     load_flux2_dit,
     load_qwen3_embedder,
 )
+from thenoise.dit.kvcache import KVCache
+from thenoise.utils.safetensors import checkpoint_has_key
 from thenoise.utils.text_encoder import find_tokenizer_dir
 from thenoise.models.base import Conditioning, DiffusionModel, Step, normalize_keys
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
@@ -57,6 +59,13 @@ class FluxKleinModel(DiffusionModel):
     # with ``ref_index_scale = 10`` (the t-axis offset for the reference latent).
     supports_edit = True
     REF_INDEX = 10
+    DEFAULT_REF_METHOD = "index"
+
+    # Reference-latent KV cache: the reference tokens' K/V can be frozen across
+    # denoise steps (ComfyUI's ``FluxKVCache``). Requires a checkpoint trained
+    # with ``index_timestep_zero`` (the ``__index_timestep_zero__`` marker).
+    supports_kv_cache = True
+    DEFAULT_KV_CACHE = False
 
     def _lora_key_map(self, key: str) -> str:
         """Map ComfyUI Flux.2 LoRA names to this repo's Flux.2 schema.
@@ -95,10 +104,15 @@ class FluxKleinModel(DiffusionModel):
         super().__init__(config=config)
 
         # Determine the Klein variant (4B / 9B) from the DiT checkpoint; this also
-        # selects the matching Qwen3 text encoder (4B / 8B).
+        # selects the matching Qwen3 text encoder (4B / 8B). Edit checkpoints
+        # trained with reference tokens conditioned at timestep zero carry the
+        # ``__index_timestep_zero__`` marker — auto-detect it (shared helper,
+        # wrapper-prefix agnostic) and enable the ``zero_cond_t`` modulation.
         self.params: Flux2Params = detect_klein_params(config.dit_path)
+        self.zero_cond_t = checkpoint_has_key(config.dit_path, "__index_timestep_zero__")
+        self.params.zero_cond_t = self.zero_cond_t
         self.is_8b = self.params.context_in_dim == 12288
-        logger.info("Loading Flux Klein DiT (%s) from %s", self.variant_label, config.dit_path)
+        logger.info("Loading Flux Klein DiT (%s) from %s (zero_cond_t=%s)", self.variant_label, config.dit_path, self.zero_cond_t)
         self.dit = load_flux2_dit(config.dit_path, self.params, device=self.offload_device, dtype=config.dtype)
         self.dit.eval().requires_grad_(False)
 
@@ -186,23 +200,39 @@ class FluxKleinModel(DiffusionModel):
 
         if ref is not None:
             # Pack each ref with a successive t-axis index (REF_INDEX, 2x, ...)
-            # per ComfyUI, then concat all ref tokens+ids into one stream.
+            # per ComfyUI, then concat all ref tokens+ids into one stream. The
+            # target image ids are kept separate from the reference ids so the KV
+            # cache can drop the refs from the sequence (read mode) while still
+            # knowing their positions (fill mode).
             ref_tokens, ref_ids = [], []
             for i, ref_latent in enumerate(ref):
                 t, ids = self.pack_reference_latent(ref_latent, ref_method, ref_index=i + 1)
                 ref_tokens.append(t)
                 ref_ids.append(ids)
             self._ref_tokens = torch.cat(ref_tokens, dim=1)
-            img_ids = torch.cat([x_ids, torch.cat(ref_ids, dim=1)], dim=1)
+            ref_ids = torch.cat(ref_ids, dim=1)
+            self._ref_token_count = self._ref_tokens.shape[1]
         else:
             self._ref_tokens = None
-            img_ids = x_ids
+            self._ref_token_count = 0
+            ref_ids = torch.zeros(1, 0, 4, device=dev, dtype=torch.long)
 
         self.dit.pe_embedder.clear()
-        self.dit.pe_embedder.store("img", img_ids, dtype=self.dtype)
+        self.dit.pe_embedder.store("img", x_ids, dtype=self.dtype)
+        self.dit.pe_embedder.store("ref", ref_ids, dtype=self.dtype)
         self.dit.pe_embedder.store("txt", txt_ids, dtype=self.dtype)
         if un_txt_ids is not None:
             self.dit.pe_embedder.store("txt_uncond", un_txt_ids, dtype=self.dtype)
+
+        # Reference-latent KV cache (ComfyUI ``FluxKVCache``): one cache per
+        # conditioning branch, created fresh per run so a later request can never
+        # reuse a stale cache. The uncond branch cache is only allocated when CFG
+        # is actually active (``guidance_scale > 1.0``).
+        self._kv: dict[str, KVCache] | None = None
+        if params.kv_cache and self._ref_tokens is not None and self.supports_kv_cache:
+            self._kv = {"cond": KVCache("cond")}
+            if params.guidance_scale > 1.0 and self._un_txt is not None:
+                self._kv["uncond"] = KVCache("uncond")
 
         return x
 
@@ -227,23 +257,56 @@ class FluxKleinModel(DiffusionModel):
         The Flux.2 flow ODE integrates ``x += (t_prev - t_curr) * v``, which is
         exactly the shared Euler update ``x -= delta * v`` when ``v`` is the model's
         raw output (no negation, unlike Z-Image).
+
+        With the KV cache the reference tokens are present only while the cache is
+        filling; on every later step they are dropped and their cached K/V is
+        re-appended (``Flux2.forward`` decides fill vs read from ``kv.filled``).
         """
         dev = torch.device(self.device)
         t_full = torch.full((len(latents),), float(t), dtype=latents.dtype, device=dev)
+        pe_img = self.dit.pe_embedder["img"]
+        pe_ref = self.dit.pe_embedder["ref"]
+        kv_cond = self._kv["cond"] if self._kv is not None else None
+        kv_uncond = self._kv.get("uncond") if self._kv is not None else None
         with torch.no_grad(), torch.autocast(device_type=dev.type, dtype=self.dtype):
-            pos = self.dit(
-                x=latents, pe_x=self.dit.pe_embedder["img"], timesteps=t_full, ctx=self._txt,
-                pe_ctx=self.dit.pe_embedder["txt"], ref_tokens=self._ref_tokens,
-            )
+            pos = self._dit_forward(latents, t_full, self._txt, self.dit.pe_embedder["txt"], kv_cond, pe_img, pe_ref)
             if guidance_scale > 1.0 and self._un_txt is not None:
-                neg = self.dit(
-                    x=latents, pe_x=self.dit.pe_embedder["img"], timesteps=t_full, ctx=self._un_txt,
-                    pe_ctx=self.dit.pe_embedder["txt_uncond"], ref_tokens=self._ref_tokens,
-                )
+                neg = self._dit_forward(latents, t_full, self._un_txt, self.dit.pe_embedder["txt_uncond"], kv_uncond, pe_img, pe_ref)
                 v = neg + guidance_scale * (pos - neg)
             else:
                 v = pos
         return v
+
+    def _dit_forward(
+        self,
+        x: torch.Tensor,
+        t_full: torch.Tensor,
+        ctx: torch.Tensor,
+        pe_ctx: torch.Tensor,
+        kv: KVCache | None,
+        pe_img: torch.Tensor,
+        pe_ref: torch.Tensor,
+    ) -> torch.Tensor:
+        """One DiT forward with the KV cache's fill/read semantics.
+
+        ``kv`` is ``None`` for the plain path. On the first forward of a fresh
+        cache (``not kv.filled``) the reference tokens are present (fill); on every
+        later step (``kv.filled``) they are dropped (read). The reference positions
+        (``pe_ref``) are only needed while filling.
+        """
+        ref_tokens = self._ref_tokens
+        if kv is not None and kv.filled:
+            ref_tokens = None
+        return self.dit(
+            x=x,
+            pe_x=pe_img,
+            timesteps=t_full,
+            ctx=ctx,
+            pe_ctx=pe_ctx,
+            ref_tokens=ref_tokens,
+            ref_pe=pe_ref,
+            kv=kv,
+        )
 
     # ------------------------------------------------------------ editing
     def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
@@ -262,12 +325,13 @@ class FluxKleinModel(DiffusionModel):
         """Canonical reference latent -> (tokens, ids), t-axis = REF_INDEX*ref_index.
 
         ``ref_index`` is the 1-based position (ComfyUI ``ref_index_scale``): the
-        first ref uses 10, the second 20, etc. Only the ``index`` packing method
-        is supported; anything else is rejected rather than silently ignored.
+        first ref uses 10, the second 20, etc. ``index_timestep_zero`` packs
+        identically to ``index`` (only the *modulation* differs, handled by
+        ``zero_cond_t``); anything else is rejected rather than silently ignored.
         """
-        if method != "index":
+        if method not in ("index", "index_timestep_zero"):
             raise ValueError(
-                f"unsupported ref_latents_method {method!r}; only 'index' is supported"
+                f"unsupported ref_latents_method {method!r}; expected 'index' or 'index_timestep_zero'"
             )
         dev = torch.device(self.device)
         index = self.REF_INDEX * ref_index
@@ -278,6 +342,10 @@ class FluxKleinModel(DiffusionModel):
 
     def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:
         """Unpack the DiT tokens back to the canonical packed latent."""
+        # Drop the run-scoped KV cache before the VAE decode (the controller
+        # offloads the DiT right after this, so freeing the cache tensors avoids
+        # holding GBs of frozen K/V through the decode).
+        self._kv = None
         x = torch.cat(scatter_ids(latents, self._img_ids)).squeeze(2)  # [B, 128, H//16, W//16]
         return x
 

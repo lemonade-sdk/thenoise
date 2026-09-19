@@ -82,6 +82,8 @@ def run_generate(args) -> None:
         sharpening=args.sharpening,
         lora_specs=args.lora or None,
         pixel_upscaler=pixel_upscaler,
+        kv_cache=args.kv_cache,
+        ref_method=args.ref_method,
     )
 
     image = runtime.pipeline.generate(request)
@@ -121,6 +123,8 @@ def run_edit(args) -> None:
         sharpening=args.sharpening,
         lora_specs=args.lora or None,
         pixel_upscaler=pixel_upscaler,
+        kv_cache=args.kv_cache,
+        ref_method=args.ref_method,
     )
 
     from PIL import Image

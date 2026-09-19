@@ -26,6 +26,7 @@ import torch
 from einops import rearrange
 from torch import Tensor, nn
 
+from thenoise.dit.kvcache import KVCache, KVSegment
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import attention as sdpa_attention
 from thenoise.utils.qk_norm import QKNorm
@@ -61,6 +62,10 @@ class Flux2Params:
     theta: int = 2000
     mlp_ratio: float = 3.0
     use_guidance_embed: bool = True
+    # Edit checkpoints trained with reference tokens conditioned at timestep
+    # zero (``__index_timestep_zero__`` marker) modulate the reference slice with
+    # vec(0), making its K/V step-invariant — the basis of the KV cache.
+    zero_cond_t: bool = False
 
 
 @dataclass
@@ -83,11 +88,24 @@ class Klein4BParams(Flux2Params):
     use_guidance_embed: bool = False
 
 
-def attention(qkv_list: list[Tensor], pe: Tensor) -> Tensor:
-    """Apply RoPE then the shared SDPA attention, returning ``[B, L, H*D]``."""
+def attention(qkv_list: list[Tensor], pe: Tensor, kv_read: KVSegment | None = None, kv_fill: int = 0) -> tuple[Tensor, KVSegment | None]:
+    """Apply RoPE then the shared SDPA attention, returning ``[B, L, H*D]``.
+
+    ``kv_fill`` > 0: the sequence already carries the reference tokens; snapshot
+    their trailing ``kv_fill`` K/V (post-RoPE) into a ``KVSegment`` so later
+    steps can skip recomputing them. ``kv_read``: the reference tokens have been
+    dropped from the sequence; re-append their cached K/V before attending.
+    Only one of the two is active per call.
+    """
     q, k, v = qkv_list
     q, k = apply_rope(q, k, pe)
-    return sdpa_attention([q, k, v])
+    seg = None
+    if kv_fill:
+        seg = KVSegment(k[:, :, -kv_fill:].clone(), v[:, :, -kv_fill:].clone())
+    elif kv_read is not None:
+        k = torch.cat([k, kv_read.k], dim=2)
+        v = torch.cat([v, kv_read.v], dim=2)
+    return sdpa_attention([q, k, v]), seg
 
 
 class MLPEmbedder(nn.Module):
@@ -177,7 +195,7 @@ class SingleStreamBlock(nn.Module):
         self.pre_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.mlp_act = SiLUActivation()
 
-    def forward(self, x: Tensor, pe: Tensor, mod: tuple[Tensor, Tensor]) -> Tensor:
+    def forward(self, x: Tensor, pe: Tensor, mod: tuple[Tensor, Tensor], kv_read: KVSegment | None = None, kv_fill: int = 0) -> tuple[Tensor, KVSegment | None]:
         mod_shift, mod_scale, mod_gate = mod
         x_mod = (1 + mod_scale) * self.pre_norm(x) + mod_shift
 
@@ -187,10 +205,10 @@ class SingleStreamBlock(nn.Module):
         q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         q, k = self.norm(q, k)
 
-        attn = attention([q, k, v], pe)
+        attn, seg = attention([q, k, v], pe, kv_read, kv_fill)
 
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
-        return x + mod_gate * output
+        return x + mod_gate * output, seg
 
 
 class DoubleStreamBlock(nn.Module):
@@ -229,7 +247,9 @@ class DoubleStreamBlock(nn.Module):
         pe_ctx: Tensor,
         mod_img: tuple[Tensor, Tensor],
         mod_txt: tuple[Tensor, Tensor],
-    ) -> tuple[Tensor, Tensor]:
+        kv_read: KVSegment | None = None,
+        kv_fill: int = 0,
+    ) -> tuple[Tensor, Tensor, KVSegment | None]:
         img_mod1, img_mod2 = mod_img
         txt_mod1, txt_mod2 = mod_txt
 
@@ -258,7 +278,7 @@ class DoubleStreamBlock(nn.Module):
         v = torch.cat((txt_v, img_v), dim=2)
 
         pe = torch.cat((pe_ctx, pe), dim=1)
-        attn = attention([q, k, v], pe)
+        attn, seg = attention([q, k, v], pe, kv_read, kv_fill)
         txt_attn, img_attn = attn[:, :txt_len], attn[:, txt_len:]
 
         img = img + img_mod1_gate * self.img_attn.proj(img_attn)
@@ -266,7 +286,7 @@ class DoubleStreamBlock(nn.Module):
 
         txt = txt + txt_mod1_gate * self.txt_attn.proj(txt_attn)
         txt = txt + txt_mod2_gate * self.txt_mlp((1 + txt_mod2_scale) * (self.txt_norm2(txt)) + txt_mod2_shift)
-        return img, txt
+        return img, txt, seg
 
 
 class Flux2(nn.Module):
@@ -284,6 +304,7 @@ class Flux2(nn.Module):
 
         self.hidden_size = params.hidden_size
         self.num_heads = params.num_heads
+        self.zero_cond_t = params.zero_cond_t
 
         self.pe_embedder = RopeCache(matrix_rope(params.axes_dim, params.theta))
         self.img_in = QuantizedLinear(self.in_channels, self.hidden_size, bias=False)
@@ -310,17 +331,20 @@ class Flux2(nn.Module):
         self.num_double_blocks = len(self.double_blocks)
         self.num_single_blocks = len(self.single_blocks)
 
-        # Per-block compiled-forward cache: ``(blocks, index, dynamic)``. t2i
+        # Per-block compiled-forward cache: ``(blocks, index, dynamic, mode)``. t2i
         # compiles static (fixed shape); edit (variable ref count) compiles
         # dynamic to avoid Inductor's recompile/`CantSplit` failure on the grown
-        # sequence. Keyed by the owning ModuleList + position (not ``id(block)``),
-        # which also keeps the double vs single streams from colliding.
-        self._compiled_blocks: dict[tuple[nn.ModuleList, int, bool], Callable] = {}
+        # sequence. ``mode`` is ``off`` / ``fill`` / ``read`` — the KV cache
+        # changes the graph (store vs concat), so the three variants must not
+        # share a compiled entry. Keyed by the owning ModuleList + position (not
+        # ``id(block)``), which also keeps the double vs single streams from
+        # colliding.
+        self._compiled_blocks: dict[tuple[nn.ModuleList, int, bool, str], Callable] = {}
 
-    def _compile_block(self, blocks: nn.ModuleList, index: int, dynamic: bool) -> Callable:
+    def _compile_block(self, blocks: nn.ModuleList, index: int, dynamic: bool, mode: str) -> Callable:
         """Cached ``torch.compile``d forward for ``blocks[index]``."""
         block = blocks[index]
-        key = (blocks, index, dynamic)
+        key = (blocks, index, dynamic, mode)
         fn = self._compiled_blocks.get(key)
         if fn is None:
             fn = torch.compile(block.forward, fullgraph=True, dynamic=dynamic)
@@ -344,9 +368,12 @@ class Flux2(nn.Module):
         pe_ctx: Tensor,
         guidance: Tensor | None = None,
         ref_tokens: Tensor | None = None,
+        ref_pe: Tensor | None = None,
+        kv: KVCache | None = None,
     ) -> Tensor:
         num_txt_tokens = ctx.shape[1]
         num_img_tokens = x.shape[1]
+        ref_len = 0 if ref_tokens is None else ref_tokens.shape[1]
 
         timestep_emb = timestep_embedding(timesteps, 256)
         vec = self.time_in(timestep_emb)
@@ -354,39 +381,115 @@ class Flux2(nn.Module):
             guidance_emb = timestep_embedding(guidance, 256)
             vec = vec + self.guidance_in(guidance_emb)
 
+        # ``zero_cond_t`` (edit checkpoints trained with reference tokens
+        # conditioned at timestep zero) modulates the reference slice with vec(0):
+        # duplicate the conditioning rows ``[t, 0]`` and split per token slice.
+        # The reference K/V then becomes step-independent — the basis of the KV
+        # cache. Text and (dropped-at-the-end) target tokens always use the t row.
+        zero = self.zero_cond_t and ref_len > 0
+        if zero:
+            vec_zero = self.time_in(timestep_embedding(timesteps * 0, 256))
+            if self.use_guidance_embed:
+                vec_zero = vec_zero + self.guidance_in(guidance_emb)
+            vec = torch.cat([vec, vec_zero], dim=0)
+            vec_t = vec[: len(timesteps)]
+        else:
+            vec_t = vec
+
         double_block_mod_img = self.double_stream_modulation_img(vec)
         double_block_mod_txt = self.double_stream_modulation_txt(vec)
         single_block_mod, _ = self.single_stream_modulation(vec)
 
+        def split_mod(mod, total_len: int) -> tuple[Tensor, Tensor, Tensor]:
+            """Per-token modulation for a stream of ``total_len`` tokens.
+
+            ``mod`` is a ``(shift, scale, gate)`` tuple; the first
+            ``total_len - ref_len`` tokens (text/target) use the t row, the
+            trailing ``ref_len`` reference tokens use the 0 row. Without
+            ``zero_cond_t`` every row is the t row (``[B, 1, D]`` broadcasts).
+            """
+            if not zero:
+                return tuple(m[0:1] for m in mod)
+            out = []
+            for m in mod:
+                mt = m[0:1].expand(1, total_len - ref_len, -1)
+                m0 = m[1:2].expand(1, ref_len, -1)
+                out.append(torch.cat([mt, m0], dim=1))
+            return tuple(out)
+
+        # Double stream: image tokens (target + refs) use per-token modulation;
+        # the text stream always uses the t row (it has no reference slice).
+        img_mod = (split_mod(double_block_mod_img[0], num_img_tokens + ref_len),
+                   split_mod(double_block_mod_img[1], num_img_tokens + ref_len))
+        txt_mod = tuple(tuple(x[0:1] for x in m) for m in double_block_mod_txt)
+
         # Reference-latent editing (Flux2 Klein): append the reference tokens to the
-        # image stream (in packed-latent space). ``pe_x`` already carries the refs'
-        # positions (the adapter computes it from the concatenated image ids), so only
-        # the tokens are appended here. ``None`` (plain t2i) is a no-op.
+        # image stream (in packed-latent space). ``pe_x`` is the *target-only*
+        # positions; ``ref_pe`` carries the reference positions and is only
+        # concatenated when the reference tokens are present. ``None`` (plain t2i)
+        # is a no-op.
         if ref_tokens is not None:
             x = torch.cat([x, ref_tokens], dim=1)
+            if ref_pe is not None:
+                pe_x = torch.cat([pe_x, ref_pe], dim=1)
 
         img = self.img_in(x)
         txt = self.txt_in(ctx)
 
-        # Edit varies seq length (ref tokens appended), so compile blocks
-        # dynamically there; t2i keeps static-specialized kernels.
-        dynamic = ref_tokens is not None
+        # KV cache mode: ``fill`` snapshots the reference K/V on the first step
+        # (the sequence still carries the refs, so it is exact); ``read`` drops the
+        # refs and re-appends their cached K/V on every later step. ``off`` is the
+        # plain path. Decided once, before the loop, so a mid-loop fill can never
+        # flip the mode under the loop's feet.
+        if kv is not None and not kv.filled and ref_tokens is not None:
+            mode = "fill"
+        elif kv is not None and kv.filled:
+            mode = "read"
+        else:
+            mode = "off"
+
+        # Edit varies seq length (ref tokens appended) and the KV path changes the
+        # graph, so compile blocks dynamically for the grown (fill) sequence; t2i
+        # keeps static kernels. ``read`` is compiled STATIC: its sequence length is
+        # ``txt + img`` (independent of the ref count, which was dropped), so a
+        # static graph avoids Inductor's symbolic ``Mul`` tiling failure on the
+        # cached-K/V concat.
+        if mode == "read":
+            dynamic = False
+        elif mode == "fill":
+            dynamic = True
+        else:
+            dynamic = ref_tokens is not None
 
         for i in range(len(self.double_blocks)):
-            fwd = self._compile_block(self.double_blocks, i, dynamic)
-            img, txt = fwd(img, txt, pe_x, pe_ctx, double_block_mod_img, double_block_mod_txt)
+            seg = kv.segment(("double", i)) if kv is not None else None
+            kv_fill = ref_len if mode == "fill" else 0
+            kv_read = seg if mode == "read" else None
+            fwd = self._compile_block(self.double_blocks, i, dynamic, mode)
+            img, txt, seg_out = fwd(img, txt, pe_x, pe_ctx, img_mod, txt_mod, kv_read, kv_fill)
+            if seg_out is not None and kv is not None:
+                kv.store(("double", i), seg_out)
 
         img = torch.cat((txt, img), dim=1)
         pe = torch.cat((pe_ctx, pe_x), dim=1)
+        single_mod = split_mod(single_block_mod, num_txt_tokens + num_img_tokens + ref_len)
 
         for i in range(len(self.single_blocks)):
-            fwd = self._compile_block(self.single_blocks, i, dynamic)
-            img = fwd(img, pe, single_block_mod)
+            seg = kv.segment(("single", i)) if kv is not None else None
+            kv_fill = ref_len if mode == "fill" else 0
+            kv_read = seg if mode == "read" else None
+            fwd = self._compile_block(self.single_blocks, i, dynamic, mode)
+            img, seg_out = fwd(img, pe, single_mod, kv_read, kv_fill)
+            if seg_out is not None and kv is not None:
+                kv.store(("single", i), seg_out)
 
-        img = img.to(vec.device)
+        if mode == "fill" and kv is not None:
+            kv.set_filled()
+
+        img = img.to(vec_t.device)
         img = img[:, num_txt_tokens:, ...]  # drop the text tokens
         img = slice_reference_output(img, num_img_tokens)  # drop ref tokens
-        img = self.final_layer(img, vec)
+        img = self.final_layer(img, vec_t)
         return img
 
 

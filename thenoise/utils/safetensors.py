@@ -216,6 +216,27 @@ def strip_wrap_prefixes(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.
     return stripped
 
 
+def checkpoint_has_key(path: str, key: str) -> bool:
+    """True if the safetensors ``path`` contains ``key`` (wrapper-agnostic).
+
+    Generic repackaging prefixes (``model.diffusion_model.`` / ``net.``) are
+    stripped before matching, so raw and repackaged checkpoints resolve
+    identically. Used to detect checkpoint-level architecture markers that are
+    *not* part of the weights — e.g. the empty ``__index_timestep_zero__`` buffer
+    that marks an edit model trained with reference tokens conditioned at
+    timestep zero (``zero_cond_t``).
+    """
+    with MemoryEfficientSafeOpen(path) as f:
+        for k in f.keys():
+            for prefix in WRAP_PREFIXES:
+                if k.startswith(prefix):
+                    k = k[len(prefix):]
+                    break
+            if k == key:
+                return True
+    return False
+
+
 def load_dit_safetensors(
     path: str,
     device: Union[str, torch.device],

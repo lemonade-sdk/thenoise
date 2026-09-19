@@ -145,6 +145,13 @@ class DiffusionModel(ABC):
     # Editing models set this True and override ``encode_reference``/``pack_reference_latent``.
     supports_edit: bool = False
 
+    # Reference-latent KV cache: freeze the reference tokens' K/V across denoise
+    # steps (ComfyUI ``FluxKVCache``). Models that support it set this True and
+    # override ``DEFAULT_KV_CACHE`` (per-model default, off unless trained for it).
+    supports_kv_cache: bool = False
+    DEFAULT_KV_CACHE: bool = False
+    DEFAULT_REF_METHOD: str = "index"
+
     # Whether the attention projections are fused (``qkv``) or separate
     # (``to_q``/``to_k``/``to_v``). LoRA factors are fused into a single ``qkv``
     # only for fused-projection models

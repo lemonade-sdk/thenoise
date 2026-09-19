@@ -428,6 +428,8 @@ Accepts all `/text2image` fields plus:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `image` | `string` \| `string[]` | *(required)* | One or more base64-encoded reference images (OpenAI-style; first sets the output size when `width`/`height` omitted) |
+| `kv_cache` | `boolean` | model default (off) | Reference-latent KV cache (freeze the reference tokens' K/V across denoise steps for faster editing; requires a checkpoint trained with `index_timestep_zero`) |
+| `ref_method` | `string` | `index` | Reference packing method: `index` or `index_timestep_zero` |
 
 ### Example
 
@@ -503,6 +505,10 @@ curl -s localhost:8000/upscale \
 | `--qwen-vae-enhance` | no | off | Nyquist notch post-filter |
 | `--film-grain` | no | `0.0` | Film grain strength (0.0–10.0) |
 | `--sharpening` | no | `0.0` | RCAS sharpening strength (0.0–1.0) |
+| `--kv-cache` / `--no-kv-cache` | no | off | Reference-latent KV cache (edit only): freeze the reference tokens' K/V across denoise steps for faster editing. Requires a checkpoint trained with `index_timestep_zero` |
+| `--ref-method` | no | `index` | Reference packing method for editing: `index` or `index_timestep_zero` (conditions reference tokens at timestep zero; used by KV-cache-capable edit checkpoints) |
+
+> **Note:** `--kv-cache` is a reference-latent optimization and only applies to `edit` (it needs a reference image). On `generate` it raises an error.
 
 ### `edit` only
 

@@ -92,6 +92,7 @@ class _ResolvedRequest:
     effective_sampler: str
     seed: int
     pixel_upscaler: Optional[str]
+    kv_cache: bool
 
 
 class PipelineController:
@@ -169,16 +170,19 @@ class PipelineController:
         seed: int,
         sampler: str,
         ref_method: Optional[str] = None,
+        kv_cache: bool = False,
     ) -> Tuple:
         """Cache key for the sampling (denoise stage).
 
         Embeds the prompt key so any prompt/guidance/LoRA change cascades. The
-        edit path also embeds ``ref_method`` (it changes the reference packing, hence the denoise output).
+        edit path also embeds ``ref_method`` (it changes the reference packing, hence
+        the denoise output) and ``kv_cache`` (the KV cache changes the denoise
+        output, so cached latents must not be shared across the two modes).
         """
         base = (prompt_key, width, height, steps, seed, sampler)
         if ref_method is None:
             return ("sampling",) + base
-        return ("sampling_edit",) + base + (ref_method,)
+        return ("sampling_edit",) + base + (ref_method, kv_cache)
 
     def _cache_key_decode(
         self,
@@ -249,8 +253,11 @@ class PipelineController:
 
         r = self._resolve_pipeline(local)
         ref_key = self._cache_key_reference(images, r.width, r.height)
+        # The reference packing method defaults to the model's own (``index`` for
+        # Flux2 Klein) unless the request overrides it (``index_timestep_zero``).
+        ref_method = request.ref_method or getattr(model, "DEFAULT_REF_METHOD", "index")
         return self._finalize(
-            self._run(local, r, ref_key=ref_key, ref_method="index"),
+            self._run(local, r, ref_key=ref_key, ref_method=ref_method),
             local, r,
         )
 
@@ -282,13 +289,20 @@ class PipelineController:
         model = self.model
         is_edit = ref_key is not None
 
+        # The KV cache is a reference-latent optimization: it requires an edit
+        # request (a reference latent) and a model that supports it.
+        if r.kv_cache and not is_edit:
+            raise ValueError("kv_cache requires an edit request (a reference image)")
+        if r.kv_cache and is_edit and not model.supports_kv_cache:
+            raise ValueError(f"model '{model.name}' does not support the reference-latent KV cache")
+
         prompt_key = self._cache_key_prompt(
             request.prompt, request.negative_prompt, r.guidance_scale,
             request.lora_specs, ref_key=ref_key,
         )
         sampling_key = self._cache_key_sampling(
             prompt_key, r.width, r.height, r.steps, r.seed, r.effective_sampler,
-            ref_method=ref_method,
+            ref_method=ref_method, kv_cache=r.kv_cache,
         )
         decode_key = self._cache_key_decode(sampling_key, r.refined)
 
@@ -329,6 +343,7 @@ class PipelineController:
             params = SamplingParams(
                 height=r.height, width=r.width, steps=r.steps, seed=r.seed,
                 guidance_scale=r.guidance_scale, sampler=r.effective_sampler,
+                kv_cache=r.kv_cache,
             )
 
             # Stage 2: sampling — the dit block. The DiT is resident here, so
@@ -437,6 +452,10 @@ class PipelineController:
         )
         effective_sampler = request.sampler or model.SAMPLER
 
+        # Reference-latent KV cache: resolve the request override against the
+        # model's own default (Flux2 Klein defaults to off).
+        kv_cache = request.kv_cache if request.kv_cache is not None else model.DEFAULT_KV_CACHE
+
         # seed=-1 is treated as "random" (same as None)
         seed = request.seed
         if seed is None or seed == -1:
@@ -447,6 +466,7 @@ class PipelineController:
             factor=factor, upscale_type=upscale_type, target_width=target_width,
             target_height=target_height, refined=refined, pixel_scale=pixel_scale,
             effective_sampler=effective_sampler, seed=seed, pixel_upscaler=pixel_upscaler,
+            kv_cache=kv_cache,
         )
 
     def _finalize(

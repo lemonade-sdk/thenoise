@@ -226,6 +226,22 @@
   </div>
 
   <div class="field">
+    <label class="label" for="edit_ref_method">Reference method</label>
+    <select id="edit_ref_method">
+      <option value="">auto</option>
+      <option value="index">index</option>
+      <option value="index_timestep_zero">index_timestep_zero</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label class="label">
+      <input type="checkbox" id="edit_kv_cache">
+      KV cache <span class="hint">(freeze reference K/V for faster editing; needs an index_timestep_zero checkpoint)</span>
+    </label>
+  </div>
+
+  <div class="field">
     <label class="label" for="edit_seed">Seed</label>
     <input type="number" id="edit_seed" placeholder="random" min="0">
   </div>

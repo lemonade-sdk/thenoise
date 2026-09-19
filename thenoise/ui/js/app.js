@@ -510,6 +510,9 @@ $('edit_btn').addEventListener('click', () => {
     request: () => postJSON('/edit', collectSettings('edit_', {
       // OpenAI-style: one image -> a string, many -> an array.
       image: editRefs.length === 1 ? editRefs[0].b64 : editRefs.map(r => r.b64),
+      // Reference-latent KV cache + packing method (edit only).
+      kv_cache: $('edit_kv_cache').checked,
+      ref_method: $('edit_ref_method').value || null,
     })),
     onSuccess: async (blob) => {
       // Don't revoke the previous eOutUrl: it is kept as an entry in history.

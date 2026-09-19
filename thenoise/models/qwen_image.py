@@ -24,6 +24,7 @@ from thenoise.models.base import (
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.latents import pack_latents, unpack_latents
 from thenoise.utils.math import round_up
+from thenoise.utils.safetensors import checkpoint_has_key
 from thenoise.utils.text_encoder import (
     QWEN25_TOKENIZER_CONFIG_DIR,
     load_qwen2_5_vl_model,
@@ -36,10 +37,12 @@ logger = logging.getLogger(__name__)
 
 
 def _detect_zero_cond_t(dit_path: str) -> bool:
-    from safetensors import safe_open
+    """True if the checkpoint carries the ``__index_timestep_zero__`` marker.
 
-    with safe_open(dit_path, framework="pt") as f:
-        return "__index_timestep_zero__" in f.keys()
+    Marks an edit model trained with reference tokens conditioned at timestep
+    zero (``zero_cond_t``). Shared helper, wrapper-prefix agnostic.
+    """
+    return checkpoint_has_key(dit_path, "__index_timestep_zero__")
 
 
 class QwenImageModel(DiffusionModel):
