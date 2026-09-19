@@ -93,6 +93,7 @@ def load_flux2_dit(
         device=device,
         dtype=dtype,
         key_map=_flux2_key_map,
+        drop_keys=("__index_timestep_zero__",),
     )
 
 

@@ -26,10 +26,11 @@ class Krea2Model(DiffusionModel):
     name = "krea2"
 
     # Model-owned defaults (incl. advanced sampler params -- not exposed to API/CLI).
-    DEFAULT_STEPS = 8
-    DEFAULT_GUIDANCE_SCALE = 1.0
-    DEFAULT_WIDTH = 1024
-    DEFAULT_HEIGHT = 1024
+    DEFAULT_PREFS = {
+        **DiffusionModel.DEFAULT_PREFS,
+        "steps": 8,
+        "guidance_scale": 1.0,
+    }
     DEFAULT_Y1 = 0.5
     DEFAULT_Y2 = 1.15
     DEFAULT_MU = 1.15
@@ -84,8 +85,9 @@ class Krea2Model(DiffusionModel):
             .requires_grad_(False)
         )
 
-        # VAE latent geometry (shared Qwen-Image VAE): 8x spatial compression.
-        self._compression = self.vae.compression
+        # VAE latent geometry (the VAE owns it): channels via ``vae.z_dim`` in
+        # ``init_latents``, compression here since the schedule needs it per token.
+        self._compression = self.vae.spatial_compression
 
         # Register swappable components with the memory manager.
         self.memory.register("dit", self.dit)

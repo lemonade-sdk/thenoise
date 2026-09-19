@@ -23,10 +23,15 @@ Subclasses implement the model-specific kernels and load their own VAE:
   * ``_upscale_format(...)``  — required: the latent-format name for this
     model's VAE (selected by ``load_latent_upscaler``).
 
-Both models use the same Qwen-Image VAE (z_dim=16, spatial compression 8), so
-``init_latents`` produces and ``finalize_latent`` returns the canonical latent
-format ``[B, C, H, W]`` (4D). The VAE's ``decode_to_pixels`` accepts that
-directly (the VAE is 2D / single-frame; it no longer adds a frame axis).
+Every adapter works on the canonical latent format ``[B, C, H, W]`` (4D), which is
+simply the VAE's own output format: ``C = vae.z_dim``, one latent cell per
+``vae.spatial_compression`` pixels (16ch/8x for the shared Qwen-Image VAE, 128ch/16x
+for the packed Flux.2 one). The geometry therefore lives on the VAE, never on the
+adapter: a DiT's own input width is a different number (it patchifies the latent
+further) and re-declaring the latent's shape is how the two drift apart.
+``init_latents`` produces and ``finalize_latent`` returns that format, which the
+VAE's ``decode_to_pixels`` accepts directly (the VAE is 2D / single-frame; it no
+longer adds a frame axis).
 Model-internal reshaping (e.g.
 Anima's frame axis, Krea2's patchify) lives in ``prepare_latent``/``finalize_latent``
 and runs ONCE around the loop, so the per-step ``denoise_step`` never re-converts
@@ -51,7 +56,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple, Union
 
 import torch
 from safetensors.torch import load_file
@@ -69,9 +74,10 @@ from thenoise.utils.model_dir import (
     resolve_in_dir,
     list_safetensors,
 )
+from thenoise.utils.checkpoint import detect_checkpoint_prefs
 from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
 from thenoise.utils.lora import LoRAApplyResult
-from thenoise.utils.safetensors import WRAP_PREFIXES
+from thenoise.utils.safetensors import unwrap_key
 
 logger = logging.getLogger(__name__)
 
@@ -97,12 +103,11 @@ class Conditioning:
     null_mask: Optional[torch.Tensor] = None
 
 
-# Generic wrapper prefixes that repackagings (e.g. ComfyUI's "diffusion_model"
-# export) prepend to *every* tensor name. Detection must strip these before
-# matching on an architecture signature, otherwise a repackaged checkpoint is
-# misidentified. The canonical list lives in ``thenoise.utils.safetensors``
-# (shared with ``strip_wrap_prefixes`` used at load time) so detection and
-# loading stay in sync.
+# Generic wrapper prefixes (``model.diffusion_model.`` / ``net.``) that repackagings
+# prepend to *every* tensor name. Detection must strip these before matching on an
+# architecture signature, otherwise a repackaged checkpoint is misidentified. The
+# stripping itself is shared with loading via ``safetensors.unwrap_key`` so the two
+# can never drift apart.
 
 
 def normalize_keys(keys):
@@ -114,11 +119,7 @@ def normalize_keys(keys):
     the wrapper, so raw and repackaged checkpoints resolve identically.
     """
     for k in keys:
-        for p in WRAP_PREFIXES:
-            if k.startswith(p):
-                k = k[len(p):]
-                break
-        yield k
+        yield unwrap_key(k)
 
 
 class DiffusionModel(ABC):
@@ -126,16 +127,29 @@ class DiffusionModel(ABC):
 
     name: str = ""
 
-    DEFAULT_WIDTH = 1024
-    DEFAULT_HEIGHT = 1024
-    DEFAULT_STEPS = 28
-    DEFAULT_GUIDANCE_SCALE = 0.0
-
-    SAMPLER = "er_sde"
-
-    # Canonical latent geometry (shared Qwen-Image VAE).
-    LATENT_CHANNELS = 16
-    _VAE_SCALE = 8
+    # Generation preferences and their model default — layer 3 of the precedence
+    # implemented by ``pref``: 1. explicit request (API/CLI), 2. what the loaded
+    # checkpoint's markers imply (``checkpoint_prefs``), 3. these defaults.
+    # Adapters override just the entries they differ on, e.g.
+    #
+    #     DEFAULT_PREFS = {**DiffusionModel.DEFAULT_PREFS, "steps": 4}
+    #
+    # so a preference added later keeps its base default instead of being dropped.
+    # Asking for an unlisted name is a bug, so ``pref`` raises rather than silently
+    # defaulting.
+    DEFAULT_PREFS: ClassVar[Dict[str, Any]] = {
+        "width": 1024,
+        "height": 1024,
+        "steps": 28,
+        # CFG scale; <= 1.0 disables the unconditional forward.
+        "guidance_scale": 0.0,
+        # Default solver (see ``thenoise.samplers.SAMPLERS``).
+        "sampler": "er_sde",
+        # Reference conditioning method for editing.
+        "ref_method": "index",
+        # Reference-latent KV cache (edit only).
+        "kv_cache": False,
+    }
 
     UPSCALE_SCALE = 2
     REFINE_STEPS = 1
@@ -144,6 +158,17 @@ class DiffusionModel(ABC):
     # Reference-latent editing capability (image + instruction -> edited image).
     # Editing models set this True and override ``encode_reference``/``pack_reference_latent``.
     supports_edit: bool = False
+
+    # Reference-latent KV cache: freeze the reference tokens' K/V across denoise
+    # steps (ComfyUI ``FluxKVCache``). Models that implement the fill/read protocol
+    # set this True. Validity is a separate question: the frozen K/V stay
+    # step-invariant only under ``ref_method="index_timestep_zero"``.
+    supports_kv_cache: bool = False
+
+    # Preferences implied by the loaded checkpoint's markers; replaced per instance
+    # in ``__init__``. The empty class default keeps ``pref`` working on instances
+    # built without ``__init__`` (tests, stubs).
+    checkpoint_prefs: Dict[str, Any] = {}
 
     # Whether the attention projections are fused (``qkv``) or separate
     # (``to_q``/``to_k``/``to_v``). LoRA factors are fused into a single ``qkv``
@@ -176,6 +201,11 @@ class DiffusionModel(ABC):
         self.text_encoder_path = config.text_encoder_path
         self.lora_dir = config.lora_dir
 
+        # Layer 2 of the preference precedence: the preferences implied by markers
+        # in the DiT header (empty when it carries none). Model-agnostic by
+        # construction — see ``thenoise.utils.checkpoint``.
+        self.checkpoint_prefs = detect_checkpoint_prefs(config.dit_path)
+
         # Component placement: subclasses register ``dit`` / ``text_encoder`` /
         # ``vae``; the pipeline controller ensures/offloads them by name.
         self.memory = MemoryManager(self.device, self.offload_device)
@@ -191,6 +221,29 @@ class DiffusionModel(ABC):
         # ``_upscale_format`` supplies the latent-format name matching the VAE.
         self._upscaler = None
         self._adaptor = None
+
+    # ------------------------------------------------------------ preferences
+    def pref(self, name: str, request_value: Any = None) -> Any:
+        """Resolve a generation preference: request > checkpoint marker > model default.
+
+        ``request_value`` is what the API/CLI carried, or ``None`` when the user did
+        not ask (that is how "auto" is represented on the wire). Markers only fill
+        in what the user did not ask for — an explicit request always wins, since
+        unmarked-but-trained checkpoints (and LoRAs that change what a checkpoint
+        expects) are common enough that vetoing on a missing marker would misfire.
+        """
+        if name not in self.DEFAULT_PREFS:
+            raise KeyError(f"unknown preference {name!r}; known: {sorted(self.DEFAULT_PREFS)}")
+        if request_value is not None:
+            value, source = request_value, "request"
+        else:
+            detected = self.checkpoint_prefs.get(name)
+            if detected is not None:
+                value, source = detected, "checkpoint"
+            else:
+                value, source = self.DEFAULT_PREFS[name], "model default"
+        logger.debug("%s = %s (%s)", name, value, source)
+        return value
 
     # ------------------------------------------------------------ devices
     def _detect_offload_device(self, config: ModelConfig) -> str:

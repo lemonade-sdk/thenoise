@@ -41,14 +41,14 @@
   <div class="swap-row">
     <div class="field">
       <label class="label" for="width">Width</label>
-      <input type="number" id="width" placeholder="auto" value="1024" min="0">
+      <input type="number" id="width" placeholder="auto" value="1024" min="1">
       <span class="hint">Max 4096</span>
     </div>
     <button class="swap ctrl" id="swap" title="Swap width and height"
       aria-label="Swap width and height">&#8646;</button>
     <div class="field">
       <label class="label" for="height">Height</label>
-      <input type="number" id="height" placeholder="auto" value="1024" min="0">
+      <input type="number" id="height" placeholder="auto" value="1024" min="1">
       <span class="hint">Max 4096</span>
     </div>
   </div>
@@ -56,7 +56,7 @@
   <div class="row">
     <div class="field">
       <label class="label" for="steps">Steps</label>
-      <input type="number" id="steps" placeholder="auto" min="0">
+      <input type="number" id="steps" placeholder="auto" min="1">
     </div>
     <div class="field">
       <label class="label" for="guidance_scale">Guidance</label>
@@ -192,14 +192,14 @@
   <div class="swap-row">
     <div class="field">
       <label class="label" for="edit_width">Width</label>
-      <input type="number" id="edit_width" placeholder="auto" value="" min="0">
+      <input type="number" id="edit_width" placeholder="auto" value="" min="1">
       <span class="hint">Max 4096</span>
     </div>
     <button class="swap ctrl" id="eswap" title="Swap width and height"
       aria-label="Swap width and height">&#8646;</button>
     <div class="field">
       <label class="label" for="edit_height">Height</label>
-      <input type="number" id="edit_height" placeholder="auto" value="" min="0">
+      <input type="number" id="edit_height" placeholder="auto" value="" min="1">
       <span class="hint">Max 4096</span>
     </div>
   </div>
@@ -208,7 +208,7 @@
   <div class="row">
     <div class="field">
       <label class="label" for="edit_steps">Steps</label>
-      <input type="number" id="edit_steps" placeholder="auto" min="0">
+      <input type="number" id="edit_steps" placeholder="auto" min="1">
     </div>
     <div class="field">
       <label class="label" for="edit_guidance_scale">Guidance</label>
@@ -222,6 +222,24 @@
       <option value="">auto</option>
       <option value="er_sde">er_sde</option>
       <option value="euler">euler</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label class="label" for="edit_ref_method">Reference method</label>
+    <select id="edit_ref_method">
+      <option value="">auto</option>
+      <option value="index">index</option>
+      <option value="index_timestep_zero">index_timestep_zero</option>
+    </select>
+  </div>
+
+  <div class="field">
+    <label class="label" for="edit_kv_cache">KV cache <span class="hint">(freeze reference K/V across steps; faster edits)</span></label>
+    <select id="edit_kv_cache">
+      <option value="">auto</option>
+      <option value="true">enabled</option>
+      <option value="false">disabled</option>
     </select>
   </div>
 

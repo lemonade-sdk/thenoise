@@ -92,6 +92,8 @@ class _ResolvedRequest:
     effective_sampler: str
     seed: int
     pixel_upscaler: Optional[str]
+    kv_cache: bool
+    ref_method: str
 
 
 class PipelineController:
@@ -169,16 +171,19 @@ class PipelineController:
         seed: int,
         sampler: str,
         ref_method: Optional[str] = None,
+        kv_cache: bool = False,
     ) -> Tuple:
         """Cache key for the sampling (denoise stage).
 
         Embeds the prompt key so any prompt/guidance/LoRA change cascades. The
-        edit path also embeds ``ref_method`` (it changes the reference packing, hence the denoise output).
+        edit path also embeds ``ref_method`` (it changes the reference packing, hence
+        the denoise output) and ``kv_cache`` (the KV cache changes the denoise
+        output, so cached latents must not be shared across the two modes).
         """
         base = (prompt_key, width, height, steps, seed, sampler)
         if ref_method is None:
             return ("sampling",) + base
-        return ("sampling_edit",) + base + (ref_method,)
+        return ("sampling_edit",) + base + (ref_method, kv_cache)
 
     def _cache_key_decode(
         self,
@@ -250,7 +255,7 @@ class PipelineController:
         r = self._resolve_pipeline(local)
         ref_key = self._cache_key_reference(images, r.width, r.height)
         return self._finalize(
-            self._run(local, r, ref_key=ref_key, ref_method="index"),
+            self._run(local, r, ref_key=ref_key, ref_method=r.ref_method),
             local, r,
         )
 
@@ -282,13 +287,20 @@ class PipelineController:
         model = self.model
         is_edit = ref_key is not None
 
+        # The KV cache is a reference-latent optimization: it requires an edit
+        # request (a reference latent) and a model that supports it.
+        if r.kv_cache and not is_edit:
+            raise ValueError("kv_cache requires an edit request (a reference image)")
+        if r.kv_cache and is_edit and not model.supports_kv_cache:
+            raise ValueError(f"model '{model.name}' does not support the reference-latent KV cache")
+
         prompt_key = self._cache_key_prompt(
             request.prompt, request.negative_prompt, r.guidance_scale,
             request.lora_specs, ref_key=ref_key,
         )
         sampling_key = self._cache_key_sampling(
             prompt_key, r.width, r.height, r.steps, r.seed, r.effective_sampler,
-            ref_method=ref_method,
+            ref_method=ref_method, kv_cache=r.kv_cache,
         )
         decode_key = self._cache_key_decode(sampling_key, r.refined)
 
@@ -329,6 +341,7 @@ class PipelineController:
             params = SamplingParams(
                 height=r.height, width=r.width, steps=r.steps, seed=r.seed,
                 guidance_scale=r.guidance_scale, sampler=r.effective_sampler,
+                kv_cache=r.kv_cache,
             )
 
             # Stage 2: sampling — the dit block. The DiT is resident here, so
@@ -403,14 +416,16 @@ class PipelineController:
         (cache keys must use the actual resolved values).
         """
         model = self.model
-        width = request.width or model.DEFAULT_WIDTH
-        height = request.height or model.DEFAULT_HEIGHT
-        steps = request.steps or model.DEFAULT_STEPS
-        guidance_scale = (
-            model.DEFAULT_GUIDANCE_SCALE
-            if request.guidance_scale is None
-            else request.guidance_scale
-        )
+        # Generation preferences, resolved in one place by the model's precedence:
+        # explicit request (API/CLI) > checkpoint marker > model default
+        # (``DiffusionModel.pref``).
+        width = model.pref("width", request.width)
+        height = model.pref("height", request.height)
+        steps = model.pref("steps", request.steps)
+        guidance_scale = model.pref("guidance_scale", request.guidance_scale)
+        effective_sampler = model.pref("sampler", request.sampler)
+        ref_method = model.pref("ref_method", request.ref_method)
+        kv_cache = model.pref("kv_cache", request.kv_cache)
 
         pixel_upscaler = request.pixel_upscaler
         if pixel_upscaler and self._pixel_upscalers.upscaler_dir:
@@ -435,7 +450,20 @@ class PipelineController:
         pixel_scale = self._pixel_upscaler_scale_for(
             factor, upscale_type, pixel_upscaler
         )
-        effective_sampler = request.sampler or model.SAMPLER
+
+        # The KV cache freezes the reference K/V, which is only valid when those
+        # tokens are conditioned at timestep zero. When the cache is on but the
+        # reference method was left on auto, pick the method that makes it valid
+        # rather than failing; an explicit ``index`` stays explicit, and is rejected
+        # below rather than silently producing a degraded edit.
+        if kv_cache and request.ref_method is None:
+            ref_method = "index_timestep_zero"
+        if kv_cache and ref_method != "index_timestep_zero":
+            raise ValueError(
+                "kv_cache requires ref_method='index_timestep_zero': the cached "
+                "reference K/V are only step-invariant when the reference tokens are "
+                "conditioned at timestep zero"
+            )
 
         # seed=-1 is treated as "random" (same as None)
         seed = request.seed
@@ -447,6 +475,7 @@ class PipelineController:
             factor=factor, upscale_type=upscale_type, target_width=target_width,
             target_height=target_height, refined=refined, pixel_scale=pixel_scale,
             effective_sampler=effective_sampler, seed=seed, pixel_upscaler=pixel_upscaler,
+            kv_cache=kv_cache, ref_method=ref_method,
         )
 
     def _finalize(

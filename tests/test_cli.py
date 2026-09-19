@@ -238,3 +238,42 @@ def test_out_defaults_to_png_when_no_extension(out, expected):
     from thenoise.utils.paths import ensure_png_extension
 
     assert ensure_png_extension(out) == expected
+
+
+def test_cli_edit_parses_kv_cache_and_ref_method(parse):
+    args = parse([
+        "edit",
+        "--dit", "d.safetensors",
+        "--vae", "v.safetensors",
+        "--text-encoder", "te.safetensors",
+        "--prompt", "make it sunny",
+        "--image", "in.png",
+        "--kv-cache",
+        "--ref-method", "index_timestep_zero",
+    ])
+    assert args.kv_cache is True
+    assert args.ref_method == "index_timestep_zero"
+
+
+def test_cli_kv_cache_defaults_to_none(parse):
+    """Both ``--kv-cache`` and ``--no-kv-cache`` leave a tri-state default of None."""
+    args = parse([
+        "edit",
+        "--dit", "d.safetensors",
+        "--vae", "v.safetensors",
+        "--text-encoder", "te.safetensors",
+        "--prompt", "x",
+        "--image", "in.png",
+    ])
+    assert args.kv_cache is None
+    assert args.ref_method is None
+    args = parse([
+        "edit",
+        "--dit", "d.safetensors",
+        "--vae", "v.safetensors",
+        "--text-encoder", "te.safetensors",
+        "--prompt", "x",
+        "--image", "in.png",
+        "--no-kv-cache",
+    ])
+    assert args.kv_cache is False

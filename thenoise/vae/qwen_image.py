@@ -588,8 +588,12 @@ class AutoencoderKLQwenImage(nn.Module):
         return self.encoder.parameters().__next__().device
 
     @property
-    def compression(self) -> int:
-        """Spatial compression factor (2^num_downsampling_stages), e.g. 8x for this VAE."""
+    def spatial_compression(self) -> int:
+        """Spatial compression factor (2^num_downsampling_stages), e.g. 8x for this VAE.
+
+        Together with ``z_dim`` this defines the canonical latent the pipeline
+        carries: ``[B, z_dim, H / spatial_compression, W / spatial_compression]``.
+        """
         return 2 ** (len(self.encoder.dim_mult) - 1)
 
     def _encode(self, x: torch.Tensor):

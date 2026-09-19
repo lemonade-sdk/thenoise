@@ -2,8 +2,9 @@
 
 Ported from kohya-ss/musubi-tuner's ``qwen_image/qwen_image_model.py`` (itself
 Diffusers ``QwenImageTransformer2DModel``), trimmed to inference-only. RoPE uses 3D
-image frequencies; ``zero_cond_t`` (edit-2511, flagged by ``__index_timestep_zero__``)
-zeroes the timestep on the reference tokens. Weights load via ``load_dit`` (BF16 and
+image frequencies; timestep-zero reference conditioning (the ``index_timestep_zero``
+reference method, flagged by the ``__index_timestep_zero__`` checkpoint marker) zeroes
+the timestep on the reference tokens. Weights load via ``load_dit`` (BF16 and
 int8_convrot checkpoints).
 """
 from __future__ import annotations
@@ -220,9 +221,8 @@ class Attention(nn.Module):
         return img_attn_output, txt_attn_output
 
 class QwenImageTransformerBlock(nn.Module):
-    def __init__(self, dim: int, heads: int, attention_head_dim: int, eps: float = 1e-5, zero_cond_t: bool = False):
+    def __init__(self, dim: int, heads: int, attention_head_dim: int, eps: float = 1e-5):
         super().__init__()
-        self.zero_cond_t = zero_cond_t
         self.img_mod = nn.Sequential(nn.SiLU(), QuantizedLinear(dim, 6 * dim, bias=True))
         self.txt_mod = nn.Sequential(nn.SiLU(), QuantizedLinear(dim, 6 * dim, bias=True))
         self.img_norm1 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
@@ -269,7 +269,10 @@ class QwenImageTransformerBlock(nn.Module):
         timestep_zero_index: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         img_mod_params = self.img_mod(temb)
-        if self.zero_cond_t:
+        if timestep_zero_index is not None:
+            # ``temb`` carries both the t row and the t=0 row (the reference tokens
+            # are conditioned at timestep zero); the text stream has no reference
+            # slice, so it uses the t row only.
             temb = torch.chunk(temb, 2, dim=0)[0]
         txt_mod_params = self.txt_mod(temb)
 
@@ -319,7 +322,6 @@ class QwenImageTransformer2DModel(nn.Module):
         num_attention_heads: int = 24,
         joint_attention_dim: int = 3584,
         axes_dims_rope: Tuple[int, int, int] = (16, 56, 56),
-        zero_cond_t: bool = False,
     ):
         super().__init__()
         self.out_channels = out_channels or in_channels
@@ -339,7 +341,6 @@ class QwenImageTransformer2DModel(nn.Module):
                     heads=num_attention_heads,
                     attention_head_dim=attention_head_dim,
                     eps=1e-5,
-                    zero_cond_t=zero_cond_t,
                 )
                 for _ in range(num_layers)
             ]
@@ -347,8 +348,6 @@ class QwenImageTransformer2DModel(nn.Module):
 
         self.norm_out = AdaLayerNormContinuous(self.inner_dim, self.inner_dim, elementwise_affine=False, eps=1e-6)
         self.proj_out = QuantizedLinear(self.inner_dim, patch_size * patch_size * self.out_channels, bias=True)
-
-        self.zero_cond_t = zero_cond_t
 
     def forward(
         self,
@@ -359,12 +358,19 @@ class QwenImageTransformer2DModel(nn.Module):
         txt_pe: torch.Tensor = None,
         timestep_zero_index: Optional[int] = None,
     ) -> torch.Tensor:
+        """One DiT forward.
+
+        ``timestep_zero_index`` is the single source of truth for timestep-zero
+        reference conditioning (the ``index_timestep_zero`` reference method): the
+        target-token count at which the sequence switches from the t row to the t=0
+        row, i.e. the boundary between target and reference tokens. With it, ``temb``
+        carries both rows ``[t, 0]``; ``None`` (plain t2i, or an ``index`` edit) keeps
+        the single-row modulation.
+        """
         hidden_states = self.img_in(hidden_states)
         timestep = timestep.to(hidden_states.dtype)
 
-        if self.zero_cond_t:
-            if timestep_zero_index is None:
-                raise ValueError("`timestep_zero_index` must be provided when `zero_cond_t=True`.")
+        if timestep_zero_index is not None:
             timestep = torch.cat([timestep, timestep * 0], dim=0)
 
         encoder_hidden_states = self.txt_norm(encoder_hidden_states)
@@ -382,7 +388,7 @@ class QwenImageTransformer2DModel(nn.Module):
                 timestep_zero_index=timestep_zero_index,
             )
 
-        if self.zero_cond_t:
+        if timestep_zero_index is not None:
             temb = temb.chunk(2, dim=0)[0]
 
         hidden_states = self.norm_out(hidden_states, temb)
@@ -390,7 +396,6 @@ class QwenImageTransformer2DModel(nn.Module):
 
 
 def create_model(
-    zero_cond_t: bool,
     dtype: Optional[torch.dtype] = None,
     num_layers: int = 60,
 ) -> QwenImageTransformer2DModel:
@@ -403,7 +408,6 @@ def create_model(
         num_attention_heads=24,
         joint_attention_dim=3584,
         axes_dims_rope=(16, 56, 56),
-        zero_cond_t=zero_cond_t,
     )
     if dtype is not None:
         model.to(dtype)
@@ -413,13 +417,12 @@ def create_model(
 def load_qwen_image_dit(
     dit_path: str,
     device: str,
-    zero_cond_t: bool,
     dtype: torch.dtype,
     num_layers: int = 60,
 ) -> QwenImageTransformer2DModel:
     """Load the Qwen-Image DiT via the central quant-aware loader."""
     with init_empty_weights():
-        model = create_model(zero_cond_t=zero_cond_t, num_layers=num_layers)
+        model = create_model(num_layers=num_layers)
     load_dit(model, dit_path, device=device, dtype=dtype, drop_keys=("__index_timestep_zero__",))
     logger.info("Loaded Qwen-Image DiT from %s", dit_path)
     return model

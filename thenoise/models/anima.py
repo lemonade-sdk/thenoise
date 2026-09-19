@@ -26,10 +26,11 @@ class AnimaModel(DiffusionModel):
     name = "anima"
 
     # Defaults for the turbo version
-    DEFAULT_STEPS = 8
-    DEFAULT_GUIDANCE_SCALE = 1
-    DEFAULT_WIDTH = 1024
-    DEFAULT_HEIGHT = 1024
+    DEFAULT_PREFS = {
+        **DiffusionModel.DEFAULT_PREFS,
+        "steps": 8,
+        "guidance_scale": 1,
+    }
     # Matches ComfyUI's Anima sampling_settings ``shift: 3.0`` (ModelSamplingDiscreteFlow).
     DEFAULT_FLOW_SHIFT = 3.0
 
@@ -145,8 +146,11 @@ class AnimaModel(DiffusionModel):
 
     def init_latents(self, params: SamplingParams) -> torch.Tensor:
         dev = torch.device(self.device)
-        num_channels = self.dit.LATENT_CHANNELS
-        shape = (1, num_channels, params.height // self._VAE_SCALE, params.width // self._VAE_SCALE)
+        shape = (
+            1, self.vae.z_dim,
+            params.height // self.vae.spatial_compression,
+            params.width // self.vae.spatial_compression,
+        )
         generator = torch.Generator(device=dev).manual_seed(params.seed)
         return torch.randn(shape, generator=generator, device=dev, dtype=self.dtype)
 
@@ -195,10 +199,10 @@ class AnimaModel(DiffusionModel):
         return latents.squeeze(2)
 
     def resolve_size(self, width: int, height: int) -> tuple[int, int]:
-        # The latent grid is patchified in 2x2 blocks (patch_spatial=2) on an
-        # 8x-VAE-compressed latent, so pixel dims must be multiples of
-        # 8 * 2 = 16. Round up to the nearest multiple.
-        align = 16
+        # The latent grid is patchified by the DiT (patch_spatial=2) on top of the
+        # VAE's compression (8x), so pixel dims must be multiples of 8 * 2 = 16.
+        # Round up to the nearest multiple.
+        align = self.vae.spatial_compression * self.dit.patch_spatial
         return round_up(width, align), round_up(height, align)
 
     def percent_to_sigma(self, percent: float) -> float:
