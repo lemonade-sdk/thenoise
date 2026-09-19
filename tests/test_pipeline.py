@@ -40,10 +40,11 @@ def test_resolve_falls_back_to_model_defaults():
     model = StubModel()
     r = _controller(model)._resolve_pipeline(GenerateRequest(prompt="p"))
 
-    assert (r.width, r.height) == (model.DEFAULT_WIDTH, model.DEFAULT_HEIGHT)
-    assert r.steps == model.DEFAULT_STEPS
-    assert r.guidance_scale == model.DEFAULT_GUIDANCE_SCALE
-    assert r.effective_sampler == model.SAMPLER
+    defaults = model.DEFAULT_PREFS
+    assert (r.width, r.height) == (defaults["width"], defaults["height"])
+    assert r.steps == defaults["steps"]
+    assert r.guidance_scale == defaults["guidance_scale"]
+    assert r.effective_sampler == defaults["sampler"]
     # No upscale requested -> identity plan, and no pixel upscaler.
     assert (r.factor, r.upscale_type) == (1.0, "refined")
     assert r.refined is False
@@ -183,7 +184,7 @@ def test_decode_key_changes_when_refined():
     controller = _controller()
     model = controller.model
     sampling_key = controller._cache_key_sampling(
-        ("prompt",), model.DEFAULT_WIDTH, model.DEFAULT_HEIGHT, 2, 1, "euler"
+        ("prompt",), model.DEFAULT_PREFS["width"], model.DEFAULT_PREFS["height"], 2, 1, "euler"
     )
     plain = controller._cache_key_decode(sampling_key, False)
     refined = controller._cache_key_decode(sampling_key, True)

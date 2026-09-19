@@ -40,16 +40,12 @@ logger = logging.getLogger(__name__)
 class QwenImageModel(DiffusionModel):
     name = "qwen_image"
 
-    DEFAULT_STEPS = 28
-    DEFAULT_GUIDANCE_SCALE = 2.5
-    DEFAULT_WIDTH = 1024
-    DEFAULT_HEIGHT = 1024
-
-    SAMPLER = "euler"
-
-    # Qwen-Image VAE: 16 channels at 8x spatial compression, patchified 2x2.
-    LATENT_CHANNELS = 16
-    _VAE_SCALE = 8
+    DEFAULT_PREFS = {
+        **DiffusionModel.DEFAULT_PREFS,
+        "steps": 28,
+        "guidance_scale": 2.5,
+        "sampler": "euler",
+    }
 
     supports_edit = True
 
@@ -122,7 +118,11 @@ class QwenImageModel(DiffusionModel):
 
     def init_latents(self, params: SamplingParams) -> torch.Tensor:
         dev = torch.device(self.device)
-        shape = (1, self.LATENT_CHANNELS, params.height // self._VAE_SCALE, params.width // self._VAE_SCALE)
+        shape = (
+            1, self.vae.z_dim,
+            params.height // self.vae.spatial_compression,
+            params.width // self.vae.spatial_compression,
+        )
         generator = torch.Generator(device=dev).manual_seed(params.seed)
         return torch.randn(shape, generator=generator, device=dev, dtype=self.dtype)
 
@@ -145,7 +145,7 @@ class QwenImageModel(DiffusionModel):
 
         self._txt = cond.cond.to(device=dev, dtype=self.dtype)
         txt_len = int(cond.cond_mask.to(device=dev).sum().item())
-        self._img_shapes = [(1, params.height // self._VAE_SCALE // 2, params.width // self._VAE_SCALE // 2)]
+        self._img_shapes = [(1, params.height // self._pixels_per_token, params.width // self._pixels_per_token)]
 
         if ref is not None:
             ref_tokens = []
@@ -197,8 +197,8 @@ class QwenImageModel(DiffusionModel):
         # count (H/16 * W/16), matching musubi-tuner's ``image_seq_len =
         # latents.shape[1]`` after ``pack_latents``. Using the raw 8x-compressed
         # grid (H/8 * W/8) inflates mu by 4x and denoises at the wrong timesteps.
-        image_seq_len = (params.height // self._VAE_SCALE // 2) * (
-            params.width // self._VAE_SCALE // 2
+        image_seq_len = (params.height // self._pixels_per_token) * (
+            params.width // self._pixels_per_token
         )
         ts = qwen_sampling.get_schedule(params.steps, image_seq_len)
         return [Step(t=ts[i], delta=ts[i] - ts[i + 1]) for i in range(params.steps)]
@@ -247,12 +247,21 @@ class QwenImageModel(DiffusionModel):
     def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:
         # Unpack the DiT tokens back to the canonical 4D latent.
         return unpack_latents(
-            latents, params.height // self._VAE_SCALE, params.width // self._VAE_SCALE
+            latents, params.height // self.vae.spatial_compression, params.width // self.vae.spatial_compression
         )
+
+    @property
+    def _pixels_per_token(self) -> int:
+        """Pixels per DiT token: the VAE's compression times the DiT's 2x2 patchify.
+
+        The latent geometry is the VAE's (``z_dim`` / ``spatial_compression``); the
+        patchify on top of it is the DiT's own, so the two stay separate concerns.
+        """
+        return self.vae.spatial_compression * self.dit.patch_size
 
     def resolve_size(self, width: int, height: int) -> tuple[int, int]:
         # The latent grid is patchified in 2x2 blocks on an 8x-VAE-compressed latent.
-        align = self._VAE_SCALE * 2
+        align = self._pixels_per_token
         return round_up(width, align), round_up(height, align)
 
     # ------------------------------------------------------------ editing

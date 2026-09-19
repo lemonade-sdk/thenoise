@@ -383,7 +383,12 @@ LoRA format is `filename:weight` — the `.safetensors` extension is appended au
 
 ### `/text2image` request body
 
-All fields except `prompt` are optional. Omitted fields use the loaded model's defaults.
+All fields except `prompt` are optional. An omitted field resolves as **request →
+checkpoint marker → model default**: whatever you send always wins, otherwise a
+marker in the loaded checkpoint may imply a value, and failing that the model's own
+default applies (see [`DiffusionModel.pref`](thenoise/models/base.py)). Today the
+only marker read is `__index_timestep_zero__`, which implies `ref_method:
+index_timestep_zero` (see [`/edit`](#edit-request-body)).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -398,7 +403,7 @@ All fields except `prompt` are optional. Omitted fields use the loaded model's d
 | `upscale_factor` | `float` | `1.0` | Upscale factor (max depends on the pixel upscaler scale) |
 | `upscale_type` | `string` | `refined` | `refined` (latent 2x + refiner) or `no-refiner` (pixel upscaler only) |
 | `pixel_upscaler` | `string` | `null` | Pixel upscaler name (no `.safetensors` suffix) from `--upscaler-dir` |
-| `sampler` | `string` | `er_sde` | Denoising solver: `euler` or `er_sde` |
+| `sampler` | `string` | model default | Denoising solver: `euler` or `er_sde` |
 | `qwen_vae_enhance` | `bool` | `false` | Nyquist notch post-filter (removes 2px grid artifacts) |
 | `film_grain` | `float` | `0.0` | Film grain strength, 0.0–10.0 |
 | `sharpening` | `float` | `0.0` | RCAS sharpening strength, 0.0–1.0 |
@@ -431,11 +436,11 @@ Accepts all `/text2image` fields plus:
 | `kv_cache` | `boolean` | auto (off) | Reference-latent KV cache (freeze the reference tokens' K/V across denoise steps for faster editing). Turns on `ref_method: index_timestep_zero` unless you set it explicitly |
 | `ref_method` | `string` | auto | Reference conditioning: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index` |
 
-> **Preference resolution.** Omitted fields resolve as **request → checkpoint marker →
-> model default**. The only marker read today is `__index_timestep_zero__`, which
-> selects `ref_method: index_timestep_zero` on checkpoints trained that way; an
-> explicit `ref_method` always wins over detection (markers are a hint — some
-> trained checkpoints do not carry one). Asking for `kv_cache` together with an
+> **Reference method.** Checkpoints trained to condition their reference tokens at
+> timestep zero carry the `__index_timestep_zero__` marker, which makes
+> `ref_method` resolve to `index_timestep_zero` automatically. An explicit
+> `ref_method` always wins over detection — markers are only a hint, and some
+> trained checkpoints do not carry one. Asking for `kv_cache` together with an
 > explicit `ref_method: index` is rejected rather than silently degraded.
 
 ### Example
@@ -497,8 +502,8 @@ curl -s localhost:8000/upscale \
 |------|----------|---------|-------------|
 | `--prompt` | yes | — | Text prompt |
 | `--negative-prompt` | no | `""` | Negative prompt |
-| `--width` | no | model default | Output width (0..4096) |
-| `--height` | no | model default | Output height (0..4096) |
+| `--width` | no | model default | Output width (1..4096; omit for auto) |
+| `--height` | no | model default | Output height (1..4096; omit for auto) |
 | `--steps` | no | model default | Denoising steps |
 | `--guidance-scale` | no | model default | CFG scale |
 | `--seed` | no | random | Random seed |
@@ -508,7 +513,7 @@ curl -s localhost:8000/upscale \
 | `--upscale-type` | no | `refined` | `refined` or `no-refiner` |
 | `--upscale` | no | off | 2× latent upscale with refine denoise (legacy alias for `--upscale-type refined --upscale-factor 2`) |
 | `--upscale-factor` | no | `1.0` | Upscale factor (> 0.0; max depends on the pixel upscaler scale, see [Upscaling](#upscaling)) |
-| `--sampler` | no | `er_sde` | Solver: `euler` or `er_sde` |
+| `--sampler` | no | model default | Solver: `euler` or `er_sde` |
 | `--qwen-vae-enhance` | no | off | Nyquist notch post-filter |
 | `--film-grain` | no | `0.0` | Film grain strength (0.0–10.0) |
 | `--sharpening` | no | `0.0` | RCAS sharpening strength (0.0–1.0) |

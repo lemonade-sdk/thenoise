@@ -238,8 +238,9 @@ function validateDims(prefix) {
   const MAX_DIM = 4096;
   for (const f of ['width', 'height']) {
     const v = $(prefix + f).value === '' ? null : parseInt($(prefix + f).value, 10);
-    if (v !== null && (v < 0 || v > MAX_DIM)) {
-      alert(`error: ${f} must be between 0 and ${MAX_DIM} (got ${v}).`);
+    // Empty means "auto" (the model default); 0 is just an invalid size.
+    if (v !== null && (v < 1 || v > MAX_DIM)) {
+      alert(`error: ${f} must be between 1 and ${MAX_DIM} (got ${v}).`);
       return false;
     }
   }

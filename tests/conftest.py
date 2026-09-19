@@ -346,11 +346,16 @@ class StubModel(DiffusionModel):
     """
 
     name = "stub"
-    DEFAULT_WIDTH = 64
-    DEFAULT_HEIGHT = 64
-    DEFAULT_STEPS = 2
-    DEFAULT_GUIDANCE_SCALE = 1.0
-    SAMPLER = "euler"
+    DEFAULT_PREFS = {
+        **DiffusionModel.DEFAULT_PREFS,
+        "width": 64,
+        "height": 64,
+        "steps": 2,
+        "guidance_scale": 1.0,
+        "sampler": "euler",
+    }
+    # Stub-local latent geometry: a real adapter reads these off its VAE
+    # (``vae.z_dim`` / ``vae.spatial_compression``), which this stub has none of.
     LATENT_CHANNELS = 4
     _VAE_SCALE = 8
     UPSCALE_SCALE = 2

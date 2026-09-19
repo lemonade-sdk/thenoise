@@ -40,19 +40,15 @@ logger = logging.getLogger(__name__)
 class FluxKleinModel(DiffusionModel):
     name = "flux_klein"
 
-    # Distilled defaults (the common inference use): 4 NFEs, CFG off (guidance 1.0).
-    # Base models should pass --steps 50 --guidance-scale 4.
-    DEFAULT_STEPS = 4
-    DEFAULT_GUIDANCE_SCALE = 1.0
-    DEFAULT_WIDTH = 1024
-    DEFAULT_HEIGHT = 1024
-
-    # Flux.2 flow-matching Euler schedule.
-    SAMPLER = "euler"
-
-    # Packed-latent geometry (Flux.2 VAE): 128ch at 16x spatial compression.
-    LATENT_CHANNELS = 128
-    _PACK = 16  # pixel / packed-latent ratio
+    # Distilled defaults (the common inference use): 4 NFEs, CFG off (guidance 1.0),
+    # Flux.2's flow-matching Euler schedule. Base models should pass
+    # --steps 50 --guidance-scale 4.
+    DEFAULT_PREFS = {
+        **DiffusionModel.DEFAULT_PREFS,
+        "steps": 4,
+        "guidance_scale": 1.0,
+        "sampler": "euler",
+    }
 
     # Reference-latent editing: Flux2 Klein supports the ComfyUI "index" method
     # with ``ref_index_scale = 10`` (the t-axis offset for the reference latent).
@@ -159,7 +155,11 @@ class FluxKleinModel(DiffusionModel):
 
     def init_latents(self, params: SamplingParams) -> torch.Tensor:
         dev = torch.device(self.device)
-        shape = (1, self.LATENT_CHANNELS, params.height // self._PACK, params.width // self._PACK)
+        shape = (
+            1, self.vae.z_dim,
+            params.height // self.vae.spatial_compression,
+            params.width // self.vae.spatial_compression,
+        )
         generator = torch.Generator(device=dev).manual_seed(params.seed)
         return torch.randn(shape, generator=generator, device=dev, dtype=self.dtype)
 
@@ -236,7 +236,9 @@ class FluxKleinModel(DiffusionModel):
         return x
 
     def schedule(self, params: SamplingParams) -> list[Step]:
-        image_seq_len = (params.width // self._PACK) * (params.height // self._PACK)
+        image_seq_len = (params.width // self.vae.spatial_compression) * (
+            params.height // self.vae.spatial_compression
+        )
         ts = get_schedule(params.steps, image_seq_len)
         # Step.t is the flow timestep (1 -> 0); delta = t_i - t_{i+1}. The shared
         # Euler loop integrates ``x -= delta * velocity``, matching the Flux.2
@@ -351,7 +353,7 @@ class FluxKleinModel(DiffusionModel):
 
     def resolve_size(self, width: int, height: int) -> tuple[int, int]:
         # The packed latent is H//16 x W//16, so pixel dims must be multiples of 16.
-        align = self._PACK
+        align = self.vae.spatial_compression
         return round_up(width, align), round_up(height, align)
 
     def _upscale_format(self) -> str:

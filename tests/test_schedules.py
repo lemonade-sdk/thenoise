@@ -45,14 +45,25 @@ def _params(steps=8, width=1024, height=1024):
     )
 
 
-# The shipped patch/latent geometry of each adapter (the shipped configs all
-# patchify 2x2 on an 8x-compressed VAE latent -> a 16px pixel alignment).
+# The attributes each adapter's kernels read on a bare instance. Latent geometry
+# comes from the VAE (``z_dim`` / ``spatial_compression``), so a stand-in stands in
+# for it; the shipped configs all patchify 2x2 on an 8x-compressed latent -> a 16px
+# pixel alignment (Flux.2's VAE is already 16x on a packed latent and its DiT does
+# not patchify further).
+def _vae(z_dim, spatial_compression):
+    return SimpleNamespace(z_dim=z_dim, spatial_compression=spatial_compression)
+
+
 BARE = {
-    "anima": {},
-    "krea2": {"dit": SimpleNamespace(config=SimpleNamespace(patch=2)), "_compression": 8},
-    "zimage": {"dit": SimpleNamespace(patch_size=2)},
-    "flux_klein": {},
-    "qwen_image": {},
+    "anima": {"vae": _vae(16, 8), "dit": SimpleNamespace(patch_spatial=2)},
+    "krea2": {
+        "vae": _vae(16, 8),
+        "dit": SimpleNamespace(config=SimpleNamespace(patch=2)),
+        "_compression": 8,
+    },
+    "zimage": {"vae": _vae(16, 8), "dit": SimpleNamespace(patch_size=2)},
+    "flux_klein": {"vae": _vae(128, 16)},
+    "qwen_image": {"vae": _vae(16, 8), "dit": SimpleNamespace(patch_size=2)},
 }
 
 # The adapters whose step schedule shifts with the image token count. Krea 2 is

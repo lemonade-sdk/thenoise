@@ -23,8 +23,9 @@ _MAX_DIM = 4096
 
 
 def _check_dim(name: str, value) -> None:
-    if value is not None and (value < 0 or value > _MAX_DIM):
-        print(f"error: {name} must be between 0 and {_MAX_DIM} (got {value}).", file=sys.stderr)
+    """Reject an out-of-range dimension. 0 is not "auto" (omitting the flag is)."""
+    if value is not None and (value < 1 or value > _MAX_DIM):
+        print(f"error: {name} must be between 1 and {_MAX_DIM} (got {value}).", file=sys.stderr)
         sys.exit(1)
 
 

@@ -23,10 +23,15 @@ Subclasses implement the model-specific kernels and load their own VAE:
   * ``_upscale_format(...)``  — required: the latent-format name for this
     model's VAE (selected by ``load_latent_upscaler``).
 
-Both models use the same Qwen-Image VAE (z_dim=16, spatial compression 8), so
-``init_latents`` produces and ``finalize_latent`` returns the canonical latent
-format ``[B, C, H, W]`` (4D). The VAE's ``decode_to_pixels`` accepts that
-directly (the VAE is 2D / single-frame; it no longer adds a frame axis).
+Every adapter works on the canonical latent format ``[B, C, H, W]`` (4D), which is
+simply the VAE's own output format: ``C = vae.z_dim``, one latent cell per
+``vae.spatial_compression`` pixels (16ch/8x for the shared Qwen-Image VAE, 128ch/16x
+for the packed Flux.2 one). The geometry therefore lives on the VAE, never on the
+adapter: a DiT's own input width is a different number (it patchifies the latent
+further) and re-declaring the latent's shape is how the two drift apart.
+``init_latents`` produces and ``finalize_latent`` returns that format, which the
+VAE's ``decode_to_pixels`` accepts directly (the VAE is 2D / single-frame; it no
+longer adds a frame axis).
 Model-internal reshaping (e.g.
 Anima's frame axis, Krea2's patchify) lives in ``prepare_latent``/``finalize_latent``
 and runs ONCE around the loop, so the per-step ``denoise_step`` never re-converts
@@ -122,16 +127,29 @@ class DiffusionModel(ABC):
 
     name: str = ""
 
-    DEFAULT_WIDTH = 1024
-    DEFAULT_HEIGHT = 1024
-    DEFAULT_STEPS = 28
-    DEFAULT_GUIDANCE_SCALE = 0.0
-
-    SAMPLER = "er_sde"
-
-    # Canonical latent geometry (shared Qwen-Image VAE).
-    LATENT_CHANNELS = 16
-    _VAE_SCALE = 8
+    # Generation preferences and their model default — layer 3 of the precedence
+    # implemented by ``pref``: 1. explicit request (API/CLI), 2. what the loaded
+    # checkpoint's markers imply (``checkpoint_prefs``), 3. these defaults.
+    # Adapters override just the entries they differ on, e.g.
+    #
+    #     DEFAULT_PREFS = {**DiffusionModel.DEFAULT_PREFS, "steps": 4}
+    #
+    # so a preference added later keeps its base default instead of being dropped.
+    # Asking for an unlisted name is a bug, so ``pref`` raises rather than silently
+    # defaulting.
+    DEFAULT_PREFS: ClassVar[Dict[str, Any]] = {
+        "width": 1024,
+        "height": 1024,
+        "steps": 28,
+        # CFG scale; <= 1.0 disables the unconditional forward.
+        "guidance_scale": 0.0,
+        # Default solver (see ``thenoise.samplers.SAMPLERS``).
+        "sampler": "er_sde",
+        # Reference conditioning method for editing.
+        "ref_method": "index",
+        # Reference-latent KV cache (edit only).
+        "kv_cache": False,
+    }
 
     UPSCALE_SCALE = 2
     REFINE_STEPS = 1
@@ -146,18 +164,6 @@ class DiffusionModel(ABC):
     # set this True. Validity is a separate question: the frozen K/V stay
     # step-invariant only under ``ref_method="index_timestep_zero"``.
     supports_kv_cache: bool = False
-
-    # Generation preferences and their model default — layer 3 of the precedence
-    # implemented by ``pref``: 1. explicit request (API/CLI), 2. what the loaded
-    # checkpoint's markers imply (``checkpoint_prefs``), 3. these defaults.
-    # Subclasses override the entries they care about; asking for an unlisted name
-    # is a bug, so it raises rather than silently defaulting.
-    DEFAULT_PREFS: ClassVar[Dict[str, Any]] = {
-        # Reference packing / conditioning method for editing.
-        "ref_method": "index",
-        # Reference-latent KV cache (edit only).
-        "kv_cache": False,
-    }
 
     # Preferences implied by the loaded checkpoint's markers; replaced per instance
     # in ``__init__``. The empty class default keeps ``pref`` working on instances

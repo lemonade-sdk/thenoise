@@ -416,14 +416,16 @@ class PipelineController:
         (cache keys must use the actual resolved values).
         """
         model = self.model
-        width = request.width or model.DEFAULT_WIDTH
-        height = request.height or model.DEFAULT_HEIGHT
-        steps = request.steps or model.DEFAULT_STEPS
-        guidance_scale = (
-            model.DEFAULT_GUIDANCE_SCALE
-            if request.guidance_scale is None
-            else request.guidance_scale
-        )
+        # Generation preferences, resolved in one place by the model's precedence:
+        # explicit request (API/CLI) > checkpoint marker > model default
+        # (``DiffusionModel.pref``).
+        width = model.pref("width", request.width)
+        height = model.pref("height", request.height)
+        steps = model.pref("steps", request.steps)
+        guidance_scale = model.pref("guidance_scale", request.guidance_scale)
+        effective_sampler = model.pref("sampler", request.sampler)
+        ref_method = model.pref("ref_method", request.ref_method)
+        kv_cache = model.pref("kv_cache", request.kv_cache)
 
         pixel_upscaler = request.pixel_upscaler
         if pixel_upscaler and self._pixel_upscalers.upscaler_dir:
@@ -448,12 +450,7 @@ class PipelineController:
         pixel_scale = self._pixel_upscaler_scale_for(
             factor, upscale_type, pixel_upscaler
         )
-        effective_sampler = request.sampler or model.SAMPLER
 
-        # Generation preferences, resolved in one place by the model's precedence:
-        # explicit request (API/CLI) > checkpoint marker > model default.
-        ref_method = model.pref("ref_method", request.ref_method)
-        kv_cache = model.pref("kv_cache", request.kv_cache)
         # The KV cache freezes the reference K/V, which is only valid when those
         # tokens are conditioned at timestep zero. When the cache is on but the
         # reference method was left on auto, pick the method that makes it valid
