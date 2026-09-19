@@ -45,8 +45,8 @@ class Text2ImageRequest(BaseModel):
     sharpening: float = 0.0
     lora_specs: Optional[List[str]] = None  # ["filename.safetensors:0.8", ...]
     pixel_upscaler: Optional[str] = None  # name (no .safetensors) in upscaler_dir
-    kv_cache: Optional[bool] = None  # reference-latent KV cache (edit only)
-    ref_method: Optional[str] = None  # reference packing method (edit only)
+    kv_cache: Optional[bool] = None  # reference-latent KV cache (edit only; null = auto)
+    ref_method: Optional[str] = None  # reference conditioning (edit only; null = auto)
     out: Literal["png", "json"] = "png"
 
     def to_request(self):

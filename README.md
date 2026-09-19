@@ -428,8 +428,15 @@ Accepts all `/text2image` fields plus:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `image` | `string` \| `string[]` | *(required)* | One or more base64-encoded reference images (OpenAI-style; first sets the output size when `width`/`height` omitted) |
-| `kv_cache` | `boolean` | model default (off) | Reference-latent KV cache (freeze the reference tokens' K/V across denoise steps for faster editing; requires a checkpoint trained with `index_timestep_zero`) |
-| `ref_method` | `string` | `index` | Reference packing method: `index` or `index_timestep_zero` |
+| `kv_cache` | `boolean` | auto (off) | Reference-latent KV cache (freeze the reference tokens' K/V across denoise steps for faster editing). Turns on `ref_method: index_timestep_zero` unless you set it explicitly |
+| `ref_method` | `string` | auto | Reference conditioning: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index` |
+
+> **Preference resolution.** Omitted fields resolve as **request → checkpoint marker →
+> model default**. The only marker read today is `__index_timestep_zero__`, which
+> selects `ref_method: index_timestep_zero` on checkpoints trained that way; an
+> explicit `ref_method` always wins over detection (markers are a hint — some
+> trained checkpoints do not carry one). Asking for `kv_cache` together with an
+> explicit `ref_method: index` is rejected rather than silently degraded.
 
 ### Example
 
@@ -505,8 +512,8 @@ curl -s localhost:8000/upscale \
 | `--qwen-vae-enhance` | no | off | Nyquist notch post-filter |
 | `--film-grain` | no | `0.0` | Film grain strength (0.0–10.0) |
 | `--sharpening` | no | `0.0` | RCAS sharpening strength (0.0–1.0) |
-| `--kv-cache` / `--no-kv-cache` | no | off | Reference-latent KV cache (edit only): freeze the reference tokens' K/V across denoise steps for faster editing. Requires a checkpoint trained with `index_timestep_zero` |
-| `--ref-method` | no | `index` | Reference packing method for editing: `index` or `index_timestep_zero` (conditions reference tokens at timestep zero; used by KV-cache-capable edit checkpoints) |
+| `--kv-cache` / `--no-kv-cache` | no | auto (off) | Reference-latent KV cache (edit only): freeze the reference tokens' K/V across denoise steps for faster editing. Implies `--ref-method index_timestep_zero` unless one is given explicitly |
+| `--ref-method` | no | auto | Reference conditioning for editing: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index` |
 
 > **Note:** `--kv-cache` is a reference-latent optimization and only applies to `edit` (it needs a reference image). On `generate` it raises an error.
 

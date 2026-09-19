@@ -93,6 +93,7 @@ class _ResolvedRequest:
     seed: int
     pixel_upscaler: Optional[str]
     kv_cache: bool
+    ref_method: str
 
 
 class PipelineController:
@@ -253,11 +254,8 @@ class PipelineController:
 
         r = self._resolve_pipeline(local)
         ref_key = self._cache_key_reference(images, r.width, r.height)
-        # The reference packing method defaults to the model's own (``index`` for
-        # Flux2 Klein) unless the request overrides it (``index_timestep_zero``).
-        ref_method = request.ref_method or getattr(model, "DEFAULT_REF_METHOD", "index")
         return self._finalize(
-            self._run(local, r, ref_key=ref_key, ref_method=ref_method),
+            self._run(local, r, ref_key=ref_key, ref_method=r.ref_method),
             local, r,
         )
 
@@ -452,9 +450,23 @@ class PipelineController:
         )
         effective_sampler = request.sampler or model.SAMPLER
 
-        # Reference-latent KV cache: resolve the request override against the
-        # model's own default (Flux2 Klein defaults to off).
-        kv_cache = request.kv_cache if request.kv_cache is not None else model.DEFAULT_KV_CACHE
+        # Generation preferences, resolved in one place by the model's precedence:
+        # explicit request (API/CLI) > checkpoint marker > model default.
+        ref_method = model.pref("ref_method", request.ref_method)
+        kv_cache = model.pref("kv_cache", request.kv_cache)
+        # The KV cache freezes the reference K/V, which is only valid when those
+        # tokens are conditioned at timestep zero. When the cache is on but the
+        # reference method was left on auto, pick the method that makes it valid
+        # rather than failing; an explicit ``index`` stays explicit, and is rejected
+        # below rather than silently producing a degraded edit.
+        if kv_cache and request.ref_method is None:
+            ref_method = "index_timestep_zero"
+        if kv_cache and ref_method != "index_timestep_zero":
+            raise ValueError(
+                "kv_cache requires ref_method='index_timestep_zero': the cached "
+                "reference K/V are only step-invariant when the reference tokens are "
+                "conditioned at timestep zero"
+            )
 
         # seed=-1 is treated as "random" (same as None)
         seed = request.seed
@@ -466,7 +478,7 @@ class PipelineController:
             factor=factor, upscale_type=upscale_type, target_width=target_width,
             target_height=target_height, refined=refined, pixel_scale=pixel_scale,
             effective_sampler=effective_sampler, seed=seed, pixel_upscaler=pixel_upscaler,
-            kv_cache=kv_cache,
+            kv_cache=kv_cache, ref_method=ref_method,
         )
 
     def _finalize(

@@ -78,15 +78,17 @@ def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png
                    help="denoising solver (default: auto)")
     p.add_argument("--kv-cache", dest="kv_cache", action="store_true",
                    help="reference-latent KV cache (edit only): freeze the reference "
-                        "tokens' K/V across denoise steps for faster editing")
+                        "tokens' K/V across denoise steps for faster editing "
+                        "(implies --ref-method index_timestep_zero unless given)")
     p.add_argument("--no-kv-cache", dest="kv_cache", action="store_false",
                    help="disable the reference-latent KV cache (default)")
     p.set_defaults(kv_cache=None)
     p.add_argument("--ref-method", choices=["index", "index_timestep_zero"],
                    default=None,
-                   help="reference packing method for editing (default: model default, "
-                        "'index' for Flux2 Klein); 'index_timestep_zero' conditions "
-                        "reference tokens at timestep zero (KV-cache-capable checkpoints)")
+                   help="reference conditioning for editing (default: auto, i.e. "
+                        "detected from the checkpoint marker, else 'index'); "
+                        "'index_timestep_zero' conditions reference tokens at "
+                        "timestep zero, which is what makes the KV cache valid")
     p.add_argument("--qwen-vae-enhance", action="store_true",
                    help="apply the Nyquist Notch post filter to decoded pixels "
                         "(removes 2px grid artifacts)")

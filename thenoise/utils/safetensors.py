@@ -198,6 +198,20 @@ class MemoryEfficientSafeOpen:
 WRAP_PREFIXES = ("model.diffusion_model.", "net.")
 
 
+def unwrap_key(key: str) -> str:
+    """Return a tensor name with any generic wrapper prefix stripped.
+
+    Repackaged checkpoints prefix every tensor name with a shared wrapper such as
+    ``model.diffusion_model.`` (ComfyUI) or ``net.``. Stripping it lets detection,
+    marker matching and ``load_state_dict`` all see the model's *own* key paths, so
+    raw and repackaged checkpoints resolve identically.
+    """
+    for prefix in WRAP_PREFIXES:
+        if key.startswith(prefix):
+            return key[len(prefix):]
+    return key
+
+
 def strip_wrap_prefixes(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     """Return a new state dict with generic wrapper prefixes stripped from keys.
 
@@ -206,35 +220,18 @@ def strip_wrap_prefixes(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.
     own key paths are restored (the loader expects bare ``txtfusion.``/``blocks.``
     etc., not the wrapped forms).
     """
-    stripped = {}
-    for key, value in state_dict.items():
-        for prefix in WRAP_PREFIXES:
-            if key.startswith(prefix):
-                key = key[len(prefix):]
-                break
-        stripped[key] = value
-    return stripped
+    return {unwrap_key(key): value for key, value in state_dict.items()}
 
 
-def checkpoint_has_key(path: str, key: str) -> bool:
-    """True if the safetensors ``path`` contains ``key`` (wrapper-agnostic).
+def checkpoint_keys(path: str) -> set[str]:
+    """The tensor names in the safetensors header of ``path``, wrapper-normalized.
 
-    Generic repackaging prefixes (``model.diffusion_model.`` / ``net.``) are
-    stripped before matching, so raw and repackaged checkpoints resolve
-    identically. Used to detect checkpoint-level architecture markers that are
-    *not* part of the weights — e.g. the empty ``__index_timestep_zero__`` buffer
-    that marks an edit model trained with reference tokens conditioned at
-    timestep zero (``zero_cond_t``).
+    Reads the header only (no tensor data), so it is cheap enough to run at model
+    load time. Used to see checkpoint-level markers that are *not* weights — see
+    ``thenoise.utils.checkpoint``.
     """
     with MemoryEfficientSafeOpen(path) as f:
-        for k in f.keys():
-            for prefix in WRAP_PREFIXES:
-                if k.startswith(prefix):
-                    k = k[len(prefix):]
-                    break
-            if k == key:
-                return True
-    return False
+        return {unwrap_key(k) for k in f.keys()}
 
 
 def load_dit_safetensors(

@@ -218,18 +218,6 @@ def _tiny_edit_inputs(model, seq=4, refseq=6, txtlen=8):
     }
 
 
-@pytest.fixture
-def tiny_flux2_zero():
-    torch.manual_seed(0)
-    return Flux2(
-        Flux2Params(
-            in_channels=8, context_in_dim=24, hidden_size=16, num_heads=2,
-            depth=1, depth_single_blocks=1, axes_dim=[2, 2, 2, 2],
-            mlp_ratio=1.5, use_guidance_embed=False, zero_cond_t=True,
-        )
-    ).eval()
-
-
 def test_kv_cache_fill_and_read_are_exact(tiny_flux2):
     """Fill (refs present) and read (refs dropped + cached K/V) == full sequence.
 
@@ -259,44 +247,39 @@ def test_kv_cache_fill_and_read_are_exact(tiny_flux2):
     assert torch.allclose(read, full, atol=1e-6), (read - full).abs().max().item()
 
 
-def test_zero_cond_t_changes_the_edit_output_but_not_t2i():
+def test_zero_cond_t_changes_the_edit_output_but_not_t2i(tiny_flux2):
     """``zero_cond_t`` modulates the reference slice with vec(0).
 
-    With references the output differs from the plain ``index`` modulation; with
-    no references (plain t2i) the two are identical.
+    It is a per-forward flag (the adapter derives it from the resolved
+    ``ref_method``), so one set of weights serves both: with references the output
+    differs, with no references (plain t2i) the flag cannot matter.
     """
     torch.manual_seed(0)
-    plain = Flux2(Flux2Params(in_channels=8, context_in_dim=24, hidden_size=16, num_heads=2,
-                              depth=1, depth_single_blocks=1, axes_dim=[2, 2, 2, 2],
-                              mlp_ratio=1.5, use_guidance_embed=False, zero_cond_t=False)).eval()
-    zero = Flux2(Flux2Params(in_channels=8, context_in_dim=24, hidden_size=16, num_heads=2,
-                             depth=1, depth_single_blocks=1, axes_dim=[2, 2, 2, 2],
-                             mlp_ratio=1.5, use_guidance_embed=False, zero_cond_t=True)).eval()
-    zero.load_state_dict(plain.state_dict())
-    inp = _tiny_edit_inputs(zero)
+    m = tiny_flux2
+    inp = _tiny_edit_inputs(m)
     with torch.no_grad():
         # t2i: identical (no refs -> no t=0 split).
-        out_plain_t2i = plain(inp["x"], inp["pe_x"], inp["t"], inp["ctx"], inp["pe_txt"])
-        out_zero_t2i = zero(inp["x"], inp["pe_x"], inp["t"], inp["ctx"], inp["pe_txt"])
+        out_plain_t2i = m(inp["x"], inp["pe_x"], inp["t"], inp["ctx"], inp["pe_txt"],
+                          zero_cond_t=False)
+        out_zero_t2i = m(inp["x"], inp["pe_x"], inp["t"], inp["ctx"], inp["pe_txt"],
+                         zero_cond_t=True)
         assert torch.allclose(out_plain_t2i, out_zero_t2i, atol=1e-6)
         # edit: the refs are modulated differently -> outputs differ.
-        out_plain = plain(inp["x"], inp["pe_x"], inp["t"], inp["ctx"], inp["pe_txt"],
-                          ref_tokens=inp["ref"], ref_pe=inp["pe_ref"])
-        out_zero = zero(inp["x"], inp["pe_x"], inp["t"], inp["ctx"], inp["pe_txt"],
-                        ref_tokens=inp["ref"], ref_pe=inp["pe_ref"])
+        out_plain = m(inp["x"], inp["pe_x"], inp["t"], inp["ctx"], inp["pe_txt"],
+                      ref_tokens=inp["ref"], ref_pe=inp["pe_ref"], zero_cond_t=False)
+        out_zero = m(inp["x"], inp["pe_x"], inp["t"], inp["ctx"], inp["pe_txt"],
+                     ref_tokens=inp["ref"], ref_pe=inp["pe_ref"], zero_cond_t=True)
         assert not torch.allclose(out_plain, out_zero)
 
 
-def test_zero_cond_t_keeps_refs_step_independent(tiny_flux2_zero):
+def test_zero_cond_t_keeps_refs_step_independent(tiny_flux2):
     """With ``zero_cond_t`` the reference K/V are step-invariant: the cache drift
     over a multi-step run is far smaller than with plain ``index`` modulation."""
     torch.manual_seed(0)
-    inp = _tiny_edit_inputs(tiny_flux2_zero)
+    m = tiny_flux2
+    inp = _tiny_edit_inputs(m)
 
     def drift(zero_cond_t):
-        m = Flux2(Flux2Params(in_channels=8, context_in_dim=24, hidden_size=16, num_heads=2,
-                              depth=1, depth_single_blocks=1, axes_dim=[2, 2, 2, 2],
-                              mlp_ratio=1.5, use_guidance_embed=False, zero_cond_t=zero_cond_t)).eval()
         torch.manual_seed(0)
         x_full = torch.randn(1, 4, 8)
         x_cache = x_full.clone()
@@ -305,13 +288,15 @@ def test_zero_cond_t_keeps_refs_step_independent(tiny_flux2_zero):
             ts = torch.tensor([t_i])
             with torch.no_grad():
                 x_full = x_full - 0.2 * m(x_full, inp["pe_x"], ts, inp["ctx"], inp["pe_txt"],
-                                          ref_tokens=inp["ref"], ref_pe=inp["pe_ref"])
+                                          ref_tokens=inp["ref"], ref_pe=inp["pe_ref"],
+                                          zero_cond_t=zero_cond_t)
                 if not kv.filled:
                     x_cache = x_cache - 0.2 * m(x_cache, inp["pe_x"], ts, inp["ctx"], inp["pe_txt"],
-                                                ref_tokens=inp["ref"], ref_pe=inp["pe_ref"], kv=kv)
+                                                ref_tokens=inp["ref"], ref_pe=inp["pe_ref"],
+                                                kv=kv, zero_cond_t=zero_cond_t)
                 else:
                     x_cache = x_cache - 0.2 * m(x_cache, inp["pe_x"], ts, inp["ctx"], inp["pe_txt"],
-                                                ref_tokens=None, kv=kv)
+                                                ref_tokens=None, kv=kv, zero_cond_t=zero_cond_t)
         return (x_full - x_cache).abs().max().item()
 
     drift_zero = drift(True)
@@ -372,6 +357,7 @@ def test_adapter_denoise_step_kv_fill_then_read():
     model._txt = torch.randn(1, 8, 24)
     model._un_txt = None
     model._ref_tokens = torch.randn(1, 6, 8)
+    model._zero_cond_t = True  # what ``prepare_latent`` stashes for index_timestep_zero
 
     from thenoise.models.base import Conditioning
     cond = Conditioning(cond=model._txt)

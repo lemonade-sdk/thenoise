@@ -62,10 +62,6 @@ class Flux2Params:
     theta: int = 2000
     mlp_ratio: float = 3.0
     use_guidance_embed: bool = True
-    # Edit checkpoints trained with reference tokens conditioned at timestep
-    # zero (``__index_timestep_zero__`` marker) modulate the reference slice with
-    # vec(0), making its K/V step-invariant — the basis of the KV cache.
-    zero_cond_t: bool = False
 
 
 @dataclass
@@ -304,7 +300,6 @@ class Flux2(nn.Module):
 
         self.hidden_size = params.hidden_size
         self.num_heads = params.num_heads
-        self.zero_cond_t = params.zero_cond_t
 
         self.pe_embedder = RopeCache(matrix_rope(params.axes_dim, params.theta))
         self.img_in = QuantizedLinear(self.in_channels, self.hidden_size, bias=False)
@@ -379,6 +374,7 @@ class Flux2(nn.Module):
         ref_tokens: Tensor | None = None,
         ref_pe: Tensor | None = None,
         kv: KVCache | None = None,
+        zero_cond_t: bool = False,
     ) -> Tensor:
         num_txt_tokens = ctx.shape[1]
         num_img_tokens = x.shape[1]
@@ -390,12 +386,14 @@ class Flux2(nn.Module):
             guidance_emb = timestep_embedding(guidance, 256)
             vec = vec + self.guidance_in(guidance_emb)
 
-        # ``zero_cond_t`` (edit checkpoints trained with reference tokens
-        # conditioned at timestep zero) modulates the reference slice with vec(0):
-        # duplicate the conditioning rows ``[t, 0]`` and split per token slice.
-        # The reference K/V then becomes step-independent — the basis of the KV
-        # cache. Text and (dropped-at-the-end) target tokens always use the t row.
-        zero = self.zero_cond_t and ref_len > 0
+        # ``zero_cond_t`` (reference tokens trained at timestep zero — the
+        # ``index_timestep_zero`` reference method) modulates the reference slice
+        # with vec(0): duplicate the conditioning rows ``[t, 0]`` and split per
+        # token slice. The reference K/V then becomes step-independent — the basis
+        # of the KV cache. Text and (dropped-at-the-end) target tokens always use
+        # the t row. It is a per-forward choice, made by the adapter from the
+        # resolved ``ref_method`` preference, not baked into the architecture.
+        zero = zero_cond_t and ref_len > 0
         if zero:
             vec_zero = self.time_in(timestep_embedding(timesteps * 0, 256))
             if self.use_guidance_embed:

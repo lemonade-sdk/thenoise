@@ -2,8 +2,10 @@
 
 All variants are edit-capable: the input image is both (1) encoded by Qwen2.5-VL as
 vision tokens into the text conditioning, and (2) VAE-encoded and concatenated into
-the DiT token sequence as a reference latent. ``zero_cond_t`` (edit-2511, flagged by
-``__index_timestep_zero__``) is detected from the checkpoint.
+the DiT token sequence as a reference latent. Conditioning the reference tokens at
+timestep zero (the ``index_timestep_zero`` reference method) is a per-run choice
+resolved from the ``ref_method`` preference, whose automatic layer comes from the
+checkpoint's ``__index_timestep_zero__`` marker.
 """
 from __future__ import annotations
 
@@ -24,7 +26,6 @@ from thenoise.models.base import (
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.latents import pack_latents, unpack_latents
 from thenoise.utils.math import round_up
-from thenoise.utils.safetensors import checkpoint_has_key
 from thenoise.utils.text_encoder import (
     QWEN25_TOKENIZER_CONFIG_DIR,
     load_qwen2_5_vl_model,
@@ -34,15 +35,6 @@ from thenoise.utils.text_encoder import (
 from thenoise.vae import load_qwen_vae
 
 logger = logging.getLogger(__name__)
-
-
-def _detect_zero_cond_t(dit_path: str) -> bool:
-    """True if the checkpoint carries the ``__index_timestep_zero__`` marker.
-
-    Marks an edit model trained with reference tokens conditioned at timestep
-    zero (``zero_cond_t``). Shared helper, wrapper-prefix agnostic.
-    """
-    return checkpoint_has_key(dit_path, "__index_timestep_zero__")
 
 
 class QwenImageModel(DiffusionModel):
@@ -82,10 +74,9 @@ class QwenImageModel(DiffusionModel):
     def __init__(self, *, config: ModelConfig):
         super().__init__(config=config)
 
-        self.zero_cond_t = _detect_zero_cond_t(config.dit_path)
-        logger.info("Loading Qwen-Image DiT from %s (zero_cond_t=%s)", config.dit_path, self.zero_cond_t)
+        logger.info("Loading Qwen-Image DiT from %s", config.dit_path)
         self.dit = qwen_models.load_qwen_image_dit(
-            config.dit_path, device=self.offload_device, zero_cond_t=self.zero_cond_t, dtype=config.dtype
+            config.dit_path, device=self.offload_device, dtype=config.dtype
         )
         self.dit.eval().requires_grad_(False)
 
@@ -147,7 +138,7 @@ class QwenImageModel(DiffusionModel):
 
         The reference latent (edit) is packed and concatenated into the DiT token
         sequence; ``img_shapes`` gains one entry per reference and drives both the
-        precomputed RoPE positions and the ``zero_cond_t`` split index.
+        precomputed RoPE positions and the timestep-zero split index.
         """
         dev = torch.device(self.device)
         x = pack_latents(latents.to(device=dev, dtype=self.dtype))
@@ -188,11 +179,14 @@ class QwenImageModel(DiffusionModel):
             null_pos = build_txt_positions(max_vid_index, null_len, device=dev)
             self.dit.pe_embedder.store("txt_uncond", null_pos, dtype=self.dtype)
 
-        # ``zero_cond_t`` zeroes the timestep on the reference tokens; the split
-        # point is the base image token count.
+        # Timestep-zero conditioning (``ref_method="index_timestep_zero"``) zeroes
+        # the timestep on the reference tokens; the split point is the base image
+        # token count. Only meaningful with references present, so an ``index`` edit
+        # (or plain t2i) leaves it None -> single-row modulation.
+        zero_cond_t = ref_method == "index_timestep_zero" and self._ref_tokens is not None
         self._timestep_zero_index = (
             self._img_shapes[0][0] * self._img_shapes[0][1] * self._img_shapes[0][2]
-            if self.zero_cond_t
+            if zero_cond_t
             else None
         )
 
@@ -267,9 +261,16 @@ class QwenImageModel(DiffusionModel):
         return self.vae.encode_pixels_to_latents(pixels.unsqueeze(0))
 
     def pack_reference_latent(self, latents: torch.Tensor, method: str = "index", ref_index: int = 1):
-        """Canonical reference latent -> packed DiT tokens (native Qwen-Image approach)."""
-        if method != "index":
-            raise ValueError(f"unsupported ref_latents_method {method!r}; only 'index' is supported")
+        """Canonical reference latent -> packed DiT tokens (native Qwen-Image approach).
+
+        ``index_timestep_zero`` packs identically to ``index`` (the difference is the
+        timestep-zero *modulation* of the reference tokens, applied via
+        ``timestep_zero_index``); anything else is rejected.
+        """
+        if method not in ("index", "index_timestep_zero"):
+            raise ValueError(
+                f"unsupported ref_latents_method {method!r}; expected 'index' or 'index_timestep_zero'"
+            )
         dev = torch.device(self.device)
         return pack_latents(latents.to(device=dev, dtype=self.dtype)), None
 

@@ -80,9 +80,10 @@ class GenerateRequest:
     lora_specs: Optional[List[str]] = None
     pixel_upscaler: Optional[str] = None
     image: Optional[Union[Image.Image, List[Image.Image]]] = None
-    # Reference-latent KV cache (edit only); None = model default.
+    # Reference-latent KV cache (edit only); None = auto (see
+    # ``DiffusionModel.pref``: checkpoint marker, then model default).
     kv_cache: Optional[bool] = None
-    # Reference packing method for editing (edit only); None = model default.
+    # Reference conditioning method for editing (edit only); None = auto.
     ref_method: Optional[str] = None
 
 

@@ -10,10 +10,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from conftest import write_safetensors
 from thenoise.dit.qwen_image import sampling as qwen_sampling
 from thenoise.dit.qwen_image import utils as qwen_utils
-from thenoise.models.qwen_image import _detect_zero_cond_t, QwenImageModel
+from thenoise.models.qwen_image import QwenImageModel
 from thenoise.utils.image_tensor import resize_to_area
 from thenoise.utils.latents import pack_latents, unpack_latents
 from thenoise.utils.math import calculate_shift
@@ -128,15 +127,17 @@ def test_pack_reference_latent_rejects_unsupported_method():
         model.pack_reference_latent(torch.randn(1, 16, 4, 4), method="crop")
 
 
-# ------------------------------------------------------------ zero_cond_t flag
+def test_pack_reference_latent_accepts_both_methods():
+    """``index_timestep_zero`` packs like ``index`` (only the modulation differs).
 
-
-def test_detect_zero_cond_t_reads_checkpoint_header(tmp_path):
-    """The edit-2511 checkpoint carries ``__index_timestep_zero__``; older ones do not."""
-    plain = tmp_path / "plain.safetensors"
-    write_safetensors(plain, {"img_in.weight": torch.zeros(1), "txt_in.weight": torch.zeros(1)})
-    assert _detect_zero_cond_t(str(plain)) is False
-
-    zero_cond = tmp_path / "zero_cond.safetensors"
-    write_safetensors(zero_cond, {"__index_timestep_zero__": torch.zeros(1)})
-    assert _detect_zero_cond_t(str(zero_cond)) is True
+    Both reference methods must be accepted: an edit checkpoint carrying the
+    ``__index_timestep_zero__`` marker now auto-resolves to it, so rejecting it
+    would break the automatic preference layer.
+    """
+    model = QwenImageModel.__new__(QwenImageModel)
+    model.device = "cpu"
+    model.dtype = torch.float32
+    ref = torch.randn(1, 16, 4, 4)
+    index_tokens, _ = model.pack_reference_latent(ref, method="index")
+    zero_tokens, _ = model.pack_reference_latent(ref, method="index_timestep_zero")
+    assert torch.equal(index_tokens, zero_tokens)

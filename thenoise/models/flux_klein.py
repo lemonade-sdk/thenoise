@@ -28,7 +28,6 @@ from thenoise.dit.flux2.utils import (
     load_qwen3_embedder,
 )
 from thenoise.dit.kvcache import KVCache
-from thenoise.utils.safetensors import checkpoint_has_key
 from thenoise.utils.text_encoder import find_tokenizer_dir
 from thenoise.models.base import Conditioning, DiffusionModel, Step, normalize_keys
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
@@ -59,13 +58,11 @@ class FluxKleinModel(DiffusionModel):
     # with ``ref_index_scale = 10`` (the t-axis offset for the reference latent).
     supports_edit = True
     REF_INDEX = 10
-    DEFAULT_REF_METHOD = "index"
 
     # Reference-latent KV cache: the reference tokens' K/V can be frozen across
-    # denoise steps (ComfyUI's ``FluxKVCache``). Requires a checkpoint trained
-    # with ``index_timestep_zero`` (the ``__index_timestep_zero__`` marker).
+    # denoise steps (ComfyUI's ``FluxKVCache``). Valid only with
+    # ``ref_method="index_timestep_zero"`` (enforced by the pipeline).
     supports_kv_cache = True
-    DEFAULT_KV_CACHE = False
 
     def _lora_key_map(self, key: str) -> str:
         """Map ComfyUI Flux.2 LoRA names to this repo's Flux.2 schema.
@@ -104,15 +101,14 @@ class FluxKleinModel(DiffusionModel):
         super().__init__(config=config)
 
         # Determine the Klein variant (4B / 9B) from the DiT checkpoint; this also
-        # selects the matching Qwen3 text encoder (4B / 8B). Edit checkpoints
-        # trained with reference tokens conditioned at timestep zero carry the
-        # ``__index_timestep_zero__`` marker — auto-detect it (shared helper,
-        # wrapper-prefix agnostic) and enable the ``zero_cond_t`` modulation.
+        # selects the matching Qwen3 text encoder (4B / 8B). The timestep-zero
+        # reference conditioning is NOT a weight-level property here: it is chosen
+        # per run from the resolved ``ref_method`` preference (``prepare_latent``),
+        # whose automatic layer comes from the checkpoint markers the base class
+        # already read (``self.checkpoint_prefs``).
         self.params: Flux2Params = detect_klein_params(config.dit_path)
-        self.zero_cond_t = checkpoint_has_key(config.dit_path, "__index_timestep_zero__")
-        self.params.zero_cond_t = self.zero_cond_t
         self.is_8b = self.params.context_in_dim == 12288
-        logger.info("Loading Flux Klein DiT (%s) from %s (zero_cond_t=%s)", self.variant_label, config.dit_path, self.zero_cond_t)
+        logger.info("Loading Flux Klein DiT (%s) from %s", self.variant_label, config.dit_path)
         self.dit = load_flux2_dit(config.dit_path, self.params, device=self.offload_device, dtype=config.dtype)
         self.dit.eval().requires_grad_(False)
 
@@ -183,9 +179,12 @@ class FluxKleinModel(DiffusionModel):
         forward. Safe under the lock.
 
         In the edit path (``ref`` given) the reference latent is packed the same
-        way and stashed as ``_ref_tokens`` for ``denoise_step``.
+        way and stashed as ``_ref_tokens`` for ``denoise_step``. ``ref_method``
+        decides whether those tokens are conditioned at timestep zero
+        (``index_timestep_zero`` -> ``zero_cond_t`` in the DiT forward).
         """
         dev = torch.device(self.device)
+        self._zero_cond_t = ref_method == "index_timestep_zero"
         x, x_ids = prc_img(latents.to(device=dev, dtype=self.dtype))
         self._img_ids = x_ids  # used by ``finalize_latent``
 
@@ -306,6 +305,7 @@ class FluxKleinModel(DiffusionModel):
             ref_tokens=ref_tokens,
             ref_pe=pe_ref,
             kv=kv,
+            zero_cond_t=self._zero_cond_t,
         )
 
     # ------------------------------------------------------------ editing

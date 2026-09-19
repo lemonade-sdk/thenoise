@@ -51,7 +51,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple, Union
 
 import torch
 from safetensors.torch import load_file
@@ -69,9 +69,10 @@ from thenoise.utils.model_dir import (
     resolve_in_dir,
     list_safetensors,
 )
+from thenoise.utils.checkpoint import detect_checkpoint_prefs
 from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
 from thenoise.utils.lora import LoRAApplyResult
-from thenoise.utils.safetensors import WRAP_PREFIXES
+from thenoise.utils.safetensors import unwrap_key
 
 logger = logging.getLogger(__name__)
 
@@ -97,12 +98,11 @@ class Conditioning:
     null_mask: Optional[torch.Tensor] = None
 
 
-# Generic wrapper prefixes that repackagings (e.g. ComfyUI's "diffusion_model"
-# export) prepend to *every* tensor name. Detection must strip these before
-# matching on an architecture signature, otherwise a repackaged checkpoint is
-# misidentified. The canonical list lives in ``thenoise.utils.safetensors``
-# (shared with ``strip_wrap_prefixes`` used at load time) so detection and
-# loading stay in sync.
+# Generic wrapper prefixes (``model.diffusion_model.`` / ``net.``) that repackagings
+# prepend to *every* tensor name. Detection must strip these before matching on an
+# architecture signature, otherwise a repackaged checkpoint is misidentified. The
+# stripping itself is shared with loading via ``safetensors.unwrap_key`` so the two
+# can never drift apart.
 
 
 def normalize_keys(keys):
@@ -114,11 +114,7 @@ def normalize_keys(keys):
     the wrapper, so raw and repackaged checkpoints resolve identically.
     """
     for k in keys:
-        for p in WRAP_PREFIXES:
-            if k.startswith(p):
-                k = k[len(p):]
-                break
-        yield k
+        yield unwrap_key(k)
 
 
 class DiffusionModel(ABC):
@@ -146,11 +142,27 @@ class DiffusionModel(ABC):
     supports_edit: bool = False
 
     # Reference-latent KV cache: freeze the reference tokens' K/V across denoise
-    # steps (ComfyUI ``FluxKVCache``). Models that support it set this True and
-    # override ``DEFAULT_KV_CACHE`` (per-model default, off unless trained for it).
+    # steps (ComfyUI ``FluxKVCache``). Models that implement the fill/read protocol
+    # set this True. Validity is a separate question: the frozen K/V stay
+    # step-invariant only under ``ref_method="index_timestep_zero"``.
     supports_kv_cache: bool = False
-    DEFAULT_KV_CACHE: bool = False
-    DEFAULT_REF_METHOD: str = "index"
+
+    # Generation preferences and their model default — layer 3 of the precedence
+    # implemented by ``pref``: 1. explicit request (API/CLI), 2. what the loaded
+    # checkpoint's markers imply (``checkpoint_prefs``), 3. these defaults.
+    # Subclasses override the entries they care about; asking for an unlisted name
+    # is a bug, so it raises rather than silently defaulting.
+    DEFAULT_PREFS: ClassVar[Dict[str, Any]] = {
+        # Reference packing / conditioning method for editing.
+        "ref_method": "index",
+        # Reference-latent KV cache (edit only).
+        "kv_cache": False,
+    }
+
+    # Preferences implied by the loaded checkpoint's markers; replaced per instance
+    # in ``__init__``. The empty class default keeps ``pref`` working on instances
+    # built without ``__init__`` (tests, stubs).
+    checkpoint_prefs: Dict[str, Any] = {}
 
     # Whether the attention projections are fused (``qkv``) or separate
     # (``to_q``/``to_k``/``to_v``). LoRA factors are fused into a single ``qkv``
@@ -183,6 +195,11 @@ class DiffusionModel(ABC):
         self.text_encoder_path = config.text_encoder_path
         self.lora_dir = config.lora_dir
 
+        # Layer 2 of the preference precedence: the preferences implied by markers
+        # in the DiT header (empty when it carries none). Model-agnostic by
+        # construction — see ``thenoise.utils.checkpoint``.
+        self.checkpoint_prefs = detect_checkpoint_prefs(config.dit_path)
+
         # Component placement: subclasses register ``dit`` / ``text_encoder`` /
         # ``vae``; the pipeline controller ensures/offloads them by name.
         self.memory = MemoryManager(self.device, self.offload_device)
@@ -198,6 +215,29 @@ class DiffusionModel(ABC):
         # ``_upscale_format`` supplies the latent-format name matching the VAE.
         self._upscaler = None
         self._adaptor = None
+
+    # ------------------------------------------------------------ preferences
+    def pref(self, name: str, request_value: Any = None) -> Any:
+        """Resolve a generation preference: request > checkpoint marker > model default.
+
+        ``request_value`` is what the API/CLI carried, or ``None`` when the user did
+        not ask (that is how "auto" is represented on the wire). Markers only fill
+        in what the user did not ask for — an explicit request always wins, since
+        unmarked-but-trained checkpoints (and LoRAs that change what a checkpoint
+        expects) are common enough that vetoing on a missing marker would misfire.
+        """
+        if name not in self.DEFAULT_PREFS:
+            raise KeyError(f"unknown preference {name!r}; known: {sorted(self.DEFAULT_PREFS)}")
+        if request_value is not None:
+            value, source = request_value, "request"
+        else:
+            detected = self.checkpoint_prefs.get(name)
+            if detected is not None:
+                value, source = detected, "checkpoint"
+            else:
+                value, source = self.DEFAULT_PREFS[name], "model default"
+        logger.debug("%s = %s (%s)", name, value, source)
+        return value
 
     # ------------------------------------------------------------ devices
     def _detect_offload_device(self, config: ModelConfig) -> str:
