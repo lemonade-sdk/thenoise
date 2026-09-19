@@ -271,6 +271,11 @@ function collectSettings(prefix, extra) {
   return body;
 }
 
+function parseTriState(value) {
+  if (value === '' || value == null) return null;
+  return value === 'true';
+}
+
 function parseLora(value) {
   return value.trim()
     ? value.split('\n').map(l => l.trim()).filter(Boolean)

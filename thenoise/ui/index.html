@@ -235,10 +235,12 @@
   </div>
 
   <div class="field">
-    <label class="label">
-      <input type="checkbox" id="edit_kv_cache">
-      KV cache <span class="hint">(freeze reference K/V for faster editing; needs an index_timestep_zero checkpoint)</span>
-    </label>
+    <label class="label" for="edit_kv_cache">KV cache <span class="hint">(freeze reference K/V across steps; faster edits)</span></label>
+    <select id="edit_kv_cache">
+      <option value="">auto</option>
+      <option value="true">enabled</option>
+      <option value="false">disabled</option>
+    </select>
   </div>
 
   <div class="field">

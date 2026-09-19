@@ -498,6 +498,18 @@ const editHist = makeHistory({
   },
 });
 
+function editExtras() {
+  const extra = {
+    // OpenAI-style: one image -> a string, many -> an array.
+    image: editRefs.length === 1 ? editRefs[0].b64 : editRefs.map(r => r.b64),
+  };
+  const kv = parseTriState($('edit_kv_cache').value);
+  if (kv !== null) extra.kv_cache = kv;
+  const method = $('edit_ref_method').value;
+  if (method) extra.ref_method = method;
+  return extra;
+}
+
 $('edit_btn').addEventListener('click', () => {
   if (editRefs.length === 0) return;
   if (!validateDims('edit_')) return;
@@ -507,13 +519,7 @@ $('edit_btn').addEventListener('click', () => {
     overlay: $('eoverlay'),
     timerEl: 'etimer',
     timerTextEl: 'etimer_text',
-    request: () => postJSON('/edit', collectSettings('edit_', {
-      // OpenAI-style: one image -> a string, many -> an array.
-      image: editRefs.length === 1 ? editRefs[0].b64 : editRefs.map(r => r.b64),
-      // Reference-latent KV cache + packing method (edit only).
-      kv_cache: $('edit_kv_cache').checked,
-      ref_method: $('edit_ref_method').value || null,
-    })),
+    request: () => postJSON('/edit', collectSettings('edit_', editExtras())),
     onSuccess: async (blob) => {
       // Don't revoke the previous eOutUrl: it is kept as an entry in history.
       eOutUrl = URL.createObjectURL(blob);
