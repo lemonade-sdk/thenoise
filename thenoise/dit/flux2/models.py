@@ -331,20 +331,29 @@ class Flux2(nn.Module):
         self.num_double_blocks = len(self.double_blocks)
         self.num_single_blocks = len(self.single_blocks)
 
-        # Per-block compiled-forward cache: ``(blocks, index, dynamic, mode)``. t2i
+        # Per-block compiled-forward cache: ``(blocks, index, dynamic)``. t2i
         # compiles static (fixed shape); edit (variable ref count) compiles
         # dynamic to avoid Inductor's recompile/`CantSplit` failure on the grown
-        # sequence. ``mode`` is ``off`` / ``fill`` / ``read`` — the KV cache
-        # changes the graph (store vs concat), so the three variants must not
-        # share a compiled entry. Keyed by the owning ModuleList + position (not
-        # ``id(block)``), which also keeps the double vs single streams from
-        # colliding.
-        self._compiled_blocks: dict[tuple[nn.ModuleList, int, bool, str], Callable] = {}
+        # sequence. Only the ``off`` and ``fill`` paths are compiled — the KV cache
+        # ``read`` path runs eager, see ``_block_forward``. Keyed by the owning
+        # ModuleList + position (not ``id(block)``), which also keeps the double vs
+        # single streams from colliding.
+        self._compiled_blocks: dict[tuple[nn.ModuleList, int, bool], Callable] = {}
 
-    def _compile_block(self, blocks: nn.ModuleList, index: int, dynamic: bool, mode: str) -> Callable:
-        """Cached ``torch.compile``d forward for ``blocks[index]``."""
+    def _block_forward(self, blocks: nn.ModuleList, index: int, dynamic: bool, mode: str) -> Callable:
+        """Per-block forward for ``blocks[index]`` under KV-cache ``mode``.
+
+        ``off`` and ``fill`` return a cached ``torch.compile``d forward; they must
+        not share an entry because the cache changes the graph (K/V store vs plain).
+        ``read`` (only reached with a filled KV cache) returns the eager forward:
+        its whole delta is the cached-K/V ``torch.cat``, which Inductor handles
+        poorly (symbolic tiling of the concat / ``Mul`` failures) for work that is
+        negligible next to the attention it feeds.
+        """
         block = blocks[index]
-        key = (blocks, index, dynamic, mode)
+        if mode == "read":
+            return block.forward
+        key = (blocks, index, dynamic)
         fn = self._compiled_blocks.get(key)
         if fn is None:
             fn = torch.compile(block.forward, fullgraph=True, dynamic=dynamic)
@@ -450,13 +459,9 @@ class Flux2(nn.Module):
 
         # Edit varies seq length (ref tokens appended) and the KV path changes the
         # graph, so compile blocks dynamically for the grown (fill) sequence; t2i
-        # keeps static kernels. ``read`` is compiled STATIC: its sequence length is
-        # ``txt + img`` (independent of the ref count, which was dropped), so a
-        # static graph avoids Inductor's symbolic ``Mul`` tiling failure on the
-        # cached-K/V concat.
-        if mode == "read":
-            dynamic = False
-        elif mode == "fill":
+        # keeps static kernels. ``read`` is never compiled (see ``_block_forward``),
+        # so its ``dynamic`` value is irrelevant.
+        if mode == "fill":
             dynamic = True
         else:
             dynamic = ref_tokens is not None
@@ -465,7 +470,7 @@ class Flux2(nn.Module):
             seg = kv.segment(("double", i)) if kv is not None else None
             kv_fill = ref_len if mode == "fill" else 0
             kv_read = seg if mode == "read" else None
-            fwd = self._compile_block(self.double_blocks, i, dynamic, mode)
+            fwd = self._block_forward(self.double_blocks, i, dynamic, mode)
             img, txt, seg_out = fwd(img, txt, pe_x, pe_ctx, img_mod, txt_mod, kv_read, kv_fill)
             if seg_out is not None and kv is not None:
                 kv.store(("double", i), seg_out)
@@ -478,7 +483,7 @@ class Flux2(nn.Module):
             seg = kv.segment(("single", i)) if kv is not None else None
             kv_fill = ref_len if mode == "fill" else 0
             kv_read = seg if mode == "read" else None
-            fwd = self._compile_block(self.single_blocks, i, dynamic, mode)
+            fwd = self._block_forward(self.single_blocks, i, dynamic, mode)
             img, seg_out = fwd(img, pe, single_mod, kv_read, kv_fill)
             if seg_out is not None and kv is not None:
                 kv.store(("single", i), seg_out)
