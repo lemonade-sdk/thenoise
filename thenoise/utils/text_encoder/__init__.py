@@ -31,6 +31,8 @@ from transformers import (
     Qwen3ForCausalLM,
     Qwen3VLConfig,
     Qwen3VLForConditionalGeneration,
+    Qwen3VLProcessor,
+    Qwen3VLVideoProcessor,
     T5TokenizerFast,
 )
 
@@ -41,6 +43,7 @@ from thenoise.utils.qwen_configs import (
     QWEN2_5_VL_PREPROCESSOR_CONFIG,
     QWEN3_0_6B_CONFIG,
     QWEN3_VL_4B_INSTRUCT_CONFIG,
+    QWEN3_VL_PREPROCESSOR_CONFIG,
 )
 
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
@@ -51,7 +54,18 @@ T5_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "t5")
 # Only these ``tokenizer_config.json`` fields differ across the other Qwen variants
 # (the vocab/merges are byte-identical), so they are applied as post-load overrides.
 QWEN3_06B_TOKENIZER_OVERRIDES = {"eos_token": "<|endoftext|>"}
-QWEN3_VL_TOKENIZER_OVERRIDES = {"model_max_length": 262144}
+
+# The VL token names a multimodal processor looks up on its tokenizer. The shared
+# ``qwen25_tokenizer`` carries all of them in its added-token table (they are in every
+# Qwen vocabulary), it just does not name them, and the VL templates address them by
+# name.
+QWEN3_VL_TOKENIZER_OVERRIDES = {
+    "model_max_length": 262144,
+    "image_token": "<|image_pad|>",
+    "video_token": "<|video_pad|>",
+    "vision_start_token": "<|vision_start|>",
+    "vision_end_token": "<|vision_end|>",
+}
 QWEN2_5_VL_TOKENIZER_OVERRIDES: dict = {}
 
 #: Shared Qwen image-description prompt template (text-to-image path): a system
@@ -166,12 +180,15 @@ def load_qwen3_vl_model(
     *,
     dtype: torch.dtype,
     device: Union[str, torch.device],
+    config: Optional[dict] = None,
 ) -> Qwen3VLForConditionalGeneration:
-    """Build a Qwen3-VL-4B text encoder and load weights from a local safetensors.
+    """Build a Qwen3-VL text encoder (4B by default) and load a local safetensors into it.
 
     Accepts the official HF layout and ComfyUI's ``model.``/``visual.`` keys.
+    ``config`` is one of the vendored ``QWEN3_VL_*_CONFIG`` dicts, which is what
+    selects the variant (the 8B has a wider LM *and* a deeper vision tower).
     """
-    config = Qwen3VLConfig.from_dict(QWEN3_VL_4B_INSTRUCT_CONFIG)
+    config = Qwen3VLConfig.from_dict(config or QWEN3_VL_4B_INSTRUCT_CONFIG)
     with init_empty_weights():
         model = Qwen3VLForConditionalGeneration._from_config(config)
         del model.lm_head
@@ -249,6 +266,22 @@ def load_qwen3_vl_tokenizer(
     return tokenizer, tokenizer
 
 
+def load_qwen3_vl_processor(tokenizer):
+    """Build a Qwen3-VL processor (image preprocessor + the same tokenizer) locally.
+
+    The image config is vendored (``QWEN3_VL_PREPROCESSOR_CONFIG``) so no
+    ``preprocessor_config.json`` is fetched. The video processor is constructed with
+    its defaults: this engine feeds the encoder single images only, but the
+    processor requires one, and it is what produces the ``mm_token_type_ids`` the
+    model needs for its multimodal RoPE.
+    """
+    return Qwen3VLProcessor(
+        image_processor=Qwen2VLImageProcessor.from_dict(QWEN3_VL_PREPROCESSOR_CONFIG),
+        tokenizer=tokenizer,
+        video_processor=Qwen3VLVideoProcessor(),
+    )
+
+
 def load_qwen2_5_vl_processor(tokenizer):
     """Build a Qwen2.5-VL image/video processor from the vendored preprocessor config."""
     image_processor = Qwen2VLImageProcessor.from_dict(QWEN2_5_VL_PREPROCESSOR_CONFIG)
@@ -312,6 +345,7 @@ __all__ = [
     "load_qwen3_tokenizer",
     "load_qwen2_tokenizer",
     "load_qwen3_vl_tokenizer",
+    "load_qwen3_vl_processor",
     "load_qwen2_5_vl_processor",
     "load_t5_tokenizer",
     "QWEN25_TOKENIZER_CONFIG_DIR",

@@ -192,6 +192,12 @@ class DiffusionModel(ABC):
     # only for fused-projection models
     fused_attention: bool = True
 
+    # Which end of the attention sequence the run's KV cache freezes: ``"suffix"``
+    # when the model attends ``text, target, references`` (Flux.2 Klein, Qwen-Image)
+    # and ``"prefix"`` when the step-invariant slice comes first (Qwen-Image 2.1
+    # attends ``text + references, target``). Passed to ``thenoise.dit.kvcache``.
+    KV_CACHED_SLICE: ClassVar[str] = "suffix"
+
     def _lora_key_map(self, key: str) -> str:
         """Map a LoRA key to this model's schema.
 
@@ -423,9 +429,9 @@ class DiffusionModel(ABC):
         if not (params.kv_cache and has_reference and self.capability("kv_cache")):
             self._kv_caches = None
             return
-        caches = {"cond": KVCache("cond")}
+        caches = {"cond": KVCache("cond", self.KV_CACHED_SLICE)}
         if has_uncond:
-            caches["uncond"] = KVCache("uncond")
+            caches["uncond"] = KVCache("uncond", self.KV_CACHED_SLICE)
         self._kv_caches = caches
 
     def kv_cache(self, branch: str) -> Optional[KVCache]:

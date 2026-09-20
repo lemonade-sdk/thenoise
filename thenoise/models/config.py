@@ -53,6 +53,8 @@ class EncodePromptArgs:
     negative_prompt: str = ""
     guidance_scale: float = 0.0
     image: Optional[Union[Image.Image, List[Image.Image]]] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
 
 
 @dataclass

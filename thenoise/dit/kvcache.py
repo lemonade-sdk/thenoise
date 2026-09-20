@@ -15,9 +15,14 @@ the ``KVCache.update`` pattern from ``torchtune``, chosen over concatenating a
 cached prefix because it keeps ``torch.cat`` out of the compiled blocks entirely —
 a concatenation whose split point depends on the (dynamic) token count is something
 Inductor's tiling analysis cannot handle. It also fixes the token layout a model
-must use: the reference tokens have to be the *trailing* suffix of the attention
-sequence (and contiguous with the tokens that stay in it), which is why both
-supported models attend in ``text, target, references`` order.
+must use: with ``cached_slice="suffix"`` the frozen tokens have to be the *trailing*
+suffix of the attention sequence (and contiguous with the tokens that stay in it),
+which is why Flux.2 Klein and Qwen-Image attend in ``text, target, references``
+order. A model whose frozen slice is the *leading* prefix — Qwen-Image 2.1, whose
+causal prefix is text + references with the target image last — says so with
+``cached_slice="prefix"`` and the write moves to the other end of the buffer. The
+fill step is the same either way (it writes everything), so the difference is one
+offset, derived from the buffer.
 
 Which tokens form the cached slice, how the modulation is made step-independent,
 and whether the cache is exact (causal prefix) or approximate (bidirectional
@@ -53,10 +58,25 @@ class KVBuffers:
 
     k: torch.Tensor
     v: torch.Tensor
+    cached_slice: str = "suffix"
 
     @property
     def capacity(self) -> int:
         return self.k.shape[2]
+
+    def write_offset(self, n_tokens: int) -> int:
+        """Where a step's ``n_tokens`` recomputed tokens land in the buffer.
+
+        ``suffix`` keeps them at the front (the frozen slice is the tail), ``prefix``
+        at the back (the frozen slice is the head). A fill writes the whole buffer,
+        for which both give 0.
+        """
+        return self.capacity - n_tokens if self.cached_slice == "prefix" else 0
+
+    def write(self, k: torch.Tensor, v: torch.Tensor, offset: int = 0) -> None:
+        """Copy this step's ``k``/``v`` into the buffer at ``offset``, leaving the rest."""
+        self.k.narrow(2, offset, k.shape[2]).copy_(k)
+        self.v.narrow(2, offset, v.shape[2]).copy_(v)
 
 
 class KVCache:
@@ -72,8 +92,13 @@ class KVCache:
     mode: a fill writes the whole buffer, a read writes its leading prefix.
     """
 
-    def __init__(self, label: str = ""):
+    def __init__(self, label: str = "", cached_slice: str = "suffix"):
+        if cached_slice not in ("suffix", "prefix"):
+            raise ValueError(
+                f"unknown cached_slice {cached_slice!r}; expected 'suffix' or 'prefix'"
+            )
         self._label = label
+        self.cached_slice = cached_slice
         self._buffers: dict[Hashable, KVBuffers] = {}
         self._filled = False
 
@@ -96,7 +121,8 @@ class KVCache:
         got = self._buffers.get(key)
         if got is None or got.capacity != shape[2]:
             got = KVBuffers(torch.empty(shape, dtype=dtype, device=device),
-                            torch.empty(shape, dtype=dtype, device=device))
+                            torch.empty(shape, dtype=dtype, device=device),
+                            self.cached_slice)
             self._buffers[key] = got
         return got
 
@@ -162,9 +188,10 @@ def attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     """SDPA over ``q``/``k``/``v``, refreshed through ``bufs`` when the run has a cache.
 
     ``bufs`` are this block's run-long buffers (``[B, H, L_total, D]``, same layout
-    as the arguments): the step's ``L`` tokens are copied into their leading
-    positions and the attention then reads the *whole* buffer, so the tail still
-    holds the frozen reference K/V while the queries stay at ``L``. On the fill step
+    as the arguments): the step's ``L`` tokens are copied into their own positions
+    (see :meth:`KVBuffers.write_offset`) and the attention then reads the *whole*
+    buffer, so the frozen slice survives the copy while the queries stay at ``L``.
+    On the fill step
     the copy covers the entire buffer, references included, so filling and reading
     are literally the same two copies — no mode flag, no branch, and above all no
     ``torch.cat``: a concatenation whose split point is a dynamic token count is
@@ -173,7 +200,6 @@ def attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     Returns the attention output for the *queries*, token-major ``[B, L, H*D]``.
     """
     if bufs is not None:
-        bufs.k.narrow(2, 0, k.shape[2]).copy_(k)
-        bufs.v.narrow(2, 0, v.shape[2]).copy_(v)
+        bufs.write(k, v, bufs.write_offset(k.shape[2]))
         k, v = bufs.k, bufs.v
     return sdpa_attention([q, k, v])

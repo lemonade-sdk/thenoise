@@ -24,10 +24,12 @@ from thenoise.models import (
     FluxKleinModel,
     Krea2Model,
     QwenImageModel,
+    QwenImage21Model,
     ZImageModel,
 )
 from thenoise.models.base import DiffusionModel
 from thenoise.models.config import SamplingParams
+from thenoise.utils.math import round_up
 
 
 def _bare(cls, **attrs):
@@ -65,12 +67,13 @@ BARE = {
     "zimage": {"vae": _vae(16, 8), "dit": SimpleNamespace(patch_size=2)},
     "flux_klein": {"vae": _vae(128, 16)},
     "qwen_image": {"vae": _vae(16, 8), "dit": SimpleNamespace(patch_size=2)},
+    "qwen_image21": {"vae": _vae(64, 16)},
 }
 
 # The adapters whose step schedule shifts with the image token count. Krea 2 is
 # NOT one of them: it pins ``mu=DEFAULT_MU`` (the distilled checkpoint was trained
 # at a fixed shift), so its grid is resolution independent by design.
-RESOLUTION_AWARE = {"flux_klein", "qwen_image"}
+RESOLUTION_AWARE = {"flux_klein", "qwen_image", "qwen_image21"}
 
 
 @pytest.mark.parametrize("model_cls", MODEL_CATALOG, ids=CATALOG_IDS)
@@ -110,11 +113,20 @@ def test_schedule_resolution_dependence_matches_the_model(model_cls):
         assert ts_small == ts_large
 
 
+# Pixel alignment each adapter rounds request sizes to. The shipped models all land
+# on 16 (an 8x VAE with a 2x2 patchify, or a 16x VAE whose DiT patchifies nothing);
+# Qwen-Image 2.1 needs 32, because a Qwen3-VL vision token covers a 32x32 pixel block
+# and the reference latent has to replace whole vision tokens.
+ALIGN = {"qwen_image21": 32}
+DEFAULT_ALIGN = 16
+
+
 @pytest.mark.parametrize("model_cls", MODEL_CATALOG, ids=CATALOG_IDS)
 def test_resolve_size_aligns_to_the_patched_latent_grid(model_cls):
-    """Odd sizes are rounded up to the model's pixel alignment (16 = 8 * patch 2)."""
+    """Odd sizes are rounded up to the model's pixel alignment."""
+    align = ALIGN.get(model_cls.name, DEFAULT_ALIGN)
     model = _bare(model_cls, **BARE[model_cls.name])
-    assert model.resolve_size(100, 60) == (112, 64)
+    assert model.resolve_size(100, 60) == (round_up(100, align), round_up(60, align))
     # An already-aligned size is untouched.
     assert model.resolve_size(1024, 512) == (1024, 512)
 
@@ -140,6 +152,7 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
         (ZImageModel, False, False),
         (FluxKleinModel, True, True),
         (QwenImageModel, True, True),
+        (QwenImage21Model, True, True),
     ],
     ids=CATALOG_IDS,
 )

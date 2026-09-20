@@ -334,6 +334,8 @@ class PipelineController:
                         negative_prompt=request.negative_prompt,
                         guidance_scale=r.guidance_scale,
                         image=request.image if is_edit else None,
+                        width=r.width,
+                        height=r.height,
                     )
                 )
                 memory.offload("text_encoder")

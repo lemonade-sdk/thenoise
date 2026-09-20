@@ -23,10 +23,12 @@ import pytest  # noqa: E402
 
 from thenoise.dit.quantized import QuantizedLinear  # noqa: E402
 from thenoise.models import (  # noqa: E402
+    MODEL_CATALOG,
     AnimaModel,
     FluxKleinModel,
     Krea2Model,
     QwenImageModel,
+    QwenImage21Model,
     ZImageModel,
 )
 from thenoise.models.base import Conditioning, DiffusionModel  # noqa: E402
@@ -327,11 +329,40 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "model.diffusion_model.proj_out.weight",
         ],
     ),
+    "qwen_image21": (
+        QwenImage21Model,
+        [
+            "img_in.weight",
+            "proj_out.weight",
+            "modulation.1.weight",
+            "txt_in.text_norm.weight",
+            "txt_in.in_layer.weight",
+            "time_text_embed.timestep_embedder.linear_1.weight",
+            "transformer_blocks.0.attn.norm_q.weight",
+            "transformer_blocks.0.attn.to_q.weight",
+            "transformer_blocks.0.img_mlp.gate_up.weight",
+        ],
+    ),
+    "qwen_image21_wrapped": (
+        QwenImage21Model,
+        [
+            "model.diffusion_model.img_in.weight",
+            "model.diffusion_model.proj_out.weight",
+            "model.diffusion_model.modulation.1.weight",
+            "model.diffusion_model.txt_in.text_norm.weight",
+            "model.diffusion_model.time_text_embed.timestep_embedder.linear_1.weight",
+            "model.diffusion_model.transformer_blocks.0.attn.norm_q.weight",
+            "model.diffusion_model.transformer_blocks.0.img_mlp.gate_up.weight",
+        ],
+    ),
+    # The two Qwen-Images share the img_in / txt_in / time_text_embed prefixes: the
+    # 2.1 key-set must not be claimed by the dual-stream 1.x detector (and vice
+    # versa), which is exactly what the detection matrix below pins down.
     "unknown": (None, ["some.random.key", "blocks.0.attn.gate.weight"]),
 }
 
 KEYSET_IDS = sorted(MODEL_KEYSETS)
-CATALOG_IDS = [cls.name for cls in (Krea2Model, AnimaModel, ZImageModel, FluxKleinModel, QwenImageModel)]
+CATALOG_IDS = [cls.name for cls in MODEL_CATALOG]
 
 
 # ------------------------------------------------------------------------ stub models

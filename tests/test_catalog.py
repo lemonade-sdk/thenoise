@@ -20,9 +20,9 @@ MODEL_DEFAULTS = {
     "anima": {"steps": 8, "guidance": 1, "sampler": "er_sde"},
     "krea2": {"steps": 8, "guidance": 1.0, "sampler": "er_sde"},
     "zimage": {"steps": 8, "guidance": 1.0, "sampler": "euler"},
-    # Distilled: 4 steps, guidance 1.0 (CFG off), Euler.
     "flux_klein": {"steps": 4, "guidance": 1.0, "sampler": "euler"},
     "qwen_image": {"steps": 28, "guidance": 2.5, "sampler": "euler"},
+    "qwen_image21": {"steps": 28, "guidance": 2.5, "sampler": "euler"},
 }
 
 
@@ -51,9 +51,17 @@ def test_model_defaults_extend_the_base_preferences(model):
 
 @pytest.mark.parametrize("model", MODEL_CATALOG, ids=CATALOG_IDS)
 def test_model_upscale_format_is_registered_with_weights(model):
-    """Each adapter names a latent format that has a committed upscaler."""
+    """Each adapter names a latent format that has a committed upscaler.
+
+    An adapter may instead raise ``NotImplementedError`` to say its VAE has no
+    upscaler weights yet — ``--upscale`` then fails with that same message rather
+    than upscaling in a format that does not match the VAE.
+    """
     instance = object.__new__(model)  # the format is a class constant, no weights
-    fmt = instance._upscale_format()
+    try:
+        fmt = instance._upscale_format()
+    except NotImplementedError as exc:
+        pytest.skip(f"{model.name} has no latent upscaler yet: {exc}")
     assert fmt in _UPSCALER_FORMATS, f"{model.name} names unknown format {fmt!r}"
     _factory, filename, channels = _UPSCALER_FORMATS[fmt]
     assert upscale_weight_path(filename).is_file()

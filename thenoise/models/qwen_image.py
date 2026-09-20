@@ -70,12 +70,16 @@ class QwenImageModel(DiffusionModel):
         Qwen-Image's distinctive blocks are the dual-stream projections (``img_in.`` /
         ``txt_in.``) and the joint time/text embedding (``time_text_embed.``). Keys
         are normalized first so repackaged checkpoints resolve identically.
+
+        The dual-stream text projections (``add_q_proj``) are what separates it from
+        Qwen-Image 2.1, a single-stream model that carries the same three prefixes.
         """
         keys = list(normalize_keys(f.keys()))
         has_img_in = any(k.startswith("img_in.") for k in keys)
         has_txt_in = any(k.startswith("txt_in.") for k in keys)
         has_time_text_embed = any(k.startswith("time_text_embed.") for k in keys)
-        return has_img_in and has_txt_in and has_time_text_embed
+        has_txt_stream = any(k.startswith("transformer_blocks.0.attn.add_q_proj.") for k in keys)
+        return has_img_in and has_txt_in and has_time_text_embed and has_txt_stream
 
     def __init__(self, *, config: ModelConfig):
         super().__init__(config=config)
