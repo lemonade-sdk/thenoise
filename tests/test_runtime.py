@@ -45,11 +45,14 @@ def test_load_resolves_the_model_from_the_dit(catalog):
     assert runtime.pipeline is not None
 
 
-def test_model_capabilities_reports_supports_edit(catalog):
-    catalog(supports_edit=True)
+def test_model_capabilities_are_reported_verbatim(catalog):
+    """``/health`` gets the adapter's own capability dict, copied not aliased."""
+    catalog(CAPABILITIES={"edit": True, "kv_cache": False})
     runtime = Runtime(Settings())
     runtime.load(ModelPaths("dit", "vae", "te"))
-    assert runtime.model_capabilities() == {"supports_edit": True}
+    assert runtime.model_capabilities() == {"edit": True, "kv_cache": False}
+    runtime.model_capabilities()["edit"] = False
+    assert runtime.model_capabilities()["edit"] is True
 
 
 def test_loading_swaps_the_single_resident_model(catalog):

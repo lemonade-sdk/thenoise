@@ -230,7 +230,7 @@ class PipelineController:
         cascades downstream automatically.
         """
         model = self.model
-        if not model.supports_edit:
+        if not model.capability("edit"):
             raise ValueError(f"model '{model.name}' does not support image editing")
         images = self._edit_images(request)
         if not images:
@@ -291,7 +291,7 @@ class PipelineController:
         # request (a reference latent) and a model that supports it.
         if r.kv_cache and not is_edit:
             raise ValueError("kv_cache requires an edit request (a reference image)")
-        if r.kv_cache and is_edit and not model.supports_kv_cache:
+        if r.kv_cache and is_edit and not model.capability("kv_cache"):
             raise ValueError(f"model '{model.name}' does not support the reference-latent KV cache")
 
         prompt_key = self._cache_key_prompt(

@@ -493,7 +493,8 @@ def test_kv_cache_requires_a_model_that_supports_it():
 
     ``EditingStubModel`` edits (so it has a reference latent to freeze) but never
     wired ``thenoise.dit.kvcache`` into its blocks, which is exactly what
-    ``supports_kv_cache`` advertises.
+    wired ``thenoise.dit.kvcache`` into its blocks, which is exactly what the
+    ``kv_cache`` capability advertises.
     """
     from PIL import Image
 

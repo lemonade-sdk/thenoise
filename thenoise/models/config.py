@@ -45,7 +45,7 @@ class EncodePromptArgs:
     A single structure (instead of passing each parameter separately) so adding a
     new knob — e.g. a future ``negative_prompt`` variant or an image — never
     changes the method signature. ``image`` is only set in the edit path
-    (``supports_edit`` models); multimodal encoders feed it as vision tokens in
+    (models with the ``edit`` capability); multimodal encoders feed it as vision tokens in
     addition to any reference latent.
     """
 

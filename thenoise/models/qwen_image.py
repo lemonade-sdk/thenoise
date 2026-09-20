@@ -53,12 +53,11 @@ class QwenImageModel(DiffusionModel):
         "sampler": "euler",
     }
 
-    supports_edit = True
-
-    # Reference-latent KV cache: the reference tokens' K/V can be frozen across
-    # denoise steps (ComfyUI's ``FluxKVCache``). Valid only with
-    # ``ref_method="index_timestep_zero"`` (enforced by the pipeline).
-    supports_kv_cache = True
+    # Instruction-based editing off the Qwen-Image-Edit recipe: the input image is
+    # concatenated into the token sequence as a reference latent. The KV cache
+    # freezes the reference K/V across steps (ComfyUI ``FluxKVCache``), valid only
+    # with ``ref_method="index_timestep_zero"`` (enforced by the pipeline).
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": True}
 
     # Qwen-Image uses separate ``to_q``/``to_k``/``to_v`` attention projections,
     # so LoRA factors must NOT be fused into a single ``qkv``.

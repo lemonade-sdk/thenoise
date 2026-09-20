@@ -156,16 +156,26 @@ class DiffusionModel(ABC):
     REFINE_STEPS = 1
     REFINE_DENOISE = 0.1
 
-    # Reference-latent editing capability (image + instruction -> edited image).
-    # Editing models set this True and override ``encode_reference``/``pack_reference_latent``.
-    supports_edit: bool = False
-
-    # Reference-latent KV cache: freeze the reference tokens' K/V across denoise
-    # steps (ComfyUI ``FluxKVCache``). Models that support it set this True; the
-    # shared ``start_kv_caches``/``kv_cache``/``end_kv_caches`` protocol below then
-    # owns the run-scoped buffers. Validity is a separate question: the frozen K/V
-    # stay step-invariant only under ``ref_method="index_timestep_zero"``.
-    supports_kv_cache: bool = False
+    # Model capabilities — which optional generation features this adapter actually
+    # implements. Adapters override just the entries they differ on, e.g.
+    #
+    #     CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True}
+    #
+    # so a capability added later keeps its base default instead of being dropped
+    # (the same layering as ``DEFAULT_PREFS``). Asking for an unlisted name is a bug,
+    # so ``capability`` raises rather than answering ``False``: silently disabling a
+    # feature is indistinguishable from a model that genuinely lacks it. The dict is
+    # reported verbatim by ``/health`` so the UI can gate its controls.
+    CAPABILITIES: ClassVar[Dict[str, bool]] = {
+        # Reference-latent editing: image + instruction -> edited image. An adapter
+        # that sets it also overrides ``encode_reference``/``pack_reference_latent``.
+        "edit": False,
+        # Reference-latent KV cache: freeze the reference tokens' K/V across denoise
+        # steps (ComfyUI ``FluxKVCache``) through the shared ``start_kv_caches`` /
+        # ``kv_cache`` / ``end_kv_caches`` protocol. Validity is a separate question:
+        # the frozen K/V stay step-invariant only under ``index_timestep_zero``.
+        "kv_cache": False,
+    }
 
     # The run's caches, created by ``start_kv_caches`` (``prepare_latent``) and
     # dropped by ``end_kv_caches`` (``finalize_latent``). The empty class default
@@ -252,6 +262,17 @@ class DiffusionModel(ABC):
         logger.debug("%s = %s (%s)", name, value, source)
         return value
 
+    # ------------------------------------------------------------ capabilities
+    def capability(self, name: str) -> bool:
+        """True when this adapter implements capability ``name`` (see ``CAPABILITIES``).
+
+        Raises on an unlisted name, mirroring ``pref``: a typo in a capability check
+        must not quietly read as "this model cannot do it".
+        """
+        if name not in self.CAPABILITIES:
+            raise KeyError(f"unknown capability {name!r}; known: {sorted(self.CAPABILITIES)}")
+        return self.CAPABILITIES[name]
+
     # ------------------------------------------------------------ devices
     def _detect_offload_device(self, config: ModelConfig) -> str:
         """Pick an offload device from safetensors size vs VRAM (or ``device``).
@@ -288,7 +309,7 @@ class DiffusionModel(ABC):
         Text-encoder only (the DiT is NOT needed here). Accepts a single
         ``EncodePromptArgs`` struct (prompt, negative_prompt, guidance_scale,
         image) so new knobs never change the signature. ``image`` is only set in
-        the edit path (``supports_edit`` models); multimodal encoders feed it as
+        the edit path (models with the ``edit`` capability); multimodal encoders feed it as
         vision tokens in addition to any reference latent. Returns the raw
         conditioning, transformed into the model-internal conditioning by
         ``fuse_text`` (which runs with the DiT resident).
@@ -399,7 +420,7 @@ class DiffusionModel(ABC):
         prompt is usually shorter), so their buffers cannot be shared; the uncond
         cache is only created when CFG is actually active.
         """
-        if not (params.kv_cache and has_reference and self.supports_kv_cache):
+        if not (params.kv_cache and has_reference and self.capability("kv_cache")):
             self._kv_caches = None
             return
         caches = {"cond": KVCache("cond")}

@@ -295,7 +295,7 @@ The downloaded `RealESRGAN_x4plus.safetensors` goes into an `--upscaler-dir` (se
 
 Editing-capable models can edit an existing image from a text instruction: **image + prompt → edited image**.
 
-Editing is a **model** capability (`supports_edit`): Flux.2 Klein and Qwen-Image support it. Both also implement the reference-latent **KV cache** (`supports_kv_cache`): with `ref_method: index_timestep_zero` the reference tokens' K/V are frozen after the first denoise step, so later steps run a shorter sequence (`--kv-cache`, see [Options](#options)). Flux.2 Klein requires a special "KV" checkpoint for this to work.
+Editing is a **model** capability: Flux.2 Klein and Qwen-Image support it. Both also implement the reference-latent **KV cache** (`kv_cache`): with `ref_method: index_timestep_zero` the reference tokens' K/V are frozen after the first denoise step, so later steps run faster (`--kv-cache`). Flux.2 Klein requires a special "KV" checkpoint for this to work.
 
 You may provide one or many reference images. Without an explicit `width`/`height`, the **first** reference image is resized to 1024 on its largest side (aspect preserved) and sets the output size; the rest are used as additional references.
 
@@ -374,12 +374,21 @@ LoRA format is `filename:weight` — the `.safetensors` extension is appended au
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/` | Web UI |
-| `GET` | `/health` | Server status and loaded model |
+| `GET` | `/health` | Server status, loaded model and its capabilities (see below) |
 | `GET` | `/lora` | List available LoRA names |
 | `GET` | `/upscalers` | List available pixel upscaler names (works even with no model loaded) |
 | `POST` | `/upscale` | Pixel-upscale an input image (works even with no model loaded) |
 | `POST` | `/text2image` | Generate an image |
 | `POST` | `/edit` | Edit an image from an instruction (image + prompt → edited image); requires an editing-capable model |
+
+### `/health`
+
+`{"status": "ok", "models": ["qwen_image"], "capabilities": {"edit": true, "kv_cache": true}}`
+
+`models` is empty until a DiT is loaded, and `capabilities` is the loaded adapter's
+`CAPABILITIES` dict verbatim (`{}` with no model) — the web UI uses it to gate the
+Edit tab and the KV-cache control, and a request asking for a capability the model
+lacks is rejected with HTTP 400 rather than silently ignored.
 
 ### `/text2image` request body
 

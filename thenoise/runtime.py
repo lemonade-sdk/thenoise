@@ -132,10 +132,11 @@ class Runtime:
         return [self._model_name] if self._model else []
 
     def model_capabilities(self) -> dict:
-        """Capabilities of the currently loaded model (empty when none loaded).
+        """The loaded model's capabilities (empty when none loaded).
+
+        Passed through verbatim from ``DiffusionModel.CAPABILITIES`` so a capability
+        added to the base dict reaches ``/health`` (and the UI) without a change here.
         """
         if self._model is None:
             return {}
-        return {
-            "supports_edit": bool(getattr(self._model, "supports_edit", False)),
-        }
+        return dict(self._model.CAPABILITIES)

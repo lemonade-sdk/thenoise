@@ -133,55 +133,45 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
 
 
 @pytest.mark.parametrize(
-    "model_cls,expect",
+    "model_cls,edit,kv_cache",
     [
-        (AnimaModel, False),
-        (Krea2Model, False),
-        (ZImageModel, False),
-        (FluxKleinModel, True),
-        (QwenImageModel, True),
+        (AnimaModel, False, False),
+        (Krea2Model, False, False),
+        (ZImageModel, False, False),
+        (FluxKleinModel, True, True),
+        (QwenImageModel, True, True),
     ],
     ids=CATALOG_IDS,
 )
-def test_reference_editing_capability(model_cls, expect):
-    """Only adapters that override the reference kernels advertise ``supports_edit``.
+def test_model_capabilities(model_cls, edit, kv_cache):
+    """``CAPABILITIES`` is the one source of truth, and it must describe the adapter.
 
-    The pipeline raises for a model that advertises editing without the kernels,
-    so the flag and the overrides must never drift apart.
+    Both halves are checked against the machinery they name, since the pipeline
+    rejects a request the model cannot serve and ``/health`` lets the UI grey out
+    what the loaded model lacks:
+
+      * ``edit``           -> the reference kernels are really overridden.
+      * ``kv_cache``       -> the shared cache protocol really starts a run cache,
+        and freezing reference K/V needs a reference latent, so it implies ``edit``.
     """
     model = _bare(model_cls, **BARE[model_cls.name])
-    assert model.supports_edit is expect
+    assert model.capability("edit") is edit
+    assert model.capability("kv_cache") is kv_cache
+    assert not kv_cache or edit  # freezing reference K/V needs a reference latent
     overrides_reference_kernels = (
         model_cls.encode_reference is not DiffusionModel.encode_reference
         and model_cls.pack_reference_latent is not DiffusionModel.pack_reference_latent
     )
-    assert overrides_reference_kernels is expect
-
-
-@pytest.mark.parametrize(
-    "model_cls,expect",
-    [
-        (AnimaModel, False),
-        (Krea2Model, False),
-        (ZImageModel, False),
-        (FluxKleinModel, True),
-        (QwenImageModel, True),
-    ],
-    ids=CATALOG_IDS,
-)
-def test_reference_kv_cache_capability(model_cls, expect):
-    """Only the adapters that run the cache's fill/read protocol advertise it.
-
-    The pipeline rejects ``kv_cache`` for the others, so the flag must track the DiT
-    actually threading ``thenoise.dit.kvcache`` through its blocks -- and freezing
-    reference K/V needs a reference latent, so it implies editing support.
-    """
-    model = _bare(model_cls, **BARE[model_cls.name])
-    assert model.supports_kv_cache is expect
-    assert model.supports_edit is True or not expect
-    # The flag is what the shared protocol acts on, not just a label.
+    assert overrides_reference_kernels is edit
     model.start_kv_caches(replace(_params(), kv_cache=True), True, True)
-    assert (model._kv_caches is not None) is expect
+    assert (model._kv_caches is not None) is kv_cache
+
+
+def test_unknown_capability_is_an_error():
+    """An unlisted capability raises rather than quietly reading as "cannot do it"."""
+    model = _bare(AnimaModel)
+    with pytest.raises(KeyError, match="unknown capability"):
+        model.capability("controlnet")
 
 
 def test_base_encode_reference_is_not_implemented():

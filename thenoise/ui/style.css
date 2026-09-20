@@ -274,6 +274,13 @@ body {
   outline: none;
 }
 
+/* A control for a capability the loaded model lacks (see ``applyModelState``): muted
+   and inert, but left in the form so switching models does not reflow the sidebar. */
+.sidebar select:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
 .sidebar textarea {
   resize: vertical;
   min-height: 42px;

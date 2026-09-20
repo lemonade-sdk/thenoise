@@ -259,24 +259,33 @@ loadUpscalers();
 updateUpscaleMax('');
 updateUpscaleMax('edit_');
 
-// Hide the generate/edit tabs when no model is loaded, and disable the
-// edit tab when the loaded model doesn't support image editing.
+// Gate the UI on what the loaded model actually is: hide the tabs with no model,
+// and disable the controls whose capability the model lacks. The pipeline rejects a
+// request that asks for a capability the model does not implement, so offering it
+// would only turn a configuration mistake into a failed generation.
 async function applyModelState() {
   let hasModel = true;
-  let supportsEdit = true;
+  let caps = null; // null = unknown (network error): assume a model that can do it all
   try {
     const res = await fetch('/health');
     if (res.ok) {
       const data = await res.json();
       hasModel = (data.models || []).length > 0;
-      supportsEdit = !!(data.capabilities && data.capabilities.supports_edit);
+      caps = data.capabilities || {};
     }
   } catch (e) { /* assume a model is present on network errors */ }
+  const capable = (name) => caps === null || !!caps[name];
+
   $('no_model').classList.toggle('hidden', hasModel);
   $('edit_no_model').classList.toggle('hidden', hasModel);
   // Edit is usable only when a model is loaded AND it supports editing.
-  const editAvailable = hasModel && supportsEdit;
-  $('edit_no_support').classList.toggle('hidden', !hasModel || supportsEdit);
+  $('edit_no_support').classList.toggle('hidden', !hasModel || capable('edit'));
+  // KV cache: off the menu (literally) when the model never wired the cache in.
+  const kv = $('edit_kv_cache');
+  const hasKvCache = capable('kv_cache');
+  kv.disabled = !hasKvCache;
+  if (!hasKvCache) kv.value = '';
+  kv.title = hasKvCache ? '' : 'the loaded model has no reference-latent KV cache';
 }
 applyModelState();
 
@@ -503,7 +512,9 @@ function editExtras() {
     // OpenAI-style: one image -> a string, many -> an array.
     image: editRefs.length === 1 ? editRefs[0].b64 : editRefs.map(r => r.b64),
   };
-  const kv = parseTriState($('edit_kv_cache').value);
+  // A disabled control keeps its value, so also check it is actually enabled.
+  const kvSelect = $('edit_kv_cache');
+  const kv = kvSelect.disabled ? null : parseTriState(kvSelect.value);
   if (kv !== null) extra.kv_cache = kv;
   const method = $('edit_ref_method').value;
   if (method) extra.ref_method = method;

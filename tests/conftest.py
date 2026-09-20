@@ -366,7 +366,7 @@ class StubModel(DiffusionModel):
         self,
         *,
         config: Optional[ModelConfig] = None,
-        supports_edit: Optional[bool] = None,
+        capabilities: Optional[dict] = None,
         lora_dir: Optional[str] = None,
     ):
         super().__init__(
@@ -376,8 +376,8 @@ class StubModel(DiffusionModel):
                 device="cpu", dtype=torch.float32, lora_dir=lora_dir,
             )
         )
-        if supports_edit is not None:
-            self.supports_edit = supports_edit
+        if capabilities is not None:
+            self.CAPABILITIES = {**self.CAPABILITIES, **capabilities}
         self.calls: Counter = Counter()
         self.dit = torch.nn.Identity()  # ``switch_loras`` is handed this module
         self.sizes: list[tuple[int, int]] = []
@@ -449,9 +449,9 @@ class StubModel(DiffusionModel):
 
 
 class EditingStubModel(StubModel):
-    """A stub that declares editing support (reference-latent path)."""
+    """A stub that declares the ``edit`` capability (reference-latent path)."""
 
-    supports_edit = True
+    CAPABILITIES = {**StubModel.CAPABILITIES, "edit": True}
 
 
 # ---------------------------------------------------------------------------- fixtures
@@ -507,6 +507,8 @@ def fake_model_cls():
             "name": name,
             "__init__": __init__,
             "detect": staticmethod(lambda f: False),
+            # A model that declares no capability; tests override it via ``**attrs``.
+            "CAPABILITIES": {},
             **attrs,
         }
         return type("FakeModel", (), namespace)
@@ -522,7 +524,7 @@ def stub_model():
 
 @pytest.fixture
 def editing_stub_model():
-    """A fresh :class:`StubModel` with ``supports_edit`` enabled."""
+    """A fresh :class:`StubModel` with the ``edit`` capability enabled."""
     return EditingStubModel()
 
 

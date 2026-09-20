@@ -57,13 +57,10 @@ class FluxKleinModel(DiffusionModel):
 
     # Reference-latent editing: Flux2 Klein supports the ComfyUI "index" method
     # with ``ref_index_scale = 10`` (the t-axis offset for the reference latent).
-    supports_edit = True
+    # The KV cache freezes the reference K/V across steps (ComfyUI ``FluxKVCache``),
+    # valid only with ``ref_method="index_timestep_zero"`` (enforced by the pipeline).
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": True}
     REF_INDEX = 10
-
-    # Reference-latent KV cache: the reference tokens' K/V can be frozen across
-    # denoise steps (ComfyUI's ``FluxKVCache``). Valid only with
-    # ``ref_method="index_timestep_zero"`` (enforced by the pipeline).
-    supports_kv_cache = True
 
     def _lora_key_map(self, key: str) -> str:
         """Map ComfyUI Flux.2 LoRA names to this repo's Flux.2 schema.

@@ -101,13 +101,13 @@ def _png_b64(size=(2, 2)) -> str:
 # --------------------------------------------------------------------- /health
 
 
-def test_health_reports_edit_capability():
-    """/health exposes model capabilities so the UI can gate the Edit tab."""
+def test_health_reports_model_capabilities():
+    """/health exposes the model's capabilities so the UI can gate Edit and KV cache."""
     runtime = _runtime()
-    runtime._model = type("M", (), {"supports_edit": True})()
+    runtime._model = type("M", (), {"CAPABILITIES": {"edit": True, "kv_cache": True}})()
     res = _endpoint(create_app(runtime), "/health")()
     assert res["models"] == ["fake"]
-    assert res["capabilities"] == {"supports_edit": True}
+    assert res["capabilities"] == {"edit": True, "kv_cache": True}
 
 
 def test_health_capabilities_empty_without_model():
