@@ -307,13 +307,14 @@ def test_zero_cond_t_keeps_refs_step_independent(tiny_flux2):
 def test_kv_cache_freed_in_finalize():
     """``finalize_latent`` drops the run-scoped KV cache (no stale cache across runs)."""
     model = FluxKleinModel.__new__(FluxKleinModel)
-    model._kv = {"cond": KVCache("cond"), "uncond": KVCache("uncond")}
+    model._kv_caches = {"cond": KVCache("cond"), "uncond": KVCache("uncond")}
     model._img_ids = torch.zeros(1, 4, 4, dtype=torch.long)
     latents = torch.randn(1, 4, 8)
     from thenoise.models.config import SamplingParams
     params = SamplingParams(height=64, width=64, steps=4, seed=0, guidance_scale=1.0, sampler="euler")
     model.finalize_latent(latents, params)
-    assert model._kv is None
+    assert model._kv_caches is None
+    assert model.kv_cache("cond") is None  # the DiT's plain path from here on
 
 
 def test_kv_cache_multi_ref_caches_the_sum():
@@ -353,7 +354,7 @@ def test_adapter_denoise_step_kv_fill_then_read():
     model.dit.pe_embedder.store("img", torch.zeros(1, 4, 4, dtype=torch.long))
     model.dit.pe_embedder.store("ref", torch.full((1, 6, 4), FluxKleinModel.REF_INDEX, dtype=torch.long))
     model.dit.pe_embedder.store("txt", torch.zeros(1, 8, 4, dtype=torch.long))
-    model._kv = {"cond": KVCache("cond")}
+    model._kv_caches = {"cond": KVCache("cond")}
     model._txt = torch.randn(1, 8, 24)
     model._un_txt = None
     model._ref_tokens = torch.randn(1, 6, 8)
@@ -364,6 +365,6 @@ def test_adapter_denoise_step_kv_fill_then_read():
     latents = torch.randn(1, 4, 8)
     with torch.no_grad():
         v0 = model.denoise_step(latents, 0.5, cond, 1.0, 0)
-        assert model._kv["cond"].filled  # step 0 filled the cache
+        assert model.kv_cache("cond").filled  # step 0 filled the cache
         v1 = model.denoise_step(latents, 0.4, cond, 1.0, 1)
     assert not torch.allclose(v0, v1)  # different t -> different velocity

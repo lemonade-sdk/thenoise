@@ -6,6 +6,12 @@ image frequencies; timestep-zero reference conditioning (the ``index_timestep_ze
 reference method, flagged by the ``__index_timestep_zero__`` checkpoint marker) zeroes
 the timestep on the reference tokens. Weights load via ``load_dit`` (BF16 and
 int8_convrot checkpoints).
+
+Editing appends reference tokens after the image tokens, which makes their K/V
+freezable across denoise steps (the ``index_timestep_zero`` / ``zero_cond_t``
+trick): ``forward`` therefore also takes ``ref_tokens``/``ref_pe`` plus a
+``thenoise.dit.kvcache.KVCache`` and runs the fill/read protocol on exactly the
+token layout the cache needs — see ``Attention.forward``.
 """
 from __future__ import annotations
 
@@ -13,11 +19,12 @@ from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from accelerate import init_empty_weights
 
 from thenoise.utils.loader import load_dit
+from thenoise.dit.kvcache import KVBuffers, KVCache, attend, cache_mode
 from thenoise.dit.quantized import QuantizedLinear
+from thenoise.utils.dynamo import mark_token_axis
 from thenoise.utils.positions import broadcast_positions, grid_positions
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.rms_norm import RMSNorm
@@ -166,6 +173,7 @@ class Attention(nn.Module):
         encoder_hidden_states: torch.Tensor,
         img_pe: torch.Tensor,
         txt_pe: torch.Tensor,
+        bufs: Optional[KVBuffers] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         img_query = self.to_q(hidden_states)
         img_key = self.to_k(hidden_states)
@@ -187,33 +195,34 @@ class Attention(nn.Module):
         txt_query = self.norm_added_q(txt_query)
         txt_key = self.norm_added_k(txt_key)
 
-        # RoPE in [B, H, L, D] via the shared 2x2-matrix ``apply_rope``.
-        img_query, img_key = apply_rope(
-            img_query.transpose(1, 2), img_key.transpose(1, 2), img_pe
-        )
+        # Everything downstream works in [B, H, L, D]: RoPE through the shared
+        # 2x2-matrix ``apply_rope`` and the joint attention through ``attend``.
         img_query = img_query.transpose(1, 2)
         img_key = img_key.transpose(1, 2)
-        txt_query, txt_key = apply_rope(
-            txt_query.transpose(1, 2), txt_key.transpose(1, 2), txt_pe
-        )
+        img_value = img_value.transpose(1, 2)
         txt_query = txt_query.transpose(1, 2)
         txt_key = txt_key.transpose(1, 2)
+        txt_value = txt_value.transpose(1, 2)
 
-        seq_img = img_query.shape[1]
-        joint_query = torch.cat([img_query, txt_query], dim=1)
-        joint_key = torch.cat([img_key, txt_key], dim=1)
-        joint_value = torch.cat([img_value, txt_value], dim=1)
+        img_query, img_key = apply_rope(img_query, img_key, img_pe)
+        txt_query, txt_key = apply_rope(txt_query, txt_key, txt_pe)
 
-        joint_query = joint_query.transpose(1, 2)
-        joint_key = joint_key.transpose(1, 2)
-        joint_value = joint_value.transpose(1, 2)
-        joint_hidden_states = F.scaled_dot_product_attention(
-            joint_query, joint_key, joint_value, attn_mask=None, dropout_p=0.0
-        )
-        joint_hidden_states = joint_hidden_states.transpose(1, 2).flatten(2, 3)
+        # Joint sequence order is text first, then image (whose trailing slice is
+        # the reference tokens). Attention is permutation invariant over keys and
+        # values, so this ordering is free — and it is what the KV cache needs:
+        # every step rewrites the leading *text + target* prefix of its buffers and
+        # the reference K/V stay frozen in the tail (``kvcache.attend``). With the
+        # image stream first the references would sit *between* the target and the
+        # text keys, which no prefix write can express.
+        txt_len = txt_query.shape[2]
+        joint_query = torch.cat([txt_query, img_query], dim=2)
+        joint_key = torch.cat([txt_key, img_key], dim=2)
+        joint_value = torch.cat([txt_value, img_value], dim=2)
 
-        img_attn_output = joint_hidden_states[:, :seq_img, :]
-        txt_attn_output = joint_hidden_states[:, seq_img:, :]
+        joint_hidden_states = attend(joint_query, joint_key, joint_value, bufs)  # [B, L, H*D]
+
+        img_attn_output = joint_hidden_states[:, txt_len:, :]
+        txt_attn_output = joint_hidden_states[:, :txt_len, :]
 
         img_attn_output = self.to_out[0](img_attn_output)
         img_attn_output = self.to_out[1](img_attn_output)
@@ -239,26 +248,27 @@ class QwenImageTransformerBlock(nn.Module):
             eps=eps,
         )
 
-    def _modulate(self, x, mod_params, timestep_zero_index: Optional[int] = None):
-        shift, scale, gate = mod_params.chunk(3, dim=-1)
-        if timestep_zero_index is not None:
-            actual_batch = shift.size(0) // 2
-            shift_base, shift_ext = shift[:actual_batch], shift[actual_batch:]
-            scale_base, scale_ext = scale[:actual_batch], scale[actual_batch:]
-            gate_base, gate_ext = gate[:actual_batch], gate[actual_batch:]
-            x_base = x[:, :timestep_zero_index] * (1 + scale_base.unsqueeze(1)) + shift_base.unsqueeze(1)
-            x_ext = x[:, timestep_zero_index:] * (1 + scale_ext.unsqueeze(1)) + shift_ext.unsqueeze(1)
-            gate = torch.cat(
-                [
-                    gate_base.unsqueeze(1).expand(-1, timestep_zero_index, -1),
-                    gate_ext.unsqueeze(1).expand(-1, x.size(1) - timestep_zero_index, -1),
-                ],
-                dim=1,
-            )
-            return torch.cat([x_base, x_ext], dim=1), gate
-        return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1), gate.unsqueeze(1)
+    def _modulate(self, x, mod_params, token_mask: Optional[torch.Tensor] = None):
+        """AdaLN modulation of ``x``; ``token_mask`` picks the per-token modulation row.
 
-    @torch.compile(fullgraph=True, dynamic=True)
+        With timestep-zero reference conditioning ``mod_params`` carries one row per
+        batch *and* per conditioning row (``[t; 0]``), and ``token_mask`` is the
+        ``[1, L, 1]`` leading-prefix mask of the target tokens: ``True`` takes the t
+        row, the trailing reference tokens the t=0 row. A mask rather than an
+        ``expand`` + ``cat`` of the two row groups because a concatenation whose
+        split point is the (dynamic) token count is exactly what Inductor cannot
+        tile inside a compiled block.
+        """
+        shift, scale, gate = mod_params.chunk(3, dim=-1)
+        if token_mask is None:
+            return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1), gate.unsqueeze(1)
+        half = shift.size(0) // 2
+        shift = torch.where(token_mask, shift[:half].unsqueeze(1), shift[half:].unsqueeze(1))
+        scale = torch.where(token_mask, scale[:half].unsqueeze(1), scale[half:].unsqueeze(1))
+        gate = torch.where(token_mask, gate[:half].unsqueeze(1), gate[half:].unsqueeze(1))
+        return x * (1 + scale) + shift, gate
+
+    @torch.compile(fullgraph=True)
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -266,10 +276,11 @@ class QwenImageTransformerBlock(nn.Module):
         temb: torch.Tensor,
         img_pe: torch.Tensor,
         txt_pe: torch.Tensor,
-        timestep_zero_index: Optional[int] = None,
+        token_mask: Optional[torch.Tensor] = None,
+        bufs: Optional[KVBuffers] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         img_mod_params = self.img_mod(temb)
-        if timestep_zero_index is not None:
+        if token_mask is not None:
             # ``temb`` carries both the t row and the t=0 row (the reference tokens
             # are conditioned at timestep zero); the text stream has no reference
             # slice, so it uses the t row only.
@@ -280,13 +291,13 @@ class QwenImageTransformerBlock(nn.Module):
         txt_mod1, txt_mod2 = txt_mod_params.chunk(2, dim=-1)
 
         img_normed = self.img_norm1(hidden_states)
-        img_modulated, img_gate1 = self._modulate(img_normed, img_mod1, timestep_zero_index)
+        img_modulated, img_gate1 = self._modulate(img_normed, img_mod1, token_mask)
         txt_normed = self.txt_norm1(encoder_hidden_states)
         txt_modulated, txt_gate1 = self._modulate(txt_normed, txt_mod1)
         del img_mod1, txt_mod1
 
         img_attn_output, txt_attn_output = self.attn(
-            img_modulated, txt_modulated, img_pe, txt_pe
+            img_modulated, txt_modulated, img_pe, txt_pe, bufs
         )
         del img_modulated, txt_modulated
 
@@ -294,7 +305,7 @@ class QwenImageTransformerBlock(nn.Module):
         encoder_hidden_states = torch.addcmul(encoder_hidden_states, txt_gate1, txt_attn_output)
 
         img_normed2 = self.img_norm2(hidden_states)
-        img_modulated2, img_gate2 = self._modulate(img_normed2, img_mod2, timestep_zero_index)
+        img_modulated2, img_gate2 = self._modulate(img_normed2, img_mod2, token_mask)
         img_mlp_output = self.img_mlp(img_modulated2)
         hidden_states = torch.addcmul(hidden_states, img_gate2, img_mlp_output)
 
@@ -326,6 +337,8 @@ class QwenImageTransformer2DModel(nn.Module):
         super().__init__()
         self.out_channels = out_channels or in_channels
         self.inner_dim = num_attention_heads * attention_head_dim
+        self.num_heads = num_attention_heads
+        self.head_dim = attention_head_dim
         self.patch_size = patch_size
 
         self.pe_embedder = RopeCache(matrix_rope(list(axes_dims_rope), 10000))
@@ -356,21 +369,44 @@ class QwenImageTransformer2DModel(nn.Module):
         timestep: torch.Tensor = None,
         img_pe: torch.Tensor = None,
         txt_pe: torch.Tensor = None,
+        ref_tokens: Optional[torch.Tensor] = None,
+        ref_pe: Optional[torch.Tensor] = None,
+        kv: Optional[KVCache] = None,
         timestep_zero_index: Optional[int] = None,
     ) -> torch.Tensor:
-        """One DiT forward.
+        """One DiT forward, returning the velocity of the *target* tokens only.
 
-        ``timestep_zero_index`` is the single source of truth for timestep-zero
-        reference conditioning (the ``index_timestep_zero`` reference method): the
-        target-token count at which the sequence switches from the t row to the t=0
-        row, i.e. the boundary between target and reference tokens. With it, ``temb``
-        carries both rows ``[t, 0]``; ``None`` (plain t2i, or an ``index`` edit) keeps
-        the single-row modulation.
+        ``ref_tokens`` are the reference (edit) latents, already packed into image
+        tokens; they are appended after the target tokens, ``ref_pe`` carrying their
+        positions. ``timestep_zero_index`` is the single source of truth for
+        timestep-zero reference conditioning (the ``index_timestep_zero`` reference
+        method): the target-token count at which the image stream switches from the t
+        row to the t=0 row. With it, ``temb`` carries both rows ``[t, 0]``; ``None``
+        (plain t2i, or an ``index`` edit) keeps the single-row modulation.
+
+        ``kv`` is the run's reference-latent KV cache (``thenoise.dit.kvcache``). The
+        mode is decided once, before the blocks: the first forward of a fresh cache
+        runs the full sequence and fills the buffers (so what it writes is exact),
+        every later one is called with ``ref_tokens=None`` and reads the cached
+        reference suffix back out of them.
         """
+        num_img_tokens = hidden_states.shape[1]
+        ref_len = 0 if ref_tokens is None else ref_tokens.shape[1]
+        mode = cache_mode(kv, ref_tokens is not None)
+
+        if ref_tokens is not None:
+            hidden_states = torch.cat([hidden_states, ref_tokens], dim=1)
+            if ref_pe is not None:
+                img_pe = torch.cat([img_pe, ref_pe], dim=1)
+
         hidden_states = self.img_in(hidden_states)
         timestep = timestep.to(hidden_states.dtype)
 
-        if timestep_zero_index is not None:
+        # Timestep-zero conditioning only applies while reference tokens are in the
+        # sequence: once they are cached away there is nothing left to condition at
+        # t=0 and the target tokens keep using the t row, exactly as before.
+        zero_cond_t = timestep_zero_index is not None and ref_len > 0
+        if zero_cond_t:
             timestep = torch.cat([timestep, timestep * 0], dim=0)
 
         encoder_hidden_states = self.txt_norm(encoder_hidden_states)
@@ -378,18 +414,45 @@ class QwenImageTransformer2DModel(nn.Module):
 
         temb = self.time_text_embed(timestep, hidden_states)
 
-        for block in self.transformer_blocks:
+        # Per-token conditioning row, as a mask over the image stream so the blocks
+        # never have to concatenate at a dynamic token count (see ``_modulate``).
+        token_mask = None
+        if zero_cond_t:
+            token_mask = (
+                torch.arange(hidden_states.shape[1], device=hidden_states.device)
+                < timestep_zero_index
+            )[None, :, None]
+            mark_token_axis(token_mask)
+
+        # A block attends over text + target + references while filling, and the
+        # references are simply absent from the sequence once cached. The buffers are
+        # allocated at the fill length and keep that capacity for the whole run, so
+        # ``read`` only checks there is room for the shorter prefix.
+        kv_len = encoder_hidden_states.shape[1] + hidden_states.shape[1]
+        kv_shape = (hidden_states.shape[0], self.num_heads, kv_len, self.head_dim)
+
+        for i, block in enumerate(self.transformer_blocks):
+            bufs = None if kv is None else kv.buffers(i, mode, kv_shape, hidden_states.dtype, hidden_states.device)
+            mark_token_axis(hidden_states, encoder_hidden_states, img_pe, txt_pe)
             encoder_hidden_states, hidden_states = block(
                 hidden_states=hidden_states,
                 encoder_hidden_states=encoder_hidden_states,
                 temb=temb,
                 img_pe=img_pe,
                 txt_pe=txt_pe,
-                timestep_zero_index=timestep_zero_index,
+                token_mask=token_mask,
+                bufs=bufs,
             )
 
-        if timestep_zero_index is not None:
+        if mode == "fill" and kv is not None:
+            kv.set_filled()
+
+        if zero_cond_t:
             temb = temb.chunk(2, dim=0)[0]
+        if ref_len:
+            # The reference tokens are appended after the target ones, so drop them
+            # before the output head (they carry no prediction).
+            hidden_states = hidden_states[:, :num_img_tokens]
 
         hidden_states = self.norm_out(hidden_states, temb)
         return self.proj_out(hidden_states)

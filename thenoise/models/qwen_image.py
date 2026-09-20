@@ -6,6 +6,12 @@ the DiT token sequence as a reference latent. Conditioning the reference tokens 
 timestep zero (the ``index_timestep_zero`` reference method) is a per-run choice
 resolved from the ``ref_method`` preference, whose automatic layer comes from the
 checkpoint's ``__index_timestep_zero__`` marker.
+
+That marker is also what makes the reference-latent KV cache (ComfyUI's
+``FluxKVCache``) valid, so this adapter drives the shared ``thenoise.dit.kvcache``
+protocol exactly like the Flux Klein one: ``prepare_latent`` starts the run's
+caches and keeps the reference RoPE positions apart from the target's,
+``denoise_step`` feeds the reference tokens only while the cache is still filling.
 """
 from __future__ import annotations
 
@@ -48,6 +54,11 @@ class QwenImageModel(DiffusionModel):
     }
 
     supports_edit = True
+
+    # Reference-latent KV cache: the reference tokens' K/V can be frozen across
+    # denoise steps (ComfyUI's ``FluxKVCache``). Valid only with
+    # ``ref_method="index_timestep_zero"`` (enforced by the pipeline).
+    supports_kv_cache = True
 
     # Qwen-Image uses separate ``to_q``/``to_k``/``to_v`` attention projections,
     # so LoRA factors must NOT be fused into a single ``qkv``.
@@ -168,10 +179,16 @@ class QwenImageModel(DiffusionModel):
         # Precompute the RoPE frequencies once per prompt; they are independent of
         # image/timestep and are reused across every denoise step. The image stream
         # covers the concatenated base+ref tokens; the text stream uses a single
-        # index (``max_vid_index + j``) advanced across all three axes.
+        # index (``max_vid_index + j``) advanced across all three axes. Target and
+        # reference positions are stored apart so ``denoise_step`` can drop the
+        # references from the sequence once the KV cache has frozen their K/V.
         self.dit.pe_embedder.clear()
         img_pos = build_video_positions(self._img_shapes, device=dev)
-        self.dit.pe_embedder.store("img", img_pos, dtype=self.dtype)
+        num_img_tokens = (
+            self._img_shapes[0][0] * self._img_shapes[0][1] * self._img_shapes[0][2]
+        )
+        self.dit.pe_embedder.store("img", img_pos[:, :num_img_tokens], dtype=self.dtype)
+        self.dit.pe_embedder.store("ref", img_pos[:, num_img_tokens:], dtype=self.dtype)
         max_vid_index = max(max(h // 2, w // 2) for _, h, w in self._img_shapes)
         txt_pos = build_txt_positions(max_vid_index, txt_len, device=dev)
         self.dit.pe_embedder.store("txt", txt_pos, dtype=self.dtype)
@@ -184,10 +201,14 @@ class QwenImageModel(DiffusionModel):
         # token count. Only meaningful with references present, so an ``index`` edit
         # (or plain t2i) leaves it None -> single-row modulation.
         zero_cond_t = ref_method == "index_timestep_zero" and self._ref_tokens is not None
-        self._timestep_zero_index = (
-            self._img_shapes[0][0] * self._img_shapes[0][1] * self._img_shapes[0][2]
-            if zero_cond_t
-            else None
+        self._timestep_zero_index = num_img_tokens if zero_cond_t else None
+
+        # Reference-latent KV cache: fresh per run, one cache per conditioning branch
+        # (see ``DiffusionModel.start_kv_caches``).
+        self.start_kv_caches(
+            params,
+            has_reference=self._ref_tokens is not None,
+            has_uncond=params.guidance_scale > 1.0 and self._null_txt is not None,
         )
 
         return x
@@ -211,28 +232,29 @@ class QwenImageModel(DiffusionModel):
         guidance_scale: float,
         i: int,
     ) -> torch.Tensor:
+        """One Qwen-Image DiT forward (+ CFG), returning the velocity.
+
+        With the KV cache the reference tokens reach the DiT only while the cache is
+        filling; on every later step they are dropped and each block keeps working on
+        its cache buffers, whose reference suffix is left untouched
+        (``QwenImageTransformer2DModel.forward`` decides fill vs read from
+        ``kv.filled``).
+        """
         dev = torch.device(self.device)
         t_full = torch.full((1,), float(t), dtype=latents.dtype, device=dev)
-        hidden_states = latents
-        if self._ref_tokens is not None:
-            hidden_states = torch.cat([hidden_states, self._ref_tokens], dim=1)
+        pe_img = self.dit.pe_embedder["img"]
+        pe_ref = self.dit.pe_embedder["ref"]
 
         with torch.no_grad(), torch.autocast(device_type=dev.type, dtype=self.dtype):
-            pos = self.dit(
-                hidden_states, self._txt, t_full,
-                img_pe=self.dit.pe_embedder["img"],
-                txt_pe=self.dit.pe_embedder["txt"],
-                timestep_zero_index=self._timestep_zero_index,
+            pos = self._dit_forward(
+                latents, t_full, self._txt, self.dit.pe_embedder["txt"],
+                self.kv_cache("cond"), pe_img, pe_ref,
             )
-            pos = pos[:, : latents.shape[1], :]
             if guidance_scale > 1.0 and self._null_txt is not None:
-                neg = self.dit(
-                    hidden_states, self._null_txt, t_full,
-                    img_pe=self.dit.pe_embedder["img"],
-                    txt_pe=self.dit.pe_embedder["txt_uncond"],
-                    timestep_zero_index=self._timestep_zero_index,
+                neg = self._dit_forward(
+                    latents, t_full, self._null_txt, self.dit.pe_embedder["txt_uncond"],
+                    self.kv_cache("uncond"), pe_img, pe_ref,
                 )
-                neg = neg[:, : latents.shape[1], :]
                 v = neg + guidance_scale * (pos - neg)
                 # Re-normalize the CFG combination back to the conditional norm
                 # (Qwen-Image guidance trick), preventing the extrapolated
@@ -244,7 +266,42 @@ class QwenImageModel(DiffusionModel):
                 v = pos
         return v
 
+    def _dit_forward(
+        self,
+        x: torch.Tensor,
+        t_full: torch.Tensor,
+        ctx: torch.Tensor,
+        pe_ctx: torch.Tensor,
+        kv,
+        pe_img: torch.Tensor,
+        pe_ref: torch.Tensor,
+    ) -> torch.Tensor:
+        """One DiT forward with the KV cache's fill/read semantics.
+
+        ``kv`` is ``None`` for the plain path. On the first forward of a fresh cache
+        (``not kv.filled``) the reference tokens are present (fill); on every later
+        step (``kv.filled``) they are dropped (read), leaving their frozen K/V in
+        every block's cache buffers. The reference positions (``pe_ref``) are only
+        needed while filling.
+        """
+        ref_tokens = self._ref_tokens
+        if kv is not None and kv.filled:
+            ref_tokens = None
+        return self.dit(
+            hidden_states=x,
+            encoder_hidden_states=ctx,
+            timestep=t_full,
+            img_pe=pe_img,
+            txt_pe=pe_ctx,
+            ref_tokens=ref_tokens,
+            ref_pe=pe_ref,
+            kv=kv,
+            timestep_zero_index=self._timestep_zero_index,
+        )
+
     def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:
+        # Drop the run-scoped KV cache before the VAE decode (see ``end_kv_caches``).
+        self.end_kv_caches()
         # Unpack the DiT tokens back to the canonical 4D latent.
         return unpack_latents(
             latents, params.height // self.vae.spatial_compression, params.width // self.vae.spatial_compression
