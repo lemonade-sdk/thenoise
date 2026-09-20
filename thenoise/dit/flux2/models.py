@@ -24,11 +24,10 @@ from dataclasses import dataclass, field
 import torch
 from einops import rearrange
 from torch import Tensor, nn
-from torch._dynamo import maybe_mark_dynamic
 
-from thenoise.dit.kvcache import KVCache
+from thenoise.dit.kvcache import KVBuffers, KVCache, attend, cache_mode
 from thenoise.dit.quantized import QuantizedLinear
-from thenoise.utils.attention import attention as sdpa_attention
+from thenoise.utils.dynamo import mark_token_axis
 from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.setup_logging import setup_logging
@@ -84,48 +83,19 @@ class Klein4BParams(Flux2Params):
     use_guidance_embed: bool = False
 
 
-def mark_token_axis(*tensors: "Tensor | None", dim: int = 1) -> None:
-    """Declare that ``dim`` of ``tensors`` varies, for the compiled blocks.
+def attention(qkv_list: list[Tensor], pe: Tensor, bufs: KVBuffers | None) -> Tensor:
+    """Apply RoPE, then attend through the run's K/V buffers (``kvcache.attend``).
 
-    The blocks are compiled in Dynamo's default (auto) dynamic mode, which compiles
-    the first call of a frame fully static and only promotes the axes that wobbled
-    on a recompile — and that promotion symbolises *every* axis it can reach, which
-    is where Inductor used to fall over (``CantSplit`` / symbolic-``Mul`` tiling) on
-    the reference-token and KV-cache paths. Declaring up front the one axis that
-    genuinely varies — the token count, i.e. resolution, prompt length and
-    reference count — gets one kernel per graph shape while batch, heads and hidden
-    size stay static, and no wasted static-first compilation.
-
-    ``maybe_mark_dynamic`` rather than ``mark_dynamic``: an axis the graph
-    specialises anyway (a broadcast ``[B, 1, D]`` modulation row, say) is then
-    specialised silently instead of raising ``ConstraintViolationError``.
-    """
-    for t in tensors:
-        if t is not None and t.dim() > dim:
-            maybe_mark_dynamic(t, dim)
-
-
-def attention(qkv_list: list[Tensor], pe: Tensor, kbuf: Tensor | None,
-              vbuf: Tensor | None) -> Tensor:
-    """Apply RoPE, refresh the cache buffers, then the shared SDPA (``[B, L, H*D]`` out).
-
-    ``kbuf``/``vbuf`` are this block's run-long K/V buffers, allocated once at its
-    full sequence length ``[B, H, L_text + L_img + L_ref, D]`` (``None`` = no cache,
-    the plain text-to-image path). Every step rewrites only the leading
-    ``k.shape[2]`` tokens: on the fill step that is the whole buffer, references
-    included, and on later steps only the target prefix, leaving the cached
-    reference suffix in place. So filling and reading are literally the same two
-    copies — no mode flag, no branch, and above all no ``torch.cat``: a
-    concatenation whose split point is a dynamic token count is what Inductor's
-    tiling analysis chokes on.
+    Output is token-major ``[B, L, H*D]``. ``bufs`` are this block's run-long K/V
+    buffers, allocated once at its full sequence length
+    ``[B, H, L_text + L_img + L_ref, D]`` (``None`` = no cache, the plain
+    text-to-image path); the RoPE-fused K/V is refreshed into their leading prefix
+    and the whole buffer is attended, so the cached reference suffix survives without
+    a ``cat``.
     """
     q, k, v = qkv_list
     q, k = apply_rope(q, k, pe)
-    if kbuf is not None:
-        kbuf.narrow(2, 0, k.shape[2]).copy_(k)
-        vbuf.narrow(2, 0, v.shape[2]).copy_(v)
-        k, v = kbuf, vbuf
-    return sdpa_attention([q, k, v])
+    return attend(q, k, v, bufs)
 
 
 class MLPEmbedder(nn.Module):
@@ -216,8 +186,8 @@ class SingleStreamBlock(nn.Module):
         self.mlp_act = SiLUActivation()
 
     @torch.compile(fullgraph=True)
-    def forward(self, x: Tensor, pe: Tensor, mod: tuple[Tensor, Tensor], kbuf: Tensor | None,
-                vbuf: Tensor | None) -> Tensor:
+    def forward(self, x: Tensor, pe: Tensor, mod: tuple[Tensor, Tensor],
+                bufs: KVBuffers | None) -> Tensor:
         mod_shift, mod_scale, mod_gate = mod
         x_mod = (1 + mod_scale) * self.pre_norm(x) + mod_shift
 
@@ -227,7 +197,7 @@ class SingleStreamBlock(nn.Module):
         q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         q, k = self.norm(q, k)
 
-        attn = attention([q, k, v], pe, kbuf, vbuf)
+        attn = attention([q, k, v], pe, bufs)
 
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
         return x + mod_gate * output
@@ -270,8 +240,7 @@ class DoubleStreamBlock(nn.Module):
         pe_ctx: Tensor,
         mod_img: tuple[Tensor, Tensor],
         mod_txt: tuple[Tensor, Tensor],
-        kbuf: Tensor | None,
-        vbuf: Tensor | None,
+        bufs: KVBuffers | None,
     ) -> tuple[Tensor, Tensor]:
         img_mod1, img_mod2 = mod_img
         txt_mod1, txt_mod2 = mod_txt
@@ -301,7 +270,7 @@ class DoubleStreamBlock(nn.Module):
         v = torch.cat((txt_v, img_v), dim=2)
 
         pe = torch.cat((pe_ctx, pe), dim=1)
-        attn = attention([q, k, v], pe, kbuf, vbuf)
+        attn = attention([q, k, v], pe, bufs)
         txt_attn, img_attn = attn[:, :txt_len], attn[:, txt_len:]
 
         img = img + img_mod1_gate * self.img_attn.proj(img_attn)
@@ -448,12 +417,7 @@ class Flux2(nn.Module):
         # from the sequence and keeps the cached suffix from then on. ``off`` is the
         # plain path. Decided once, before the loop, so a mid-loop fill can never
         # flip the mode under the loop's feet.
-        if kv is not None and not kv.filled and ref_tokens is not None:
-            mode = "fill"
-        elif kv is not None and kv.filled:
-            mode = "read"
-        else:
-            mode = "off"
+        mode = cache_mode(kv, ref_tokens is not None)
 
         # ``kv_len`` is what a block attends on this step: text + target + references
         # while filling, and the references are gone (``ref_len`` == 0) once cached.
@@ -462,27 +426,24 @@ class Flux2(nn.Module):
         kv_len = num_txt_tokens + num_img_tokens + ref_len
         kv_shape = (img.shape[0], self.num_heads, kv_len, self.hidden_size // self.num_heads)
 
-        def kv_buffers(key: tuple[str, int]) -> tuple[Tensor | None, Tensor | None]:
+        def kv_buffers(key: tuple[str, int]) -> KVBuffers | None:
             if kv is None:
-                return None, None
-            buf = (kv.allocate(key, kv_shape, img.dtype, img.device) if mode == "fill"
-                   else kv.get(key, kv_len))
-            mark_token_axis(buf.k, buf.v, dim=2)   # one kernel covers any token count
-            return buf.k, buf.v
+                return None
+            return kv.buffers(key, mode, kv_shape, img.dtype, img.device)
 
         for i in range(len(self.double_blocks)):
-            kbuf, vbuf = kv_buffers(("double", i))
+            bufs = kv_buffers(("double", i))
             mark_token_axis(img, txt, pe_x, pe_ctx)
-            img, txt = self.double_blocks[i](img, txt, pe_x, pe_ctx, img_mod, txt_mod, kbuf, vbuf)
+            img, txt = self.double_blocks[i](img, txt, pe_x, pe_ctx, img_mod, txt_mod, bufs)
 
         img = torch.cat((txt, img), dim=1)
         pe = torch.cat((pe_ctx, pe_x), dim=1)
         single_mod = split_mod(single_block_mod, num_txt_tokens + num_img_tokens + ref_len)
 
         for i in range(len(self.single_blocks)):
-            kbuf, vbuf = kv_buffers(("single", i))
+            bufs = kv_buffers(("single", i))
             mark_token_axis(img, pe)
-            img = self.single_blocks[i](img, pe, single_mod, kbuf, vbuf)
+            img = self.single_blocks[i](img, pe, single_mod, bufs)
 
         if mode == "fill" and kv is not None:
             kv.set_filled()

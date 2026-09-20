@@ -14,11 +14,19 @@ leading tokens it recomputed, leaving the cached reference suffix in place; that
 the ``KVCache.update`` pattern from ``torchtune``, chosen over concatenating a
 cached prefix because it keeps ``torch.cat`` out of the compiled blocks entirely —
 a concatenation whose split point depends on the (dynamic) token count is something
-Inductor's tiling analysis cannot handle.
+Inductor's tiling analysis cannot handle. It also fixes the token layout a model
+must use: the reference tokens have to be the *trailing* suffix of the attention
+sequence (and contiguous with the tokens that stay in it), which is why both
+supported models attend in ``text, target, references`` order.
 
 Which tokens form the cached slice, how the modulation is made step-independent,
 and whether the cache is exact (causal prefix) or approximate (bidirectional
 attention) are all *model* concerns and deliberately live outside this module.
+Everything a model needs to implement them is here, so the fiddly parts are shared
+rather than re-derived per architecture: :func:`cache_mode` (fill / read / off,
+decided once per forward), :meth:`KVCache.buffers` (a block's buffers for that
+mode, with the token axis already declared dynamic) and :func:`attend` (the prefix
+refresh plus the SDPA — the ``cat``-free tail every cached block ends with).
 """
 from __future__ import annotations
 
@@ -27,7 +35,10 @@ from typing import Hashable, Optional
 
 import torch
 
-__all__ = ["KVBuffers", "KVCache"]
+from thenoise.utils.attention import attention as sdpa_attention
+from thenoise.utils.dynamo import mark_token_axis
+
+__all__ = ["KVBuffers", "KVCache", "attend", "cache_mode"]
 
 
 @dataclass(frozen=True)
@@ -105,6 +116,19 @@ class KVCache:
                                " the cache was filled for a different sequence length")
         return got
 
+    def buffers(self, key: Hashable, mode: str, shape: tuple[int, ...],
+                dtype: torch.dtype, device: torch.device) -> KVBuffers:
+        """``key``'s buffers for one block, for this forward's ``mode`` (see :func:`cache_mode`).
+
+        ``fill`` allocates (or reuses) at the full sequence length, ``read`` looks
+        the buffers up and checks they have room for the tokens this step writes.
+        Either way the token axis is declared dynamic here, so one kernel covers
+        every token count the block is later replayed with.
+        """
+        got = self.allocate(key, shape, dtype, device) if mode == "fill" else self.get(key, shape[2])
+        mark_token_axis(got.k, got.v, dim=2)
+        return got
+
     def set_filled(self) -> None:
         self._filled = True
 
@@ -116,3 +140,40 @@ class KVCache:
         """Total cached bytes across all blocks (k + v)."""
         return sum(buf.k.numel() * buf.k.element_size() + buf.v.numel() * buf.v.element_size()
                    for buf in self._buffers.values())
+
+
+def cache_mode(kv: Optional[KVCache], refs_present: bool) -> str:
+    """``"fill"`` / ``"read"`` / ``"off"`` for one forward; call it once, before the blocks.
+
+    Deciding here rather than inside the loop means a mid-loop fill can never flip
+    the mode under the loop's feet. ``off`` is the plain (uncached) path: either
+    there is no cache, or a run started without reference tokens so there is
+    nothing to freeze.
+    """
+    if kv is None:
+        return "off"
+    if refs_present:
+        return "read" if kv.filled else "fill"
+    return "read" if kv.filled else "off"
+
+
+def attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+           bufs: Optional[KVBuffers] = None) -> torch.Tensor:
+    """SDPA over ``q``/``k``/``v``, refreshed through ``bufs`` when the run has a cache.
+
+    ``bufs`` are this block's run-long buffers (``[B, H, L_total, D]``, same layout
+    as the arguments): the step's ``L`` tokens are copied into their leading
+    positions and the attention then reads the *whole* buffer, so the tail still
+    holds the frozen reference K/V while the queries stay at ``L``. On the fill step
+    the copy covers the entire buffer, references included, so filling and reading
+    are literally the same two copies — no mode flag, no branch, and above all no
+    ``torch.cat``: a concatenation whose split point is a dynamic token count is
+    what Inductor's tiling analysis chokes on. ``bufs=None`` is the plain path.
+
+    Returns the attention output for the *queries*, token-major ``[B, L, H*D]``.
+    """
+    if bufs is not None:
+        bufs.k.narrow(2, 0, k.shape[2]).copy_(k)
+        bufs.v.narrow(2, 0, v.shape[2]).copy_(v)
+        k, v = bufs.k, bufs.v
+    return sdpa_attention([q, k, v])
