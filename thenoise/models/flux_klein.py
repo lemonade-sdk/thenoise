@@ -260,8 +260,9 @@ class FluxKleinModel(DiffusionModel):
         raw output (no negation, unlike Z-Image).
 
         With the KV cache the reference tokens are present only while the cache is
-        filling; on every later step they are dropped and their cached K/V is
-        re-appended (``Flux2.forward`` decides fill vs read from ``kv.filled``).
+        filling; on every later step they are dropped and each block keeps working
+        on its cache buffers, whose reference suffix is left untouched
+        (``Flux2.forward`` decides fill vs read from ``kv.filled``).
         """
         dev = torch.device(self.device)
         t_full = torch.full((len(latents),), float(t), dtype=latents.dtype, device=dev)
