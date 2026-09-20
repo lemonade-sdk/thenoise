@@ -295,7 +295,7 @@ The downloaded `RealESRGAN_x4plus.safetensors` goes into an `--upscaler-dir` (se
 
 Editing-capable models can edit an existing image from a text instruction: **image + prompt → edited image**.
 
-Editing is a **model** capability (`supports_edit`). At the moment only Flux.2 Klein supports it.
+Editing is a **model** capability (`supports_edit`): Flux.2 Klein and Qwen-Image support it. Both also implement the reference-latent **KV cache** (`supports_kv_cache`): with `ref_method: index_timestep_zero` the reference tokens' K/V are frozen after the first denoise step, so later steps run a shorter sequence (`--kv-cache`, see [Options](#options)). Flux.2 Klein requires a special "KV" checkpoint for this to work.
 
 You may provide one or many reference images. Without an explicit `width`/`height`, the **first** reference image is resized to 1024 on its largest side (aspect preserved) and sets the output size; the rest are used as additional references.
 
@@ -426,7 +426,7 @@ If no model is loaded, `/text2image` returns HTTP 503.
 
 ### `/edit` request body
 
-Instruction-based editing: image(s) + prompt → edited image. Requires an editing-capable model (Flux.2 Klein); otherwise returns HTTP 400.
+Instruction-based editing: image(s) + prompt → edited image. Requires an editing-capable model; otherwise returns HTTP 400.
 
 Accepts all `/text2image` fields plus:
 
@@ -524,7 +524,7 @@ curl -s localhost:8000/upscale \
 
 ### `edit` only
 
-Edits an existing image from an instruction (image + prompt → edited image). Requires an editing-capable model (Flux.2 Klein) and shares all generation flags with `generate`.
+Edits an existing image from an instruction (image + prompt → edited image). Requires an editing-capable model and shares all generation flags with `generate`.
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|

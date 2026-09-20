@@ -11,6 +11,7 @@ their kernel reads: no checkpoints, no device.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -155,6 +156,32 @@ def test_reference_editing_capability(model_cls, expect):
         and model_cls.pack_reference_latent is not DiffusionModel.pack_reference_latent
     )
     assert overrides_reference_kernels is expect
+
+
+@pytest.mark.parametrize(
+    "model_cls,expect",
+    [
+        (AnimaModel, False),
+        (Krea2Model, False),
+        (ZImageModel, False),
+        (FluxKleinModel, True),
+        (QwenImageModel, True),
+    ],
+    ids=CATALOG_IDS,
+)
+def test_reference_kv_cache_capability(model_cls, expect):
+    """Only the adapters that run the cache's fill/read protocol advertise it.
+
+    The pipeline rejects ``kv_cache`` for the others, so the flag must track the DiT
+    actually threading ``thenoise.dit.kvcache`` through its blocks -- and freezing
+    reference K/V needs a reference latent, so it implies editing support.
+    """
+    model = _bare(model_cls, **BARE[model_cls.name])
+    assert model.supports_kv_cache is expect
+    assert model.supports_edit is True or not expect
+    # The flag is what the shared protocol acts on, not just a label.
+    model.start_kv_caches(replace(_params(), kv_cache=True), True, True)
+    assert (model._kv_caches is not None) is expect
 
 
 def test_base_encode_reference_is_not_implemented():

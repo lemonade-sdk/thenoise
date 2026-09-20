@@ -432,7 +432,8 @@ class QwenImageTransformer2DModel(nn.Module):
         kv_shape = (hidden_states.shape[0], self.num_heads, kv_len, self.head_dim)
 
         for i, block in enumerate(self.transformer_blocks):
-            bufs = None if kv is None else kv.buffers(i, mode, kv_shape, hidden_states.dtype, hidden_states.device)
+            bufs = (None if kv is None else
+                    kv.buffers(i, mode, kv_shape, hidden_states.dtype, hidden_states.device))
             mark_token_axis(hidden_states, encoder_hidden_states, img_pe, txt_pe)
             encoder_hidden_states, hidden_states = block(
                 hidden_states=hidden_states,

@@ -486,3 +486,21 @@ def test_kv_cache_requires_an_edit_request():
     controller = _controller()
     with pytest.raises(ValueError, match="requires an edit request"):
         controller.generate(_request(kv_cache=True))
+
+
+def test_kv_cache_requires_a_model_that_supports_it():
+    """The KV cache is per-adapter: the pipeline refuses instead of ignoring it.
+
+    ``EditingStubModel`` edits (so it has a reference latent to freeze) but never
+    wired ``thenoise.dit.kvcache`` into its blocks, which is exactly what
+    ``supports_kv_cache`` advertises.
+    """
+    from PIL import Image
+
+    from conftest import EditingStubModel
+
+    controller = _controller(EditingStubModel())
+    with pytest.raises(ValueError, match="does not support the reference-latent KV cache"):
+        controller.edit(
+            _request(image=Image.new("RGB", (64, 64), "white"), steps=1, kv_cache=True)
+        )

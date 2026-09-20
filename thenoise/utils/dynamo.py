@@ -18,7 +18,7 @@ from torch._dynamo import maybe_mark_dynamic
 __all__ = ["mark_token_axis"]
 
 
-def mark_token_axis(*tensors: "Optional[torch.Tensor]", dim: int = 1) -> None:
+def mark_token_axis(*tensors: Optional[torch.Tensor], dim: int = 1) -> None:
     """Declare that ``dim`` of ``tensors`` varies, for the compiled blocks.
 
     Declaring the token axis (which carries the resolution, prompt length and
