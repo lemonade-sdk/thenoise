@@ -11,6 +11,11 @@ selects the matching Qwen3 text encoder (4B / 8B). Distilled vs base behavior is
 driven by ``guidance_scale``: distilled models default to guidance 1.0 (single
 forward, no CFG); base models pass a guidance > 1.0 to enable CFG (two forwards).
 
+The reference-latent KV cache (ComfyUI's ``FluxKVCache``) is wired through the
+shared ``thenoise.dit.kvcache`` machinery: ``prepare_latent`` starts the run's
+caches, ``denoise_step`` hands the DiT the reference tokens while they are still
+being filled and drops them once each block has frozen their K/V.
+
 The default schedule is Euler (the Flux.2 flow ODE); ER-SDE is also usable.
 """
 from __future__ import annotations
@@ -223,15 +228,13 @@ class FluxKleinModel(DiffusionModel):
         if un_txt_ids is not None:
             self.dit.pe_embedder.store("txt_uncond", un_txt_ids, dtype=self.dtype)
 
-        # Reference-latent KV cache (ComfyUI ``FluxKVCache``): one cache per
-        # conditioning branch, created fresh per run so a later request can never
-        # reuse a stale cache. The uncond branch cache is only allocated when CFG
-        # is actually active (``guidance_scale > 1.0``).
-        self._kv: dict[str, KVCache] | None = None
-        if params.kv_cache and self._ref_tokens is not None and self.supports_kv_cache:
-            self._kv = {"cond": KVCache("cond")}
-            if params.guidance_scale > 1.0 and self._un_txt is not None:
-                self._kv["uncond"] = KVCache("uncond")
+        # Reference-latent KV cache (ComfyUI ``FluxKVCache``): fresh per run, one
+        # cache per conditioning branch (see ``DiffusionModel.start_kv_caches``).
+        self.start_kv_caches(
+            params,
+            has_reference=self._ref_tokens is not None,
+            has_uncond=params.guidance_scale > 1.0 and self._un_txt is not None,
+        )
 
         return x
 
@@ -268,8 +271,8 @@ class FluxKleinModel(DiffusionModel):
         t_full = torch.full((len(latents),), float(t), dtype=latents.dtype, device=dev)
         pe_img = self.dit.pe_embedder["img"]
         pe_ref = self.dit.pe_embedder["ref"]
-        kv_cond = self._kv["cond"] if self._kv is not None else None
-        kv_uncond = self._kv.get("uncond") if self._kv is not None else None
+        kv_cond = self.kv_cache("cond")
+        kv_uncond = self.kv_cache("uncond")
         with torch.no_grad(), torch.autocast(device_type=dev.type, dtype=self.dtype):
             pos = self._dit_forward(latents, t_full, self._txt, self.dit.pe_embedder["txt"], kv_cond, pe_img, pe_ref)
             if guidance_scale > 1.0 and self._un_txt is not None:
@@ -345,10 +348,8 @@ class FluxKleinModel(DiffusionModel):
 
     def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:
         """Unpack the DiT tokens back to the canonical packed latent."""
-        # Drop the run-scoped KV cache before the VAE decode (the controller
-        # offloads the DiT right after this, so freeing the cache tensors avoids
-        # holding GBs of frozen K/V through the decode).
-        self._kv = None
+        # Drop the run-scoped KV cache before the VAE decode (see ``end_kv_caches``).
+        self.end_kv_caches()
         x = torch.cat(scatter_ids(latents, self._img_ids)).squeeze(2)  # [B, 128, H//16, W//16]
         return x
 

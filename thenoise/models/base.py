@@ -61,6 +61,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple, Un
 import torch
 from safetensors.torch import load_file
 
+from thenoise.dit.kvcache import KVCache
 from thenoise.memory import MemoryManager
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.device import get_device_memory
@@ -160,10 +161,16 @@ class DiffusionModel(ABC):
     supports_edit: bool = False
 
     # Reference-latent KV cache: freeze the reference tokens' K/V across denoise
-    # steps (ComfyUI ``FluxKVCache``). Models that implement the fill/read protocol
-    # set this True. Validity is a separate question: the frozen K/V stay
-    # step-invariant only under ``ref_method="index_timestep_zero"``.
+    # steps (ComfyUI ``FluxKVCache``). Models that support it set this True; the
+    # shared ``start_kv_caches``/``kv_cache``/``end_kv_caches`` protocol below then
+    # owns the run-scoped buffers. Validity is a separate question: the frozen K/V
+    # stay step-invariant only under ``ref_method="index_timestep_zero"``.
     supports_kv_cache: bool = False
+
+    # The run's caches, created by ``start_kv_caches`` (``prepare_latent``) and
+    # dropped by ``end_kv_caches`` (``finalize_latent``). The empty class default
+    # keeps ``kv_cache`` answering ``None`` on adapters built without ``__init__``.
+    _kv_caches: Optional[Dict[str, KVCache]] = None
 
     # Preferences implied by the loaded checkpoint's markers; replaced per instance
     # in ``__init__``. The empty class default keeps ``pref`` working on instances
@@ -376,6 +383,45 @@ class DiffusionModel(ABC):
         ``ref_index`` is the 1-based position among the reference images (used to
         give each ref a distinct t-axis index). Overridden by editing models."""
         return None
+
+    # ------------------------------------------------------- reference KV cache
+    def start_kv_caches(
+        self,
+        params: SamplingParams,
+        has_reference: bool,
+        has_uncond: bool,
+    ) -> None:
+        """Create this run's K/V caches, one per conditioning branch. Call in ``prepare_latent``.
+
+        Fresh per run so a later request can never reuse a stale cache, and only for
+        an edit run on a model implementing the fill/read protocol. One cache per
+        branch because the branches can have different token counts (the uncond
+        prompt is usually shorter), so their buffers cannot be shared; the uncond
+        cache is only created when CFG is actually active.
+        """
+        if not (params.kv_cache and has_reference and self.supports_kv_cache):
+            self._kv_caches = None
+            return
+        caches = {"cond": KVCache("cond")}
+        if has_uncond:
+            caches["uncond"] = KVCache("uncond")
+        self._kv_caches = caches
+
+    def kv_cache(self, branch: str) -> Optional[KVCache]:
+        """The cache of one conditioning branch (``cond`` / ``uncond``), else ``None``.
+
+        ``None`` means the run has no cache at all (plain t2i, ``kv_cache`` off, or a
+        model without support), which is the DiT's uncached path.
+        """
+        return None if self._kv_caches is None else self._kv_caches.get(branch)
+
+    def end_kv_caches(self) -> None:
+        """Drop the run's caches. Call in ``finalize_latent``, before the VAE decode.
+
+        The controller offloads the DiT right after that, so releasing the cache
+        here avoids holding its frozen K/V (easily GBs) through the decode.
+        """
+        self._kv_caches = None
 
     # --------------------------------------------------------------- LoRA
     def _parse_lora_spec(self, spec: str) -> Tuple[str, float]:
