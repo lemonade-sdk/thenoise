@@ -20,11 +20,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Callable
 
 import torch
 from einops import rearrange
 from torch import Tensor, nn
+from torch._dynamo import maybe_mark_dynamic
 
 from thenoise.dit.kvcache import KVCache, KVSegment
 from thenoise.dit.quantized import QuantizedLinear
@@ -82,6 +82,27 @@ class Klein4BParams(Flux2Params):
     depth: int = 5
     depth_single_blocks: int = 20
     use_guidance_embed: bool = False
+
+
+def mark_dynamic_seq(*tensors: Tensor | None, dim: int = 1) -> None:
+    """Mark the token axis of ``tensors`` as variable for ``torch.compile``.
+
+    The blocks are compiled in Dynamo's default (auto) dynamic mode, which
+    compiles the first call of a frame fully static and only promotes the axes
+    that wobbled on a recompile — and that promotion symbolises *every* axis it
+    can reach, which is where Inductor used to fall over (``CantSplit`` /
+    symbolic-``Mul`` tiling) on the reference-token and KV-cache paths. Marking
+    up front the one axis that genuinely varies — the token count, i.e.
+    resolution, prompt length and reference count — gets one kernel per graph
+    shape while batch, heads and hidden size stay static.
+
+    ``maybe_mark_dynamic`` is the non-enforcing variant: an axis the graph ends
+    up specialising anyway (a broadcast ``[B, 1, D]`` modulation row, say) is
+    specialised silently instead of raising ``ConstraintViolationError``.
+    """
+    for t in tensors:
+        if t is not None and t.dim() > dim:
+            maybe_mark_dynamic(t, dim)
 
 
 def attention(qkv_list: list[Tensor], pe: Tensor, kv_read: KVSegment | None = None, kv_fill: int = 0) -> tuple[Tensor, KVSegment | None]:
@@ -191,6 +212,7 @@ class SingleStreamBlock(nn.Module):
         self.pre_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.mlp_act = SiLUActivation()
 
+    @torch.compile(fullgraph=True)
     def forward(self, x: Tensor, pe: Tensor, mod: tuple[Tensor, Tensor], kv_read: KVSegment | None = None, kv_fill: int = 0) -> tuple[Tensor, KVSegment | None]:
         mod_shift, mod_scale, mod_gate = mod
         x_mod = (1 + mod_scale) * self.pre_norm(x) + mod_shift
@@ -235,6 +257,7 @@ class DoubleStreamBlock(nn.Module):
             QuantizedLinear(mlp_hidden_dim, hidden_size, bias=False),
         )
 
+    @torch.compile(fullgraph=True)
     def forward(
         self,
         img: Tensor,
@@ -326,35 +349,6 @@ class Flux2(nn.Module):
         self.num_double_blocks = len(self.double_blocks)
         self.num_single_blocks = len(self.single_blocks)
 
-        # Per-block compiled-forward cache: ``(blocks, index, dynamic)``. t2i
-        # compiles static (fixed shape); edit (variable ref count) compiles
-        # dynamic to avoid Inductor's recompile/`CantSplit` failure on the grown
-        # sequence. Only the ``off`` and ``fill`` paths are compiled — the KV cache
-        # ``read`` path runs eager, see ``_block_forward``. Keyed by the owning
-        # ModuleList + position (not ``id(block)``), which also keeps the double vs
-        # single streams from colliding.
-        self._compiled_blocks: dict[tuple[nn.ModuleList, int, bool], Callable] = {}
-
-    def _block_forward(self, blocks: nn.ModuleList, index: int, dynamic: bool, mode: str) -> Callable:
-        """Per-block forward for ``blocks[index]`` under KV-cache ``mode``.
-
-        ``off`` and ``fill`` return a cached ``torch.compile``d forward; they must
-        not share an entry because the cache changes the graph (K/V store vs plain).
-        ``read`` (only reached with a filled KV cache) returns the eager forward:
-        its whole delta is the cached-K/V ``torch.cat``, which Inductor handles
-        poorly (symbolic tiling of the concat / ``Mul`` failures) for work that is
-        negligible next to the attention it feeds.
-        """
-        block = blocks[index]
-        if mode == "read":
-            return block.forward
-        key = (blocks, index, dynamic)
-        fn = self._compiled_blocks.get(key)
-        if fn is None:
-            fn = torch.compile(block.forward, fullgraph=True, dynamic=dynamic)
-            self._compiled_blocks[key] = fn
-        return fn
-
     @property
     def device(self):
         return next(self.parameters()).device
@@ -421,7 +415,9 @@ class Flux2(nn.Module):
             for m in mod:
                 mt = m[0:1].expand(1, total_len - ref_len, -1)
                 m0 = m[1:2].expand(1, ref_len, -1)
-                out.append(torch.cat([mt, m0], dim=1))
+                row = torch.cat([mt, m0], dim=1)
+                mark_dynamic_seq(row)  # per-token modulation carries the token count
+                out.append(row)
             return tuple(out)
 
         # Double stream: image tokens (target + refs) use per-token modulation;
@@ -455,21 +451,14 @@ class Flux2(nn.Module):
         else:
             mode = "off"
 
-        # Edit varies seq length (ref tokens appended) and the KV path changes the
-        # graph, so compile blocks dynamically for the grown (fill) sequence; t2i
-        # keeps static kernels. ``read`` is never compiled (see ``_block_forward``),
-        # so its ``dynamic`` value is irrelevant.
-        if mode == "fill":
-            dynamic = True
-        else:
-            dynamic = ref_tokens is not None
-
         for i in range(len(self.double_blocks)):
             seg = kv.segment(("double", i)) if kv is not None else None
             kv_fill = ref_len if mode == "fill" else 0
             kv_read = seg if mode == "read" else None
-            fwd = self._block_forward(self.double_blocks, i, dynamic, mode)
-            img, txt, seg_out = fwd(img, txt, pe_x, pe_ctx, img_mod, txt_mod, kv_read, kv_fill)
+            mark_dynamic_seq(img, txt, pe_x, pe_ctx)
+            if kv_read is not None:
+                mark_dynamic_seq(kv_read.k, kv_read.v, dim=2)  # [B, H, L, D]
+            img, txt, seg_out = self.double_blocks[i](img, txt, pe_x, pe_ctx, img_mod, txt_mod, kv_read, kv_fill)
             if seg_out is not None and kv is not None:
                 kv.store(("double", i), seg_out)
 
@@ -481,8 +470,10 @@ class Flux2(nn.Module):
             seg = kv.segment(("single", i)) if kv is not None else None
             kv_fill = ref_len if mode == "fill" else 0
             kv_read = seg if mode == "read" else None
-            fwd = self._block_forward(self.single_blocks, i, dynamic, mode)
-            img, seg_out = fwd(img, pe, single_mod, kv_read, kv_fill)
+            mark_dynamic_seq(img, pe)
+            if kv_read is not None:
+                mark_dynamic_seq(kv_read.k, kv_read.v, dim=2)
+            img, seg_out = self.single_blocks[i](img, pe, single_mod, kv_read, kv_fill)
             if seg_out is not None and kv is not None:
                 kv.store(("single", i), seg_out)
 
