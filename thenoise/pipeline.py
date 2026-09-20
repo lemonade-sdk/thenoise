@@ -249,8 +249,9 @@ class PipelineController:
 
         r = self._resolve_pipeline(local)
         ref_key = self._cache_key_reference(images, r.width, r.height)
+        ref_method = getattr(self.model, "DEFAULT_REF_METHOD", "index")
         return self._finalize(
-            self._run(local, r, ref_key=ref_key, ref_method="index"),
+            self._run(local, r, ref_key=ref_key, ref_method=ref_method),
             local, r,
         )
 

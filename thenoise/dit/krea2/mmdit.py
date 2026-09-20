@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from einops import rearrange
 from torch import Tensor
 
+from thenoise.dit.krea2.reference import slice_reference_output
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention as common_attention
 from thenoise.utils.qk_norm import QKNorm
@@ -298,6 +299,7 @@ class SingleStreamDiT(nn.Module):
         t: Tensor,
         mask: Tensor | None,
         freqs: Tensor,
+        ref_len: int = 0,
     ) -> Tensor:
         img = self.first(img)
         t = self.tmlp(temb(t, self.config.tdim))
@@ -324,13 +326,16 @@ class SingleStreamDiT(nn.Module):
 
         # Main blocks: bidirectional attention over [image (img_len, all valid) + text (padded)].
         # Image-first ordering keeps each sample's valid tokens a contiguous prefix, which the
-        # shared key-padding-mask path uses.
+        # shared key-padding-mask path uses. In the edit path ``img`` is already
+        # ``[refs | target]`` (the adapter prepended the reference tokens), so ``imglen`` covers
+        # both; ``ref_len`` (leading ref tokens) is dropped from the output to keep the target only.
         attn_params = AttentionParams.create_attention_params_from_mask(imglen, txtmask)
 
         for block in self.blocks:
             combined = block(combined, tvec, freqs, attn_params)
 
         final = self.last(combined, t)
-        output = final[:, :imglen, :]  # image tokens are the leading slice now
+        # Drop the leading reference tokens; keep only the target tokens.
+        output = slice_reference_output(final, ref_len, imglen - ref_len)
 
         return output

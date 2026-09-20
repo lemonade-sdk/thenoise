@@ -295,7 +295,8 @@ The downloaded `RealESRGAN_x4plus.safetensors` goes into an `--upscaler-dir` (se
 
 Editing-capable models can edit an existing image from a text instruction: **image + prompt → edited image**.
 
-Editing is a **model** capability (`supports_edit`). At the moment only Flux.2 Klein supports it.
+Editing is a **model** capability (`supports_edit`). Flux.2 Klein, Qwen Image Edit and **Krea 2** (with the
+`krea2-identity-edit` LoRA) supports it.
 
 You may provide one or many reference images. Without an explicit `width`/`height`, the **first** reference image is resized to 1024 on its largest side (aspect preserved) and sets the output size; the rest are used as additional references.
 
@@ -506,7 +507,7 @@ curl -s localhost:8000/upscale \
 
 ### `edit` only
 
-Edits an existing image from an instruction (image + prompt → edited image). Requires an editing-capable model (Flux.2 Klein) and shares all generation flags with `generate`.
+Edits an existing image from an instruction (image + prompt → edited image). Requires an editing-capable model (Flux.2 Klein or Krea 2 with the `krea2-identity-edit` LoRA) and shares all generation flags with `generate`.
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|

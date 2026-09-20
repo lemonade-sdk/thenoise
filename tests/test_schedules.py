@@ -124,7 +124,7 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
     "model_cls,expect",
     [
         (AnimaModel, False),
-        (Krea2Model, False),
+        (Krea2Model, True),
         (ZImageModel, False),
         (FluxKleinModel, True),
         (QwenImageModel, True),

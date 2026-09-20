@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import logging
 import math
+from typing import Optional
 
 import torch
 from einops import rearrange
 
 from thenoise.dit.krea2 import utils as krea2_utils
-from thenoise.dit.krea2.sampling import encode_prompts, prepare, timesteps
+from thenoise.dit.krea2.reference import pack_reference
+from thenoise.dit.krea2.sampling import encode_prompts, prepare, prepare_edit, timesteps
 from thenoise.models.base import (
     Conditioning,
     DiffusionModel,
@@ -33,6 +35,11 @@ class Krea2Model(DiffusionModel):
     DEFAULT_Y1 = 0.5
     DEFAULT_Y2 = 1.15
     DEFAULT_MU = 1.15
+
+    # Reference-image editing (Krea 2 identity-edit / pose LoRA path).
+    supports_edit = True
+    DEFAULT_REF_METHOD = "fit"
+    DEFAULT_GROUNDING_PX = 768
 
     # Resolution-aware schedule interpolation endpoints (image-token counts).
     DEFAULT_MINRES = 256
@@ -99,10 +106,23 @@ class Krea2Model(DiffusionModel):
         self,
         args: EncodePromptArgs,
     ) -> Conditioning:
-        """Text-encoder only: RAW prompt embeddings (DiT fusion in ``fuse_text``)."""
+        """Text-encoder only: RAW prompt embeddings (DiT fusion in ``fuse_text``).
+
+        In the edit path (``args.image`` set) the instruction is encoded image-grounded
+        (the reference image feeds the Qwen3-VL as vision tokens); text-only stays the
+        fast path.
+        """
         cfg = args.guidance_scale > 1.0
+        images = args.image if args.image is not None else None
+        if images is not None and not isinstance(images, (list, tuple)):
+            images = [images]
         txt, txtmask, untxt, untxtmask = encode_prompts(
-            self.encoder, [args.prompt], [args.negative_prompt], cfg=cfg
+            self.encoder,
+            [args.prompt],
+            [args.negative_prompt],
+            cfg=cfg,
+            images=images,
+            grounding_px=self.DEFAULT_GROUNDING_PX,
         )
         return Conditioning(
             cond=txt, cond_mask=txtmask, null=untxt, null_mask=untxtmask
@@ -153,13 +173,16 @@ class Krea2Model(DiffusionModel):
         latents: torch.Tensor,
         cond: Conditioning,
         params: SamplingParams,
+        ref: Optional[list[torch.Tensor]] = None,
+        ref_method: str = "fit",
     ) -> torch.Tensor:
         """Patchify the canonical latent and build pos/mask for the DiT, ONCE.
 
-        ``prepare`` converts the latent to ``[B, seq, C*patch^2]`` image tokens
-        and derives the combined image+text position/mask tensors. Those (plus the
-        text embeddings, moved to device) are stashed on the instance so the
-        per-step ``denoise_step`` stays a pure DiT forward. Safe under the lock.
+        ``prepare`` converts the latent to ``[B, seq, C*patch^2]`` image tokens and derives
+        the combined image+text position/mask tensors; those are stashed on the instance so
+        each ``denoise_step`` stays a pure DiT forward. In the edit path (``ref`` given) the
+        reference tokens are prepended (frame=1..N) and ``ref_len`` is stashed so
+        ``denoise_step`` drops them from the DiT output.
         """
         dev = torch.device(self.device)
         patch = self.dit.config.patch
@@ -169,20 +192,36 @@ class Krea2Model(DiffusionModel):
 
         txt = cond.cond.to(device=dev, dtype=self.dtype)
         txtmask = cond.cond_mask.to(device=dev)
-        img, pos, mask = prepare(latents, txt.shape[1], patch, txtmask)
+        if ref is not None:
+            img, pos, mask, ref_len = prepare_edit(
+                latents, ref, txt.shape[1], patch, txtmask, ref_method
+            )
+            self._ref_len = ref_len
+            self._ref_tokens = img[:, :ref_len]  # stashed refs, prepended in ``denoise_step``
+            target = img[:, ref_len:]  # the sampler integrates over the target only
+        else:
+            img, pos, mask = prepare(latents, txt.shape[1], patch, txtmask)
+            self._ref_len = 0
+            self._ref_tokens = None
+            target = img
         self.dit.posemb.store("cond", pos, dtype=self.dtype)
         self._txt, self._mask = txt, mask
 
         if cond.null is not None:
             untxt = cond.null.to(device=dev, dtype=self.dtype)
             untxtmask = cond.null_mask.to(device=dev)
-            _, unpos, unmask = prepare(latents, untxt.shape[1], patch, untxtmask)
+            if ref is not None:
+                _, unpos, unmask, _ = prepare_edit(
+                    latents, ref, untxt.shape[1], patch, untxtmask, ref_method
+                )
+            else:
+                _, unpos, unmask = prepare(latents, untxt.shape[1], patch, untxtmask)
             self.dit.posemb.store("uncond", unpos, dtype=self.dtype)
             self._untxt, self._unmask = untxt, unmask
         else:
             self._untxt = self._unmask = None
 
-        return img
+        return target
 
     def schedule(self, params: SamplingParams) -> list[Step]:
         patch = self.dit.config.patch
@@ -207,13 +246,19 @@ class Krea2Model(DiffusionModel):
         dev = torch.device(self.device)
         device_type = torch.device(dev).type
         t_full = torch.full((len(latents),), t, dtype=latents.dtype, device=dev)
+        # Prepend the reference tokens so the DiT sees ``[refs | target | text]``.
+        img = latents
+        if self._ref_tokens is not None:
+            img = torch.cat([self._ref_tokens, latents], dim=1)
         with torch.autocast(device_type=device_type, dtype=self.dtype):
             cond_out = self.dit(
-                img=latents, context=self._txt, t=t_full, mask=self._mask, freqs=self.dit.posemb["cond"]
+                img=img, context=self._txt, t=t_full, mask=self._mask,
+                freqs=self.dit.posemb["cond"], ref_len=self._ref_len,
             )
             if guidance_scale > 1.0 and self._untxt is not None:
                 uncond = self.dit(
-                    img=latents, context=self._untxt, t=t_full, mask=self._unmask, freqs=self.dit.posemb["uncond"]
+                    img=img, context=self._untxt, t=t_full, mask=self._unmask,
+                    freqs=self.dit.posemb["uncond"], ref_len=self._ref_len,
                 )
                 v = uncond + guidance_scale * (cond_out - uncond)
             else:
@@ -256,3 +301,30 @@ class Krea2Model(DiffusionModel):
     def _upscale_format(self) -> str:
         """Qwen-Image VAE -> Wan21 z-score latent format."""
         return "wan21"
+
+    # ------------------------------------------------------------ editing
+    def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
+        """Encode input pixels (``[C,H,W]`` in [-1, 1]) -> canonical reference latent."""
+        return self.vae.encode_pixels_to_latents(pixels.unsqueeze(0))
+
+    def pack_reference_latent(
+        self,
+        latents: torch.Tensor,
+        method: str = "fit",
+        ref_index: int = 1,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Canonical reference latent -> (tokens, ids).
+
+        ``method`` selects the training-matched geometry: ``fit`` (identity-edit, v1.2)
+        fits the ref to the target grid with a centered offset.
+        """
+        patch = self.dit.config.patch
+        if method == "fit":
+            gh, gw = latents.shape[-2] // patch, latents.shape[-1] // patch
+            return pack_reference(
+                latents, gh, gw, patch, ref_index, device=torch.device(self.device)
+            )
+        raise ValueError(
+            f"unsupported ref_latents_method {method!r}; "
+            "supported: 'fit'"
+        )

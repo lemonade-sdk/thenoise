@@ -48,6 +48,17 @@ INT8_ARTIFACTS = {
     "dit_raw": "diffusion_models/krea2_raw_int8_convrot.safetensors",
 }
 
+LORAS = {
+    "identity-edit": (
+        "conradlocke/krea2-identity-edit",
+        "krea2_identity_edit_v1_2.safetensors",
+    ),
+    "pose": (
+        "thedeoxen/Krea-2-pose-controlnet",
+        "krea2_turbo_openpose_controlnet.safetensors",
+    ),
+}
+
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Download Krea 2 model artifacts")
@@ -56,6 +67,11 @@ def main() -> None:
     ap.add_argument(
         "--int8-convrot", action="store_true",
         help="download int8-convrot DiTs instead of bf16",
+    )
+    ap.add_argument(
+        "--lora", action="append", choices=list(LORAS), default=[], metavar="NAME",
+        help="download a reference-edit LoRA into ``--out/loras`` (repeatable; "
+             f"choices: {', '.join(LORAS)})",
     )
     args = ap.parse_args()
 
@@ -70,6 +86,11 @@ def main() -> None:
     for name, path in items:
         dest = hf_hub_download(REPO, path, local_dir=str(out))
         print(f"{name:14s} -> {dest}")
+
+    for lora in args.lora:
+        lora_repo, lora_file = LORAS[lora]
+        dest = hf_hub_download(lora_repo, lora_file, local_dir=str(out / "loras"))
+        print(f"{lora:14s} -> {dest}")
 
 
 if __name__ == "__main__":

@@ -33,6 +33,19 @@ def gather_valid_text(txt, mask):
     return out, newmask
 
 
+def _patch_image(img, patch):
+    """Patchify the canonical latent into target image tokens + RoPE grid + mask.
+     Returns ``(tokens, pos, mask, h_, w_)`` where ``h_``/``w_`` are the token-grid dims.
+    """
+    b, _, h, w = img.shape
+    h_, w_ = h // patch, w // patch
+    # (t, h, w) grid with t=0 and a row-major h/w ordering.
+    pos = grid_positions([1, h_, w_], dtype=torch.float32, device=img.device).unsqueeze(0).expand(b, -1, -1)
+    mask = torch.ones(b, h_ * w_, device=img.device, dtype=torch.bool)
+    tokens = rearrange(img, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch, pw=patch)
+    return tokens, pos, mask, h_, w_
+
+
 def prepare(img, txtlen, patch, txtmask):
     """Patchify the latent and build the combined image+text position / mask tensors.
 
@@ -40,17 +53,44 @@ def prepare(img, txtlen, patch, txtmask):
     ([img (all valid), text (valid prefix + padding)]), which the shared attention's
     key-padding-mask path uses. Returns (img_tokens, pos, mask).
     """
+    tokens, pos, mask, _, _ = _patch_image(img, patch)
+
+    txtpos = torch.zeros(tokens.shape[0], txtlen, 3, device=img.device)
+    mask = torch.cat((mask, txtmask), dim=1)
+    pos = torch.cat((pos, txtpos), dim=1)
+    return tokens, pos, mask
+
+
+def prepare_edit(img, ref_latents, txtlen, patch, txtmask, ref_method="fit"):
+    """Patchify the target latent and prepend the reference tokens (edit path).
+    Returns ``(img_tokens, pos, mask, ref_len)``.
+    """
+    from thenoise.dit.krea2.reference import concat_reference, pack_reference
+
+    if ref_method != "fit":
+        raise ValueError(f"unsupported ref_latents_method {ref_method!r}; supported: 'fit'")
+
     b, _, h, w = img.shape
     h_, w_ = h // patch, w // patch
-    # (t, h, w) grid with t=0 and a row-major h/w ordering.
-    imgpos = grid_positions([1, h_, w_], dtype=torch.float32, device=img.device).unsqueeze(0).expand(b, -1, -1)
-    imgmask = torch.ones(b, h_ * w_, device=img.device, dtype=torch.bool)
-    img = rearrange(img, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=patch, pw=patch)
+    target_tokens, target_pos, target_mask, _, _ = _patch_image(img, patch)
+
+    ref_tokens, ref_pos, ref_mask = [], [], []
+    for i, ref in enumerate(ref_latents):
+        rt, rp = pack_reference(
+            ref.to(img.device, dtype=img.dtype), h_, w_, patch, i + 1, device=img.device
+        )
+        ref_tokens.append(rt)
+        ref_pos.append(rp)
+        ref_mask.append(torch.ones(b, rt.shape[1], device=img.device, dtype=torch.bool))
+    img_tokens = concat_reference(ref_tokens, target_tokens)
+    img_pos = torch.cat([*ref_pos, target_pos], dim=1)
+    img_mask = torch.cat([*ref_mask, target_mask], dim=1)
+    ref_len = img_tokens.shape[1] - target_tokens.shape[1]
 
     txtpos = torch.zeros(b, txtlen, 3, device=img.device)
-    mask = torch.cat((imgmask, txtmask), dim=1)
-    pos = torch.cat((imgpos, txtpos), dim=1)
-    return img, pos, mask
+    pos = torch.cat((img_pos, txtpos), dim=1)
+    mask = torch.cat((img_mask, txtmask), dim=1)
+    return img_tokens, pos, mask, ref_len
 
 
 def timesteps(seq_len, steps, x1, x2, y1=0.5, y2=1.15, sigma=1.0, mu=None):
@@ -70,22 +110,30 @@ def timesteps(seq_len, steps, x1, x2, y1=0.5, y2=1.15, sigma=1.0, mu=None):
 
 
 @torch.no_grad()
-def encode_prompts(encoder, prompts, negative_prompts=None, *, cfg=True):
+def encode_prompts(encoder, prompts, negative_prompts=None, *, cfg=True, images=None, grounding_px=768):
     """Encode prompts (and optional negatives) into gathered varlen text embeddings.
 
     Returns ``(txt, txtmask, untxt, untxtmask)``; the unconditional pair is ``None`` when
     ``cfg`` is False. ``gather_valid_text`` drops the interior padding the encoder
     inserts between prompt and suffix so the valid tokens form a contiguous prefix.
     The encoder stays resident (plenty of unified RAM); it is never freed/reloaded.
+
+    When ``images`` is given the encoder runs the image-grounded (vision-token) path;
+    the negatives are grounded on the same images (matching training's unconditional).
     """
-    txt, txtmask = encoder(prompts)
+    def _run(prompts):
+        if images is not None:
+            return encoder(prompts, images=images, grounding_px=grounding_px)
+        return encoder(prompts)
+
+    txt, txtmask = _run(prompts)
     txt, txtmask = gather_valid_text(txt, txtmask)
 
     untxt = untxtmask = None
     if cfg:
         if negative_prompts is None:
             negative_prompts = [""] * len(prompts)
-        untxt, untxtmask = encoder(negative_prompts)
+        untxt, untxtmask = _run(negative_prompts)
         untxt, untxtmask = gather_valid_text(untxt, untxtmask)
 
     return txt, txtmask, untxt, untxtmask

@@ -424,3 +424,87 @@ def test_broadcast_positions_repeats_a_single_index():
     assert torch.equal(pos[:, 1], pos[:, 2])
     assert pos[0].tolist() == [7.0, 7.0, 7.0]
     assert pos[3].tolist() == [10.0, 10.0, 10.0]
+
+
+# ------------------------------------------------------------- krea2 reference
+
+from thenoise.dit.krea2.reference import (
+    fit_reference,
+    pack_reference,
+    reference_positions,
+    slice_reference_output,
+)
+from thenoise.dit.krea2.sampling import prepare_edit
+
+
+def test_reference_positions_centered_offset():
+    """A reference fitted inside the target grid sits at a centered (fractional) offset."""
+    pos = reference_positions(1, frame=1, gh=2, gw=2, th=6, tw=6)
+    assert pos.shape == (1, 4, 3)
+    assert (pos[0, :, 0] == 1.0).all()  # frame=1
+    # offset = (6-2)/2 = 2 on each of h/w.
+    assert sorted(pos[0, :, 1].tolist()) == [2.0, 2.0, 3.0, 3.0]
+    assert sorted(pos[0, :, 2].tolist()) == [2.0, 2.0, 3.0, 3.0]
+
+
+def test_reference_positions_zero_offset_when_matched():
+    """When the reference already fills the target grid the offset is 0 (stride-1)."""
+    pos = reference_positions(1, frame=2, gh=4, gw=4, th=4, tw=4)
+    assert pos.shape == (1, 16, 3)
+    assert (pos[0, :, 0] == 2.0).all()
+    assert sorted(pos[0, :, 1].unique().tolist()) == [0.0, 1.0, 2.0, 3.0]
+    assert sorted(pos[0, :, 2].unique().tolist()) == [0.0, 1.0, 2.0, 3.0]
+
+
+def test_fit_reference_is_noop_when_already_at_target_grid():
+    latent = torch.randn(1, 16, 8, 8)
+    out = fit_reference(latent, th=4, tw=4, patch=2)
+    assert torch.equal(out, latent)
+
+
+def test_fit_reference_crops_to_target_aspect():
+    # A 16x8 latent fitted to a 8x8 target grid (patch 2 -> 8x8 pixels) center-crops width.
+    latent = torch.randn(1, 16, 16, 8)
+    out = fit_reference(latent, th=4, tw=4, patch=2)
+    assert out.shape == (1, 16, 8, 8)
+
+
+def test_pack_reference_patchifies_and_builds_frame_pos():
+    latent = torch.randn(1, 16, 4, 4)
+    tokens, pos = pack_reference(latent, th=2, tw=2, patch=2, ref_index=1)
+    assert tokens.shape == (1, 4, 16 * 2 * 2)
+    assert pos.shape == (1, 4, 3)
+    assert (pos[0, :, 0] == 1.0).all()
+
+
+def test_prepare_edit_prepends_refs_with_frame_indices():
+    img = torch.randn(1, 16, 4, 4)  # target latent -> 2x2 tokens
+    ref = [torch.randn(1, 16, 4, 4)]  # one ref at the target grid -> 2x2 tokens
+    txtmask = torch.tensor([[True, True, False]])
+    tokens, pos, mask, ref_len = prepare_edit(img, ref, txtlen=3, patch=2, txtmask=txtmask)
+    # [ref(4) | target(4) | text(3)] = 11 tokens.
+    assert tokens.shape == (1, 8, 16 * 2 * 2)
+    assert ref_len == 4
+    assert pos.shape == (1, 11, 3)
+    assert mask.shape == (1, 11)
+    assert mask[0, :8].tolist() == [1.0] * 8
+    assert mask[0, 8:].tolist() == [1.0, 1.0, 0.0]
+    # Ref tokens carry frame=1; target carries frame=0; text at origin.
+    assert (pos[0, :4, 0] == 1.0).all()
+    assert (pos[0, 4:8, 0] == 0.0).all()
+    assert torch.equal(pos[0, 8:], torch.zeros(3, 3))
+
+
+def test_prepare_edit_rejects_non_fit_method():
+    img = torch.randn(1, 16, 4, 4)
+    ref = [torch.randn(1, 16, 4, 4)]
+    txtmask = torch.ones(1, 3, dtype=torch.bool)
+    with pytest.raises(ValueError):
+        prepare_edit(img, ref, txtlen=3, patch=2, txtmask=txtmask, ref_method="crop")
+
+
+def test_slice_reference_output_drops_leading_refs():
+    out = torch.arange(3 * 10 * 4, dtype=torch.float32).reshape(3, 10, 4)
+    sliced = slice_reference_output(out, ref_len=4, target_len=6)
+    assert sliced.shape == (3, 6, 4)
+    assert torch.equal(sliced, out[:, 4:10])

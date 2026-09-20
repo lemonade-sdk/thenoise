@@ -31,6 +31,7 @@ from transformers import (
     Qwen3ForCausalLM,
     Qwen3VLConfig,
     Qwen3VLForConditionalGeneration,
+    Qwen3VLProcessor,
     T5TokenizerFast,
 )
 
@@ -258,6 +259,22 @@ def load_qwen2_5_vl_processor(tokenizer):
     )
 
 
+def load_qwen3_vl_processor(tokenizer):
+    """Build a Qwen3-VL image/video processor from the vendored vision config + tokenizer.
+
+    Qwen3-VL has no standalone image-processor class in ``transformers``; it reuses the
+    Qwen2-VL image/video processor classes configured from the vendored ``vision_config``
+    (patch size, merge size, temporal patch size), which is exactly what the Qwen3-VL
+    ``Qwen3VLProcessor`` expects. Needed for Krea 2's image-grounded instruction encode.
+    """
+    vision_config = QWEN3_VL_4B_INSTRUCT_CONFIG["vision_config"]
+    image_processor = Qwen2VLImageProcessor.from_dict(vision_config)
+    video_processor = Qwen2VLVideoProcessor.from_dict(vision_config)
+    return Qwen3VLProcessor(
+        image_processor=image_processor, tokenizer=tokenizer, video_processor=video_processor
+    )
+
+
 def load_t5_tokenizer(t5_tokenizer_path: Optional[str] = None):
     """Load the T5 tokenizer used for LLM-adapter target tokens.
 
@@ -313,6 +330,7 @@ __all__ = [
     "load_qwen2_tokenizer",
     "load_qwen3_vl_tokenizer",
     "load_qwen2_5_vl_processor",
+    "load_qwen3_vl_processor",
     "load_t5_tokenizer",
     "QWEN25_TOKENIZER_CONFIG_DIR",
     "T5_TOKENIZER_CONFIG_DIR",
