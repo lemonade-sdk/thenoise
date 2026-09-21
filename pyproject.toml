@@ -20,7 +20,7 @@ dependencies = [
     "einops>=0.7.0",
     "accelerate>=1.6.0",
     "pillow>=11.3.0",
-    "comfy-kitchen>=0.2.34",
+    "comfy-kitchen>=0.2.35",
     "numpy",
     "tqdm",
 ]
