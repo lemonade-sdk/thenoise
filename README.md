@@ -259,7 +259,7 @@ and VAE are always included).
 
 This fetches the bf16 DiT (~14 GB), the Qwen3-VL-8B text encoder (~17.5 GB) and the
 VAE (~0.7 GB). Add `--int8-convrot` to fetch the int8-convrot DiT **and** text encoder
-instead (~17 GB total).:
+instead (~17 GB total):
 
 ```bash
 ./thenoise.sh generate \

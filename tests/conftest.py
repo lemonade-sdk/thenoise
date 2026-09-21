@@ -356,8 +356,7 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
         ],
     ),
     # The two Qwen-Images share the img_in / txt_in / time_text_embed prefixes: the
-    # 2.1 key-set must not be claimed by the dual-stream 1.x detector (and vice
-    # versa), which is exactly what the detection matrix below pins down.
+    # detection matrix below pins down that neither claims the other's key-set.
     "unknown": (None, ["some.random.key", "blocks.0.attn.gate.weight"]),
 }
 

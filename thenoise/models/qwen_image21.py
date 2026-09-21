@@ -4,37 +4,33 @@ Qwen-Image 2.1 shares nothing but a name with Qwen-Image 1: a different DiT (see
 :mod:`thenoise.dit.qwen_image21.models`), a Wan-2.2-layout 64-channel/16x RGBA VAE,
 and a Qwen3-VL-8B conditioner.
 
-That VAE is the engine's first RGBA one, so this model is the reason the pipeline
-carries a channel count at all: the alpha its VAE decodes runs through the
-postprocessing filters, the postprocessors and the PNG writer untouched (see
-``DiffusionModel.pixel_channels``). Only the boundaries that genuinely cannot carry
-an alpha composite it away, onto white: the Qwen3-VL vision tokens below, and the
-pixel-domain upscaler (which resamples the matte and re-attaches it).
+That VAE is the engine's first RGBA one, so this is the model the pipeline's channel
+count exists for (see ``DiffusionModel.pixel_channels``). The boundaries that cannot
+carry an alpha — the Qwen3-VL vision tokens and the pixel-domain upscaler —
+composite it onto white.
 
-The latent is the DiT's own input. ``img_in`` takes the VAE's 64 channels directly
-and one token is one latent cell, so — unlike Qwen-Image 1 or Flux Klein — there is
-no pack/unpack step: the canonical 4D latent is the model-internal one, and
-``prepare_latent``/``finalize_latent`` only move it.
+The latent is the DiT's own input: ``img_in`` takes the VAE's 64 channels directly
+and one token is one latent cell, so unlike Qwen-Image 1 or Flux Klein there is no
+pack/unpack step and ``prepare_latent``/``finalize_latent`` only move it.
 
-Editing feeds the reference image in twice, exactly like Qwen-Image 1: the text
-encoder sees it as vision tokens, and its VAE latent is spliced into the DiT's text
-stream at the slot the tokenizer recorded. The difference is what the DiT does with
-it: the whole text + reference prefix is modulated at ``t = 0`` *and* is causally
-upstream of the target, so the prefix K/V are step-invariant and freezing them
-(``kv_cache``) is exact rather than approximate. That timestep-zero conditioning is
-architectural — the model has no ``index`` reference method — hence the
-``index_timestep_zero`` default and the rejection of anything else.
+Editing feeds the reference in twice, like Qwen-Image 1: as vision tokens to the
+text encoder, and as a VAE latent spliced into the DiT's text stream at the slot the
+tokenizer recorded. The whole text + reference prefix is modulated at ``t = 0`` and
+is causally upstream of the target, so its K/V are step-invariant and the KV cache
+is exact rather than approximate. That timestep-zero conditioning is architectural —
+the model has no ``index`` reference method — hence the ``index_timestep_zero``
+default and the rejection of anything else.
 
 The two halves of an edit are kept in step by construction: the reference is resized
 for the text encoder with the same cover-and-crop the pipeline applies before
-``encode_reference``, so the vision tokens the encoder removes and the latent tokens
-that replace them describe the same pixels (one vision token per 32x32 pixels, one
-latent cell per 16x16 — hence the 32-pixel size alignment).
+``encode_reference``, so the vision tokens removed and the latent tokens replacing
+them describe the same pixels (one vision token per 32x32 pixels, one latent cell
+per 16x16 — hence the 32-pixel size alignment).
 
-LoRA note: the released checkpoints store the SwiGLU gate and up projections fused as
-one ``img_mlp.gate_up`` matrix, so a community LoRA trained against the diffusers
-``img_mlp.proj`` / ``img_mlp.gate_layer`` names only lands on this model's attention
-projections (the unmatched MLP factors are reported as unused at apply time).
+LoRA note: the released checkpoints fuse the SwiGLU gate and up projections into one
+``img_mlp.gate_up`` matrix, so a LoRA trained against the diffusers ``img_mlp.proj`` /
+``img_mlp.gate_layer`` names only lands on the attention projections (the unmatched
+factors are reported as unused at apply time).
 """
 from __future__ import annotations
 
@@ -68,13 +64,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class QwenImage21Conditioning(Conditioning):
-    """``Conditioning`` plus the per-branch reference-image slots.
+    """``Conditioning`` plus the per-branch reference-image token slots.
 
-    ``cond_slots[i]`` is the token index in ``cond`` where the ``i``-th reference
-    latent is spliced into the text stream (``null_slots`` for the CFG branch). They
-    are per-branch because the two prompts have different lengths, and the pipeline
-    treats a ``Conditioning`` opaquely, so carrying them here keeps that piece of
-    model knowledge out of the shared code.
+    ``cond_slots[i]`` is the index in ``cond`` where the ``i``-th reference latent is
+    spliced into the text stream. They are per-branch because the two prompts have
+    different lengths.
     """
 
     cond_slots: Optional[List[int]] = None
@@ -89,11 +83,10 @@ class QwenImage21Model(DiffusionModel):
         "steps": 28,
         "guidance_scale": 1.0,
         "sampler": "euler",
-        # The prefix (text + references) is modulated at t = 0 by construction, so
-        # that is the reference method — not a choice the checkpoint or request makes.
+        # The prefix is modulated at t = 0 by construction, so that is the only
+        # reference method, and its K/V are exactly step-invariant
+        # (``KV_CACHED_SLICE``), so freezing them costs no accuracy.
         "ref_method": "index_timestep_zero",
-        # Its prefix K/V are EXACTLY step-invariant (see ``KV_CACHED_SLICE``), so
-        # freezing them is free of accuracy cost.
         "kv_cache": True,
     }
 
@@ -109,10 +102,9 @@ class QwenImage21Model(DiffusionModel):
     def detect(f) -> bool:
         """True if this handle is a Qwen-Image 2.1 DiT.
 
-        The architecture's own signature: the shared per-run ``modulation`` and the
-        zero-centred ``txt_in.text_norm`` exist in no other model (Qwen-Image 1 has an
-        ``img_in``/``txt_in`` pair too, but a per-block modulation and no text norm).
-        Keys are normalized first so repackaged checkpoints resolve identically.
+        The shared per-run ``modulation`` and the zero-centred ``txt_in.text_norm``
+        exist in no other model. Keys are normalized first so repackaged checkpoints
+        resolve identically.
         """
         keys = set(normalize_keys(f.keys()))
         return is_qwen_image21_key(keys)
@@ -128,8 +120,8 @@ class QwenImage21Model(DiffusionModel):
         # Per-run state, filled in by ``prepare_latent``.
         self._seqs: dict[str, QwenImage21Sequence] = {}
 
-        # Qwen3-VL-8B with its vision tower: an edit's reference image goes in here as
-        # vision tokens as well as into the DiT as a latent (see the module docstring).
+        # Qwen3-VL-8B with its vision tower: an edit's reference goes in here as
+        # vision tokens as well as into the DiT as a latent.
         logger.info("Loading Qwen-Image 2.1 text encoder (Qwen3-VL-8B) from %s", config.text_encoder_path)
         self.text_encoder: QwenImage21TextEncoder = load_qwen_image21_text_encoder(
             config.text_encoder_path, dtype=config.dtype, device=self.offload_device
@@ -154,16 +146,12 @@ class QwenImage21Model(DiffusionModel):
     def _encoder_images(self, args: EncodePromptArgs) -> Optional[list]:
         """``args.image`` (single or list) as RGB, at the size the VAE saw.
 
-        The pipeline builds each reference latent from ``resize_to_cover_center_crop(
-        image, width, height)``, so the vision tokens are computed from the same crop
-        — otherwise the latent tokens would not describe the pixels the language model
-        described, and the slot it left behind would be the wrong size too. Sizes are
-        aligned to 32 pixels (see :meth:`resolve_size`), which is also exactly one
-        vision token.
+        The pipeline builds each reference latent from the same cover-and-crop, so
+        the vision tokens and the latent tokens that replace them describe the same
+        pixels (sizes are aligned to one vision token, see :meth:`resolve_size`).
 
-        The vision tower only speaks RGB, so this is a boundary where an alpha has to
-        go: it is composited onto white rather than dropped, which would hand the
-        encoder the RGB of fully transparent pixels.
+        The vision tower only speaks RGB, so this is a boundary where an alpha has
+        to go: it is composited onto white rather than dropped.
         """
         if args.image is None:
             return None
@@ -177,10 +165,9 @@ class QwenImage21Model(DiffusionModel):
     def encode_prompt(self, args: EncodePromptArgs) -> Conditioning:
         """Prompt (and, when editing, the references) -> embeddings + image slots.
 
-        There is no attention mask: the engine encodes one prompt at a time, so the
-        sequence needs no padding, and the vision tokens the encoder reports back are
-        removed rather than masked — the DiT splices the reference latents into their
-        places.
+        There is no attention mask: one prompt at a time needs no padding, and the
+        vision tokens are removed rather than masked — the DiT splices the reference
+        latents into their places.
         """
         images = self._encoder_images(args)
         cond, cond_slots = self.text_encoder(args.prompt, images)
@@ -213,9 +200,8 @@ class QwenImage21Model(DiffusionModel):
 
         The sequence holds the *projected* text + reference tokens and their RoPE
         table, so a denoise step is only the target-image tokens plus the block loop.
-        Each conditioning branch needs its own (the uncond prompt is usually shorter,
-        hence different token counts, slots and cache buffers), keyed ``cond`` /
-        ``uncond`` exactly like the run's KV caches.
+        Each conditioning branch needs its own (the uncond prompt is usually shorter),
+        keyed ``cond`` / ``uncond`` like the run's KV caches.
         """
         dev = torch.device(self.device)
         x = latents.to(device=dev, dtype=self.dtype)
@@ -237,8 +223,7 @@ class QwenImage21Model(DiffusionModel):
                 name="seq_uncond", dtype=self.dtype,
             )
 
-        # Reference-latent KV cache: fresh per run, one cache per conditioning branch
-        # (see ``DiffusionModel.start_kv_caches``).
+        # Fresh KV caches, one per conditioning branch.
         self.start_kv_caches(
             params,
             has_reference=refs is not None,
@@ -264,8 +249,7 @@ class QwenImage21Model(DiffusionModel):
     ) -> torch.Tensor:
         """One DiT forward (+ CFG) returning the velocity, in canonical latent form.
 
-        Plain CFG — Qwen-Image 1's norm-renormalisation of the guided prediction is
-        not part of this architecture's recipe.
+        Plain CFG — Qwen-Image 1's norm-renormalisation is not part of this recipe.
         """
         dev = torch.device(self.device)
         t_full = torch.full((1,), float(t), dtype=latents.dtype, device=dev)
@@ -279,7 +263,6 @@ class QwenImage21Model(DiffusionModel):
         return v
 
     def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:
-        # Drop the run-scoped KV cache (and the run's sequences) before the decode.
         self.end_kv_caches()
         self._seqs = {}
         return latents
@@ -287,20 +270,15 @@ class QwenImage21Model(DiffusionModel):
     def resolve_size(self, width: int, height: int) -> tuple[int, int]:
         """Align to 32 pixels: two latent cells, and one Qwen3-VL vision token.
 
-        The VAE alone would only need 16. The extra factor is the edit path: a vision
-        token covers a 32x32 pixel block, and the reference latent that replaces the
-        removed vision tokens must divide into those blocks exactly.
+        The VAE alone would only need 16; the extra factor is the edit path, where
+        the reference latent must replace whole 32x32 vision tokens.
         """
         align = 2 * self.vae.spatial_compression
         return round_up(width, align), round_up(height, align)
 
     # ------------------------------------------------------------ editing
     def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
-        """Encode input pixels (``[C,H,W]`` in [-1, 1]) -> canonical reference latent.
-
-        The pipeline hands over four channels (this VAE's ``pixel_channels``), alpha
-        included; the VAE pads an opaque one if a caller passes three.
-        """
+        """Encode input pixels (``[C,H,W]`` in [-1, 1]) -> canonical reference latent."""
         return self.vae.encode_pixels_to_latents(pixels.unsqueeze(0))
 
     def pack_reference_latent(
@@ -311,11 +289,9 @@ class QwenImage21Model(DiffusionModel):
     ) -> Tuple[torch.Tensor, None]:
         """Validate the reference method and hand back the latent unchanged.
 
-        There is nothing to pack: :meth:`build_sequence` projects the reference latent
-        through ``img_in`` and positions it itself, and its ``t = 0`` modulation is
-        architectural rather than per-request — so ``index``, which would mean
-        "condition the reference like the target", does not exist in this model and is
-        rejected instead of silently behaving like ``index_timestep_zero``.
+        There is nothing to pack, and ``index`` — which would mean "condition the
+        reference like the target" — does not exist here, so it is rejected rather
+        than silently behaving like ``index_timestep_zero``.
         """
         if method != "index_timestep_zero":
             raise ValueError(

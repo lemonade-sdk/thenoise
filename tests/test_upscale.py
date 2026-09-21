@@ -265,11 +265,7 @@ def _manager_with(fake):
 
 
 def test_apply_feeds_the_upscaler_rgb_and_keeps_the_alpha():
-    """Real-ESRGAN is 3-channel: composite for it, then re-attach the matte.
-
-    Dropping the alpha here would make "upscale this cut-out" silently paint a
-    background over it; the alpha is instead resampled by the same factor.
-    """
+    """Real-ESRGAN is 3-channel: composite for it, then re-attach the matte."""
     fake = _FakeUpscaler()
 
     # Black RGB under a fully transparent matte.

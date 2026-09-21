@@ -386,11 +386,9 @@ def _switch_to_quantized(
 ) -> None:
     """Put a quantized weight on ``module``: quantized if it can run one, else dequantized.
 
-    Only linears run a ``QuantizedTensor`` directly (their GEMM dispatches on the
-    layout). A quantized **embedding** is the one other thing a text-encoder export
-    stores — a row gather cannot run on a quantized table, so the table is
-    dequantized (un-rotating ConvRot) into the compute dtype, which is what the
-    runtime would pay per lookup anyway.
+    Only linears run a ``QuantizedTensor`` directly. A quantized **embedding** is the
+    one other thing a text-encoder export stores; a row gather cannot run on a
+    quantized table, so it is dequantized into the compute dtype.
     """
     if hasattr(module, "load_quantized"):
         module.load_quantized(qt)

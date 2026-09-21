@@ -4,16 +4,13 @@
 tensors in ``[-1, 1]`` with shape ``[C, H, W]`` and need the same PIL conversion +
 resize helpers.
 
-The channel count of that tensor is the *VAE's* (``DiffusionModel.pixel_channels``:
-3 for the RGB VAEs, 4 for the RGBA Qwen-Image 2.1 one), so these helpers are the
-two places where a channel count gets decided — on the way in
-(:func:`pil_to_pixels`, told how many channels the target wants) and on the way
-out (:func:`pixels_to_pil`, which just mirrors what it was handed). Wherever a
-stage cannot carry an alpha (an RGB-only VAE, a text encoder's vision tokens, the
-pixel-domain upscaler) the alpha is *composited* onto :data:`ALPHA_BACKGROUND`
-with :func:`flatten_alpha`, never dropped: PIL's ``convert("RGB")`` throws the
-channel away and keeps the RGB of the transparent pixels, which is black at best
-and encoding garbage at worst.
+The channel count of that tensor is the *VAE's* (``DiffusionModel.pixel_channels``),
+so these are the two places where it gets decided: on the way in
+(:func:`pil_to_pixels`, told how many channels the destination wants) and on the
+way out (:func:`pixels_to_pil`, which mirrors what it was handed). Wherever a stage
+cannot carry an alpha, :func:`flatten_alpha` *composites* it onto
+:data:`ALPHA_BACKGROUND` rather than dropping it: PIL's ``convert("RGB")`` keeps the
+RGB of the transparent pixels, which is black at best and garbage at worst.
 """
 from __future__ import annotations
 
@@ -26,8 +23,7 @@ import torch.nn.functional as F
 from PIL import Image
 
 # Background an alpha channel is composited onto whenever a stage cannot carry it.
-# White matches the opaque padding value an RGBA VAE pads RGB inputs with
-# (``AutoencoderKLWan22.pad_channel_value`` = 1.0 in the ``[-1, 1]`` range).
+# Matches the opaque padding value an RGBA VAE pads RGB inputs with.
 ALPHA_BACKGROUND: Tuple[int, int, int] = (255, 255, 255)
 
 # PIL modes that carry a real transparency channel. ``P`` is handled separately:
@@ -64,12 +60,9 @@ def flatten_alpha(
 def load_image(source: Union[str, "os.PathLike", Image.Image]) -> Image.Image:
     """Open an input image keeping its alpha when it has one.
 
-    The wire layer used to ``convert("RGB")`` on the way in, which fixed the
-    channel count before anyone asked the model: a transparent input reaching an
-    RGBA model lost its alpha, and one reaching an RGB model kept the transparent
-    pixels' RGB. Normalising to RGB or RGBA (never ``P``/``L``/16-bit) keeps the
-    question "does this carry transparency?" answerable downstream, where the
-    destination's channel count is known.
+    Normalises to RGB or RGBA (never ``P``/``L``/16-bit) so the question "does this
+    carry transparency?" stays answerable downstream, where the destination's
+    channel count is known.
     """
     image = source if isinstance(source, Image.Image) else Image.open(source)
     image.load()  # resolve the lazy decode (and P-mode transparency) now
@@ -79,14 +72,10 @@ def load_image(source: Union[str, "os.PathLike", Image.Image]) -> Image.Image:
 def pil_to_pixels(image: Image.Image, channels: Optional[int] = 3) -> torch.Tensor:
     """PIL -> [C, H, W] fp32 tensor in [-1, 1] with exactly ``channels`` channels.
 
-    ``channels`` is the pixel width of the destination (a VAE's
-    ``pixel_channels``, or 3 for the pixel-domain upscaler): an image without
+    ``channels`` is the pixel width of the destination: an image without
     transparency entering an RGBA destination gets an opaque alpha, one *with*
-    transparency entering an RGB destination is composited onto white.
-
-    ``channels=None`` means "as it came in" — RGBA when the image carries
-    transparency, RGB when it does not — for a stage that has no opinion of its
-    own and only has to avoid losing information (the standalone upscaler).
+    transparency entering an RGB destination is composited onto white. ``None``
+    means "as it came in", for a stage that only has to lose nothing.
     """
     if channels is None:
         channels = 4 if has_alpha(image) else 3
@@ -98,11 +87,7 @@ def pil_to_pixels(image: Image.Image, channels: Optional[int] = 3) -> torch.Tens
 
 
 def pixels_to_pil(pixels: torch.Tensor) -> Image.Image:
-    """GPU fp32 [C, H, W] tensor in [-1, 1] -> PIL image with ``C`` channels.
-
-    The mode mirrors the channel count, so pixels decoded by an RGBA VAE become
-    an RGBA image and the PNG encoder writes the alpha through.
-    """
+    """GPU fp32 [C, H, W] tensor in [-1, 1] -> PIL image with ``C`` channels."""
     c = pixels.shape[0]
     if c not in _MODES:
         raise ValueError(f"cannot build a PIL image from {c} channels")

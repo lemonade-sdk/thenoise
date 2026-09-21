@@ -592,9 +592,8 @@ class AutoencoderKLQwenImage(nn.Module):
     def pixel_channels(self) -> int:
         """Pixel channels the VAE consumes/emits (3 = RGB, 4 = RGBA).
 
-        Part of the shared VAE interface (see ``AutoencoderKLWan22``): the pipeline
-        uses it to decide whether an alpha channel reaches the model or is
-        composited away at the encode boundary, and how many channels the PNG
+        Part of the shared VAE interface (see ``AutoencoderKLWan22``): it decides
+        whether an incoming alpha reaches the model and how many channels the PNG
         output carries.
         """
         return self.input_channels

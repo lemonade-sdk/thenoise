@@ -1,8 +1,8 @@
 """Alpha-aware pipeline tests: the channels an RGBA model gets in and gives out.
 
 The pipeline carries the VAE's channel count from the input image to the PNG, so
-these tests are the seams where that can leak: the reference (edit) encode, the
-decode -> PIL tail, and the reference cache key. They run over the weight-free
+these tests cover the seams where that can leak: the reference (edit) encode, the
+reference cache key, and the decode -> PIL tail. They run over the weight-free
 ``StubModel`` (CPU, fp32) with its ``pixel_channels`` overridden to 4.
 """
 from __future__ import annotations
@@ -29,7 +29,6 @@ def _request(**kwargs) -> GenerateRequest:
 
 class _RGBAStubModel(EditingStubModel):
     """An editing stub on an RGBA VAE: 4 channels in, 4 channels out."""
-
     pixel_channels = 4
 
     def decode(self, latents):
@@ -150,7 +149,7 @@ def test_pixel_upscale_of_an_rgba_generation_keeps_it_rgba(tmp_path, monkeypatch
 
 
 def test_the_alpha_survives_into_the_png_bytes():
-    """What the UI/browser receives is RGBA, not just what ``generate`` returned."""
+    """What the browser receives is RGBA, not just what ``generate`` returned."""
     import io
 
     image = _controller(_RGBAStubModel()).generate(_request(steps=1))

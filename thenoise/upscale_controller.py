@@ -32,8 +32,8 @@ class PixelUpscaleController:
         to integer output dimensions). An ``upscale_factor`` of ``0.0`` is a
         sentinel meaning "use the model's detected native scale".
 
-        An input carrying transparency comes back carrying transparency: the
-        upscaler itself is RGB-only and composites/resamples the alpha itself (see
+        An input carrying transparency comes back carrying transparency (the
+        upscaler itself is RGB-only and handles the alpha, see
         :meth:`PixelUpscalerManager.apply`).
         """
         name = self._pixel_upscalers.validate(pixel_upscaler)
@@ -50,9 +50,7 @@ class PixelUpscaleController:
                 f"upscale_factor must be in [1, {scale}] for a {scale}x upscaler"
             )
 
-        # ``None`` = keep whatever the input carried: transparency in, transparency
-        # out (the upscaler composites the alpha away for its RGB-only model and
-        # re-attaches it afterwards).
+        # ``None`` = keep whatever the input carried.
         pixels = pil_to_pixels(image, None).to(self._pixel_upscalers.device)
         with self._lock:
             pixels = self._pixel_upscalers.apply(name, pixels, scale)

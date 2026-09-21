@@ -1,33 +1,23 @@
 """Qwen-Image 2.1 text encoder — Qwen3-VL-8B, vision tokens in, image slots out.
 
 Qwen-Image 2.1 is conditioned by a *full* Qwen3-VL-8B: the LM **and** its vision
-tower (unlike Qwen-Image 1's Qwen2.5-VL conditioner, which is also 1.x's 3584-wide
-text, and unlike Flux Klein's text-only Qwen3). An edit therefore feeds the
-reference image in twice, and both halves have to agree on where it sits:
-
-  * the language model sees it as vision tokens spliced into the prompt, and
-  * the DiT replaces exactly those token positions with the reference VAE latent.
+tower. An edit therefore feeds the reference image in twice, and both halves have to
+agree on where it sits: the language model sees it as vision tokens spliced into the
+prompt, and the DiT replaces exactly those positions with the reference VAE latent.
 
 So the encoder returns, per conditioning branch, the prompt embeddings with the
 system turn *and* the vision tokens removed, plus ``image_slots`` — the token index
-each removed image left behind, which is where
+each removed image left behind, where
 :meth:`thenoise.dit.qwen_image21.models.QwenImage21Transformer2DModel.build_sequence`
-splices the latent back in. Keeping the two in step is also why the pipeline sizes
-the reference for the VAE and for this encoder identically: a vision token covers
-32x32 pixels and a latent cell 16x16, so each removed token is replaced by exactly
-2x2 latent tokens.
+splices the latent back in.
 
 Two details are load-bearing for matching the reference implementation:
 
-  * **The hidden state is the last layer's output BEFORE the final RMSNorm.**
-    The model is tuned on that (ComfyUI sets ``layer_norm_hidden_state = False``
-    for the same reason). ``hidden_states[-1]`` is not it on current transformers —
-    that value is already normalised — so the encoder takes it from a forward-pre-hook
-    on the LM's final norm instead, which does not depend on how the library happens
-    to order its captured hidden states.
-  * **The system turn is dropped and the user turn starts the conditioning.** The
-    prompt is wrapped in a comprehension system prompt, and only everything from the
-    second chat-start marker onwards reaches the DiT.
+  * **The hidden state is the last layer's output BEFORE the final RMSNorm** (the
+    model is tuned on that; ``hidden_states[-1]`` is already normalised on current
+    transformers), so it is captured with a forward-pre-hook on the LM's final norm.
+  * **The system turn is dropped and the user turn starts the conditioning**: only
+    everything from the second chat-start marker onwards reaches the DiT.
 """
 from __future__ import annotations
 
@@ -69,9 +59,8 @@ T2I_TEMPLATE = SYSTEM_PROMPT + IM_START + "user\n{}" + PROMPT_SUFFIX
 def prompt_template(prompt: str, num_images: int) -> str:
     """The chat-wrapped prompt, with one labelled vision block per reference.
 
-    Mirrors the reference tokenizer: the images lead the user turn as
-    ``image1``, ``image2``, ... each followed by its vision block, and the text
-    follows them. An empty prompt becomes a single space, so the user turn is never
+    The images lead the user turn as ``image1``, ``image2``, ... each followed by its
+    vision block. An empty prompt becomes a single space, so the user turn is never
     empty (which would change the tokenisation of the markers around it).
     """
     if not prompt:
@@ -96,9 +85,8 @@ def keep_mask_and_slots(
         reference latent.
 
     A slot is the index the removed run *used* to start at, counted in the kept
-    tokens before it — i.e. where the latent goes in the shortened stream. Runs are
-    identified by ``mm_token_type_ids`` (modality 1 = image) rather than by scanning
-    for the pad id, which is what the processor itself uses to expand them.
+    tokens before it. Runs are identified by ``mm_token_type_ids`` (modality 1 =
+    image), which is what the processor itself uses to expand them.
 
     ``input_ids``/``mm_token_type_ids`` are one sequence (no batch axis).
     """
@@ -124,8 +112,8 @@ def keep_mask_and_slots(
 class QwenImage21TextEncoder(nn.Module):
     """Qwen3-VL-8B prompt encoder: ``(prompt, images) -> (embeddings, slots)``.
 
-    Registered with the memory manager as any other text encoder: it owns the model
-    and moves with it, while the tokenizer/processor are pure Python and stay put.
+    Registered with the memory manager as any other text encoder; the
+    tokenizer/processor are pure Python and stay put.
     """
 
     def __init__(self, qwen: nn.Module, tokenizer, processor) -> None:
@@ -167,8 +155,8 @@ class QwenImage21TextEncoder(nn.Module):
         """Encode one prompt -> ``([1, L, hidden], slots)``.
 
         ``images`` are PIL images in prompt order (already at the size the VAE saw).
-        The returned embeddings have the system turn and the vision tokens removed,
-        so ``L`` is the conditioning length the DiT's sequence is built from.
+        The system turn and the vision tokens are removed, so ``L`` is the
+        conditioning length the DiT's sequence is built from.
         """
         images = list(images or [])
         text = prompt_template(prompt, len(images))
@@ -178,8 +166,7 @@ class QwenImage21TextEncoder(nn.Module):
         model_inputs = {
             "input_ids": input_ids,
             "attention_mask": self._to_model(inputs["attention_mask"], torch.long),
-            # M-RoPE needs the per-token modality map; the processor ships it and the
-            # model refuses to guess it.
+            # M-RoPE needs the per-token modality map; the model refuses to guess it.
             "mm_token_type_ids": self._to_model(inputs["mm_token_type_ids"], torch.long),
             "use_cache": False,
         }
@@ -215,7 +202,7 @@ def load_qwen_image21_text_encoder(
 
     ``path`` is a single safetensors file (official HF or ComfyUI layout, bf16 or
     int8-convrot). The tokenizer defaults to the vendored Qwen config directory, or
-    to a ``tokenizer/`` directory next to the checkpoint when the downloader left one.
+    to a ``tokenizer/`` directory next to the checkpoint.
     """
     qwen = load_qwen3_vl_model(
         path, dtype=dtype, device=device, config=QWEN3_VL_8B_INSTRUCT_CONFIG

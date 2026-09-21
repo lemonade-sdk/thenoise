@@ -25,8 +25,8 @@ Subclasses implement the model-specific kernels and load their own VAE:
 
 The VAE also owns the pixel width (``pixel_channels``: 3 for the RGB family, 4 for
 the RGBA Qwen-Image 2.1 one) and the adapter just reports it, so the pipeline can
-ask the input boundary for the right number of channels and hand the decoded ones
-through to the PNG without any model ever naming a format.
+ask for the right number of channels at the input boundary and hand the decoded
+ones through to the PNG.
 
 Every adapter works on the canonical latent format ``[B, C, H, W]`` (4D), which is
 simply the VAE's own output format: ``C = vae.z_dim``, one latent cell per
@@ -197,10 +197,9 @@ class DiffusionModel(ABC):
     # only for fused-projection models
     fused_attention: bool = True
 
-    # Which end of the attention sequence the run's KV cache freezes: ``"suffix"``
-    # when the model attends ``text, target, references`` (Flux.2 Klein, Qwen-Image)
-    # and ``"prefix"`` when the step-invariant slice comes first (Qwen-Image 2.1
-    # attends ``text + references, target``). Passed to ``thenoise.dit.kvcache``.
+    # Which end of the attention sequence this model's KV cache freezes: "suffix"
+    # for a ``text, target, references`` layout, "prefix" for ``text + references,
+    # target``. Passed to ``thenoise.dit.kvcache``.
     KV_CACHED_SLICE: ClassVar[str] = "suffix"
 
     def _lora_key_map(self, key: str) -> str:
@@ -574,14 +573,7 @@ class DiffusionModel(ABC):
     # ------------------------------------------------------------ pixel format
     @property
     def pixel_channels(self) -> int:
-        """Pixel channels this model's VAE consumes and emits (3 = RGB, 4 = RGBA).
-
-        Owned by the VAE like the rest of the latent geometry: it is the channel
-        count the pipeline asks the input PIL boundary for, the width a reference
-        image is encoded at, and the width the decode hands to postprocessing and
-        the PNG writer. A model without a say in the matter (a weight-free stub)
-        is RGB.
-        """
+        """Pixel channels this model's VAE consumes and emits (3 = RGB, 4 = RGBA)."""
         return getattr(getattr(self, "vae", None), "pixel_channels", 3)
 
     # ------------------------------------------------------------ decode
@@ -591,8 +583,7 @@ class DiffusionModel(ABC):
         Accepts the canonical 4D latent ``[B, C, H, W]`` (the VAE is 2D /
         single-frame) and returns pixels ``[C, H, W]`` in [-1, 1] as an fp32
         GPU tensor, ready for the controller's postprocessing. ``C`` is the VAE's
-        own width (:attr:`pixel_channels`), so an RGBA VAE's alpha reaches the PNG
-        output instead of being dropped here.
+        own width, so an RGBA decode's alpha reaches the PNG output.
         """
         dev = torch.device(self.device)
         with torch.no_grad():

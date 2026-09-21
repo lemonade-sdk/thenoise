@@ -142,12 +142,7 @@ class Runtime:
         return dict(self._model.CAPABILITIES)
 
     def model_pixel_channels(self) -> int:
-        """The loaded model's pixel width (3 = RGB, 4 = RGBA); 3 with no model.
-
-        Reported by ``/health`` so the UI can tell whether an output can be
-        transparent. Defaults to RGB rather than failing when a model has no VAE
-        opinion to offer.
-        """
+        """The loaded model's pixel width (3 = RGB, 4 = RGBA); 3 with no model."""
         if self._model is None:
             return 3
         return getattr(self._model, "pixel_channels", 3)

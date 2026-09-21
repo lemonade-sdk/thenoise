@@ -126,12 +126,7 @@ class _KvCacheByDefaultModel(EditingStubModel):
 
 
 def test_a_model_defaulting_kv_cache_still_runs_a_plain_generation():
-    """The cache freezes *reference* K/V; with no reference there is nothing to freeze.
-
-    Shipping the default on must not turn every text-to-image request into the
-    pipeline's "kv_cache requires an edit request" error — the default is about
-    edits, and an auto request means "whatever the model wants, where it applies".
-    """
+    """The cache freezes *reference* K/V, so with no reference it must stay off."""
     plain = _controller(_KvCacheByDefaultModel())._resolve_pipeline(_request())
     assert plain.kv_cache is False
 
@@ -139,7 +134,6 @@ def test_a_model_defaulting_kv_cache_still_runs_a_plain_generation():
         _request(image=Image.new("RGB", (64, 64), "white"))
     )
     assert edit.kv_cache is True
-    # And it drags the reference method along, exactly as an explicit request does.
     assert edit.ref_method == "index_timestep_zero"
 
 

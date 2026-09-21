@@ -1,13 +1,10 @@
 """Qwen-Image 2.1 DiT loading: architecture from the header, weights via ``load_dit``.
 
 Two reconciliations happen at load time, both so the model can be built out of the
-repo's shared modules instead of checkpoint-shaped ones:
-
-* the attention QK norms (``attn.norm_q`` / ``attn.norm_k``) land on the shared
-  ``QKNorm`` layout, and
-* ``txt_in.text_norm`` is a *zero-centred* RMSNorm — its stored weight is
-  ``scale - 1`` — so the 1 is added back here and the plain ``RMSNorm`` runs it
-  (the same move Krea 2 makes for its text-norm scale).
+repo's shared modules instead of checkpoint-shaped ones: the attention QK norms
+(``attn.norm_q`` / ``attn.norm_k``) land on the shared ``QKNorm`` layout, and
+``txt_in.text_norm`` — a *zero-centred* RMSNorm whose stored weight is ``scale - 1``
+— has the 1 added back so the plain ``RMSNorm`` runs it.
 """
 from __future__ import annotations
 
@@ -37,10 +34,9 @@ _SIGNATURE_KEYS = (
 def is_qwen_image21_key(keys) -> bool:
     """True if these tensor names are a Qwen-Image 2.1 DiT.
 
-    The shared ``modulation`` (one AdaLN driving every block) plus the zero-centred
-    ``txt_in.text_norm`` are unique to this architecture: Qwen-Image 1 has an
-    ``img_in``/``txt_in`` pair too, but a per-block modulation and no text norm on the
-    input. Names are unwrapped, so a repackaged checkpoint matches identically.
+    The shared ``modulation`` plus the zero-centred ``txt_in.text_norm`` are unique
+    to this architecture. Names are unwrapped, so a repackaged checkpoint matches
+    identically.
     """
     names = {unwrap_key(k) for k in keys}
     return all(k in names for k in _SIGNATURE_KEYS)

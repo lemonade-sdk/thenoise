@@ -96,8 +96,7 @@ class EditRequest(Text2ImageRequest):
         from .models.config import GenerateRequest
 
         b64_list = self.image if isinstance(self.image, list) else [self.image]
-        # ``load_image`` keeps an alpha channel when the input has one; only the
-        # model knows whether it wants it (see ``PipelineController._run``).
+        # Keep an alpha if the input has one; only the model knows whether it wants it.
         images = [load_image(io.BytesIO(base64.b64decode(b))) for b in b64_list]
         req: GenerateRequest = self.to_request()
         # OpenAI-style: ``image`` is one or more images; store single or list.
@@ -134,8 +133,7 @@ def create_app(runtime) -> FastAPI:
             "status": "ok",
             "models": runtime.available(),
             "capabilities": runtime.model_capabilities(),
-            # 4 when the loaded model's VAE is RGBA: the UI needs to know its
-            # output can be transparent before it can show one honestly.
+            # 4 when the loaded model's VAE is RGBA, so the UI can show transparency.
             "pixel_channels": runtime.model_pixel_channels(),
         }
 

@@ -131,7 +131,7 @@ def run_edit(args) -> None:
     from thenoise.utils.image_tensor import load_image
 
     # ``--image`` is repeatable; first sets aspect/size, rest are refs. Opened
-    # without flattening: an alpha is the model's call, not the CLI's.
+    # without flattening: an alpha is the model's call.
     request.image = [load_image(p) for p in args.image]
     image = runtime.pipeline.edit(request)
 

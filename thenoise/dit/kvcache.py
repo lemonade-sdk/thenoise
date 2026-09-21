@@ -15,14 +15,11 @@ the ``KVCache.update`` pattern from ``torchtune``, chosen over concatenating a
 cached prefix because it keeps ``torch.cat`` out of the compiled blocks entirely —
 a concatenation whose split point depends on the (dynamic) token count is something
 Inductor's tiling analysis cannot handle. It also fixes the token layout a model
-must use: with ``cached_slice="suffix"`` the frozen tokens have to be the *trailing*
-suffix of the attention sequence (and contiguous with the tokens that stay in it),
-which is why Flux.2 Klein and Qwen-Image attend in ``text, target, references``
-order. A model whose frozen slice is the *leading* prefix — Qwen-Image 2.1, whose
-causal prefix is text + references with the target image last — says so with
-``cached_slice="prefix"`` and the write moves to the other end of the buffer. The
-fill step is the same either way (it writes everything), so the difference is one
-offset, derived from the buffer.
+must use: the frozen slice has to be contiguous with the tokens a step writes, so
+a model attending ``text, target, references`` (Flux.2 Klein, Qwen-Image) keeps the
+recomputed tokens at the front of the buffer and one attending ``text + references,
+target`` (Qwen-Image 2.1) at the back — ``KVBuffers.cached_slice`` picks the end, and
+the fill step writes the whole buffer either way.
 
 Which tokens form the cached slice, how the modulation is made step-independent,
 and whether the cache is exact (causal prefix) or approximate (bidirectional
@@ -65,12 +62,7 @@ class KVBuffers:
         return self.k.shape[2]
 
     def write_offset(self, n_tokens: int) -> int:
-        """Where a step's ``n_tokens`` recomputed tokens land in the buffer.
-
-        ``suffix`` keeps them at the front (the frozen slice is the tail), ``prefix``
-        at the back (the frozen slice is the head). A fill writes the whole buffer,
-        for which both give 0.
-        """
+        """Where a step's ``n_tokens`` recomputed tokens land (0 for a whole-buffer fill)."""
         return self.capacity - n_tokens if self.cached_slice == "prefix" else 0
 
     def write(self, k: torch.Tensor, v: torch.Tensor, offset: int = 0) -> None:
@@ -191,11 +183,11 @@ def attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     as the arguments): the step's ``L`` tokens are copied into their own positions
     (see :meth:`KVBuffers.write_offset`) and the attention then reads the *whole*
     buffer, so the frozen slice survives the copy while the queries stay at ``L``.
-    On the fill step
-    the copy covers the entire buffer, references included, so filling and reading
-    are literally the same two copies — no mode flag, no branch, and above all no
-    ``torch.cat``: a concatenation whose split point is a dynamic token count is
-    what Inductor's tiling analysis chokes on. ``bufs=None`` is the plain path.
+    On the fill step the copy covers the entire buffer, references included, so
+    filling and reading are literally the same two copies — no mode flag, no branch,
+    and above all no ``torch.cat``: a concatenation whose split point is a dynamic
+    token count is what Inductor's tiling analysis chokes on. ``bufs=None`` is the
+    plain path.
 
     Returns the attention output for the *queries*, token-major ``[B, L, H*D]``.
     """

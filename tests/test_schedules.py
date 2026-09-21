@@ -115,10 +115,8 @@ def test_schedule_resolution_dependence_matches_the_model(model_cls):
         assert ts_small == ts_large
 
 
-# Pixel alignment each adapter rounds request sizes to. The shipped models all land
-# on 16 (an 8x VAE with a 2x2 patchify, or a 16x VAE whose DiT patchifies nothing);
-# Qwen-Image 2.1 needs 32, because a Qwen3-VL vision token covers a 32x32 pixel block
-# and the reference latent has to replace whole vision tokens.
+# Pixel alignment each adapter rounds request sizes to. All the shipped models land
+# on 16 except Qwen-Image 2.1, which needs 32 (one Qwen3-VL vision token).
 ALIGN = {"qwen_image21": 32}
 DEFAULT_ALIGN = 16
 

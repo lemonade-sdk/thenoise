@@ -1,11 +1,8 @@
 """PIL <-> tensor conversions, and the alpha boundaries they own.
 
-The engine carries a ``[C, H, W]`` fp32 tensor whose channel count is the VAE's
-(3 for the RGB family, 4 for the RGBA Qwen-Image 2.1 one), so these conversions
-are where an alpha is either kept or deliberately composited away. The tests
-below are all about that choice: a dropped alpha is invisible in a test that only
-looks at RGB, but on a transparent PNG it is the difference between a cut-out and
-a black silhouette.
+The engine carries a ``[C, H, W]`` fp32 tensor whose channel count is the VAE's, so
+these conversions are where an alpha is either kept or deliberately composited away
+— the difference between a cut-out and a black silhouette on a transparent PNG.
 """
 from __future__ import annotations
 
@@ -161,8 +158,7 @@ def test_rgba_pixels_survive_the_round_trip():
     out = pixels_to_pil(pil_to_pixels(img, 4))
 
     assert out.mode == "RGBA"
-    # 8-bit -> [-1,1] -> 8-bit is lossy by one quantization step at worst (the
-    # conversion truncates), which is the same for alpha as for the colours.
+    # 8-bit -> [-1,1] -> 8-bit is lossy by one quantization step at worst.
     assert torch.allclose(
         pil_to_pixels(out, 4), pil_to_pixels(img, 4), atol=1.5 / 127.5
     )

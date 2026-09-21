@@ -36,15 +36,11 @@ uses only the pixel-domain upscaler (no latent 2x), limited to its detected scal
 Pixel upscalers are selected by name from ``upscaler_dir`` (CLI ``--upscaler-dir``);
 without one, only ``refined`` factors <= 2 are available.
 
-Channel count
--------------
 Every stage after the VAE carries the VAE's own pixel width
-(``DiffusionModel.pixel_channels``): an RGBA model's matte rides the same fp32
+(``DiffusionModel.pixel_channels``), so an RGBA model's matte rides the same fp32
 tensor through the notch filter, the postprocess kernels, the resize and the PNG
-writer, and an incoming alpha reaches an RGBA VAE as a fourth input channel. Only
-the two boundaries that cannot carry one composite it onto white — an RGB VAE's
-encoder and the RGB-only pixel upscaler (which resamples the matte and re-attaches
-it).
+writer. Only the boundaries that cannot carry one composite it onto white: an RGB
+VAE's encoder and the RGB-only pixel upscaler.
 """
 from __future__ import annotations
 
@@ -165,9 +161,9 @@ class PipelineController:
     ) -> Tuple:
         """Cache key for the encoded reference latent(s) (edit path).
 
-        Hashes each image's normalized pixel bytes (RGB, or RGBA when it carries
-        transparency — otherwise two references differing only in their alpha would
-        share a cache entry) in order, plus the target size, since refs are
+        Hashes each image's normalized pixel bytes (RGBA when it carries
+        transparency, so two refs differing only in their alpha do not share a
+        cache entry) in order, plus the target size, since refs are
         resize/center-cropped to the working resolution.
         """
         digests = tuple(
@@ -332,8 +328,8 @@ class PipelineController:
                         # ComfyUI-style: scale each ref to cover the working size
                         # (center-crop if the aspect ratio differs).
                         cover = resize_to_cover_center_crop(img, r.width, r.height)
-                        # Pixels at the VAE's own width: an RGBA VAE gets the alpha
-                        # channel, an RGB one gets it composited onto white.
+                        # Pixels at the VAE's own width: an RGB VAE gets the alpha
+                        # composited away.
                         pixels = pil_to_pixels(cover, model.pixel_channels)
                         ref_latents.append(model.encode_reference(pixels))  # [1,C,H,W]
                     self._cache.reference_store(ref_key, ref_latents)
@@ -444,7 +440,7 @@ class PipelineController:
         ref_method = model.pref("ref_method", request.ref_method)
         kv_cache = model.pref("kv_cache", request.kv_cache)
 
-        # Only enable kv_cache on editing, regardless of the model's default
+        # kv_cache only makes sense on an edit request.
         if request.kv_cache is None and request.image is None:
             kv_cache = False
 
@@ -509,10 +505,6 @@ class PipelineController:
 
         Notch filter -> pixel upscaler -> resize -> postprocess -> PIL -> crop ->
         PNG metadata. Kept in one place so the two paths stay in lockstep.
-
-        Every step here is channel-count agnostic: pixels decoded by an RGBA VAE
-        keep their alpha through to the PNG (the one exception is the pixel-domain
-        upscaler, which is RGB-only and handled inside it).
         """
         model = self.model
 
@@ -523,7 +515,6 @@ class PipelineController:
             pixels = nyquist_notch(pixels)
 
         # Pixel-domain upscaler (fast, not cached) + GPU resize to target size.
-        # RGB-only by nature: the manager composites/resamples the alpha itself.
         pixels = self._pixel_upscalers.apply(
             r.pixel_upscaler, pixels, r.pixel_scale
         )

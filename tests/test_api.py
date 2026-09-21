@@ -292,11 +292,7 @@ def test_edit_decodes_a_list_of_images():
 
 
 def test_edit_input_keeps_its_alpha():
-    """The wire layer must not decide the channel count before the model does.
-
-    Flattening here would hand an RGBA model an image whose transparency had been
-    deleted (and whose RGB, under a fully transparent matte, is arbitrary).
-    """
+    """The wire layer must not decide the channel count before the model does."""
     from PIL import Image
 
     req = EditRequest(prompt="cut it out", image=_rgba_png_b64())

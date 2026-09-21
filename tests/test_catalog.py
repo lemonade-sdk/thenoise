@@ -55,8 +55,7 @@ def test_model_upscale_format_is_registered_with_weights(model):
     """Each adapter names a latent format that has a committed upscaler.
 
     An adapter may instead raise ``NotImplementedError`` to say its VAE has no
-    upscaler weights yet — ``--upscale`` then fails with that same message rather
-    than upscaling in a format that does not match the VAE.
+    upscaler weights yet.
     """
     instance = object.__new__(model)  # the format is a class constant, no weights
     try:

@@ -32,9 +32,8 @@ from thenoise.utils.model_dir import (
 
 logger = logging.getLogger(__name__)
 
-# White in the pipeline's ``[-1, 1]`` pixel range — the tensor-domain twin of
-# ``image_tensor.ALPHA_BACKGROUND``, the background an alpha gets composited onto
-# when a stage cannot carry it.
+# White in the pipeline's ``[-1, 1]`` pixel range: the tensor twin of
+# ``image_tensor.ALPHA_BACKGROUND``.
 _WHITE = 1.0
 
 
@@ -136,11 +135,8 @@ class PixelUpscalerManager:
         pipeline's decoded pixels are in [-1, 1]; convert to [0, 1] before the
         model and back afterwards so downstream postprocessing stays unchanged.
 
-        Real-ESRGAN is strictly 3-channel, so it is a genuine alpha boundary: an
-        RGBA input is composited onto white for the model and its alpha resampled
-        by the same factor and re-attached, so upscaling an image with
-        transparency does not silently discard it (the matte is inevitably softer
-        than the RGB, which bilinear upsampling of a smooth alpha cannot avoid).
+        Real-ESRGAN is strictly 3-channel, so an RGBA input is composited onto white
+        for the model and its alpha resampled by the same factor and re-attached.
         """
         if not scale or not name:
             return pixels
