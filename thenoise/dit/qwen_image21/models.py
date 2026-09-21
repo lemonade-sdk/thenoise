@@ -232,6 +232,7 @@ class QwenImage21TransformerBlock(nn.Module):
         self.img_norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
         self.img_mlp = SwiGLUFeedForward(dim, dim * mlp_ratio, fused=fused_mlp)
 
+    @torch.compile(fullgraph=True)
     def forward(
         self,
         x: Tensor,
