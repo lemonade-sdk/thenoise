@@ -17,12 +17,12 @@ from thenoise.upscale import _UPSCALER_FORMATS, load_latent_upscaler, upscale_we
 
 # Per-model public defaults (the values the API/CLI fall back to).
 MODEL_DEFAULTS = {
-    "anima": {"steps": 8, "guidance": 1, "sampler": "er_sde"},
-    "krea2": {"steps": 8, "guidance": 1.0, "sampler": "er_sde"},
-    "zimage": {"steps": 8, "guidance": 1.0, "sampler": "euler"},
-    "flux_klein": {"steps": 4, "guidance": 1.0, "sampler": "euler"},
-    "qwen_image": {"steps": 28, "guidance": 2.5, "sampler": "euler"},
-    "qwen_image21": {"steps": 28, "guidance": 2.5, "sampler": "euler"},
+    "anima": {"steps": 8, "guidance": 1, "sampler": "er_sde", "kv_cache": False},
+    "krea2": {"steps": 8, "guidance": 1.0, "sampler": "er_sde", "kv_cache": False},
+    "zimage": {"steps": 8, "guidance": 1.0, "sampler": "euler", "kv_cache": False},
+    "flux_klein": {"steps": 4, "guidance": 1.0, "sampler": "euler", "kv_cache": False},
+    "qwen_image": {"steps": 28, "guidance": 2.5, "sampler": "euler", "kv_cache": False},
+    "qwen_image21": {"steps": 28, "guidance": 1.0, "sampler": "euler", "kv_cache": True},
 }
 
 
@@ -34,6 +34,7 @@ def test_model_defaults(model):
     assert prefs["steps"] == expected["steps"]
     assert prefs["guidance_scale"] == expected["guidance"]
     assert prefs["sampler"] == expected["sampler"]
+    assert prefs["kv_cache"] is expected["kv_cache"]
     # A typo'd sampler would only blow up at request time; tie it to the registry.
     assert prefs["sampler"] in SAMPLERS
     assert create_sampler(prefs["sampler"], model) is not None

@@ -119,6 +119,37 @@ def test_resolve_kv_cache_stays_off_by_default():
     assert r.ref_method == "index"
 
 
+class _KvCacheByDefaultModel(EditingStubModel):
+    """A model that ships the reference KV cache ON (Qwen-Image 2.1's default)."""
+
+    DEFAULT_PREFS = {**EditingStubModel.DEFAULT_PREFS, "kv_cache": True}
+
+
+def test_a_model_defaulting_kv_cache_still_runs_a_plain_generation():
+    """The cache freezes *reference* K/V; with no reference there is nothing to freeze.
+
+    Shipping the default on must not turn every text-to-image request into the
+    pipeline's "kv_cache requires an edit request" error — the default is about
+    edits, and an auto request means "whatever the model wants, where it applies".
+    """
+    plain = _controller(_KvCacheByDefaultModel())._resolve_pipeline(_request())
+    assert plain.kv_cache is False
+
+    edit = _controller(_KvCacheByDefaultModel())._resolve_pipeline(
+        _request(image=Image.new("RGB", (64, 64), "white"))
+    )
+    assert edit.kv_cache is True
+    # And it drags the reference method along, exactly as an explicit request does.
+    assert edit.ref_method == "index_timestep_zero"
+
+
+def test_an_explicit_kv_cache_without_a_reference_is_still_refused():
+    """Only the *default* yields to a plain generation; a request does not."""
+    controller = _controller(_KvCacheByDefaultModel())
+    with pytest.raises(ValueError, match="requires an edit request"):
+        controller.generate(_request(kv_cache=True, steps=1))
+
+
 def test_edit_passes_the_resolved_method_to_the_model():
     """The resolved preference — not the raw request — reaches ``prepare_latent``."""
     model = EditingStubModel()

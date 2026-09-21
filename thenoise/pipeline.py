@@ -444,6 +444,10 @@ class PipelineController:
         ref_method = model.pref("ref_method", request.ref_method)
         kv_cache = model.pref("kv_cache", request.kv_cache)
 
+        # Only enable kv_cache on editing, regardless of the model's default
+        if request.kv_cache is None and request.image is None:
+            kv_cache = False
+
         pixel_upscaler = request.pixel_upscaler
         if pixel_upscaler and self._pixel_upscalers.upscaler_dir:
             pixel_upscaler = self._pixel_upscalers.validate(pixel_upscaler)

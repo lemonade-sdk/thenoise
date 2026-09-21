@@ -87,11 +87,14 @@ class QwenImage21Model(DiffusionModel):
     DEFAULT_PREFS = {
         **DiffusionModel.DEFAULT_PREFS,
         "steps": 28,
-        "guidance_scale": 2.5,
+        "guidance_scale": 1.0,
         "sampler": "euler",
         # The prefix (text + references) is modulated at t = 0 by construction, so
         # that is the reference method — not a choice the checkpoint or request makes.
         "ref_method": "index_timestep_zero",
+        # Its prefix K/V are EXACTLY step-invariant (see ``KV_CACHED_SLICE``), so
+        # freezing them is free of accuracy cost.
+        "kv_cache": True,
     }
 
     CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": True}
