@@ -22,6 +22,7 @@ from typing import Dict, Optional, Union
 import torch
 
 from thenoise.upscale import load_pixel_upscaler, detect_pixel_upscaler_scale
+from thenoise.utils.image_tensor import resize_to_target
 from thenoise.utils.model_dir import (
     ensure_safetensors,
     strip_safetensors,
@@ -30,6 +31,11 @@ from thenoise.utils.model_dir import (
 )
 
 logger = logging.getLogger(__name__)
+
+# White in the pipeline's ``[-1, 1]`` pixel range — the tensor-domain twin of
+# ``image_tensor.ALPHA_BACKGROUND``, the background an alpha gets composited onto
+# when a stage cannot carry it.
+_WHITE = 1.0
 
 
 class PixelUpscalerManager:
@@ -129,16 +135,34 @@ class PixelUpscalerManager:
         last-used model loaded. The model operates on RGB in [0, 1] while the
         pipeline's decoded pixels are in [-1, 1]; convert to [0, 1] before the
         model and back afterwards so downstream postprocessing stays unchanged.
+
+        Real-ESRGAN is strictly 3-channel, so it is a genuine alpha boundary: an
+        RGBA input is composited onto white for the model and its alpha resampled
+        by the same factor and re-attached, so upscaling an image with
+        transparency does not silently discard it (the matte is inevitably softer
+        than the RGB, which bilinear upsampling of a smooth alpha cannot avoid).
         """
         if not scale or not name:
             return pixels
         self.switch(name)
         model = self._pixel_upscaler
-        x = (pixels.unsqueeze(0) + 1.0) / 2.0  # [-1, 1] -> [0, 1]
+
+        rgb = pixels[:3]
+        alpha = pixels[3:4] if pixels.shape[0] > 3 else None
+        if alpha is not None:
+            a = (alpha + 1.0) / 2.0  # alpha as a [0, 1] blend factor
+            rgb = rgb * a + _WHITE * (1.0 - a)
+
+        x = (rgb.unsqueeze(0) + 1.0) / 2.0  # [-1, 1] -> [0, 1]
         with torch.no_grad():
             out = model.forward_tiled(x)
-        out = out * 2.0 - 1.0  # [0, 1] -> [-1, 1]
-        return out[0]
+        out = (out * 2.0 - 1.0)[0]  # [0, 1] -> [-1, 1], batch axis gone
+
+        if alpha is not None:
+            out = torch.cat(
+                [out, resize_to_target(alpha, out.shape[-1], out.shape[-2])], dim=0
+            )
+        return out
 
 
 __all__ = ["PixelUpscalerManager"]

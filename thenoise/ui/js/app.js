@@ -266,15 +266,21 @@ updateUpscaleMax('edit_');
 async function applyModelState() {
   let hasModel = true;
   let caps = null; // null = unknown (network error): assume a model that can do it all
+  let rgba = false; // true when the loaded model's VAE emits an alpha channel
   try {
     const res = await fetch('/health');
     if (res.ok) {
       const data = await res.json();
       hasModel = (data.models || []).length > 0;
       caps = data.capabilities || {};
+      rgba = (data.pixel_channels || 3) > 3;
     }
   } catch (e) { /* assume a model is present on network errors */ }
   const capable = (name) => caps === null || !!caps[name];
+
+  // An RGBA model can return transparent pixels; without something behind them
+  // they would read as black (or as the panel colour) rather than as transparency.
+  document.body.classList.toggle('rgba_out', rgba);
 
   $('no_model').classList.toggle('hidden', hasModel);
   $('edit_no_model').classList.toggle('hidden', hasModel);

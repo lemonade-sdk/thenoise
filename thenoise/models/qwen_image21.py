@@ -4,6 +4,13 @@ Qwen-Image 2.1 shares nothing but a name with Qwen-Image 1: a different DiT (see
 :mod:`thenoise.dit.qwen_image21.models`), a Wan-2.2-layout 64-channel/16x RGBA VAE,
 and a Qwen3-VL-8B conditioner.
 
+That VAE is the engine's first RGBA one, so this model is the reason the pipeline
+carries a channel count at all: the alpha its VAE decodes runs through the
+postprocessing filters, the postprocessors and the PNG writer untouched (see
+``DiffusionModel.pixel_channels``). Only the boundaries that genuinely cannot carry
+an alpha composite it away, onto white: the Qwen3-VL vision tokens below, and the
+pixel-domain upscaler (which resamples the matte and re-attaches it).
+
 The latent is the DiT's own input. ``img_in`` takes the VAE's 64 channels directly
 and one token is one latent cell, so — unlike Qwen-Image 1 or Flux Klein — there is
 no pack/unpack step: the canonical 4D latent is the model-internal one, and
@@ -52,7 +59,7 @@ from thenoise.models.base import (
     normalize_keys,
 )
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
-from thenoise.utils.image_tensor import resize_to_cover_center_crop
+from thenoise.utils.image_tensor import flatten_alpha, resize_to_cover_center_crop
 from thenoise.utils.math import round_up
 from thenoise.vae import load_wan22_vae
 
@@ -150,6 +157,10 @@ class QwenImage21Model(DiffusionModel):
         described, and the slot it left behind would be the wrong size too. Sizes are
         aligned to 32 pixels (see :meth:`resolve_size`), which is also exactly one
         vision token.
+
+        The vision tower only speaks RGB, so this is a boundary where an alpha has to
+        go: it is composited onto white rather than dropped, which would hand the
+        encoder the RGB of fully transparent pixels.
         """
         if args.image is None:
             return None
@@ -158,7 +169,7 @@ class QwenImage21Model(DiffusionModel):
             return None
         if args.width and args.height:
             images = [resize_to_cover_center_crop(img, args.width, args.height) for img in images]
-        return [img.convert("RGB") for img in images]
+        return [flatten_alpha(img) for img in images]
 
     def encode_prompt(self, args: EncodePromptArgs) -> Conditioning:
         """Prompt (and, when editing, the references) -> embeddings + image slots.
@@ -280,18 +291,13 @@ class QwenImage21Model(DiffusionModel):
         align = 2 * self.vae.spatial_compression
         return round_up(width, align), round_up(height, align)
 
-    def decode(self, latents: torch.Tensor) -> torch.Tensor:
-        """VAE decode, temporarily narrowed to RGB.
-
-        This VAE is RGBA — it hands back four channels — while the pipeline's
-        postprocessing, filters and PIL conversion are 3-channel. Dropping the alpha
-        here is the one-line stand-in for the pipeline learning to carry it.
-        """
-        return super().decode(latents)[:3]
-
     # ------------------------------------------------------------ editing
     def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
-        """Encode input pixels (``[C,H,W]`` in [-1, 1]) -> canonical reference latent."""
+        """Encode input pixels (``[C,H,W]`` in [-1, 1]) -> canonical reference latent.
+
+        The pipeline hands over four channels (this VAE's ``pixel_channels``), alpha
+        included; the VAE pads an opaque one if a caller passes three.
+        """
         return self.vae.encode_pixels_to_latents(pixels.unsqueeze(0))
 
     def pack_reference_latent(

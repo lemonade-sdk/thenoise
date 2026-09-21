@@ -554,6 +554,7 @@ class AutoencoderKLQwenImage(nn.Module):
         super().__init__()
 
         self.z_dim = z_dim
+        self.input_channels = input_channels
         self.latents_mean = latents_mean
         self.latents_std = latents_std
 
@@ -586,6 +587,17 @@ class AutoencoderKLQwenImage(nn.Module):
     @property
     def device(self):
         return self.encoder.parameters().__next__().device
+
+    @property
+    def pixel_channels(self) -> int:
+        """Pixel channels the VAE consumes/emits (3 = RGB, 4 = RGBA).
+
+        Part of the shared VAE interface (see ``AutoencoderKLWan22``): the pipeline
+        uses it to decide whether an alpha channel reaches the model or is
+        composited away at the encode boundary, and how many channels the PNG
+        output carries.
+        """
+        return self.input_channels
 
     @property
     def spatial_compression(self) -> int:

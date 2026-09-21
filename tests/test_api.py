@@ -98,6 +98,15 @@ def _png_b64(size=(2, 2)) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def _rgba_png_b64(size=(2, 2)) -> str:
+    """A PNG whose only pixel is fully transparent."""
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGBA", size, (255, 0, 0, 0)).save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 # --------------------------------------------------------------------- /health
 
 
@@ -114,6 +123,14 @@ def test_health_capabilities_empty_without_model():
     res = _endpoint(create_app(_empty_runtime()), "/health")()
     assert res["models"] == []
     assert res["capabilities"] == {}
+    assert res["pixel_channels"] == 3  # nothing loaded -> nothing can be transparent
+
+
+def test_health_reports_an_rgba_model_as_rgba():
+    """``pixel_channels`` lets the UI put something behind a transparent output."""
+    runtime = _runtime()
+    runtime._model = type("M", (), {"CAPABILITIES": {}, "pixel_channels": 4})()
+    assert _endpoint(create_app(runtime), "/health")()["pixel_channels"] == 4
 
 
 # ----------------------------------------------------------------------- /lora
@@ -272,6 +289,26 @@ def test_edit_decodes_a_list_of_images():
     req = EditRequest(prompt="blend", image=[_png_b64((2, 2)), _png_b64((4, 4))])
     images = req.to_edit_request().image
     assert [img.size for img in images] == [(2, 2), (4, 4)]
+
+
+def test_edit_input_keeps_its_alpha():
+    """The wire layer must not decide the channel count before the model does.
+
+    Flattening here would hand an RGBA model an image whose transparency had been
+    deleted (and whose RGB, under a fully transparent matte, is arbitrary).
+    """
+    from PIL import Image
+
+    req = EditRequest(prompt="cut it out", image=_rgba_png_b64())
+    image = req.to_edit_request().image
+
+    assert image.mode == "RGBA"
+    assert image.getpixel((0, 0))[3] == 0
+
+
+def test_edit_input_of_an_opaque_image_stays_rgb():
+    """No alpha in the request -> no alpha handed to the pipeline."""
+    assert EditRequest(prompt="x", image=_png_b64()).to_edit_request().image.mode == "RGB"
 
 
 def test_edit_returns_png(client):

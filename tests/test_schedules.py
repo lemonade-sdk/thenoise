@@ -53,8 +53,10 @@ def _params(steps=8, width=1024, height=1024):
 # for it; the shipped configs all patchify 2x2 on an 8x-compressed latent -> a 16px
 # pixel alignment (Flux.2's VAE is already 16x on a packed latent and its DiT does
 # not patchify further).
-def _vae(z_dim, spatial_compression):
-    return SimpleNamespace(z_dim=z_dim, spatial_compression=spatial_compression)
+def _vae(z_dim, spatial_compression, pixel_channels=3):
+    return SimpleNamespace(
+        z_dim=z_dim, spatial_compression=spatial_compression, pixel_channels=pixel_channels
+    )
 
 
 BARE = {
@@ -67,7 +69,7 @@ BARE = {
     "zimage": {"vae": _vae(16, 8), "dit": SimpleNamespace(patch_size=2)},
     "flux_klein": {"vae": _vae(128, 16)},
     "qwen_image": {"vae": _vae(16, 8), "dit": SimpleNamespace(patch_size=2)},
-    "qwen_image21": {"vae": _vae(64, 16)},
+    "qwen_image21": {"vae": _vae(64, 16, pixel_channels=4)},
 }
 
 # The adapters whose step schedule shifts with the image token count. Krea 2 is
@@ -215,18 +217,43 @@ def test_decode_passes_a_4d_vae_output_through():
     assert pixels.dtype == torch.float32
 
 
+def test_decode_keeps_every_channel_the_vae_returned():
+    """An RGBA VAE's alpha survives the decode — nothing narrows it to RGB here.
+
+    This is the whole point of the shared decode being channel-count agnostic: an
+    adapter that dropped the extra channel would silently turn a model that can
+    draw transparency into one that cannot.
+    """
+    model = _bare(QwenImage21Model)
+    model.vae = _FakeVAE(out_5d=False, dtype=torch.bfloat16, channels=4)
+    pixels = model.decode(torch.zeros(1, 64, 4, 4))
+    assert pixels.shape == (4, 8, 8)
+
+
+@pytest.mark.parametrize("model_cls", MODEL_CATALOG, ids=CATALOG_IDS)
+def test_pixel_channels_is_read_off_the_vae(model_cls):
+    """The adapter reports its VAE's pixel width, and RGB is the fallback."""
+    model = _bare(model_cls, **BARE[model_cls.name])
+    assert model.pixel_channels == model.vae.pixel_channels
+
+    # An adapter with no VAE opinion to offer is RGB, not an AttributeError.
+    bare = _bare(model_cls)
+    assert bare.pixel_channels == 3
+
+
 class _FakeVAE(torch.nn.Module):
     """Returns a fixed pixel tensor, optionally with the legacy frame axis."""
 
-    def __init__(self, out_5d: bool, dtype: torch.dtype):
+    def __init__(self, out_5d: bool, dtype: torch.dtype, channels: int = 3):
         super().__init__()
         self.out_5d = out_5d
         self.dtype = dtype
+        self.channels = channels
         self.seen = []
 
     def decode_to_pixels(self, latents):
         self.seen.append((tuple(latents.shape), latents.dtype))
-        pixels = torch.zeros(1, 3, 8, 8, dtype=self.dtype)
+        pixels = torch.zeros(1, self.channels, 8, 8, dtype=self.dtype)
         return pixels.unsqueeze(2) if self.out_5d else pixels
 
 

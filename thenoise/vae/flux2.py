@@ -295,6 +295,7 @@ class AutoencoderKLFlux2(nn.Module):
 
     z_dim = 128  # packed latent channels (the canonical Flux.2 latent)
     spatial_compression = 16  # pixel / packed-latent ratio
+    pixel_channels = 3  # RGB both ways: no alpha to carry across the boundaries
     bn_eps = 1e-4
 
     def __init__(self, channels: int = 128):

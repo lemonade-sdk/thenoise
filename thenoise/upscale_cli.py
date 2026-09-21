@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 def run_upscale(args) -> None:
-    from PIL import Image
     from .runtime import Settings, Runtime
+    from .utils.image_tensor import load_image
 
     # ``--pixel-upscaler`` is a one-shot convenience: a full path to the model.
     # Split it into ``upscaler_dir`` (server config) + name (sans suffix), the
@@ -31,7 +31,8 @@ def run_upscale(args) -> None:
     settings = Settings(device=args.device, upscaler_dir=upscaler_dir)
     runtime = Runtime(settings)  # no load() — pixel upscaling is model-free
 
-    image = Image.open(args.input).convert("RGB")
+    # Opened without flattening: an alpha is preserved through the upscaler.
+    image = load_image(args.input)
     out = runtime.upscaler.upscale(image, args.upscale_factor, name)
 
     out_path = ensure_png_extension(args.out)

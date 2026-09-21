@@ -23,6 +23,11 @@ Subclasses implement the model-specific kernels and load their own VAE:
   * ``_upscale_format(...)``  — required: the latent-format name for this
     model's VAE (selected by ``load_latent_upscaler``).
 
+The VAE also owns the pixel width (``pixel_channels``: 3 for the RGB family, 4 for
+the RGBA Qwen-Image 2.1 one) and the adapter just reports it, so the pipeline can
+ask the input boundary for the right number of channels and hand the decoded ones
+through to the PNG without any model ever naming a format.
+
 Every adapter works on the canonical latent format ``[B, C, H, W]`` (4D), which is
 simply the VAE's own output format: ``C = vae.z_dim``, one latent cell per
 ``vae.spatial_compression`` pixels (16ch/8x for the shared Qwen-Image VAE, 128ch/16x
@@ -566,13 +571,28 @@ class DiffusionModel(ABC):
             )
         return self._upscaler, self._adaptor
 
+    # ------------------------------------------------------------ pixel format
+    @property
+    def pixel_channels(self) -> int:
+        """Pixel channels this model's VAE consumes and emits (3 = RGB, 4 = RGBA).
+
+        Owned by the VAE like the rest of the latent geometry: it is the channel
+        count the pipeline asks the input PIL boundary for, the width a reference
+        image is encoded at, and the width the decode hands to postprocessing and
+        the PNG writer. A model without a say in the matter (a weight-free stub)
+        is RGB.
+        """
+        return getattr(getattr(self, "vae", None), "pixel_channels", 3)
+
     # ------------------------------------------------------------ decode
     def decode(self, latents: torch.Tensor) -> torch.Tensor:
         """Shared VAE decode — the final generation step.
 
         Accepts the canonical 4D latent ``[B, C, H, W]`` (the VAE is 2D /
         single-frame) and returns pixels ``[C, H, W]`` in [-1, 1] as an fp32
-        GPU tensor, ready for the controller's postprocessing.
+        GPU tensor, ready for the controller's postprocessing. ``C`` is the VAE's
+        own width (:attr:`pixel_channels`), so an RGBA VAE's alpha reaches the PNG
+        output instead of being dropped here.
         """
         dev = torch.device(self.device)
         with torch.no_grad():

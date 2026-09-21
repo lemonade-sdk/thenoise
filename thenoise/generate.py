@@ -128,10 +128,11 @@ def run_edit(args) -> None:
         ref_method=args.ref_method,
     )
 
-    from PIL import Image
+    from thenoise.utils.image_tensor import load_image
 
-    # ``--image`` is repeatable; first sets aspect/size, rest are refs.
-    request.image = [Image.open(p).convert("RGB") for p in args.image]
+    # ``--image`` is repeatable; first sets aspect/size, rest are refs. Opened
+    # without flattening: an alpha is the model's call, not the CLI's.
+    request.image = [load_image(p) for p in args.image]
     image = runtime.pipeline.edit(request)
 
     out_path = ensure_png_extension(args.out)

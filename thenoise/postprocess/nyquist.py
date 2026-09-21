@@ -32,7 +32,10 @@ def nyquist_notch(pixels: torch.Tensor) -> torch.Tensor:
     the grid artifact while leaving the rest of the image intact.
 
     Only the first three (RGB) channels are filtered; any extra channels pass
-    through unchanged.
+    through unchanged. That is deliberate twice over: the artifact this removes is
+    the Qwen-Image VAE's own (other VAEs get no benefit from this kernel, which is
+    why it stays behind ``qwen_vae_enhance``), and an RGBA decode's matte is not a
+    colour channel the 2px luma grid story applies to.
     """
     c, _h, _w = pixels.shape
     rgb = pixels[: min(3, c)]
