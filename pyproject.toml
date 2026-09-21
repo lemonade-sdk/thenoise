@@ -39,6 +39,7 @@ packages = [
     "thenoise.dit",
     "thenoise.dit.krea2",
     "thenoise.dit.qwen_image",
+    "thenoise.dit.qwen_image21",
     "thenoise.dit.anima",
     "thenoise.dit.zimage",
     "thenoise.dit.flux2",

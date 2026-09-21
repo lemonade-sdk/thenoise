@@ -175,7 +175,7 @@ Below a short list of what you can expect in terms of perfomance. The times repo
 
 ## Supported Models
 
-Anima, Krea 2, Z-Image-Turbo, Flux.2 Klein, and Qwen-Image are supported. New models will be added. PRs adding model support are welcome.
+Anima, Krea 2, Z-Image-Turbo, Flux.2 Klein, Qwen-Image and Qwen-Image 2.1 are supported. New models will be added. PRs adding model support are welcome.
 
 All download commands use `.venv/bin/python` and need the `scripts` extra
 installed (`uv pip install -e ".[scripts]"`), because `huggingface_hub` lives
@@ -190,6 +190,7 @@ in the project venv created by [Setup](#setup) — a bare `python` will not work
 | Flux.2 Klein 4B | ~12 GB | Distilled 4-step flow MMDiT; Flux.2 VAE + Qwen3-4B | ✓ |
 | Flux.2 Klein 9B | ~25 GB | Distilled 4-step flow MMDiT; Flux.2 VAE + Qwen3-8B | ✓ |
 | Qwen-Image / Qwen-Image-Edit | ~40 GB | Dual-stream DiT; Qwen-Image VAE + Qwen2.5-VL-7B | ✓ |
+| Qwen-Image 2.1 | ~32 GB | Single-stream DiT (t2i + edit); RGBA Wan 2.2-layout VAE + Qwen3-VL-8B | ✓ |
 
 
 ### Krea 2
@@ -250,6 +251,24 @@ text encoder and Qwen-Image VAE. Older/unversioned checkpoints are not downloade
 `--image-only` / `--edit-only` to fetch just one variant's DiT (the shared text encoder
 and VAE are always included).
 
+### Qwen-Image 2.1
+
+```bash
+.venv/bin/python scripts/download_qwen_image21.py --out ./models/qwen_image21
+```
+
+This fetches the bf16 DiT (~14 GB), the Qwen3-VL-8B text encoder (~17.5 GB) and the
+VAE (~0.7 GB). Add `--int8-convrot` to fetch the int8-convrot DiT **and** text encoder
+instead (~17 GB total).:
+
+```bash
+./thenoise.sh generate \
+  --dit ./models/qwen_image21/diffusion_models/qwen_image_2.1_bf16.safetensors \
+  --vae ./models/qwen_image21/vae/qwen_image_2.1_vae_bf16.safetensors \
+  --text-encoder ./models/qwen_image21/text_encoders/qwen3vl_8b_bf16.safetensors \
+  --prompt "a fox walking in the snow" --out fox.png
+```
+
 ---
 
 ## Operation Modes
@@ -295,7 +314,7 @@ The downloaded `RealESRGAN_x4plus.safetensors` goes into an `--upscaler-dir` (se
 
 Editing-capable models can edit an existing image from a text instruction: **image + prompt → edited image**.
 
-Editing is a **model** capability: Flux.2 Klein and Qwen-Image support it. Both also implement the reference-latent **KV cache** (`kv_cache`): with `ref_method: index_timestep_zero` the reference tokens' K/V are frozen after the first denoise step, so later steps run faster (`--kv-cache`). Flux.2 Klein requires a special "KV" checkpoint for this to work.
+Editing is a **model** capability: Flux.2 Klein, Qwen-Image and Qwen-Image 2.1 support it. All three also implement the reference-latent **KV cache** (`kv_cache`): with `ref_method: index_timestep_zero` the reference tokens' K/V are frozen after the first denoise step, so later steps run faster (`--kv-cache`). Flux.2 Klein requires a special "KV" checkpoint for this to work; on Qwen-Image 2.1 the timestep-zero prefix is architectural, so the cache is exact and on by default.
 
 You may provide one or many reference images. Without an explicit `width`/`height`, the **first** reference image is resized to 1024 on its largest side (aspect preserved) and sets the output size; the rest are used as additional references.
 
