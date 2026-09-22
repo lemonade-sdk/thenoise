@@ -26,12 +26,12 @@
 #
 # Environment overrides (all optional):
 #   THENOISE_ROOT   output bundle root  (default: $env:RUNNER_TEMP\thenoise-build\thenoise)
-#   PBS_TAG         python-build-standalone release tag  (default: 20260602)
-#   PBS_PY          CPython version from that tag        (default: 3.13.13)
-#   PYVER           CPython ABI short tag                (default: 3.13)
-#   TORCH_VER       torch version + rocm stamp           (default: 2.11.0+rocm7.14.0)
-#   TORCHVISION_VER torchvision version + rocm stamp     (default: 0.26.0+rocm7.14.0)
-#   TORCH_INDEX     AMD torch wheel index                (default: https://repo.amd.com/rocm/whl-multi-arch/)
+#   PBS_TAG         python-build-standalone release tag  
+#   PBS_PY          CPython version from that tag        
+#   PYVER           CPython ABI short tag                
+#   TORCH_VER       torch version + rocm stamp           
+#   TORCHVISION_VER torchvision version + rocm stamp     
+#   TORCH_INDEX     AMD torch wheel index                
 # ===========================================================================
 param(
   [Parameter(Mandatory = $true, Position = 0)]
@@ -50,12 +50,12 @@ if (-not $Root) {
 }
 $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 
-$PbsTag = if ($env:PBS_TAG) { $env:PBS_TAG } else { "20260602" }
-$PbsPy = if ($env:PBS_PY) { $env:PBS_PY } else { "3.13.13" }
-$PyVer = if ($env:PYVER) { $env:PYVER } else { "3.13" }
-$TorchVer = if ($env:TORCH_VER) { $env:TORCH_VER } else { "2.11.0+rocm7.14.0" }
-$TorchVisionVer = if ($env:TORCHVISION_VER) { $env:TORCHVISION_VER } else { "0.26.0+rocm7.14.0" }
-$TorchIndex = if ($env:TORCH_INDEX) { $env:TORCH_INDEX } else { "https://repo.amd.com/rocm/whl-multi-arch/" }
+$PbsTag = if ($env:PBS_TAG) { $env:PBS_TAG } else { "20260901" }
+$PbsPy = if ($env:PBS_PY) { $env:PBS_PY } else { "3.14.7" }
+$PyVer = if ($env:PYVER) { $env:PYVER } else { "3.14" }
+$TorchVer = if ($env:TORCH_VER) { $env:TORCH_VER } else { "2.14.0" }
+$TorchVisionVer = if ($env:TORCHVISION_VER) { $env:TORCHVISION_VER } else { "0.29.0a" }
+$TorchIndex = if ($env:TORCH_INDEX) { $env:TORCH_INDEX } else { "https://rc.repo.amd.com/rocm/whl-next/" }
 
 $SP = "Lib\site-packages"
 $SPDir = Join-Path $Root $SP
@@ -109,6 +109,7 @@ pip-deep install --index-url $TorchIndex `
 pip-deep install --index-url $TorchIndex `
   --extra-index-url https://pypi.org/simple/ `
   "torchvision[device-${GfxArch}]==${TorchVisionVer}"
+pip-deep install "triton-windows<3.9"
 
 say "Installing thenoise + dependencies (from $RepoRoot)"
 # torch is intentionally absent from pyproject.toml. A constraints file is
@@ -157,19 +158,6 @@ foreach ($p in @("pyarrow", "opencv", "cv2", "onnx", "pandas", "plotly",
     Where-Object { $_.Name -like "$p*" } |
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
-
-# Trim the LLVM toolchain: keep clang + lld + opt (cpp_extension / hipcc) and
-# their runtime libs; drop the rest. torch.compile is disabled on Windows, so
-# clang is rarely invoked, but keep it to be safe. Conservative on Windows.
-$LLVMBin = "$SPDir\_rocm_sdk_core\lib\llvm\bin"
-if (Test-Path $LLVMBin) {
-  Get-ChildItem $LLVMBin -Filter "*.exe" -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -notmatch '^(clang|amdclang|lld|ld\.lld|opt)\.exe$' } |
-    Remove-Item -Force -ErrorAction SilentlyContinue
-}
-# clang's bundled include dirs; drop the CUDA wrapper headers.
-Get-ChildItem "$SPDir\_rocm_sdk_core\lib\llvm\lib\clang" -Directory -ErrorAction SilentlyContinue |
-  ForEach-Object { Remove-Item -Recurse -Force "$($_.FullName)\include\cuda_wrappers" -ErrorAction SilentlyContinue }
 
 # Trim Python stdlib we don't need. Keep include/ - cpp_extension may need
 # Python.h.

@@ -70,9 +70,11 @@ if (-not $torchInstalled) {
   else { Write-Host "Auto-detected GFX_ARCH=$GFX (set `$env:GFX_ARCH to override)" }
 
   & uv pip install `
-    "torch[device-$GFX]==2.11.0" `
-    "torchvision[device-$GFX]==0.26.0" `
-    --index-url https://repo.amd.com/rocm/whl-multi-arch/
+    "torch[device-$GFX]==2.14.0" `
+    "torchvision[device-$GFX]==0.29.0a" `
+    "triton-windows<3.9" `
+    --extra-index-url https://pypi.org/simple/ `
+    --index-url https://rc.repo.amd.com/rocm/whl-next/
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
@@ -84,11 +86,6 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $env:TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL = "1"
 $env:MIOPEN_FIND_MODE = "FAST"
 $env:TORCH_BLAS_PREFER_HIPBLASLT = "1"
-# Triton (torch.compile) is not yet available on Windows ROCm (AMD's Triton
-# wheels are Linux-only), so disable it. Respect an existing override in case
-# the user has a working Windows Triton.
-if (-not $env:TORCH_COMPILE_DISABLE) { $env:TORCH_COMPILE_DISABLE = "1" }
-if (-not $env:TORCHDYNAMO_DISABLE) { $env:TORCHDYNAMO_DISABLE = "1" }
 
 # ---- 6. Launch the project, forwarding all arguments ----------------------
 & $Py -m thenoise @ForwardArgs
