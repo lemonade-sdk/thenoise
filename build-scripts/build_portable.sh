@@ -15,12 +15,12 @@
 #
 # Environment overrides (all optional):
 #   THENOISE_ROOT   output bundle root  (default: $RUNNER_TEMP/thenoise-build/thenoise)
-#   PBS_TAG         python-build-standalone release tag  (default: 20260602)
-#   PBS_PY          CPython version from that tag        (default: 3.13.13)
-#   PYVER           CPython ABI short tag                (default: 3.13)
-#   TORCH_VER       torch version + rocm stamp           (default: 2.11.0+rocm7.14.0)
-#   TORCHVISION_VER torchvision version + rocm stamp     (default: 0.26.0+rocm7.14.0)
-#   TORCH_INDEX     AMD torch wheel index                (default: https://repo.amd.com/rocm/whl-multi-arch/)
+#   PBS_TAG         python-build-standalone release tag
+#   PBS_PY          CPython version from that tag        
+#   PYVER           CPython ABI short tag                
+#   TORCH_VER       torch version + rocm stamp           
+#   TORCHVISION_VER torchvision version + rocm stamp     
+#   TORCH_INDEX     AMD torch wheel index                
 set -euo pipefail
 
 GFX_TARGET="${1:?usage: build_portable.sh <gfx_target>}"
@@ -28,12 +28,12 @@ GFX_ARCH="${GFX_TARGET//X/0}"
 ROOT="${THENOISE_ROOT:-${RUNNER_TEMP:-/tmp}/thenoise-build/thenoise}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-PBS_TAG="${PBS_TAG:-20260602}"
-PBS_PY="${PBS_PY:-3.13.13}"
-PYVER="${PYVER:-3.13}"
-TORCH_VER="${TORCH_VER:-2.11.0+rocm7.14.0}"
-TORCHVISION_VER="${TORCHVISION_VER:-0.26.0+rocm7.14.0}"
-TORCH_INDEX="${TORCH_INDEX:-https://repo.amd.com/rocm/whl-multi-arch/}"
+PBS_TAG="${PBS_TAG:-20260901}"
+PBS_PY="${PBS_PY:-3.14.7}"
+PYVER="${PYVER:-3.14}"
+TORCH_VER="${TORCH_VER:-2.14.0}"
+TORCHVISION_VER="${TORCHVISION_VER:-0.29.0a}"
+TORCH_INDEX="${TORCH_INDEX:-https://rc.repo.amd.com/rocm/whl-next/}"
 
 SP="lib/python${PYVER}/site-packages"
 SP_DIR="$ROOT/$SP"
