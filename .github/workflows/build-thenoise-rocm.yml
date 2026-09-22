@@ -100,9 +100,9 @@ jobs:
       - name: Set job outputs
         id: outputs
         env:
-          LD_LIBRARY_PATH: ${{ env.THENOISE_ROOT }}/lib/python3.13/site-packages/_rocm_sdk_core/lib:${{ env.THENOISE_ROOT }}/lib/python3.13/site-packages/torch/lib
+          LD_LIBRARY_PATH: ${{ env.THENOISE_ROOT }}/lib/python3.14/site-packages/_rocm_sdk_core/lib:${{ env.THENOISE_ROOT }}/lib/python3.14/site-packages/torch/lib
         run: |
-          PY="${{ env.THENOISE_ROOT }}/bin/python3.13"
+          PY="${{ env.THENOISE_ROOT }}/bin/python3.14"
           tv=$("$PY" -c "import torch; print(torch.__version__)")
           nv=$("$PY" -c "import importlib.metadata as m; print(m.version('thenoise'))")
           echo "torch_version=$tv" >> "$GITHUB_OUTPUT"

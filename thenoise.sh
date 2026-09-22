@@ -26,7 +26,7 @@ fi
 if [ ! -d "$VENV_DIR" ]; then
   echo "Creating virtual environment ($VENV_DIR) with Python 3.14 ..."
   # --managed-python forces uv to use its own standalone CPython build rather
-  # than a system python3.13. Triton JIT-compiles its HIP driver module at
+  # than a system python. Triton JIT-compiles its HIP driver module at
   # runtime and needs Python.h; a system python without its matching -dev
   # package has no headers, which makes torch.compile fail on first generation.
   # uv's managed builds always ship headers, so this keeps setup sudo-free.
