@@ -40,10 +40,11 @@ def test_resolve_falls_back_to_model_defaults():
     model = StubModel()
     r = _controller(model)._resolve_pipeline(GenerateRequest(prompt="p"))
 
-    assert (r.width, r.height) == (model.DEFAULT_WIDTH, model.DEFAULT_HEIGHT)
-    assert r.steps == model.DEFAULT_STEPS
-    assert r.guidance_scale == model.DEFAULT_GUIDANCE_SCALE
-    assert r.effective_sampler == model.SAMPLER
+    defaults = model.DEFAULT_PREFS
+    assert (r.width, r.height) == (defaults["width"], defaults["height"])
+    assert r.steps == defaults["steps"]
+    assert r.guidance_scale == defaults["guidance_scale"]
+    assert r.effective_sampler == defaults["sampler"]
     # No upscale requested -> identity plan, and no pixel upscaler.
     assert (r.factor, r.upscale_type) == (1.0, "refined")
     assert r.refined is False
@@ -183,7 +184,7 @@ def test_decode_key_changes_when_refined():
     controller = _controller()
     model = controller.model
     sampling_key = controller._cache_key_sampling(
-        ("prompt",), model.DEFAULT_WIDTH, model.DEFAULT_HEIGHT, 2, 1, "euler"
+        ("prompt",), model.DEFAULT_PREFS["width"], model.DEFAULT_PREFS["height"], 2, 1, "euler"
     )
     plain = controller._cache_key_decode(sampling_key, False)
     refined = controller._cache_key_decode(sampling_key, True)
@@ -478,3 +479,29 @@ def test_build_upscale_pnginfo_carries_over_and_replaces():
         "upscale_factor": 4.0,
     }
 
+
+
+def test_kv_cache_requires_an_edit_request():
+    """``kv_cache`` is a reference-latent optimization: it needs a reference image."""
+    controller = _controller()
+    with pytest.raises(ValueError, match="requires an edit request"):
+        controller.generate(_request(kv_cache=True))
+
+
+def test_kv_cache_requires_a_model_that_supports_it():
+    """The KV cache is per-adapter: the pipeline refuses instead of ignoring it.
+
+    ``EditingStubModel`` edits (so it has a reference latent to freeze) but never
+    wired ``thenoise.dit.kvcache`` into its blocks, which is exactly what
+    wired ``thenoise.dit.kvcache`` into its blocks, which is exactly what the
+    ``kv_cache`` capability advertises.
+    """
+    from PIL import Image
+
+    from conftest import EditingStubModel
+
+    controller = _controller(EditingStubModel())
+    with pytest.raises(ValueError, match="does not support the reference-latent KV cache"):
+        controller.edit(
+            _request(image=Image.new("RGB", (64, 64), "white"), steps=1, kv_cache=True)
+        )

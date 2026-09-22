@@ -554,6 +554,7 @@ class AutoencoderKLQwenImage(nn.Module):
         super().__init__()
 
         self.z_dim = z_dim
+        self.input_channels = input_channels
         self.latents_mean = latents_mean
         self.latents_std = latents_std
 
@@ -588,8 +589,22 @@ class AutoencoderKLQwenImage(nn.Module):
         return self.encoder.parameters().__next__().device
 
     @property
-    def compression(self) -> int:
-        """Spatial compression factor (2^num_downsampling_stages), e.g. 8x for this VAE."""
+    def pixel_channels(self) -> int:
+        """Pixel channels the VAE consumes/emits (3 = RGB, 4 = RGBA).
+
+        Part of the shared VAE interface (see ``AutoencoderKLWan22``): it decides
+        whether an incoming alpha reaches the model and how many channels the PNG
+        output carries.
+        """
+        return self.input_channels
+
+    @property
+    def spatial_compression(self) -> int:
+        """Spatial compression factor (2^num_downsampling_stages), e.g. 8x for this VAE.
+
+        Together with ``z_dim`` this defines the canonical latent the pipeline
+        carries: ``[B, z_dim, H / spatial_compression, W / spatial_compression]``.
+        """
         return 2 ** (len(self.encoder.dim_mult) - 1)
 
     def _encode(self, x: torch.Tensor):

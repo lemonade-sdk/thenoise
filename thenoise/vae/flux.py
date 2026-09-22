@@ -123,6 +123,8 @@ class AutoencoderKLFlux(nn.Module):
     """
 
     z_dim = 16
+    spatial_compression = 8  # pixel / latent ratio (three down blocks)
+    pixel_channels = 3  # decode-only VAE: it emits RGB, never an alpha
     scaling_factor = 0.3611
     shift_factor = 0.1159
 

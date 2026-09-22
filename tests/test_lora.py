@@ -17,15 +17,25 @@ import torch.nn as nn
 from conftest import StubModel, write_safetensors
 from thenoise.models.flux_klein import FluxKleinModel
 from thenoise.utils.lora import (
-    _fuse_attention,
+    FUSE_GATE_UP,
+    FUSE_QKV,
+    _fuse_stacked,
     _match_lora_keys,
     _normalize_lora_suffix,
+    _projection_scale,
     apply_lora_to_model,
     compute_lora_delta,
     undo_lora_on_model,
 )
 
 CPU = torch.device("cpu")
+
+
+def _fuse(lora_sd, spec):
+    """Apply a fusion spec (``{fused: parts}``) as ``_normalize_lora_sd`` does."""
+    for fused, parts in spec.items():
+        lora_sd = _fuse_stacked(lora_sd, tuple(parts), fused)
+    return lora_sd
 
 
 # ------------------------------------------------- LoRA specs and the lora dir
@@ -125,17 +135,38 @@ def test_lora_spec_hash_is_order_insensitive():
         ("blocks.0.attn.lora_up.weight", "blocks.0.attn.lora_B.weight"),
         ("blocks.0.attn.lora.down.weight", "blocks.0.attn.lora_A.weight"),
         ("blocks.0.attn.lora.up.weight", "blocks.0.attn.lora_B.weight"),
+        # PEFT puts the adapter name between the factor and the leaf, and it is
+        # whatever the trainer called the adapter, not always "default".
+        ("blocks.0.attn.to_q.lora_A.default.weight", "blocks.0.attn.to_q.lora_A.weight"),
+        ("blocks.0.attn.to_q.lora_B.default.weight", "blocks.0.attn.to_q.lora_B.weight"),
+        ("blocks.0.attn.to_q.lora_A.my_adapter.weight", "blocks.0.attn.to_q.lora_A.weight"),
         # Already canonical (diffusers) forms pass through untouched.
         ("blocks.0.attn.lora_A.weight", "blocks.0.attn.lora_A.weight"),
         ("blocks.0.attn.lora_B.weight", "blocks.0.attn.lora_B.weight"),
         # Alphas and unrelated leaves are left alone.
         ("blocks.0.attn.alpha", "blocks.0.attn.alpha"),
         ("blocks.0.attn.bias", "blocks.0.attn.bias"),
+        ("blocks.0.attn.base_layer.weight", "blocks.0.attn.base_layer.weight"),
     ],
 )
 def test_normalize_lora_suffix(raw, canonical):
     out = _normalize_lora_suffix({raw: torch.ones(1)})
     assert list(out) == [canonical]
+
+
+def test_normalize_lora_suffix_collapses_a_whole_peft_state_dict():
+    """The PEFT form of a factor pair ends up matchable as one target."""
+    out = _normalize_lora_suffix(
+        {
+            "blocks.0.attn.to_q.lora_A.default.weight": torch.ones(1),
+            "blocks.0.attn.to_q.lora_B.default.weight": torch.ones(1),
+        }
+    )
+    assert set(out) == {
+        "blocks.0.attn.to_q.lora_A.weight",
+        "blocks.0.attn.to_q.lora_B.weight",
+    }
+    assert _match_lora_keys("blocks.0.attn.to_q.weight", set(out)) is not None
 
 
 def test_normalize_lora_suffix_rewrites_a_whole_state_dict():
@@ -193,21 +224,34 @@ def test_match_lora_keys_returns_none(key, keys):
 # ------------------------------------------------------------ attention fusion
 
 
-def _qkv_lora(rank=2, in_f=4, out_f=6, prefix="blocks.0.attn."):
+def _qkv_lora(
+    rank: int = 2,
+    in_f: int = 4,
+    out_f: int = 6,
+    prefix: str = "blocks.0.attn.",
+    alphas: dict | None = None,
+    present: tuple = ("q", "k", "v"),
+) -> dict:
+    """Separate to_q/to_k/to_v factors, optionally with per-projection alphas."""
     keys = {}
     for i, which in enumerate(("q", "k", "v")):
+        if which not in present:
+            continue
         keys[f"{prefix}to_{which}.lora_A.weight"] = torch.arange(
             rank * in_f, dtype=torch.float32
         ).reshape(rank, in_f) + i
         keys[f"{prefix}to_{which}.lora_B.weight"] = torch.arange(
             out_f * rank, dtype=torch.float32
         ).reshape(out_f, rank) + 10 * i
+        alpha = None if alphas is None else alphas.get(which)
+        if alpha is not None:
+            keys[f"{prefix}to_{which}.alpha"] = torch.tensor(float(alpha))
     return keys
 
 
-def test_fuse_attention_builds_the_qkv_pair():
+def test_fuse_qkv_builds_the_qkv_pair():
     sd = _qkv_lora()
-    fused = _fuse_attention(sd)
+    fused = _fuse(sd, FUSE_QKV)
 
     assert not any("to_q" in k or "to_k" in k or "to_v" in k for k in fused)
     a = fused["blocks.0.attn.qkv.lora_A.weight"]
@@ -229,7 +273,7 @@ def test_fuse_attention_builds_the_qkv_pair():
                 assert torch.equal(b[6 * i : 6 * i + 6, 2 * j : 2 * j + 2], torch.zeros(6, 2))
 
 
-def test_fuse_attention_fused_delta_equals_the_stack_of_projection_deltas():
+def test_fuse_qkv_fused_delta_equals_the_stack_of_projection_deltas():
     """The fused rank-3r delta with ``alpha = 3r`` scales to 1 and is the stack.
 
     That equality is the whole reason the fusion is correct: the three separate
@@ -238,7 +282,7 @@ def test_fuse_attention_fused_delta_equals_the_stack_of_projection_deltas():
     a scale of 1).
     """
     sd = _qkv_lora()
-    fused = _fuse_attention(sd)
+    fused = _fuse(sd, FUSE_QKV)
     per_projection = [
         compute_lora_delta(
             sd[f"blocks.0.attn.to_{w}.lora_A.weight"],
@@ -259,11 +303,234 @@ def test_fuse_attention_fused_delta_equals_the_stack_of_projection_deltas():
     assert torch.equal(fused_delta, torch.cat(per_projection, dim=0))
 
 
-def test_fuse_attention_is_a_noop_without_qkv_and_does_not_mutate():
+def test_fuse_qkv_folds_each_projection_alpha():
+    """Per-projection ``alpha/rank`` must survive the fusion (ComfyUI semantics).
+
+    ComfyUI applies each projection separately with its own ``alpha/rank``; a
+    fused pair carries a single rank (``3r``), so the scales are folded into the
+    factors. Without that, a LoRA with ``alpha != rank`` silently comes out at
+    the wrong strength (the fused default ``3r/3r`` is always 1).
+    """
+    alphas = {"q": 8.0, "k": 2.0, "v": None}  # rank 2 -> scales 4.0, 1.0, 1.0
+    sd = _qkv_lora(alphas=alphas)
+    fused = _fuse(sd, FUSE_QKV)
+
+    per_projection = [
+        compute_lora_delta(
+            sd[f"blocks.0.attn.to_{w}.lora_A.weight"],
+            sd[f"blocks.0.attn.to_{w}.lora_B.weight"],
+            2.0 if alphas[w] is None else alphas[w],
+            1.0,
+            CPU,
+        )
+        for w in "qkv"
+    ]
+    a = fused["blocks.0.attn.qkv.lora_A.weight"]
+    fused_delta = compute_lora_delta(
+        a, fused["blocks.0.attn.qkv.lora_B.weight"], a.size(0), 1.0, CPU
+    )
+    assert torch.allclose(fused_delta, torch.cat(per_projection, dim=0), rtol=2e-2, atol=2e-2)
+
+    # The consumed alphas must not resurface as "unused keys" warnings.
+    assert not [k for k in fused if k.endswith(".alpha")]
+
+
+def test_fuse_qkv_pads_missing_projections_with_zeros():
+    """A q-only attention LoRA lands on the q rows instead of raising KeyError."""
+    for present, alphas in ((("q",), None), (("k", "v"), {"k": 4.0, "v": 2.0})):
+        sd = _qkv_lora(alphas=alphas, present=present)
+        fused = _fuse(sd, FUSE_QKV)
+        a = fused["blocks.0.attn.qkv.lora_A.weight"]
+        b = fused["blocks.0.attn.qkv.lora_B.weight"]
+        # A keeps only the trained ranks; B always spans the full fused qkv height.
+        assert a.shape == (2 * len(present), 4)
+        assert b.shape == (18, 2 * len(present))
+
+        delta = compute_lora_delta(a, b, a.size(0), 1.0, CPU)
+        assert delta.shape == (18, 4)
+        for i, w in enumerate("qkv"):
+            if w in present:
+                alpha = 2.0 if alphas is None or alphas.get(w) is None else alphas[w]
+                expected = compute_lora_delta(
+                    sd[f"blocks.0.attn.to_{w}.lora_A.weight"],
+                    sd[f"blocks.0.attn.to_{w}.lora_B.weight"],
+                    alpha,
+                    1.0,
+                    CPU,
+                )
+                assert torch.allclose(delta[6 * i : 6 * i + 6], expected, rtol=2e-2, atol=2e-2)
+            else:
+                assert torch.equal(delta[6 * i : 6 * i + 6], torch.zeros(6, 4))
+
+
+def test_fuse_qkv_skips_an_unlayable_subset(caplog):
+    """q+k with different output widths: the missing v slice is unknowable.
+
+    Better an explicit warning and untouched keys (reported unused) than a delta
+    written to the wrong rows of the fused projection.
+    """
+    sd = _qkv_lora(present=("q", "k"))
+    sd["blocks.0.attn.to_k.lora_B.weight"] = torch.ones(3, 2)
+    fused = _fuse(sd, FUSE_QKV)
+
+    assert set(fused) == set(sd)
+    assert not any("qkv" in k for k in fused)
+    assert "skipping qkv fusion" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "alpha,rank,expected",
+    [
+        (None, 8, 1.0),   # no alpha key -> ComfyUI's hardcoded 1.0 == rank/rank
+        (16.0, 8, 2.0),
+        (4.0, 8, 0.5),
+        (0.0, 8, 0.0),    # alpha 0 disables the LoRA in ComfyUI too
+    ],
+)
+def test_projection_scale_matches_comfy_alpha_rule(alpha, rank, expected):
+    sd = {} if alpha is None else {"x.alpha": torch.tensor(alpha)}
+    assert _projection_scale(sd, "x.alpha", rank) == expected
+
+
+def test_fuse_qkv_is_a_noop_without_qkv_and_does_not_mutate():
     sd = {"blocks.0.ff.net.0.lora_A.weight": torch.ones(2, 4), "blocks.0.ff.net.0.lora_B.weight": torch.ones(6, 2)}
     snapshot = dict(sd)
-    assert _fuse_attention(sd) == snapshot
+    assert _fuse(sd, FUSE_QKV) == snapshot
     assert sd == snapshot
+
+
+# ------------------------------------------------------- SwiGLU gate/up fusion
+
+
+def _gate_up_lora(
+    rank: int = 2,
+    in_f: int = 4,
+    hidden: int = 6,
+    prefix: str = "blocks.0.img_mlp.",
+    alphas: dict | None = None,
+    present: tuple = ("gate_layer", "proj"),
+) -> dict:
+    """Separate SwiGLU ``gate_layer``/``proj`` factors, optionally with alphas."""
+    keys = {}
+    for i, which in enumerate(("gate_layer", "proj")):
+        if which not in present:
+            continue
+        keys[f"{prefix}{which}.lora_A.weight"] = torch.arange(
+            rank * in_f, dtype=torch.float32
+        ).reshape(rank, in_f) + i
+        keys[f"{prefix}{which}.lora_B.weight"] = torch.arange(
+            hidden * rank, dtype=torch.float32
+        ).reshape(hidden, rank) + 10 * i
+        alpha = None if alphas is None else alphas.get(which)
+        if alpha is not None:
+            keys[f"{prefix}{which}.alpha"] = torch.tensor(float(alpha))
+    return keys
+
+
+def test_fuse_gate_up_builds_the_gate_up_pair():
+    sd = _gate_up_lora()
+    fused = _fuse(sd, FUSE_GATE_UP)
+
+    assert not any("gate_layer" in k or ".proj." in k for k in fused)
+    a = fused["blocks.0.img_mlp.gate_up.lora_A.weight"]
+    b = fused["blocks.0.img_mlp.gate_up.lora_B.weight"]
+    # The fused matrix is [gate; up], so A is the rank stack and B the block
+    # diagonal at each half's row offset.
+    assert a.shape == (4, 4)
+    assert b.shape == (12, 4)
+    for i, which in enumerate(("gate_layer", "proj")):
+        assert torch.equal(a[2 * i : 2 * i + 2], sd[f"blocks.0.img_mlp.{which}.lora_A.weight"])
+        assert torch.equal(
+            b[6 * i : 6 * i + 6, 2 * i : 2 * i + 2],
+            sd[f"blocks.0.img_mlp.{which}.lora_B.weight"],
+        )
+        for j in range(2):
+            if j != i:
+                assert torch.equal(b[6 * i : 6 * i + 6, 2 * j : 2 * j + 2], torch.zeros(6, 2))
+
+
+def test_fuse_gate_up_fused_delta_is_the_stack_of_the_two_merges():
+    """Applying the fused pair once == applying gate and up on their own halves."""
+    sd = _gate_up_lora()
+    fused = _fuse(sd, FUSE_GATE_UP)
+
+    per_part = [
+        compute_lora_delta(
+            sd[f"blocks.0.img_mlp.{which}.lora_A.weight"],
+            sd[f"blocks.0.img_mlp.{which}.lora_B.weight"],
+            2.0,  # per-part alpha == rank -> scale 1
+            1.0,
+            CPU,
+        )
+        for which in ("gate_layer", "proj")
+    ]
+    a = fused["blocks.0.img_mlp.gate_up.lora_A.weight"]
+    fused_delta = compute_lora_delta(a, fused["blocks.0.img_mlp.gate_up.lora_B.weight"], a.size(0), 1.0, CPU)
+    assert torch.equal(fused_delta, torch.cat(per_part, dim=0))
+
+
+def test_fuse_gate_up_folds_each_part_alpha():
+    """The fused rank-4 pair must keep the two parts' own ``alpha/rank`` scales."""
+    alphas = {"gate_layer": 8.0, "proj": 1.0}  # rank 2 -> scales 4.0 and 0.5
+    sd = _gate_up_lora(alphas=alphas)
+    fused = _fuse(sd, FUSE_GATE_UP)
+
+    per_part = [
+        compute_lora_delta(
+            sd[f"blocks.0.img_mlp.{which}.lora_A.weight"],
+            sd[f"blocks.0.img_mlp.{which}.lora_B.weight"],
+            alphas[which],
+            1.0,
+            CPU,
+        )
+        for which in ("gate_layer", "proj")
+    ]
+    a = fused["blocks.0.img_mlp.gate_up.lora_A.weight"]
+    fused_delta = compute_lora_delta(a, fused["blocks.0.img_mlp.gate_up.lora_B.weight"], a.size(0), 1.0, CPU)
+    assert torch.allclose(fused_delta, torch.cat(per_part, dim=0), rtol=2e-2, atol=2e-2)
+    assert not [k for k in fused if k.endswith(".alpha")]
+
+
+def test_fuse_gate_up_pads_a_missing_part_with_zeros():
+    """A gate-only LoRA lands on the gate half instead of the whole matrix."""
+    sd = _gate_up_lora(present=("gate_layer",))
+    fused = _fuse(sd, FUSE_GATE_UP)
+
+    a = fused["blocks.0.img_mlp.gate_up.lora_A.weight"]
+    b = fused["blocks.0.img_mlp.gate_up.lora_B.weight"]
+    assert a.shape == (2, 4)
+    assert b.shape == (12, 2)
+
+    delta = compute_lora_delta(a, b, a.size(0), 1.0, CPU)
+    assert torch.equal(delta[6:], torch.zeros(6, 4))
+    assert torch.equal(
+        delta[:6],
+        compute_lora_delta(
+            sd["blocks.0.img_mlp.gate_layer.lora_A.weight"],
+            sd["blocks.0.img_mlp.gate_layer.lora_B.weight"],
+            2.0,
+            1.0,
+            CPU,
+        ),
+    )
+
+
+def test_fuse_gate_up_skips_an_unlayable_subset(caplog):
+    """Parts disagreeing on the input dim cannot share one fused ``A``."""
+    sd = _gate_up_lora()
+    sd["blocks.0.img_mlp.proj.lora_A.weight"] = torch.ones(2, 5)
+    fused = _fuse(sd, FUSE_GATE_UP)
+
+    assert set(fused) == set(sd)
+    assert not any("gate_up" in k for k in fused)
+    assert "skipping gate_up fusion" in caplog.text
+
+
+def test_fuse_gate_up_is_a_noop_for_qkv_factors_and_vice_versa():
+    """The two stackings never touch each other's keys."""
+    qkv, gate = _qkv_lora(), _gate_up_lora()
+    assert _fuse(qkv, FUSE_GATE_UP) == qkv
+    assert _fuse(gate, FUSE_QKV) == gate
 
 
 # ----------------------------------------------------------------- apply/undo
@@ -331,6 +598,80 @@ def test_apply_reports_and_skips_unused_keys(caplog):
     result = apply_lora_to_model(model, [sd], [1.0], CPU)
     assert result["affected_keys"] == ("proj.weight",)
     assert "unused keys" in caplog.text
+
+
+# -------------------------------------------------- the model's fusion spec
+
+
+class _SwigluNet(nn.Module):
+    """One fused ``gate_up`` row — the Qwen-Image 2.1 SwiGLU layout."""
+
+    def __init__(self):
+        super().__init__()
+        self.blocks = nn.ModuleList([nn.Module()])
+        self.blocks[0].img_mlp = nn.Module()
+        self.blocks[0].img_mlp.gate_up = nn.Linear(4, 12, bias=False)
+        with torch.no_grad():
+            self.blocks[0].img_mlp.gate_up.weight.fill_(1.0)
+
+
+def _peft_gate_up_lora() -> dict:
+    """A PEFT-named LoRA on the split SwiGLU halves (gate delta 2, up delta 8)."""
+    return {
+        "blocks.0.img_mlp.gate_layer.lora_A.default.weight": torch.ones(2, 4),
+        "blocks.0.img_mlp.gate_layer.lora_B.default.weight": torch.ones(6, 2),
+        "blocks.0.img_mlp.proj.lora_A.default.weight": 2 * torch.ones(2, 4),
+        "blocks.0.img_mlp.proj.lora_B.default.weight": 2 * torch.ones(6, 2),
+    }
+
+
+def test_a_declared_fusion_lands_a_split_lora_on_the_fused_weight():
+    """PEFT naming + the model's ``gate_up`` spec == the stack of the two halves."""
+    model = _SwigluNet()
+    original = model.blocks[0].img_mlp.gate_up.weight.clone()
+
+    result = apply_lora_to_model(
+        model, [_peft_gate_up_lora()], [1.0], CPU, fusions=FUSE_GATE_UP
+    )
+    assert result["affected_keys"] == ("blocks.0.img_mlp.gate_up.weight",)
+    expected = torch.cat([2 * torch.ones(6, 4), 8 * torch.ones(6, 4)], dim=0)
+    assert torch.equal(model.blocks[0].img_mlp.gate_up.weight, original + expected)
+
+    undo_lora_on_model(model, result, CPU)
+    assert torch.equal(model.blocks[0].img_mlp.gate_up.weight, original)
+
+
+def test_an_undeclared_fusion_is_not_applied(caplog):
+    """A model that runs the split projections must never get its LoRA stacked.
+
+    The spec is opt-in per adapter, so here the factors stay two unmatched names:
+    reported, and nothing written to the wrong rows.
+    """
+    model = _SwigluNet()
+    original = model.blocks[0].img_mlp.gate_up.weight.clone()
+
+    result = apply_lora_to_model(model, [_peft_gate_up_lora()], [1.0], CPU)
+    assert result["affected_keys"] == ()
+    assert torch.equal(model.blocks[0].img_mlp.gate_up.weight, original)
+    assert "unused keys" in caplog.text
+
+
+def test_switch_loras_uses_the_model_fusion_spec(tmp_path):
+    """The adapter's ``lora_fusions`` is what reaches ``apply_lora_to_model``."""
+
+    class _FusedModel(StubModel):
+        lora_fusions = FUSE_GATE_UP
+
+    model = _FusedModel(lora_dir=str(tmp_path))
+    write_safetensors(tmp_path / "peft.safetensors", _peft_gate_up_lora())
+    dit = _SwigluNet()
+    original = dit.blocks[0].img_mlp.gate_up.weight.clone()
+
+    model.switch_loras(["peft.safetensors:1.0"], dit)
+    assert not torch.equal(dit.blocks[0].img_mlp.gate_up.weight, original)
+
+    model.switch_loras(None, dit)
+    assert torch.equal(dit.blocks[0].img_mlp.gate_up.weight, original)
 
 
 def test_apply_with_no_loras_returns_an_empty_result():

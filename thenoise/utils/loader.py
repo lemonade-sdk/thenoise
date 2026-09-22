@@ -107,8 +107,9 @@ def load_text_encoder_weights(
     and every other leaf parameter/buffer is cast to ``dtype``. BF16/plain
     checkpoints land via ``load_state_dict(assign=True)`` after casting.
 
-    The tied ``lm_head.weight`` (absent from quantized files, redundant in BF16 files)
-    is dropped; encoders should remove their ``lm_head`` module before calling.
+    The whole ``lm_head.`` subtree (a quantized file stores a weight, a scale and a
+    marker) is dropped: encoders remove their ``lm_head`` module before calling, and
+    no LM head is ever run.
 
     Args:
         model: the (meta-constructed, QuantizedLinear-swapped) text encoder.
@@ -125,7 +126,7 @@ def load_text_encoder_weights(
     device = torch.device(device)
 
     sd = load_safetensors(path, device=device, dtype=None)
-    sd.pop("lm_head.weight", None)
+    sd = {k: v for k, v in sd.items() if k != "lm_head" and not k.startswith("lm_head.")}
     if key_map is not None:
         # A text-encoder ``key_map`` is a layout normalization (e.g. Krea 2's
         # ComfyUI ``language_model.``/``visual.`` -> ``model.`` mapping) needed on
@@ -332,6 +333,7 @@ def load_quantized_state_dict(
                 module,
                 _build_quantized_tensor(tensor, scales.pop(module_path, None), markers.get(module_path, {}), key),
                 key,
+                dtype,
             )
         elif isinstance(getattr(module, attr, None), torch.nn.Parameter):
             # BF16/full-precision leaf parameter (weight, bias, pad tokens, ...):
@@ -379,13 +381,26 @@ def _build_quantized_tensor(
     return entry[1](qweight, scale, marker)
 
 
-def _switch_to_quantized(module: torch.nn.Module, qt: QuantizedTensor, key: str) -> None:
-    if not hasattr(module, "load_quantized"):
-        raise RuntimeError(
-            f"quantized weight {key!r} landed on {type(module).__name__}, "
-            "which has no load_quantized(); it must be a QuantizedLinear"
-        )
-    module.load_quantized(qt)
+def _switch_to_quantized(
+    module: torch.nn.Module, qt: QuantizedTensor, key: str, dtype: Optional[torch.dtype]
+) -> None:
+    """Put a quantized weight on ``module``: quantized if it can run one, else dequantized.
+
+    Only linears run a ``QuantizedTensor`` directly. A quantized **embedding** is the
+    one other thing a text-encoder export stores; a row gather cannot run on a
+    quantized table, so it is dequantized into the compute dtype.
+    """
+    if hasattr(module, "load_quantized"):
+        module.load_quantized(qt)
+        return
+    if isinstance(module, torch.nn.Embedding):
+        weight = qt.dequantize()
+        module.weight = torch.nn.Parameter(weight if dtype is None else weight.to(dtype))
+        return
+    raise RuntimeError(
+        f"quantized weight {key!r} landed on {type(module).__name__}, "
+        "which has no load_quantized(); it must be a QuantizedLinear"
+    )
 
 
 def _submodule(model: torch.nn.Module, module_path: str, key: str) -> torch.nn.Module:

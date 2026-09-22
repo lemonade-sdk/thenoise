@@ -1,4 +1,4 @@
-"""Upscale factor/type planning + pixel-upscaler manager tests (no torch, no weights).
+"""Upscale factor/type planning + pixel-upscaler manager tests (no weights).
 
 Pixel-upscaling is a pixel-space / server concern, so its manager
 (``PixelUpscalerManager``) and the pipeline controller's upscale planning
@@ -8,6 +8,7 @@ tested directly, without a diffusion model.
 from __future__ import annotations
 
 import pytest
+import torch
 
 from thenoise.upscale.pixel import PixelUpscalerManager
 
@@ -148,7 +149,7 @@ def test_upscale_controller_factor_validation(tmp_path, monkeypatch):
 
     # Stub the pixel conversion so we can observe whether validation passed (the
     # controller would otherwise try to load the model onto a device).
-    def _boom(_img):
+    def _boom(_img, _channels=None):
         raise RuntimeError("reached-pixels")
 
     monkeypatch.setattr("thenoise.upscale_controller.pil_to_pixels", _boom)
@@ -176,7 +177,9 @@ def test_upscale_controller_attaches_resolved_factor(tmp_path, monkeypatch):
         def to(self, _device):
             return self
 
-    monkeypatch.setattr("thenoise.upscale_controller.pil_to_pixels", lambda _i: _Pixels())
+    monkeypatch.setattr(
+        "thenoise.upscale_controller.pil_to_pixels", lambda _i, _c=None: _Pixels()
+    )
     monkeypatch.setattr("thenoise.upscale_controller.pixels_to_pil", lambda _p: img)
     monkeypatch.setattr("thenoise.upscale_controller.resize_to_target", lambda p, _w, _h: p)
     monkeypatch.setattr("thenoise.upscale_controller.build_upscale_pnginfo", lambda *a, **k: {})
@@ -239,6 +242,67 @@ def test_switch_pixel_upscaler_keeps_last_used(tmp_path, monkeypatch):
     assert m._pixel_upscaler is fake_model
     assert len(calls) == 2
     assert m._pixel_upscaler_scales == {"x2": 2, "x4": 4}
+
+
+class _FakeUpscaler:
+    """A stand-in for the strictly-3-channel Real-ESRGAN model (2x, nearest)."""
+
+    def __init__(self):
+        self.seen = []
+
+    def forward_tiled(self, x):
+        self.seen.append(x)
+        return torch.nn.functional.interpolate(x, scale_factor=2, mode="nearest")
+
+
+def _manager_with(fake):
+    """A manager whose loaded upscaler is ``fake`` and whose ``switch`` is a no-op."""
+    m = _make_manager(upscaler_dir="")
+    m._pixel_upscaler = fake
+    m._pixel_upscaler_name = "esrgan"
+    m.switch = lambda _name: None
+    return m
+
+
+def test_apply_feeds_the_upscaler_rgb_and_keeps_the_alpha():
+    """Real-ESRGAN is 3-channel: composite for it, then re-attach the matte."""
+    fake = _FakeUpscaler()
+
+    # Black RGB under a fully transparent matte.
+    pixels = torch.cat([torch.full((3, 2, 2), -1.0), torch.full((1, 2, 2), -1.0)], 0)
+    out = _manager_with(fake).apply("esrgan", pixels, 2)
+
+    assert fake.seen[0].shape[1] == 3  # the model never sees a 4th channel
+    # Composite onto white, then [-1,1] -> [0,1]: exactly 1.0 everywhere.
+    assert torch.allclose(fake.seen[0], torch.ones_like(fake.seen[0]))
+
+    assert out.shape == (4, 4, 4)
+    assert torch.allclose(out[3], torch.full((4, 4), -1.0))  # a flat matte stays flat
+
+
+def test_apply_composites_a_matte_per_pixel_rather_than_dropping_it():
+    """The same grey under an opaque and a transparent matte must not match."""
+    rgb = torch.full((3, 1, 1), -0.5)
+
+    opaque = _FakeUpscaler()
+    _manager_with(opaque).apply("esrgan", torch.cat([rgb, torch.ones(1, 1, 1)], 0), 2)
+    transparent = _FakeUpscaler()
+    _manager_with(transparent).apply(
+        "esrgan", torch.cat([rgb, torch.full((1, 1, 1), -1.0)], 0), 2
+    )
+
+    grey = (-0.5 + 1.0) / 2.0
+    assert torch.allclose(opaque.seen[0], torch.full_like(opaque.seen[0], grey))
+    assert torch.allclose(transparent.seen[0], torch.ones_like(transparent.seen[0]))
+
+
+def test_apply_leaves_an_rgb_input_alone():
+    """No alpha in, no alpha out: the 3-channel path is untouched."""
+    fake = _FakeUpscaler()
+    out = _manager_with(fake).apply("esrgan", torch.zeros(3, 2, 2), 2)
+
+    assert fake.seen[0].shape[1] == 3
+    assert out.shape == (3, 4, 4)
 
 
 def test_forward_tiled_pads_odd_dimensions():

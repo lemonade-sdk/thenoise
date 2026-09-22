@@ -1,6 +1,6 @@
 import os
 import re
-from typing import Callable, Dict, List, Optional, Tuple, TypedDict, Union
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple, TypedDict, Union
 import torch
 import torch.nn.functional as F
 
@@ -13,14 +13,20 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+#: PEFT writes the factors as ``<target>.lora_A.<adapter>.weight``, with the
+#: adapter name (``default`` for anything saved by ``save_pretrained``) sitting
+#: between the factor and the leaf. Nothing else in the wild puts a segment there.
+_PEFT_ADAPTER_FACTOR = re.compile(r"^(?P<base>.+\.lora_[AB])\.[^.]+\.weight$")
+
+
 def _normalize_lora_suffix(lora_sd: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-    """Rewrite LoRA factor suffixes to a canonical ``lora_A``/``lora_B`` form.
+    """Rewrite LoRA factor spellings to a canonical ``lora_A``/``lora_B`` form.
 
     Training tools name the factors variously: sd-scripts ``lora_down``/
     ``lora_up``, diffusers ``lora_A``/``lora_B``, ComfyUI ``lora.down``/
-    ``lora.up``. Normalizing to ``lora_A`` (down) / ``lora_B`` (up) means the
-    rest of the pipeline (fusing and matching) needs to know only one form.
-    ``.alpha`` and already-canonical keys are left unchanged.
+    ``lora.up``, PEFT ``lora_A.<adapter>``. Normalizing to ``lora_A`` (down) /
+    ``lora_B`` (up) means the rest of the pipeline (fusing and matching) needs to
+    know only one form. ``.alpha`` and already-canonical keys are left unchanged.
     """
     out: Dict[str, torch.Tensor] = {}
     for k, v in lora_sd.items():
@@ -31,10 +37,12 @@ def _normalize_lora_suffix(lora_sd: Dict[str, torch.Tensor]) -> Dict[str, torch.
             (".lora.up.weight", ".lora_B.weight"),
         ]:
             if k.endswith(old):
-                out[k[: -len(old)] + new] = v
+                k = k[: -len(old)] + new
                 break
         else:
-            out[k] = v
+            if (m := _PEFT_ADAPTER_FACTOR.match(k)):
+                k = f"{m['base']}.weight"
+        out[k] = v
     return out
 
 
@@ -83,37 +91,152 @@ def _match_lora_keys(
     return None
 
 
-def _fuse_attention(lora_sd: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-    """Fuse separate ``to_q``/``to_k``/``to_v`` LoRA factors into ``qkv``.
+#: Fusion specs for the sub-projection stackings this engine's models use: the
+#: fused module's name -> the sub-projections a LoRA trains it as, in the fused
+#: matrix's row order. Adapters list the ones their modules use in
+#: ``DiffusionModel.lora_fusions``; a model with its own naming can as well write
+#: an equivalent ``{fused: (part, ...)}`` literal.
+FUSE_QKV: Dict[str, Tuple[str, ...]] = {"qkv": ("to_q", "to_k", "to_v")}
+FUSE_GATE_UP: Dict[str, Tuple[str, ...]] = {"gate_up": ("gate_layer", "proj")}
 
-    Diffusers/ComfyUI attention LoRAs train separate q/k/v projections; models
-    with a fused ``qkv`` projection expect the factors combined as
-    ``A_qkv = cat([A_q; A_k; A_v], dim=0)`` and
-    ``B_qkv = block_diag(B_q, B_k, B_v)``. The fused rank is ``3r``, so the
-    default scale ``alpha/dim`` with ``alpha = down.size(0) = 3r`` evaluates to
-    1, matching each original projection's ``r/r`` scaling. No-op if the LoRA
-    has no separate q/k/v factors. The input is not mutated.
+
+def _projection_scale(
+    lora_sd: Dict[str, torch.Tensor],
+    alpha_key: str,
+    rank: int,
+) -> float:
+    """ComfyUI's per-projection scale ``alpha / rank`` (1.0 when no alpha key).
+
+    Matches ``comfy.weight_adapter.lora.LoRAAdapter.calculate_weight``, which
+    uses ``alpha / down.size(0)`` when a ``.alpha`` entry exists and exactly
+    ``1.0`` when it does not.
     """
+    alpha = lora_sd.get(alpha_key)
+    if alpha is None:
+        return 1.0
+    return float(alpha.item()) / max(rank, 1)
+
+
+def _fuse_stacked(
+    lora_sd: Dict[str, torch.Tensor],
+    parts: Tuple[str, ...],
+    fused: str,
+) -> Dict[str, torch.Tensor]:
+    """Fuse per-sub-projection LoRA factors into one stacked-projection pair.
+
+    Several projections come in two layouts: trained separately (attention
+    ``to_q``/``to_k``/``to_v``, SwiGLU ``gate_layer``/``proj``) and fused into one
+    matrix whose rows are those sub-projections stacked (``qkv``, ``gate_up``). A
+    LoRA trained on the split names lands on the fused weight as
+    ``A_fused = cat([A_part], dim=0)`` and ``B_fused = block_diag(*B_part)``, each
+    part's block at its own row offset in the fused weight.
+
+    A fused pair carries a single rank (the sum over the parts), so one shared
+    ``alpha/dim`` cannot reproduce per-projection scales. Each part's
+    ``alpha / rank`` is therefore folded into its ``lora_A`` factor before
+    concatenating (and its ``.alpha`` key consumed), which makes the fused
+    delta exactly the stack of the separate merges — including LoRAs whose alpha
+    differs from the rank, or whose parts have different alphas. When no alpha
+    key is present the scale is 1 and nothing is folded, so the factors are
+    passed through bit-identically.
+
+    LoRAs that train only a subset of the parts are fused with zero rows in
+    ``B_fused`` for the missing ones (they contribute no rank), which requires
+    the parts to share one output width — the equal-slices layout every fused
+    matrix here uses. Anything that cannot be laid out unambiguously (incomplete
+    factor pairs, or missing parts alongside differing output widths) is left
+    untouched and logged instead of being written to the wrong rows.
+
+    No-op if the LoRA has none of ``parts``. The input is not mutated.
+    """
+    names = "|".join(re.escape(p) for p in parts)
     groups = set()
     for k in lora_sd:
-        m = re.match(r"^(.*?)to_[qkv]\.lora_[AB]\.weight$", k)
+        m = re.match(rf"^(.*?)({names})\.lora_[AB]\.weight$", k)
         if m:
             groups.add(m.group(1))
     if not groups:
         return lora_sd
 
     new_sd = dict(lora_sd)
-    for prefix in groups:
-        # Fuse q/k/v factors into a single qkv projection (rows q, k, v).
-        for side in ("A", "B"):
-            parts = [
-                new_sd.pop(f"{prefix}to_{p}.lora_{side}.weight")
-                for p in ("q", "k", "v")
-            ]
-            if side == "A":
-                new_sd[f"{prefix}qkv.lora_A.weight"] = torch.cat(parts, dim=0)
-            else:
-                new_sd[f"{prefix}qkv.lora_B.weight"] = torch.block_diag(*parts)
+    for prefix in sorted(groups):
+        factors = {
+            p: (
+                new_sd.get(f"{prefix}{p}.lora_A.weight"),
+                new_sd.get(f"{prefix}{p}.lora_B.weight"),
+            )
+            for p in parts
+        }
+        present = [
+            p
+            for p in parts
+            if factors[p][0] is not None and factors[p][1] is not None
+        ]
+        if not present:
+            logger.warning(
+                "LoRA %s has no complete %s factor pair; skipping %s fusion",
+                prefix,
+                "/".join(parts),
+                fused,
+            )
+            continue
+
+        out_rows = {p: factors[p][1].size(0) for p in present}
+        in_dims = {p: factors[p][0].size(1) for p in present}
+        missing = [p for p in parts if p not in present]
+        in_ok = len(set(in_dims.values())) == 1
+        out_ok = not missing or len(set(out_rows.values())) == 1
+        if not (in_ok and out_ok):
+            logger.warning(
+                "LoRA %s has mismatched %s factor shapes (%s present, %s differ); "
+                "skipping %s fusion",
+                prefix,
+                "/".join(parts),
+                "/".join(present),
+                "input" if not in_ok else "output",
+                fused,
+            )
+            continue
+
+        slice_rows = out_rows[present[0]]
+        rows = {p: out_rows.get(p, slice_rows) for p in parts}
+
+        blocks = []
+        rank_total = 0
+        for p in parts:
+            if p not in present:
+                blocks.append((rows[p], 0, None, None))
+                continue
+            a, b = factors[p]
+            alpha_key = f"{prefix}{p}.alpha"
+            scale = _projection_scale(new_sd, alpha_key, a.size(0))
+            if scale != 1.0:
+                a = (a.to(torch.float32) * scale).to(a.dtype)
+            new_sd.pop(alpha_key, None)
+            blocks.append((rows[p], a.size(0), a, b))
+            rank_total += a.size(0)
+            new_sd.pop(f"{prefix}{p}.lora_A.weight", None)
+            new_sd.pop(f"{prefix}{p}.lora_B.weight", None)
+
+        a_dtype, a_device = factors[present[0]][0].dtype, factors[present[0]][0].device
+        b_dtype, b_device = factors[present[0]][1].dtype, factors[present[0]][1].device
+        a_fused = torch.zeros(
+            rank_total, in_dims[present[0]], dtype=a_dtype, device=a_device
+        )
+        b_fused = torch.zeros(
+            sum(rows.values()), rank_total, dtype=b_dtype, device=b_device
+        )
+
+        row_off = col_off = 0
+        for rows_p, rank_p, a, b in blocks:
+            if a is not None:
+                a_fused[col_off : col_off + rank_p] = a
+                b_fused[row_off : row_off + rows_p, col_off : col_off + rank_p] = b
+                col_off += rank_p
+            row_off += rows_p
+
+        new_sd[f"{prefix}{fused}.lora_A.weight"] = a_fused
+        new_sd[f"{prefix}{fused}.lora_B.weight"] = b_fused
     return new_sd
 
 
@@ -133,18 +256,18 @@ def _unwrap_compiled(model: torch.nn.Module) -> torch.nn.Module:
 def _normalize_lora_sd(
     lora_sd: Dict[str, torch.Tensor],
     key_map: Optional[Callable[[str], str]],
-    fuse_attention: bool = True,
+    fusions: Optional[Mapping[str, Sequence[str]]] = None,
 ) -> Dict[str, torch.Tensor]:
     """Normalize an externally-named LoRA state dict for matching.
 
-    Pipeline: normalize the factor suffix, optionally fuse any separate q/k/v
-    attention factors (only for models with a fused ``qkv`` projection), then
-    apply the model family's ``key_map`` (schema renames, e.g. ComfyUI
-    ``transformer_blocks`` -> model ``double_blocks``).
+    Pipeline: normalize the factor naming, apply the model's ``fusions`` (each
+    ``{fused: parts}`` entry stacking one set of separately-trained factors onto
+    the fused module, in declaration order), then the model family's ``key_map``
+    (schema renames, e.g. ComfyUI ``transformer_blocks`` -> ``double_blocks``).
     """
     lora_sd = _normalize_lora_suffix(lora_sd)
-    if fuse_attention:
-        lora_sd = _fuse_attention(lora_sd)
+    for fused, parts in (fusions or {}).items():
+        lora_sd = _fuse_stacked(lora_sd, tuple(parts), fused)
     if key_map is not None:
         lora_sd = {key_map(k): v for k, v in lora_sd.items()}
     return lora_sd
@@ -224,7 +347,7 @@ def apply_lora_to_model(
     calc_device: torch.device,
     dit_path: Optional[str] = None,
     key_map: Optional[Callable[[str], str]] = None,
-    fuse_attention: bool = True,
+    fusions: Optional[Mapping[str, Sequence[str]]] = None,
 ) -> LoRAApplyResult:
     """Apply LoRA weights directly to a model's parameters (in-place).
 
@@ -235,8 +358,9 @@ def apply_lora_to_model(
 
     Param keys use the same naming as ``model.state_dict()`` (e.g. "blocks.0.attn.gate.weight").
 
-    ``fuse_attention`` controls whether separate ``to_q``/``to_k``/``to_v`` LoRA
-    factors are fused into a single ``qkv`` projection.
+    ``fusions`` is the model's fusion spec (``{fused: parts}``, e.g.
+    ``FUSE_QKV``): the sub-projection stackings a LoRA trained on the separate
+    names has to be fused onto before it can match this model's weights.
     """
     if not lora_sds:
         return {
@@ -259,9 +383,9 @@ def apply_lora_to_model(
     base_model = _unwrap_compiled(model)
 
     # Normalize each LoRA state dict to the model's naming: normalize the factor
-    # suffix, optionally fuse separate q/k/v attention factors, then apply the
-    # model family's ``key_map`` (schema renames, e.g. ComfyUI -> repo).
-    lora_sds = [_normalize_lora_sd(sd, key_map, fuse_attention) for sd in lora_sds]
+    # naming, apply the model's fusions, then its ``key_map`` (schema renames,
+    # e.g. ComfyUI -> repo).
+    lora_sds = [_normalize_lora_sd(sd, key_map, fusions) for sd in lora_sds]
 
     # Build key sets for each LoRA
     lora_weight_keys_list = [set(sd.keys()) for sd in lora_sds]

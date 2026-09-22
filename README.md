@@ -175,7 +175,7 @@ Below a short list of what you can expect in terms of perfomance. The times repo
 
 ## Supported Models
 
-Anima, Krea 2, Z-Image-Turbo, Flux.2 Klein, and Qwen-Image are supported. New models will be added. PRs adding model support are welcome.
+Anima, Krea 2, Z-Image-Turbo, Flux.2 Klein, Qwen-Image and Qwen-Image 2.1 are supported. New models will be added. PRs adding model support are welcome.
 
 All download commands use `.venv/bin/python` and need the `scripts` extra
 installed (`uv pip install -e ".[scripts]"`), because `huggingface_hub` lives
@@ -190,6 +190,7 @@ in the project venv created by [Setup](#setup) — a bare `python` will not work
 | Flux.2 Klein 4B | ~12 GB | Distilled 4-step flow MMDiT; Flux.2 VAE + Qwen3-4B | ✓ |
 | Flux.2 Klein 9B | ~25 GB | Distilled 4-step flow MMDiT; Flux.2 VAE + Qwen3-8B | ✓ |
 | Qwen-Image / Qwen-Image-Edit | ~40 GB | Dual-stream DiT; Qwen-Image VAE + Qwen2.5-VL-7B | ✓ |
+| Qwen-Image 2.1 | ~32 GB | Single-stream DiT (t2i + edit); RGBA Wan 2.2-layout VAE + Qwen3-VL-8B | ✓ |
 
 
 ### Krea 2
@@ -250,6 +251,24 @@ text encoder and Qwen-Image VAE. Older/unversioned checkpoints are not downloade
 `--image-only` / `--edit-only` to fetch just one variant's DiT (the shared text encoder
 and VAE are always included).
 
+### Qwen-Image 2.1
+
+```bash
+.venv/bin/python scripts/download_qwen_image21.py --out ./models/qwen_image21
+```
+
+This fetches the bf16 DiT (~14 GB), the Qwen3-VL-8B text encoder (~17.5 GB) and the
+VAE (~0.7 GB). Add `--int8-convrot` to fetch the int8-convrot DiT **and** text encoder
+instead (~17 GB total):
+
+```bash
+./thenoise.sh generate \
+  --dit ./models/qwen_image21/diffusion_models/qwen_image_2.1_bf16.safetensors \
+  --vae ./models/qwen_image21/vae/qwen_image_2.1_vae_bf16.safetensors \
+  --text-encoder ./models/qwen_image21/text_encoders/qwen3vl_8b_bf16.safetensors \
+  --prompt "a fox walking in the snow" --out fox.png
+```
+
 ---
 
 ## Operation Modes
@@ -295,7 +314,7 @@ The downloaded `RealESRGAN_x4plus.safetensors` goes into an `--upscaler-dir` (se
 
 Editing-capable models can edit an existing image from a text instruction: **image + prompt → edited image**.
 
-Editing is a **model** capability (`supports_edit`). At the moment only Flux.2 Klein supports it.
+Editing is a **model** capability: Flux.2 Klein, Qwen-Image and Qwen-Image 2.1 support it. All three also implement the reference-latent **KV cache** (`kv_cache`): with `ref_method: index_timestep_zero` the reference tokens' K/V are frozen after the first denoise step, so later steps run faster (`--kv-cache`). Flux.2 Klein requires a special "KV" checkpoint for this to work; on Qwen-Image 2.1 the timestep-zero prefix is architectural, so the cache is exact and on by default.
 
 You may provide one or many reference images. Without an explicit `width`/`height`, the **first** reference image is resized to 1024 on its largest side (aspect preserved) and sets the output size; the rest are used as additional references.
 
@@ -374,16 +393,30 @@ LoRA format is `filename:weight` — the `.safetensors` extension is appended au
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/` | Web UI |
-| `GET` | `/health` | Server status and loaded model |
+| `GET` | `/health` | Server status, loaded model and its capabilities (see below) |
 | `GET` | `/lora` | List available LoRA names |
 | `GET` | `/upscalers` | List available pixel upscaler names (works even with no model loaded) |
 | `POST` | `/upscale` | Pixel-upscale an input image (works even with no model loaded) |
 | `POST` | `/text2image` | Generate an image |
 | `POST` | `/edit` | Edit an image from an instruction (image + prompt → edited image); requires an editing-capable model |
 
+### `/health`
+
+`{"status": "ok", "models": ["qwen_image"], "capabilities": {"edit": true, "kv_cache": true}}`
+
+`models` is empty until a DiT is loaded, and `capabilities` is the loaded adapter's
+`CAPABILITIES` dict verbatim (`{}` with no model) — the web UI uses it to gate the
+Edit tab and the KV-cache control, and a request asking for a capability the model
+lacks is rejected with HTTP 400 rather than silently ignored.
+
 ### `/text2image` request body
 
-All fields except `prompt` are optional. Omitted fields use the loaded model's defaults.
+All fields except `prompt` are optional. An omitted field resolves as **request →
+checkpoint marker → model default**: whatever you send always wins, otherwise a
+marker in the loaded checkpoint may imply a value, and failing that the model's own
+default applies (see [`DiffusionModel.pref`](thenoise/models/base.py)). Today the
+only marker read is `__index_timestep_zero__`, which implies `ref_method:
+index_timestep_zero` (see [`/edit`](#edit-request-body)).
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -398,7 +431,7 @@ All fields except `prompt` are optional. Omitted fields use the loaded model's d
 | `upscale_factor` | `float` | `1.0` | Upscale factor (max depends on the pixel upscaler scale) |
 | `upscale_type` | `string` | `refined` | `refined` (latent 2x + refiner) or `no-refiner` (pixel upscaler only) |
 | `pixel_upscaler` | `string` | `null` | Pixel upscaler name (no `.safetensors` suffix) from `--upscaler-dir` |
-| `sampler` | `string` | `er_sde` | Denoising solver: `euler` or `er_sde` |
+| `sampler` | `string` | model default | Denoising solver: `euler` or `er_sde` |
 | `qwen_vae_enhance` | `bool` | `false` | Nyquist notch post-filter (removes 2px grid artifacts) |
 | `film_grain` | `float` | `0.0` | Film grain strength, 0.0–10.0 |
 | `sharpening` | `float` | `0.0` | RCAS sharpening strength, 0.0–1.0 |
@@ -421,13 +454,22 @@ If no model is loaded, `/text2image` returns HTTP 503.
 
 ### `/edit` request body
 
-Instruction-based editing: image(s) + prompt → edited image. Requires an editing-capable model (Flux.2 Klein); otherwise returns HTTP 400.
+Instruction-based editing: image(s) + prompt → edited image. Requires an editing-capable model; otherwise returns HTTP 400.
 
 Accepts all `/text2image` fields plus:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `image` | `string` \| `string[]` | *(required)* | One or more base64-encoded reference images (OpenAI-style; first sets the output size when `width`/`height` omitted) |
+| `kv_cache` | `boolean` | auto (off) | Reference-latent KV cache (freeze the reference tokens' K/V across denoise steps for faster editing). Turns on `ref_method: index_timestep_zero` unless you set it explicitly |
+| `ref_method` | `string` | auto | Reference conditioning: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index` |
+
+> **Reference method.** Checkpoints trained to condition their reference tokens at
+> timestep zero carry the `__index_timestep_zero__` marker, which makes
+> `ref_method` resolve to `index_timestep_zero` automatically. An explicit
+> `ref_method` always wins over detection — markers are only a hint, and some
+> trained checkpoints do not carry one. Asking for `kv_cache` together with an
+> explicit `ref_method: index` is rejected rather than silently degraded.
 
 ### Example
 
@@ -488,8 +530,8 @@ curl -s localhost:8000/upscale \
 |------|----------|---------|-------------|
 | `--prompt` | yes | — | Text prompt |
 | `--negative-prompt` | no | `""` | Negative prompt |
-| `--width` | no | model default | Output width (0..4096) |
-| `--height` | no | model default | Output height (0..4096) |
+| `--width` | no | model default | Output width (1..4096; omit for auto) |
+| `--height` | no | model default | Output height (1..4096; omit for auto) |
 | `--steps` | no | model default | Denoising steps |
 | `--guidance-scale` | no | model default | CFG scale |
 | `--seed` | no | random | Random seed |
@@ -499,14 +541,18 @@ curl -s localhost:8000/upscale \
 | `--upscale-type` | no | `refined` | `refined` or `no-refiner` |
 | `--upscale` | no | off | 2× latent upscale with refine denoise (legacy alias for `--upscale-type refined --upscale-factor 2`) |
 | `--upscale-factor` | no | `1.0` | Upscale factor (> 0.0; max depends on the pixel upscaler scale, see [Upscaling](#upscaling)) |
-| `--sampler` | no | `er_sde` | Solver: `euler` or `er_sde` |
+| `--sampler` | no | model default | Solver: `euler` or `er_sde` |
 | `--qwen-vae-enhance` | no | off | Nyquist notch post-filter |
 | `--film-grain` | no | `0.0` | Film grain strength (0.0–10.0) |
 | `--sharpening` | no | `0.0` | RCAS sharpening strength (0.0–1.0) |
+| `--kv-cache` / `--no-kv-cache` | no | auto (off) | Reference-latent KV cache (edit only): freeze the reference tokens' K/V across denoise steps for faster editing. Implies `--ref-method index_timestep_zero` unless one is given explicitly |
+| `--ref-method` | no | auto | Reference conditioning for editing: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index` |
+
+> **Note:** `--kv-cache` is a reference-latent optimization and only applies to `edit` (it needs a reference image). On `generate` it raises an error.
 
 ### `edit` only
 
-Edits an existing image from an instruction (image + prompt → edited image). Requires an editing-capable model (Flux.2 Klein) and shares all generation flags with `generate`.
+Edits an existing image from an instruction (image + prompt → edited image). Requires an editing-capable model and shares all generation flags with `generate`.
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|

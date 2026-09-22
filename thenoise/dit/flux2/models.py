@@ -20,14 +20,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Callable
 
 import torch
 from einops import rearrange
 from torch import Tensor, nn
 
+from thenoise.dit.kvcache import KVBuffers, KVCache, attend, cache_mode
 from thenoise.dit.quantized import QuantizedLinear
-from thenoise.utils.attention import attention as sdpa_attention
+from thenoise.utils.dynamo import mark_token_axis
 from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.setup_logging import setup_logging
@@ -83,11 +83,19 @@ class Klein4BParams(Flux2Params):
     use_guidance_embed: bool = False
 
 
-def attention(qkv_list: list[Tensor], pe: Tensor) -> Tensor:
-    """Apply RoPE then the shared SDPA attention, returning ``[B, L, H*D]``."""
+def attention(qkv_list: list[Tensor], pe: Tensor, bufs: KVBuffers | None) -> Tensor:
+    """Apply RoPE, then attend through the run's K/V buffers (``kvcache.attend``).
+
+    Output is token-major ``[B, L, H*D]``. ``bufs`` are this block's run-long K/V
+    buffers, allocated once at its full sequence length
+    ``[B, H, L_text + L_img + L_ref, D]`` (``None`` = no cache, the plain
+    text-to-image path); the RoPE-fused K/V is refreshed into their leading prefix
+    and the whole buffer is attended, so the cached reference suffix survives without
+    a ``cat``.
+    """
     q, k, v = qkv_list
     q, k = apply_rope(q, k, pe)
-    return sdpa_attention([q, k, v])
+    return attend(q, k, v, bufs)
 
 
 class MLPEmbedder(nn.Module):
@@ -177,7 +185,9 @@ class SingleStreamBlock(nn.Module):
         self.pre_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.mlp_act = SiLUActivation()
 
-    def forward(self, x: Tensor, pe: Tensor, mod: tuple[Tensor, Tensor]) -> Tensor:
+    @torch.compile(fullgraph=False)
+    def forward(self, x: Tensor, pe: Tensor, mod: tuple[Tensor, Tensor],
+                bufs: KVBuffers | None) -> Tensor:
         mod_shift, mod_scale, mod_gate = mod
         x_mod = (1 + mod_scale) * self.pre_norm(x) + mod_shift
 
@@ -187,7 +197,7 @@ class SingleStreamBlock(nn.Module):
         q, k, v = rearrange(qkv, "B L (K H D) -> K B H L D", K=3, H=self.num_heads)
         q, k = self.norm(q, k)
 
-        attn = attention([q, k, v], pe)
+        attn = attention([q, k, v], pe, bufs)
 
         output = self.linear2(torch.cat((attn, self.mlp_act(mlp)), 2))
         return x + mod_gate * output
@@ -221,6 +231,7 @@ class DoubleStreamBlock(nn.Module):
             QuantizedLinear(mlp_hidden_dim, hidden_size, bias=False),
         )
 
+    @torch.compile(fullgraph=False)
     def forward(
         self,
         img: Tensor,
@@ -229,6 +240,7 @@ class DoubleStreamBlock(nn.Module):
         pe_ctx: Tensor,
         mod_img: tuple[Tensor, Tensor],
         mod_txt: tuple[Tensor, Tensor],
+        bufs: KVBuffers | None,
     ) -> tuple[Tensor, Tensor]:
         img_mod1, img_mod2 = mod_img
         txt_mod1, txt_mod2 = mod_txt
@@ -258,7 +270,7 @@ class DoubleStreamBlock(nn.Module):
         v = torch.cat((txt_v, img_v), dim=2)
 
         pe = torch.cat((pe_ctx, pe), dim=1)
-        attn = attention([q, k, v], pe)
+        attn = attention([q, k, v], pe, bufs)
         txt_attn, img_attn = attn[:, :txt_len], attn[:, txt_len:]
 
         img = img + img_mod1_gate * self.img_attn.proj(img_attn)
@@ -310,23 +322,6 @@ class Flux2(nn.Module):
         self.num_double_blocks = len(self.double_blocks)
         self.num_single_blocks = len(self.single_blocks)
 
-        # Per-block compiled-forward cache: ``(blocks, index, dynamic)``. t2i
-        # compiles static (fixed shape); edit (variable ref count) compiles
-        # dynamic to avoid Inductor's recompile/`CantSplit` failure on the grown
-        # sequence. Keyed by the owning ModuleList + position (not ``id(block)``),
-        # which also keeps the double vs single streams from colliding.
-        self._compiled_blocks: dict[tuple[nn.ModuleList, int, bool], Callable] = {}
-
-    def _compile_block(self, blocks: nn.ModuleList, index: int, dynamic: bool) -> Callable:
-        """Cached ``torch.compile``d forward for ``blocks[index]``."""
-        block = blocks[index]
-        key = (blocks, index, dynamic)
-        fn = self._compiled_blocks.get(key)
-        if fn is None:
-            fn = torch.compile(block.forward, fullgraph=True, dynamic=dynamic)
-            self._compiled_blocks[key] = fn
-        return fn
-
     @property
     def device(self):
         return next(self.parameters()).device
@@ -344,9 +339,13 @@ class Flux2(nn.Module):
         pe_ctx: Tensor,
         guidance: Tensor | None = None,
         ref_tokens: Tensor | None = None,
+        ref_pe: Tensor | None = None,
+        kv: KVCache | None = None,
+        zero_cond_t: bool = False,
     ) -> Tensor:
         num_txt_tokens = ctx.shape[1]
         num_img_tokens = x.shape[1]
+        ref_len = 0 if ref_tokens is None else ref_tokens.shape[1]
 
         timestep_emb = timestep_embedding(timesteps, 256)
         vec = self.time_in(timestep_emb)
@@ -354,39 +353,105 @@ class Flux2(nn.Module):
             guidance_emb = timestep_embedding(guidance, 256)
             vec = vec + self.guidance_in(guidance_emb)
 
+        # ``zero_cond_t`` (reference tokens trained at timestep zero — the
+        # ``index_timestep_zero`` reference method) modulates the reference slice
+        # with vec(0): duplicate the conditioning rows ``[t, 0]`` and split per
+        # token slice. The reference K/V then becomes step-independent — the basis
+        # of the KV cache. Text and (dropped-at-the-end) target tokens always use
+        # the t row. It is a per-forward choice, made by the adapter from the
+        # resolved ``ref_method`` preference, not baked into the architecture.
+        zero = zero_cond_t and ref_len > 0
+        if zero:
+            vec_zero = self.time_in(timestep_embedding(timesteps * 0, 256))
+            if self.use_guidance_embed:
+                vec_zero = vec_zero + self.guidance_in(guidance_emb)
+            vec = torch.cat([vec, vec_zero], dim=0)
+            vec_t = vec[: len(timesteps)]
+        else:
+            vec_t = vec
+
         double_block_mod_img = self.double_stream_modulation_img(vec)
         double_block_mod_txt = self.double_stream_modulation_txt(vec)
         single_block_mod, _ = self.single_stream_modulation(vec)
 
+        def split_mod(mod, total_len: int) -> tuple[Tensor, Tensor, Tensor]:
+            """Per-token modulation for a stream of ``total_len`` tokens.
+
+            ``mod`` is a ``(shift, scale, gate)`` tuple; the first
+            ``total_len - ref_len`` tokens (text/target) use the t row, the
+            trailing ``ref_len`` reference tokens use the 0 row. Without
+            ``zero_cond_t`` every row is the t row (``[B, 1, D]`` broadcasts).
+            """
+            if not zero:
+                return tuple(m[0:1] for m in mod)
+            out = []
+            for m in mod:
+                mt = m[0:1].expand(1, total_len - ref_len, -1)
+                m0 = m[1:2].expand(1, ref_len, -1)
+                row = torch.cat([mt, m0], dim=1)
+                mark_token_axis(row)  # per-token modulation carries the token count
+                out.append(row)
+            return tuple(out)
+
+        # Double stream: image tokens (target + refs) use per-token modulation;
+        # the text stream always uses the t row (it has no reference slice).
+        img_mod = (split_mod(double_block_mod_img[0], num_img_tokens + ref_len),
+                   split_mod(double_block_mod_img[1], num_img_tokens + ref_len))
+        txt_mod = tuple(tuple(x[0:1] for x in m) for m in double_block_mod_txt)
+
         # Reference-latent editing (Flux2 Klein): append the reference tokens to the
-        # image stream (in packed-latent space). ``pe_x`` already carries the refs'
-        # positions (the adapter computes it from the concatenated image ids), so only
-        # the tokens are appended here. ``None`` (plain t2i) is a no-op.
+        # image stream (in packed-latent space). ``pe_x`` is the *target-only*
+        # positions; ``ref_pe`` carries the reference positions and is only
+        # concatenated when the reference tokens are present. ``None`` (plain t2i)
+        # is a no-op.
         if ref_tokens is not None:
             x = torch.cat([x, ref_tokens], dim=1)
+            if ref_pe is not None:
+                pe_x = torch.cat([pe_x, ref_pe], dim=1)
 
         img = self.img_in(x)
         txt = self.txt_in(ctx)
 
-        # Edit varies seq length (ref tokens appended), so compile blocks
-        # dynamically there; t2i keeps static-specialized kernels.
-        dynamic = ref_tokens is not None
+        # KV cache mode: ``fill`` runs the whole sequence on the first step, so what
+        # it writes into the cache buffers is exact; ``read`` drops the references
+        # from the sequence and keeps the cached suffix from then on. ``off`` is the
+        # plain path. Decided once, before the loop, so a mid-loop fill can never
+        # flip the mode under the loop's feet.
+        mode = cache_mode(kv, ref_tokens is not None)
+
+        # ``kv_len`` is what a block attends on this step: text + target + references
+        # while filling, and the references are gone (``ref_len`` == 0) once cached.
+        # The buffers are allocated at the fill length and keep that capacity for the
+        # whole run, so ``read`` only checks there is room for the target prefix.
+        kv_len = num_txt_tokens + num_img_tokens + ref_len
+        kv_shape = (img.shape[0], self.num_heads, kv_len, self.hidden_size // self.num_heads)
+
+        def kv_buffers(key: tuple[str, int]) -> KVBuffers | None:
+            if kv is None:
+                return None
+            return kv.buffers(key, mode, kv_shape, img.dtype, img.device)
 
         for i in range(len(self.double_blocks)):
-            fwd = self._compile_block(self.double_blocks, i, dynamic)
-            img, txt = fwd(img, txt, pe_x, pe_ctx, double_block_mod_img, double_block_mod_txt)
+            bufs = kv_buffers(("double", i))
+            mark_token_axis(img, txt, pe_x, pe_ctx)
+            img, txt = self.double_blocks[i](img, txt, pe_x, pe_ctx, img_mod, txt_mod, bufs)
 
         img = torch.cat((txt, img), dim=1)
         pe = torch.cat((pe_ctx, pe_x), dim=1)
+        single_mod = split_mod(single_block_mod, num_txt_tokens + num_img_tokens + ref_len)
 
         for i in range(len(self.single_blocks)):
-            fwd = self._compile_block(self.single_blocks, i, dynamic)
-            img = fwd(img, pe, single_block_mod)
+            bufs = kv_buffers(("single", i))
+            mark_token_axis(img, pe)
+            img = self.single_blocks[i](img, pe, single_mod, bufs)
 
-        img = img.to(vec.device)
+        if mode == "fill" and kv is not None:
+            kv.set_filled()
+
+        img = img.to(vec_t.device)
         img = img[:, num_txt_tokens:, ...]  # drop the text tokens
         img = slice_reference_output(img, num_img_tokens)  # drop ref tokens
-        img = self.final_layer(img, vec)
+        img = self.final_layer(img, vec_t)
         return img
 
 

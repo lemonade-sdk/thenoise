@@ -30,6 +30,63 @@ class AttentionParams:
         return AttentionParams(attention_mask)
 
 
+def l_major(t: torch.Tensor) -> bool:
+    """True when ``L`` is the second-innermost dimension of a ``[B, H, L, D]`` tensor.
+
+    That order — not plain ``is_contiguous()`` — is what the fused attention kernels
+    want: an offset slice of a bigger buffer has it and runs at full speed, while a
+    ``view(B, L, H, D).transpose(1, 2)`` of a packed projection does not.
+    """
+    return t.dim() == 4 and t.stride(-1) == 1 and t.stride(-2) == t.size(-1)
+
+
+def uniform_layout(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Put ``q``/``k``/``v`` in the ``L``-major layout SDPA's fast kernels require.
+
+    The fused attention kernels pick their code path from the input strides, and the
+    blocks naturally hand them a trio that is not ``L``-major: ``v`` is the
+    ``view(B, L, H, D).transpose(1, 2)`` of its packed projection, and inside a
+    compiled block Inductor may keep q/k in that same packed order too rather than
+    materialising ``[B, H, L, D]``. The measured cost on gfx1151, at 16k tokens:
+    all three ``L``-major 32.6 TFLOPS, one packed straggler 5.4, all packed 1.7 — so a
+    mixed trio is up to six times slower and a wholly packed one twenty, which reads as
+    a resolution cliff because at 4k tokens the mixed case loses only ~8 %.
+
+    Normalising *to ``L``-major* rather than to whichever layout ``k`` happens to have
+    matters: normalising towards the packed order would make things worse, and eager
+    and compiled blocks disagree about which layout that is (eager's norm and RoPE
+    hand back ``[B, H, L, D]`` contiguous; a fused block may keep the packed order).
+
+    Slices keep strides, so a segment's offset ``q`` is already ``L``-major and free,
+    and a trio already in the right order copies nothing (``contiguous()`` returns its
+    input when there is nothing to fix).
+    """
+    if not l_major(q):
+        q = q.contiguous()
+    if not l_major(k):
+        k = k.contiguous()
+    if not l_major(v):
+        v = v.contiguous()
+    return q, k, v
+
+@torch._dynamo.disable()
+def eager_attention(
+    qkv_or_q: Union[torch.Tensor, list],
+    k: Optional[torch.Tensor] = None,
+    v: Optional[torch.Tensor] = None,
+    attn_params: Optional[AttentionParams] = None,
+    drop_rate: float = 0.0,
+) -> torch.Tensor:
+    """
+    Executes sdpa in eager mode. 
+    Both ROCm 7.14 and 10.1 show significant performance drop at higher token count
+    in some scenarios. The underlying cause needs further investigation but this
+    workaround doesn't harm performance.
+    """
+    return attention(qkv_or_q, k=k, v=v, attn_params=attn_params, drop_rate=drop_rate)
+
 def attention(
     qkv_or_q: Union[torch.Tensor, list],
     k: Optional[torch.Tensor] = None,
@@ -76,6 +133,8 @@ def attention(
         g = q.shape[1] // k.shape[1]
         k = k.repeat_interleave(g, dim=1)
         v = v.repeat_interleave(g, dim=1)
+
+    q, k, v = uniform_layout(q, k, v)
 
     x = F.scaled_dot_product_attention(
         q, k, v, attn_mask=attn_params.attention_mask, dropout_p=drop_rate

@@ -23,10 +23,12 @@ import pytest  # noqa: E402
 
 from thenoise.dit.quantized import QuantizedLinear  # noqa: E402
 from thenoise.models import (  # noqa: E402
+    MODEL_CATALOG,
     AnimaModel,
     FluxKleinModel,
     Krea2Model,
     QwenImageModel,
+    QwenImage21Model,
     ZImageModel,
 )
 from thenoise.models.base import Conditioning, DiffusionModel  # noqa: E402
@@ -327,11 +329,39 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "model.diffusion_model.proj_out.weight",
         ],
     ),
+    "qwen_image21": (
+        QwenImage21Model,
+        [
+            "img_in.weight",
+            "proj_out.weight",
+            "modulation.1.weight",
+            "txt_in.text_norm.weight",
+            "txt_in.in_layer.weight",
+            "time_text_embed.timestep_embedder.linear_1.weight",
+            "transformer_blocks.0.attn.norm_q.weight",
+            "transformer_blocks.0.attn.to_q.weight",
+            "transformer_blocks.0.img_mlp.gate_up.weight",
+        ],
+    ),
+    "qwen_image21_wrapped": (
+        QwenImage21Model,
+        [
+            "model.diffusion_model.img_in.weight",
+            "model.diffusion_model.proj_out.weight",
+            "model.diffusion_model.modulation.1.weight",
+            "model.diffusion_model.txt_in.text_norm.weight",
+            "model.diffusion_model.time_text_embed.timestep_embedder.linear_1.weight",
+            "model.diffusion_model.transformer_blocks.0.attn.norm_q.weight",
+            "model.diffusion_model.transformer_blocks.0.img_mlp.gate_up.weight",
+        ],
+    ),
+    # The two Qwen-Images share the img_in / txt_in / time_text_embed prefixes: the
+    # detection matrix below pins down that neither claims the other's key-set.
     "unknown": (None, ["some.random.key", "blocks.0.attn.gate.weight"]),
 }
 
 KEYSET_IDS = sorted(MODEL_KEYSETS)
-CATALOG_IDS = [cls.name for cls in (Krea2Model, AnimaModel, ZImageModel, FluxKleinModel, QwenImageModel)]
+CATALOG_IDS = [cls.name for cls in MODEL_CATALOG]
 
 
 # ------------------------------------------------------------------------ stub models
@@ -346,11 +376,16 @@ class StubModel(DiffusionModel):
     """
 
     name = "stub"
-    DEFAULT_WIDTH = 64
-    DEFAULT_HEIGHT = 64
-    DEFAULT_STEPS = 2
-    DEFAULT_GUIDANCE_SCALE = 1.0
-    SAMPLER = "euler"
+    DEFAULT_PREFS = {
+        **DiffusionModel.DEFAULT_PREFS,
+        "width": 64,
+        "height": 64,
+        "steps": 2,
+        "guidance_scale": 1.0,
+        "sampler": "euler",
+    }
+    # Stub-local latent geometry: a real adapter reads these off its VAE
+    # (``vae.z_dim`` / ``vae.spatial_compression``), which this stub has none of.
     LATENT_CHANNELS = 4
     _VAE_SCALE = 8
     UPSCALE_SCALE = 2
@@ -361,7 +396,7 @@ class StubModel(DiffusionModel):
         self,
         *,
         config: Optional[ModelConfig] = None,
-        supports_edit: Optional[bool] = None,
+        capabilities: Optional[dict] = None,
         lora_dir: Optional[str] = None,
     ):
         super().__init__(
@@ -371,8 +406,8 @@ class StubModel(DiffusionModel):
                 device="cpu", dtype=torch.float32, lora_dir=lora_dir,
             )
         )
-        if supports_edit is not None:
-            self.supports_edit = supports_edit
+        if capabilities is not None:
+            self.CAPABILITIES = {**self.CAPABILITIES, **capabilities}
         self.calls: Counter = Counter()
         self.dit = torch.nn.Identity()  # ``switch_loras`` is handed this module
         self.sizes: list[tuple[int, int]] = []
@@ -444,9 +479,9 @@ class StubModel(DiffusionModel):
 
 
 class EditingStubModel(StubModel):
-    """A stub that declares editing support (reference-latent path)."""
+    """A stub that declares the ``edit`` capability (reference-latent path)."""
 
-    supports_edit = True
+    CAPABILITIES = {**StubModel.CAPABILITIES, "edit": True}
 
 
 # ---------------------------------------------------------------------------- fixtures
@@ -502,6 +537,8 @@ def fake_model_cls():
             "name": name,
             "__init__": __init__,
             "detect": staticmethod(lambda f: False),
+            # A model that declares no capability; tests override it via ``**attrs``.
+            "CAPABILITIES": {},
             **attrs,
         }
         return type("FakeModel", (), namespace)
@@ -517,7 +554,7 @@ def stub_model():
 
 @pytest.fixture
 def editing_stub_model():
-    """A fresh :class:`StubModel` with ``supports_edit`` enabled."""
+    """A fresh :class:`StubModel` with the ``edit`` capability enabled."""
     return EditingStubModel()
 
 

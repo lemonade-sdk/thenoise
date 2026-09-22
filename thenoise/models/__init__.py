@@ -13,6 +13,7 @@ from .flux_klein import FluxKleinModel
 from .krea2 import Krea2Model
 from .zimage import ZImageModel
 from .qwen_image import QwenImageModel
+from .qwen_image21 import QwenImage21Model
 
 MODEL_CATALOG: List[Type[DiffusionModel]] = [
     Krea2Model,
@@ -20,6 +21,7 @@ MODEL_CATALOG: List[Type[DiffusionModel]] = [
     ZImageModel,
     FluxKleinModel,
     QwenImageModel,
+    QwenImage21Model,
 ]
 
 

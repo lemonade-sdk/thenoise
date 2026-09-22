@@ -11,18 +11,18 @@ import torch
 
 from conftest import CATALOG_IDS
 from thenoise.models import MODEL_CATALOG
+from thenoise.models.base import DiffusionModel
 from thenoise.samplers import SAMPLERS, create_sampler
 from thenoise.upscale import _UPSCALER_FORMATS, load_latent_upscaler, upscale_weight_path
 
 # Per-model public defaults (the values the API/CLI fall back to).
 MODEL_DEFAULTS = {
-    "anima": {"steps": 8, "guidance": 1, "sampler": "er_sde", "channels": 16},
-    "krea2": {"steps": 8, "guidance": 1.0, "sampler": "er_sde", "channels": 16},
-    "zimage": {"steps": 8, "guidance": 1.0, "sampler": "euler", "channels": 16},
-    # Distilled: 4 steps, guidance 1.0 (CFG off), Euler, packed 128ch latent.
-    "flux_klein": {"steps": 4, "guidance": 1.0, "sampler": "euler", "channels": 128},
-    # Qwen-Image: 50 steps, guidance 1.0 (CFG off), Euler, packed 16ch latent.
-    "qwen_image": {"steps": 28, "guidance": 2.5, "sampler": "euler", "channels": 16},
+    "anima": {"steps": 8, "guidance": 1, "sampler": "er_sde", "kv_cache": False},
+    "krea2": {"steps": 8, "guidance": 1.0, "sampler": "er_sde", "kv_cache": False},
+    "zimage": {"steps": 8, "guidance": 1.0, "sampler": "euler", "kv_cache": False},
+    "flux_klein": {"steps": 4, "guidance": 1.0, "sampler": "euler", "kv_cache": False},
+    "qwen_image": {"steps": 28, "guidance": 2.5, "sampler": "euler", "kv_cache": False},
+    "qwen_image21": {"steps": 28, "guidance": 1.0, "sampler": "euler", "kv_cache": True},
 }
 
 
@@ -30,20 +30,38 @@ MODEL_DEFAULTS = {
 def test_model_defaults(model):
     """Every adapter ships the documented defaults and a usable sampler name."""
     expected = MODEL_DEFAULTS[model.name]
-    assert model.DEFAULT_STEPS == expected["steps"]
-    assert model.DEFAULT_GUIDANCE_SCALE == expected["guidance"]
-    assert model.SAMPLER == expected["sampler"]
-    assert model.LATENT_CHANNELS == expected["channels"]
-    # A typo'd SAMPLER would only blow up at request time; tie it to the registry.
-    assert model.SAMPLER in SAMPLERS
-    assert create_sampler(model.SAMPLER, model) is not None
+    prefs = model.DEFAULT_PREFS
+    assert prefs["steps"] == expected["steps"]
+    assert prefs["guidance_scale"] == expected["guidance"]
+    assert prefs["sampler"] == expected["sampler"]
+    assert prefs["kv_cache"] is expected["kv_cache"]
+    # A typo'd sampler would only blow up at request time; tie it to the registry.
+    assert prefs["sampler"] in SAMPLERS
+    assert create_sampler(prefs["sampler"], model) is not None
+
+
+@pytest.mark.parametrize("model", MODEL_CATALOG, ids=CATALOG_IDS)
+def test_model_defaults_extend_the_base_preferences(model):
+    """An adapter's override must keep every preference the base declares.
+
+    Defaults are merged (``{**DiffusionModel.DEFAULT_PREFS, ...}``); dropping a key
+    would make the pipeline raise ``KeyError`` on that preference at request time.
+    """
+    assert set(DiffusionModel.DEFAULT_PREFS) <= set(model.DEFAULT_PREFS)
 
 
 @pytest.mark.parametrize("model", MODEL_CATALOG, ids=CATALOG_IDS)
 def test_model_upscale_format_is_registered_with_weights(model):
-    """Each adapter names a latent format that has a committed upscaler."""
+    """Each adapter names a latent format that has a committed upscaler.
+
+    An adapter may instead raise ``NotImplementedError`` to say its VAE has no
+    upscaler weights yet.
+    """
     instance = object.__new__(model)  # the format is a class constant, no weights
-    fmt = instance._upscale_format()
+    try:
+        fmt = instance._upscale_format()
+    except NotImplementedError as exc:
+        pytest.skip(f"{model.name} has no latent upscaler yet: {exc}")
     assert fmt in _UPSCALER_FORMATS, f"{model.name} names unknown format {fmt!r}"
     _factory, filename, channels = _UPSCALER_FORMATS[fmt]
     assert upscale_weight_path(filename).is_file()

@@ -274,6 +274,13 @@ body {
   outline: none;
 }
 
+/* A control for a capability the loaded model lacks (see ``applyModelState``): muted
+   and inert, but left in the form so switching models does not reflow the sidebar. */
+.sidebar select:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
 .sidebar textarea {
   resize: vertical;
   min-height: 42px;
@@ -433,6 +440,19 @@ input[type=range]::-webkit-slider-thumb {
   border-radius: 8px;
   object-fit: contain;
   display: block;
+}
+
+/* RGBA models (see /health's pixel_channels): checkerboard behind the output so
+   transparent pixels read as transparency instead of as the panel colour. */
+body.rgba_out .stage img {
+  background-color: #0f131b;
+  background-image:
+    linear-gradient(45deg, var(--border) 25%, transparent 25%),
+    linear-gradient(-45deg, var(--border) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, var(--border) 75%),
+    linear-gradient(-45deg, transparent 75%, var(--border) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0;
 }
 
 .stage .placeholder {

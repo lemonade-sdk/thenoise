@@ -23,8 +23,9 @@ _MAX_DIM = 4096
 
 
 def _check_dim(name: str, value) -> None:
-    if value is not None and (value < 0 or value > _MAX_DIM):
-        print(f"error: {name} must be between 0 and {_MAX_DIM} (got {value}).", file=sys.stderr)
+    """Reject an out-of-range dimension. 0 is not "auto" (omitting the flag is)."""
+    if value is not None and (value < 1 or value > _MAX_DIM):
+        print(f"error: {name} must be between 1 and {_MAX_DIM} (got {value}).", file=sys.stderr)
         sys.exit(1)
 
 
@@ -82,6 +83,8 @@ def run_generate(args) -> None:
         sharpening=args.sharpening,
         lora_specs=args.lora or None,
         pixel_upscaler=pixel_upscaler,
+        kv_cache=args.kv_cache,
+        ref_method=args.ref_method,
     )
 
     image = runtime.pipeline.generate(request)
@@ -121,12 +124,15 @@ def run_edit(args) -> None:
         sharpening=args.sharpening,
         lora_specs=args.lora or None,
         pixel_upscaler=pixel_upscaler,
+        kv_cache=args.kv_cache,
+        ref_method=args.ref_method,
     )
 
-    from PIL import Image
+    from thenoise.utils.image_tensor import load_image
 
-    # ``--image`` is repeatable; first sets aspect/size, rest are refs.
-    request.image = [Image.open(p).convert("RGB") for p in args.image]
+    # ``--image`` is repeatable; first sets aspect/size, rest are refs. Opened
+    # without flattening: an alpha is the model's call.
+    request.image = [load_image(p) for p in args.image]
     image = runtime.pipeline.edit(request)
 
     out_path = ensure_png_extension(args.out)

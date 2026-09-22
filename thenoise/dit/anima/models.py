@@ -587,8 +587,6 @@ class Anima(nn.Module):
     28 transformer blocks with AdaLN-LoRA modulation, 3D RoPE, and optional LLM Adapter.
     """
 
-    LATENT_CHANNELS = 16
-
     def __init__(
         self,
         max_img_h: int,

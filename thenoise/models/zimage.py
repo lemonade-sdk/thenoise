@@ -23,6 +23,7 @@ from thenoise.models.base import (
     normalize_keys,
 )
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
+from thenoise.utils.lora import FUSE_QKV
 from thenoise.utils.math import round_up
 from thenoise.vae import load_flux_vae
 
@@ -33,16 +34,19 @@ class ZImageModel(DiffusionModel):
     name = "zimage"
 
     # Distilled Turbo defaults: 8 NFEs, no CFG (guidance 1 = "off", ComfyUI's
-    # convention), 1024x1024.
-    DEFAULT_STEPS = 8
-    DEFAULT_GUIDANCE_SCALE = 1.0
-    DEFAULT_WIDTH = 1024
-    DEFAULT_HEIGHT = 1024
-
-    # Z-Image's flow-matching Euler schedule is exactly the shared euler sampler.
-    SAMPLER = "euler"
+    # convention). Z-Image's flow-matching Euler schedule is exactly the shared
+    # euler sampler.
+    DEFAULT_PREFS = {
+        **DiffusionModel.DEFAULT_PREFS,
+        "steps": 8,
+        "guidance_scale": 1.0,
+        "sampler": "euler",
+    }
 
     MAX_SEQUENCE_LENGTH = 512
+
+    # Z-Image's attention is one fused ``attn.qkv`` projection.
+    lora_fusions = FUSE_QKV
 
     def _lora_key_map(self, key: str) -> str:
         """Diffusers-layout LoRAs name the output projection ``to_out.0``;
@@ -135,7 +139,14 @@ class ZImageModel(DiffusionModel):
 
     def init_latents(self, params: SamplingParams) -> torch.Tensor:
         dev = torch.device(self.device)
-        shape = (1, self.dit.in_channels, params.height // self._VAE_SCALE, params.width // self._VAE_SCALE)
+        # The DiT consumes the raw VAE latent (it patchifies internally), so its
+        # ``in_channels`` must match the VAE's ``z_dim``; the latent itself is the
+        # VAE's, so that is what sizes the noise.
+        shape = (
+            1, self.vae.z_dim,
+            params.height // self.vae.spatial_compression,
+            params.width // self.vae.spatial_compression,
+        )
         generator = torch.Generator(device=dev).manual_seed(params.seed)
         return torch.randn(shape, generator=generator, device=dev, dtype=self.dtype)
 
@@ -199,7 +210,7 @@ class ZImageModel(DiffusionModel):
     def resolve_size(self, width: int, height: int) -> tuple[int, int]:
         # The latent grid is patchified in 2x2 blocks on an 8x-VAE-compressed latent
         # (Flux VAE), so pixel dims must be multiples of 8 * 2 = 16. Round up.
-        align = self._VAE_SCALE * self.dit.patch_size
+        align = self.vae.spatial_compression * self.dit.patch_size
         return round_up(width, align), round_up(height, align)
 
     def _upscale_format(self) -> str:

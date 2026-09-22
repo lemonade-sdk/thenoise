@@ -11,6 +11,11 @@ selects the matching Qwen3 text encoder (4B / 8B). Distilled vs base behavior is
 driven by ``guidance_scale``: distilled models default to guidance 1.0 (single
 forward, no CFG); base models pass a guidance > 1.0 to enable CFG (two forwards).
 
+The reference-latent KV cache (ComfyUI's ``FluxKVCache``) is wired through the
+shared ``thenoise.dit.kvcache`` machinery: ``prepare_latent`` starts the run's
+caches, ``denoise_step`` hands the DiT the reference tokens while they are still
+being filled and drops them once each block has frozen their K/V.
+
 The default schedule is Euler (the Flux.2 flow ODE); ER-SDE is also usable.
 """
 from __future__ import annotations
@@ -27,9 +32,11 @@ from thenoise.dit.flux2.utils import (
     load_flux2_dit,
     load_qwen3_embedder,
 )
+from thenoise.dit.kvcache import KVCache
 from thenoise.utils.text_encoder import find_tokenizer_dir
 from thenoise.models.base import Conditioning, DiffusionModel, Step, normalize_keys
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
+from thenoise.utils.lora import FUSE_QKV
 from thenoise.utils.math import round_up
 from thenoise.vae import load_flux2_vae
 
@@ -39,24 +46,25 @@ logger = logging.getLogger(__name__)
 class FluxKleinModel(DiffusionModel):
     name = "flux_klein"
 
-    # Distilled defaults (the common inference use): 4 NFEs, CFG off (guidance 1.0).
-    # Base models should pass --steps 50 --guidance-scale 4.
-    DEFAULT_STEPS = 4
-    DEFAULT_GUIDANCE_SCALE = 1.0
-    DEFAULT_WIDTH = 1024
-    DEFAULT_HEIGHT = 1024
-
-    # Flux.2 flow-matching Euler schedule.
-    SAMPLER = "euler"
-
-    # Packed-latent geometry (Flux.2 VAE): 128ch at 16x spatial compression.
-    LATENT_CHANNELS = 128
-    _PACK = 16  # pixel / packed-latent ratio
+    # Distilled defaults (the common inference use): 4 NFEs, CFG off (guidance 1.0),
+    # Flux.2's flow-matching Euler schedule. Base models should pass
+    # --steps 50 --guidance-scale 4.
+    DEFAULT_PREFS = {
+        **DiffusionModel.DEFAULT_PREFS,
+        "steps": 4,
+        "guidance_scale": 1.0,
+        "sampler": "euler",
+    }
 
     # Reference-latent editing: Flux2 Klein supports the ComfyUI "index" method
     # with ``ref_index_scale = 10`` (the t-axis offset for the reference latent).
-    supports_edit = True
+    # The KV cache freezes the reference K/V across steps (ComfyUI ``FluxKVCache``),
+    # valid only with ``ref_method="index_timestep_zero"`` (enforced by the pipeline).
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": True}
     REF_INDEX = 10
+
+    # Flux.2's attention is one fused ``attn.qkv`` projection.
+    lora_fusions = FUSE_QKV
 
     def _lora_key_map(self, key: str) -> str:
         """Map ComfyUI Flux.2 LoRA names to this repo's Flux.2 schema.
@@ -95,7 +103,11 @@ class FluxKleinModel(DiffusionModel):
         super().__init__(config=config)
 
         # Determine the Klein variant (4B / 9B) from the DiT checkpoint; this also
-        # selects the matching Qwen3 text encoder (4B / 8B).
+        # selects the matching Qwen3 text encoder (4B / 8B). The timestep-zero
+        # reference conditioning is NOT a weight-level property here: it is chosen
+        # per run from the resolved ``ref_method`` preference (``prepare_latent``),
+        # whose automatic layer comes from the checkpoint markers the base class
+        # already read (``self.checkpoint_prefs``).
         self.params: Flux2Params = detect_klein_params(config.dit_path)
         self.is_8b = self.params.context_in_dim == 12288
         logger.info("Loading Flux Klein DiT (%s) from %s", self.variant_label, config.dit_path)
@@ -149,7 +161,11 @@ class FluxKleinModel(DiffusionModel):
 
     def init_latents(self, params: SamplingParams) -> torch.Tensor:
         dev = torch.device(self.device)
-        shape = (1, self.LATENT_CHANNELS, params.height // self._PACK, params.width // self._PACK)
+        shape = (
+            1, self.vae.z_dim,
+            params.height // self.vae.spatial_compression,
+            params.width // self.vae.spatial_compression,
+        )
         generator = torch.Generator(device=dev).manual_seed(params.seed)
         return torch.randn(shape, generator=generator, device=dev, dtype=self.dtype)
 
@@ -169,9 +185,12 @@ class FluxKleinModel(DiffusionModel):
         forward. Safe under the lock.
 
         In the edit path (``ref`` given) the reference latent is packed the same
-        way and stashed as ``_ref_tokens`` for ``denoise_step``.
+        way and stashed as ``_ref_tokens`` for ``denoise_step``. ``ref_method``
+        decides whether those tokens are conditioned at timestep zero
+        (``index_timestep_zero`` -> ``zero_cond_t`` in the DiT forward).
         """
         dev = torch.device(self.device)
+        self._zero_cond_t = ref_method == "index_timestep_zero"
         x, x_ids = prc_img(latents.to(device=dev, dtype=self.dtype))
         self._img_ids = x_ids  # used by ``finalize_latent``
 
@@ -186,28 +205,44 @@ class FluxKleinModel(DiffusionModel):
 
         if ref is not None:
             # Pack each ref with a successive t-axis index (REF_INDEX, 2x, ...)
-            # per ComfyUI, then concat all ref tokens+ids into one stream.
+            # per ComfyUI, then concat all ref tokens+ids into one stream. The
+            # target image ids are kept separate from the reference ids so the KV
+            # cache can drop the refs from the sequence (read mode) while still
+            # knowing their positions (fill mode).
             ref_tokens, ref_ids = [], []
             for i, ref_latent in enumerate(ref):
                 t, ids = self.pack_reference_latent(ref_latent, ref_method, ref_index=i + 1)
                 ref_tokens.append(t)
                 ref_ids.append(ids)
             self._ref_tokens = torch.cat(ref_tokens, dim=1)
-            img_ids = torch.cat([x_ids, torch.cat(ref_ids, dim=1)], dim=1)
+            ref_ids = torch.cat(ref_ids, dim=1)
+            self._ref_token_count = self._ref_tokens.shape[1]
         else:
             self._ref_tokens = None
-            img_ids = x_ids
+            self._ref_token_count = 0
+            ref_ids = torch.zeros(1, 0, 4, device=dev, dtype=torch.long)
 
         self.dit.pe_embedder.clear()
-        self.dit.pe_embedder.store("img", img_ids, dtype=self.dtype)
+        self.dit.pe_embedder.store("img", x_ids, dtype=self.dtype)
+        self.dit.pe_embedder.store("ref", ref_ids, dtype=self.dtype)
         self.dit.pe_embedder.store("txt", txt_ids, dtype=self.dtype)
         if un_txt_ids is not None:
             self.dit.pe_embedder.store("txt_uncond", un_txt_ids, dtype=self.dtype)
 
+        # Reference-latent KV cache (ComfyUI ``FluxKVCache``): fresh per run, one
+        # cache per conditioning branch (see ``DiffusionModel.start_kv_caches``).
+        self.start_kv_caches(
+            params,
+            has_reference=self._ref_tokens is not None,
+            has_uncond=params.guidance_scale > 1.0 and self._un_txt is not None,
+        )
+
         return x
 
     def schedule(self, params: SamplingParams) -> list[Step]:
-        image_seq_len = (params.width // self._PACK) * (params.height // self._PACK)
+        image_seq_len = (params.width // self.vae.spatial_compression) * (
+            params.height // self.vae.spatial_compression
+        )
         ts = get_schedule(params.steps, image_seq_len)
         # Step.t is the flow timestep (1 -> 0); delta = t_i - t_{i+1}. The shared
         # Euler loop integrates ``x -= delta * velocity``, matching the Flux.2
@@ -227,23 +262,58 @@ class FluxKleinModel(DiffusionModel):
         The Flux.2 flow ODE integrates ``x += (t_prev - t_curr) * v``, which is
         exactly the shared Euler update ``x -= delta * v`` when ``v`` is the model's
         raw output (no negation, unlike Z-Image).
+
+        With the KV cache the reference tokens are present only while the cache is
+        filling; on every later step they are dropped and each block keeps working
+        on its cache buffers, whose reference suffix is left untouched
+        (``Flux2.forward`` decides fill vs read from ``kv.filled``).
         """
         dev = torch.device(self.device)
         t_full = torch.full((len(latents),), float(t), dtype=latents.dtype, device=dev)
+        pe_img = self.dit.pe_embedder["img"]
+        pe_ref = self.dit.pe_embedder["ref"]
+        kv_cond = self.kv_cache("cond")
+        kv_uncond = self.kv_cache("uncond")
         with torch.no_grad(), torch.autocast(device_type=dev.type, dtype=self.dtype):
-            pos = self.dit(
-                x=latents, pe_x=self.dit.pe_embedder["img"], timesteps=t_full, ctx=self._txt,
-                pe_ctx=self.dit.pe_embedder["txt"], ref_tokens=self._ref_tokens,
-            )
+            pos = self._dit_forward(latents, t_full, self._txt, self.dit.pe_embedder["txt"], kv_cond, pe_img, pe_ref)
             if guidance_scale > 1.0 and self._un_txt is not None:
-                neg = self.dit(
-                    x=latents, pe_x=self.dit.pe_embedder["img"], timesteps=t_full, ctx=self._un_txt,
-                    pe_ctx=self.dit.pe_embedder["txt_uncond"], ref_tokens=self._ref_tokens,
-                )
+                neg = self._dit_forward(latents, t_full, self._un_txt, self.dit.pe_embedder["txt_uncond"], kv_uncond, pe_img, pe_ref)
                 v = neg + guidance_scale * (pos - neg)
             else:
                 v = pos
         return v
+
+    def _dit_forward(
+        self,
+        x: torch.Tensor,
+        t_full: torch.Tensor,
+        ctx: torch.Tensor,
+        pe_ctx: torch.Tensor,
+        kv: KVCache | None,
+        pe_img: torch.Tensor,
+        pe_ref: torch.Tensor,
+    ) -> torch.Tensor:
+        """One DiT forward with the KV cache's fill/read semantics.
+
+        ``kv`` is ``None`` for the plain path. On the first forward of a fresh
+        cache (``not kv.filled``) the reference tokens are present (fill); on every
+        later step (``kv.filled``) they are dropped (read). The reference positions
+        (``pe_ref``) are only needed while filling.
+        """
+        ref_tokens = self._ref_tokens
+        if kv is not None and kv.filled:
+            ref_tokens = None
+        return self.dit(
+            x=x,
+            pe_x=pe_img,
+            timesteps=t_full,
+            ctx=ctx,
+            pe_ctx=pe_ctx,
+            ref_tokens=ref_tokens,
+            ref_pe=pe_ref,
+            kv=kv,
+            zero_cond_t=self._zero_cond_t,
+        )
 
     # ------------------------------------------------------------ editing
     def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
@@ -262,12 +332,13 @@ class FluxKleinModel(DiffusionModel):
         """Canonical reference latent -> (tokens, ids), t-axis = REF_INDEX*ref_index.
 
         ``ref_index`` is the 1-based position (ComfyUI ``ref_index_scale``): the
-        first ref uses 10, the second 20, etc. Only the ``index`` packing method
-        is supported; anything else is rejected rather than silently ignored.
+        first ref uses 10, the second 20, etc. ``index_timestep_zero`` packs
+        identically to ``index`` (only the *modulation* differs, handled by
+        ``zero_cond_t``); anything else is rejected rather than silently ignored.
         """
-        if method != "index":
+        if method not in ("index", "index_timestep_zero"):
             raise ValueError(
-                f"unsupported ref_latents_method {method!r}; only 'index' is supported"
+                f"unsupported ref_latents_method {method!r}; expected 'index' or 'index_timestep_zero'"
             )
         dev = torch.device(self.device)
         index = self.REF_INDEX * ref_index
@@ -278,12 +349,14 @@ class FluxKleinModel(DiffusionModel):
 
     def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:
         """Unpack the DiT tokens back to the canonical packed latent."""
+        # Drop the run-scoped KV cache before the VAE decode (see ``end_kv_caches``).
+        self.end_kv_caches()
         x = torch.cat(scatter_ids(latents, self._img_ids)).squeeze(2)  # [B, 128, H//16, W//16]
         return x
 
     def resolve_size(self, width: int, height: int) -> tuple[int, int]:
         # The packed latent is H//16 x W//16, so pixel dims must be multiples of 16.
-        align = self._PACK
+        align = self.vae.spatial_compression
         return round_up(width, align), round_up(height, align)
 
     def _upscale_format(self) -> str:

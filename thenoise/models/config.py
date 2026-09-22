@@ -45,7 +45,7 @@ class EncodePromptArgs:
     A single structure (instead of passing each parameter separately) so adding a
     new knob — e.g. a future ``negative_prompt`` variant or an image — never
     changes the method signature. ``image`` is only set in the edit path
-    (``supports_edit`` models); multimodal encoders feed it as vision tokens in
+    (models with the ``edit`` capability); multimodal encoders feed it as vision tokens in
     addition to any reference latent.
     """
 
@@ -53,6 +53,8 @@ class EncodePromptArgs:
     negative_prompt: str = ""
     guidance_scale: float = 0.0
     image: Optional[Union[Image.Image, List[Image.Image]]] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
 
 
 @dataclass
@@ -80,6 +82,11 @@ class GenerateRequest:
     lora_specs: Optional[List[str]] = None
     pixel_upscaler: Optional[str] = None
     image: Optional[Union[Image.Image, List[Image.Image]]] = None
+    # Reference-latent KV cache (edit only); None = auto (see
+    # ``DiffusionModel.pref``: checkpoint marker, then model default).
+    kv_cache: Optional[bool] = None
+    # Reference conditioning method for editing (edit only); None = auto.
+    ref_method: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -97,6 +104,8 @@ class SamplingParams:
     seed: int
     guidance_scale: float
     sampler: str
+    # Reference-latent KV cache (edit only); resolved to a concrete bool.
+    kv_cache: bool = False
 
 
 __all__ = ["ModelConfig", "EncodePromptArgs", "GenerateRequest", "SamplingParams"]
