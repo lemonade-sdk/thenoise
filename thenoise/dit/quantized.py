@@ -15,23 +15,8 @@ Quantized weights live inside a ``QuantizedTensor`` buffer (not an
 ``thenoise.utils.loader.load_quantized_state_dict`` to populate the model from a
 ComfyUI-style checkpoint.
 
-LoRAs on quantized layers take one of two paths, picked per layer by
-``thenoise.utils.lora`` from how wide the delta is against the layer's
-requantization step (see ``QuantizedLinear.quant_step``):
-
-* **Baked** (``bake_lora``, the default): the weight is dequantized to BF16, the
-  LoRA delta is added, and the result is requantized with the layer's preserved
-  layout profile (``requantize_from_float`` carries over the ConvRot flag, group
-  size, and scale granularity). The runtime forward is a single quantized GEMM
-  with zero per-step LoRA cost. Undo reloads the original weights from the
-  checkpoint file (see ``thenoise.utils.loader.build_quantized_restore_map`` /
-  ``restore_quantized_layer``).
-* **Runtime** (``set_runtime_lora``): the weight is left untouched and the LoRA
-  runs as a low-rank add-on to the quantized GEMM. Used when the delta is finer
-  than the quantization step, where baking would round it away and land
-  requantization noise instead of the LoRA. Undo just drops the factors.
-
-The forward is layout-agnostic either way.
+The module is also a LoRA target: ``apply_lora`` picks the one way this layer can
+carry a given LoRA (see ``thenoise.utils.lora.LoraFactors``).
 """
 from __future__ import annotations
 
@@ -45,17 +30,28 @@ import torch.nn.functional as F
 from comfy_kitchen.tensor import QuantizedTensor, TensorWiseINT8Layout
 
 from thenoise.utils.loader import restore_quantized_layer
+from thenoise.utils.lora import LoraFactors, LoraMode
 
 
 class QuantizedLinear(nn.Module):
-    """Linear projection that runs BF16 (default) or a quantized scheme."""
+    """Linear projection that runs BF16 (default) or a quantized scheme.
+
+    A LoRA is added to the BF16 weight, requantized into the low-bit weight, or —
+    when its delta is finer than this layer's requantization step, where a bake
+    would land noise instead of the LoRA — kept as a low-rank branch on top of the
+    quantized GEMM.
+    """
+
+    #: Below this delta-RMS / ``quant_step()`` ratio a bake would not survive.
+    #: Calibrated against real INT8+ConvRot checkpoints: every LoRA reported
+    #: broken lands at 0.01-0.06, every one reported fine at 0.08 and up.
+    LORA_BAKE_MIN_RATIO = 0.1
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        # float32 default (matching ``nn.Linear``); the model is cast to the
-        # compute dtype (bf16) by the adapter, or the weight is replaced at load.
+        # Cast to the compute dtype by the adapter, or replaced at load time.
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         if bias:
             self.bias = nn.Parameter(torch.empty(out_features))
@@ -63,15 +59,13 @@ class QuantizedLinear(nn.Module):
             self.register_parameter("bias", None)
         self._reset_parameters()
         self._quantized = False
-        # Runtime LoRA branch (see ``set_runtime_lora``). Non-persistent buffers so
-        # they follow the module across devices/dtype casts but never reach a
-        # state_dict. ``None`` slots registered up front keep ``forward`` a plain
-        # attribute check instead of a ``getattr``.
+        # Runtime LoRA branch. Non-persistent buffers so they follow the module
+        # across devices and dtype casts but never reach a state_dict; the None
+        # slots keep ``forward`` a plain attribute check instead of a ``getattr``.
         self.register_buffer("_lora_down", None, persistent=False)
         self.register_buffer("_lora_up", None, persistent=False)
 
     def _reset_parameters(self) -> None:
-        """Initialize like ``nn.Linear`` (kaiming on weight, uniform on bias)."""
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
         if self.bias is not None:
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
@@ -81,68 +75,80 @@ class QuantizedLinear(nn.Module):
     def load_quantized(self, qt: QuantizedTensor) -> None:
         """Switch this layer to a pre-quantized weight of any layout.
 
-        Frees the BF16 ``weight`` parameter and registers ``qt`` as the
-        ``weight`` buffer (the ``QuantizedTensor`` carries the layout profile —
-        scale, ConvRot flag/group size, original dtype/shape).
+        Frees the BF16 ``weight`` parameter and registers ``qt`` as the ``weight``
+        buffer (it carries the layout profile: scale, ConvRot flag/group size,
+        original dtype/shape).
         """
         del self.weight  # free the BF16 weights
         self.register_buffer("weight", qt)
         self._quantized = True
 
-    def quant_step(self) -> Optional[torch.Tensor]:
-        """This layer's requantization step per output row, in weight units.
+    # ------------------------------------------------------------------- LoRA
 
-        The step is what a baked-in LoRA has to be wider than to survive: a delta
-        below it rounds back to the stored codes, while the requantization
-        re-derives the scales and re-rounds every other entry of the row too.
-        ``thenoise.utils.lora.lora_bake_ratio`` compares a delta against it.
+    def quant_step(self) -> Optional[torch.Tensor]:
+        """This layer's requantization step per output row, or None if unknown.
 
         The int8 exporter stores ``scale = absmax / 127`` per row (ConvRot rotates
         within groups but still scales per row, and an orthogonal rotation keeps
-        norms, so the rotated step is a fair yardstick for an unrotated delta), so
-        the stored scale *is* the step. Per-tensor int8 stores a 0-dim scale,
-        broadcast to one value per row.
-
-        Returns ``None`` for layouts with no cheap step estimate (anything but
-        int8 — FP8/MXFP8/NVFP4 scale relative to each weight rather than to the
-        row absmax, so reading a step off their single scale would be a guess).
-        ``None`` means "no opinion": the caller bakes, which is what this module
-        always did.
+        norms), so the stored scale *is* the step; a per-tensor scale broadcasts.
+        Every other layout scales relative to each weight rather than to the row
+        absmax, so None means "no step estimate" rather than a wrong one.
         """
         qt = self.weight
         if not isinstance(qt, QuantizedTensor) or qt.layout_cls is not TensorWiseINT8Layout:
             return None
         scale = getattr(qt.params, "scale", None)
-        if not isinstance(scale, torch.Tensor) or scale.numel() == 0:
+        if not isinstance(scale, torch.Tensor) or scale.numel() not in (1, self.out_features):
             return None
         step = scale.detach().to(torch.float32).reshape(-1)
-        if step.numel() == 1:
-            step = step.expand(self.out_features)
-        elif step.numel() != self.out_features:
-            # Not the per-row convention this reads (a per-group scale, say); a
-            # wrong step is worse than no step.
-            return None
-        return step
+        return step.expand(self.out_features) if step.numel() == 1 else step
+
+    @staticmethod
+    def _bake_ratio(factors: LoraFactors, step: torch.Tensor) -> torch.Tensor:
+        """How wide a LoRA is against this layer's step: ``rms(delta) / step``.
+
+        Row ``j`` of ``up @ down`` has squared norm ``up_j (down @ down.T) up_j.T``,
+        so all row norms cost two ``[out, r] x [r, r]`` products instead of building
+        the ``[out, in]`` delta. Only the rows the delta actually touches are
+        counted: a fused ``qkv``/``gate_up`` receives a partial delta, and counting
+        the untouched rows would understate it and route a healthy layer to runtime.
+
+        NaN (a zero delta) means no opinion, which reads as "bake".
+        """
+        down = factors.down.to(torch.float32)
+        up = factors.up.to(torch.float32)
+        step = step.to(down.device).reshape(-1)
+        row_sq = ((up @ (down @ down.t())) * up).sum(dim=1).clamp_min_(0)
+        keep = (row_sq > 0) & (step > 0)
+        rows = keep.sum().clamp_min(1)
+        rms = (row_sq * keep).sum().div(rows).div(down.size(1)).sqrt()
+        return rms / (step * keep).sum().div(rows)
+
+    def apply_lora(self, factors: LoraFactors) -> LoraMode:
+        """Carry a LoRA the best way this layer can, and report which way that was.
+
+        Baking is free at every step, so it stays the default: only a delta finer
+        than ``quant_step()`` — which requantization would round away while
+        re-rounding the rest of the row — goes to the runtime branch.
+        """
+        self.clear_runtime_lora()  # a leftover branch would stack on top of a bake
+        if not self._quantized:
+            self.weight.data.add_(factors.delta(self.weight.device, self.weight.dtype))
+            return LoraMode.BAKED
+
+        step = self.quant_step()
+        if step is not None and self._bake_ratio(factors, step) < self.LORA_BAKE_MIN_RATIO:
+            self.set_runtime_lora(factors.down, factors.up)
+            return LoraMode.RUNTIME
+        self.bake_lora(factors.delta(self.weight.device, self.weight.dtype))
+        return LoraMode.BAKED_QUANTIZED
 
     def bake_lora(self, delta: torch.Tensor) -> None:
-        """Bake a BF16 LoRA delta into the quantized weights (any layout).
+        """Bake a ``[out, in]`` delta into the quantized weight (any layout).
 
-        Args:
-            delta: the LoRA delta ``[out, in]`` in BF16 (``multiplier * (up @
-                down) * (alpha/r)``). Multiple LoRAs should be summed into one
-                delta before calling, so the layer is dequantized/requantized
-                only once.
-
-        Dequantizes ``weight`` to BF16 (un-rotating ConvRot if active), adds the
-        delta, and requantizes back with this layer's preserved layout profile
-        (``requantize_from_float`` keeps ConvRot flag, group size, and scale
-        granularity). The runtime forward stays a single quantized GEMM (zero
-        per-step LoRA cost). The original weights are restored on undo by
-        reloading from disk.
-
-        Only pays off when the delta is wide against ``quant_step()``; that check
-        lives in ``thenoise.utils.lora``, which routes deltas that would not
-        survive to ``set_runtime_lora`` instead.
+        Dequantizes, adds, and requantizes with this layer's preserved layout
+        profile (``requantize_from_float`` keeps the ConvRot flag, group size and
+        scale granularity), so the runtime forward stays a single quantized GEMM.
         """
         if self._lora_down is not None:
             raise RuntimeError(
@@ -153,96 +159,46 @@ class QuantizedLinear(nn.Module):
         self._set_quantized(qt.requantize_from_float(weight + delta.to(weight.dtype)))
 
     def set_runtime_lora(self, down: torch.Tensor, up: torch.Tensor) -> None:
-        """Apply a LoRA at runtime as a low-rank add-on to the quantized GEMM.
+        """Keep a LoRA as a low-rank add-on to the quantized GEMM.
 
-        Args:
-            down: ``[r, in_features]`` (the ``lora_down``/``lora_A`` factor).
-            up: ``[out_features, r]`` with the LoRA's ``alpha/r * multiplier``
-                already folded in.
-
-        ``forward`` adds ``(x @ down.T) @ up.T`` to the quantized result, so the
-        stored weight keeps its own quantization grid instead of swallowing a
-        delta finer than its requantization step. Costs two rank-sized GEMMs per
-        step and ``r * (in + out)`` of memory, leaves the weight untouched, and
-        undoes by dropping the factors. Several LoRAs on one layer go in as one
-        concatenated pair: the rank axis is summed over, so that is their exact
-        sum.
+        ``forward`` adds ``(x @ down.T) @ up.T``, so the stored weight keeps its own
+        quantization grid. Costs two rank-sized GEMMs per step and
+        ``r * (in + out)`` of memory, and leaves the weight bit-identical.
         """
         self._lora_down = down.detach().to(self.weight.device, self.weight.dtype)
         self._lora_up = up.detach().to(self.weight.device, self.weight.dtype)
 
     def clear_runtime_lora(self) -> None:
-        """Drop any runtime LoRA branch (the weight was never touched, so this
-        restores the layer exactly)."""
+        """Drop the runtime branch, which restores the layer exactly."""
         self._lora_down = None
         self._lora_up = None
+
+    def undo_lora(self, dit_path: Optional[str], raw_key: Optional[str]) -> None:
+        """Undo a baked LoRA by reloading this layer's originals from the checkpoint.
+
+        Cheaper and exact, where re-deriving the originals would compound another
+        dequantize/requantize error.
+        """
+        if not dit_path or not raw_key:
+            raise RuntimeError(
+                "cannot undo a baked quantized LoRA: no dit_path and raw checkpoint "
+                "key were recorded at apply time"
+            )
+        restore_quantized_layer(self, dit_path, raw_key)
 
     def _set_quantized(self, qt: QuantizedTensor) -> None:
         """Overwrite the quantized ``weight`` buffer in place (preserving identity)."""
         self.weight.copy_(qt)
 
-    def apply_lora(self, delta: torch.Tensor) -> None:
-        """Apply a LoRA delta ``[out, in]`` in place.
-
-        BF16 layers add ``delta`` to the weight parameter directly. Quantized
-        layers bake it in (``bake_lora``), so the runtime forward stays a single
-        quantized GEMM with zero per-step LoRA cost. A caller that can decide per
-        layer (``thenoise.utils.lora.apply_lora_to_model``) sends deltas that a
-        bake would destroy to ``set_runtime_lora`` instead of calling this.
-        """
-        if self._quantized:
-            self.bake_lora(delta)
-        else:
-            self.weight.data.add_(delta.to(self.weight.dtype))
-
-    def undo_lora(
-        self,
-        delta: Optional[torch.Tensor],
-        *,
-        raw_key: Optional[str] = None,
-        dit_path: Optional[str] = None,
-    ) -> None:
-        """Undo a previously applied LoRA delta.
-
-        BF16 layers subtract ``delta`` from the weight parameter (exact, no
-        compounding). Quantized layers reload the original quantized weights
-        from the checkpoint file by ``raw_key`` (avoids compounding
-        quantization errors from repeated dequantize/requantize). ``delta`` is
-        unused for quantized layers. A runtime LoRA branch is dropped either way:
-        it never touched the weight, so clearing it is the whole undo.
-        """
-        self.clear_runtime_lora()
-        if self._quantized:
-            if raw_key is None:
-                raise RuntimeError(
-                    "cannot undo quantized LoRA: no raw checkpoint key was "
-                    "recorded at load time"
-                )
-            if dit_path is None:
-                raise RuntimeError(
-                    "cannot undo quantized LoRA: no dit_path was recorded at "
-                    "apply time"
-                )
-            restore_quantized_layer(self, dit_path, raw_key)
-        else:
-            self.weight.data.sub_(delta.to(self.weight.dtype))
-
     def _lora_branch(self, x: torch.Tensor) -> torch.Tensor:
-        """The runtime LoRA add-on alone: ``(x @ down.T) @ up.T``.
-
-        Two ``F.linear`` calls rather than raw matmuls, because that is exactly what
-        they are (``down`` is ``[r, in]``, ``up`` is ``[out, r]``) — which puts the
-        branch on the same GEMM path, and under the same Inductor epilogue fusion,
-        as the layer's own projection. Kept as a method so a test can assert on
-        precisely what ``forward`` adds.
-        """
+        """The runtime branch alone: ``F.linear`` twice, so it shares the GEMM path
+        and Inductor epilogue fusion with the layer's own projection."""
         x = x.to(self._lora_down.dtype)
         return F.linear(F.linear(x, self._lora_down), self._lora_up)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = F.linear(x, self.weight, self.bias)
         if self._lora_down is not None:
-            # Runtime LoRA branch (``set_runtime_lora``).
             y = y + self._lora_branch(x)
         return y
 

@@ -6,6 +6,8 @@ These cover the shared ``QuantizedLinear`` module (backed by comfy_kitchen's
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import pytest
 import torch
 from comfy_kitchen.tensor import QuantizedTensor
@@ -26,6 +28,7 @@ from conftest import (
     wrapped_int8_tensor,
 )
 from thenoise.dit.quantized import QuantizedLinear
+from thenoise.utils.lora import LoraFactors, LoraMode
 from thenoise.utils.loader import (
     is_quantized_checkpoint,
     load_dit,
@@ -112,6 +115,11 @@ def test_quantized_linear_bake_lora_requantizes_in_place(layout):
 # ------------------------------------------------------- quantized LoRA undo
 
 
+def _modes(result) -> dict:
+    """``{module path: LoraMode}`` for everything the LoRA touched."""
+    return {path: undo.mode for path, undo in result["targets"].items()}
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -138,15 +146,13 @@ def test_apply_lora_bakes_quantized_and_undo_reloads_from_disk(kwargs, tmp_path)
     orig_scale = model.q.weight.params.scale.clone()
     assert torch.equal(orig_scale, tensors[f"{prefix}q.weight_scale"])
 
-    result = apply_lora_to_model(
-        model, [int8_lora_state_dict()], [1.0], torch.device("cpu"), dit_path=path
-    )
-    assert result["quantized_affected"] == ("q",)
-    assert result["quantized_restore_keys"] == (f"{prefix}q.weight",)
+    result = apply_lora_to_model(model, [int8_lora_state_dict()], dit_path=path)
+    assert _modes(result) == {"q": LoraMode.BAKED_QUANTIZED}
+    assert result["targets"]["q"].raw_key == f"{prefix}q.weight"
     assert result["dit_path"] == path
     assert not torch.equal(model.q.weight._qdata, orig_q)
 
-    undo_lora_on_model(model, result, torch.device("cpu"))
+    undo_lora_on_model(model, result)
     assert torch.equal(model.q.weight._qdata, orig_q)
     assert torch.equal(model.q.weight.params.scale, orig_scale)
 
@@ -160,10 +166,10 @@ def test_apply_lora_undo_without_dit_path_raises(tmp_path):
     model = TinyDiT()
     load_dit(model, path, device="cpu", dtype=torch.bfloat16)
 
-    result = apply_lora_to_model(model, [int8_lora_state_dict()], [1.0], torch.device("cpu"))
-    assert result["quantized_restore_keys"] == ("q.weight",)
-    with pytest.raises(RuntimeError, match="no dit_path"):
-        undo_lora_on_model(model, result, torch.device("cpu"))
+    result = apply_lora_to_model(model, [int8_lora_state_dict()])
+    assert result["targets"]["q"].raw_key == "q.weight"
+    with pytest.raises(RuntimeError, match="dit_path"):
+        undo_lora_on_model(model, result)
 
 
 def test_apply_lora_mixed_quantized_and_bf16_layers():
@@ -174,12 +180,14 @@ def test_apply_lora_mixed_quantized_and_bf16_layers():
     orig_plain = model.plain.weight.clone()
 
     loras = int8_lora_state_dict("q") | int8_lora_state_dict("plain")
-    result = apply_lora_to_model(model, [loras], [1.0], torch.device("cpu"))
+    result = apply_lora_to_model(model, [loras])
 
     assert not torch.equal(model.q.weight._qdata, orig_q)  # int8 layer baked
     assert not torch.equal(model.plain.weight, orig_plain)  # bf16 layer mutated
-    assert "plain.weight" in result["affected_keys"]
-    assert result["quantized_affected"] == ("q",)
+    assert _modes(result) == {
+        "q": LoraMode.BAKED_QUANTIZED,
+        "plain": LoraMode.BAKED,
+    }
 
 
 # ------------------------------------------------ quant_step (bake-vs-runtime input)
@@ -281,11 +289,8 @@ def test_apply_lora_bakes_a_wide_delta():
 
     model = TinyDiT(quantized=True)
     stored = model.q.weight._qdata.clone()
-    result = apply_lora_to_model(
-        model, [int8_lora_state_dict("q")], [1.0], torch.device("cpu")
-    )
-    assert result["runtime_lora"] == ()
-    assert result["quantized_affected"] == ("q",)
+    result = apply_lora_to_model(model, [int8_lora_state_dict("q")])
+    assert _modes(result) == {"q": LoraMode.BAKED_QUANTIZED}
     assert not torch.equal(model.q.weight._qdata, stored)
 
 
@@ -302,11 +307,10 @@ def test_apply_lora_applies_a_sub_step_delta_at_runtime():
     x = _bf16_x()
     base = model.q(x)
     sd = int8_lora_state_dict("q", gain=1e-4)
-    result = apply_lora_to_model(model, [sd], [1.0], torch.device("cpu"))
+    result = apply_lora_to_model(model, [sd])
 
-    assert result["runtime_lora"] == ("q",)
-    assert result["quantized_affected"] == ()
-    assert result["quantized_restore_keys"] == ()  # nothing baked -> nothing to reload
+    assert _modes(result) == {"q": LoraMode.RUNTIME}
+    assert result["targets"]["q"].raw_key is None  # nothing baked -> nothing to reload
     assert torch.equal(model.q.weight._qdata, stored)
 
     delta = sd["q.lora_up.weight"].float() @ sd["q.lora_down.weight"].float()
@@ -314,7 +318,7 @@ def test_apply_lora_applies_a_sub_step_delta_at_runtime():
     assert _rel_err(branch, x.float() @ delta.t()) < 0.05
 
     # No ``dit_path`` was recorded (or needed): undo works from memory alone.
-    undo_lora_on_model(model, result, torch.device("cpu"))
+    undo_lora_on_model(model, result)
     assert model.q._lora_down is None
     assert torch.equal(model.q(x), base)
     assert torch.equal(model.q.weight._qdata, stored)
@@ -329,11 +333,9 @@ def test_apply_lora_merges_several_loras_on_one_quantized_layer():
     second = int8_lora_state_dict("q", gain=2e-4)
     second["q.alpha"] = torch.tensor(2.0)  # alpha/r = 0.25, on top of the 0.5 weight
 
-    result = apply_lora_to_model(
-        model, [first, second], [1.0, 0.5], torch.device("cpu")
-    )
+    result = apply_lora_to_model(model, [first, second], [1.0, 0.5])
 
-    assert result["runtime_lora"] == ("q",)
+    assert _modes(result) == {"q": LoraMode.RUNTIME}
     assert model.q._lora_down.shape == (16, IN_F)  # rank 8 + rank 8, one branch
     assert model.q._lora_up.shape == (OUT_F, 16)
 
@@ -350,7 +352,7 @@ def test_apply_lora_merges_several_loras_on_one_quantized_layer():
     branch = model.q._lora_branch(x)
     assert _rel_err(branch, x.float() @ delta.t()) < 0.05
 
-    undo_lora_on_model(model, result, torch.device("cpu"))
+    undo_lora_on_model(model, result)
     assert model.q._lora_down is None
 
 
@@ -359,17 +361,61 @@ def test_baking_after_a_runtime_branch_clears_it():
     from thenoise.utils.lora import apply_lora_to_model
 
     model = TinyDiT(quantized=True)
-    apply_lora_to_model(
-        model, [int8_lora_state_dict("q", gain=1e-4)], [1.0], torch.device("cpu")
-    )
+    apply_lora_to_model(model, [int8_lora_state_dict("q", gain=1e-4)])
     assert model.q._lora_down is not None
 
-    result = apply_lora_to_model(
-        model, [int8_lora_state_dict("q")], [1.0], torch.device("cpu")
+    result = apply_lora_to_model(model, [int8_lora_state_dict("q")])
+    assert _modes(result) == {"q": LoraMode.BAKED_QUANTIZED}
+    assert model.q._lora_down is None
+
+
+# ------------------------------------------------------- the routing metric
+
+
+def test_bake_ratio_is_delta_rms_over_the_step():
+    torch.manual_seed(0)
+    down = torch.randn(4, IN_F) * 0.01
+    up = torch.randn(OUT_F, 4)
+    step = torch.full((OUT_F,), 0.02)
+    expected = (up @ down).pow(2).mean().sqrt() / 0.02
+    assert torch.allclose(
+        QuantizedLinear._bake_ratio(LoraFactors(down, up), step), expected, rtol=1e-4
     )
-    assert result["runtime_lora"] == ()
-    assert result["quantized_affected"] == ("q",)  # this time it baked
-    assert model.q._lora_down is None  # baked, then restored by delta
+
+
+def test_bake_ratio_ignores_the_rows_a_fused_lora_never_touches():
+    """A ``qkv``/``gate_up`` delta filling part of the rows is measured on that part.
+
+    Averaging over the whole fused matrix would report a delta smaller by
+    ``sqrt(rows_touched / rows)`` and send a layer that quantizes fine to runtime.
+    """
+    down = torch.zeros(1, IN_F)
+    down[0, :64] = 1.0  # the one touched row's delta has norm 8
+    up = torch.zeros(OUT_F, 1)
+    up[0, 0] = 1.0
+    step = torch.ones(OUT_F)
+
+    ratio = QuantizedLinear._bake_ratio(LoraFactors(down, up), step).item()
+    assert abs(ratio - 8.0 / IN_F**0.5) < 1e-5
+    assert ratio > QuantizedLinear.LORA_BAKE_MIN_RATIO  # wide enough: bake
+    # What a whole-matrix RMS would have claimed instead: 22x smaller -> runtime.
+    assert 8.0 / (OUT_F * IN_F) ** 0.5 < QuantizedLinear.LORA_BAKE_MIN_RATIO
+
+
+def test_a_lora_the_layer_cannot_measure_bakes():
+    """No step estimate (FP8) and a zero delta both mean "no opinion" -> bake."""
+    from thenoise.utils.lora import apply_lora_to_model
+
+    layer = QuantizedLinear(IN_F, OUT_F, bias=False)
+    layer.load_quantized(wrapped_fp8_tensor())
+    assert layer.apply_lora(LoraFactors(*_tiny_lora_factors(gain=1e-6))) is (
+        LoraMode.BAKED_QUANTIZED
+    )
+
+    ratio = QuantizedLinear._bake_ratio(
+        LoraFactors(torch.zeros(2, 4), torch.zeros(4, 2)), torch.ones(4)
+    )
+    assert not ratio > QuantizedLinear.LORA_BAKE_MIN_RATIO
 
 
 # ------------------------------------------------------ is_quantized_checkpoint
