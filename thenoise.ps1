@@ -86,6 +86,8 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $env:TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL = "1"
 $env:MIOPEN_FIND_MODE = "FAST"
 $env:TORCH_BLAS_PREFER_HIPBLASLT = "1"
+$env:TORCH_COMPILE_DISABLE = "1"
+$env:TORCHDYNAMO_DISABLE = "1"
 
 # ---- 6. Launch the project, forwarding all arguments ----------------------
 & $Py -m thenoise @ForwardArgs
