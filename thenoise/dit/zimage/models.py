@@ -255,8 +255,8 @@ class ZImageTransformer2DModel(nn.Module):
 
         return padded_feat, pos_ids, pad_mask, total_len
 
-    def prepare_rope(self, x, cap_feats, patch_size=None, f_patch_size=None):
-        """Compute and cache the RoPE frequencies for a prompt (call once).
+    def prepare_rope(self, x, cap_feats, patch_size=None, f_patch_size=None, key="", clear=True):
+        """Compute and cache the RoPE frequencies for one conditioning branch.
 
         The image and caption positions depend only on the latent/caption shapes,
         which are fixed for a prompt, so the frequencies are built once here and
@@ -267,11 +267,12 @@ class ZImageTransformer2DModel(nn.Module):
         (_, _, _, x_pos_ids, cap_pos_ids, _, _) = self.patchify_and_embed(
             x, cap_feats, patch_size, f_patch_size
         )
-        self.rope_embedder.clear()
+        if clear:
+            self.rope_embedder.clear()
         # ``rope`` expects a batch dim; the per-sample positions are concatenated and
         # carried as a single batch, then split back per sample in ``_prepare_sequence``.
-        self.rope_embedder.store("img", torch.cat(x_pos_ids, dim=0).unsqueeze(0))
-        self.rope_embedder.store("cap", torch.cat(cap_pos_ids, dim=0).unsqueeze(0))
+        self.rope_embedder.store(f"img{key}", torch.cat(x_pos_ids, dim=0).unsqueeze(0))
+        self.rope_embedder.store(f"cap{key}", torch.cat(cap_pos_ids, dim=0).unsqueeze(0))
 
     def patchify_and_embed(self, all_image, all_cap_feats, patch_size, f_patch_size):
         device = all_image[0].device
@@ -341,7 +342,7 @@ class ZImageTransformer2DModel(nn.Module):
         return result
 
     # ------------------------------------------------------------ forward
-    def forward(self, x, t, cap_feats, patch_size=None, f_patch_size=None):
+    def forward(self, x, t, cap_feats, patch_size=None, f_patch_size=None, rope_key=""):
         """Denoise one step.
 
         Args:
@@ -350,6 +351,8 @@ class ZImageTransformer2DModel(nn.Module):
                 ``t`` is the flow timestep in ``[0, 1]`` (scaled by 1000 for the
             sinusoidal embedding).
             cap_feats: list of per-sample caption embeddings ``[seq, cap_feat_dim]``.
+            rope_key: which ``prepare_rope`` entry pair (``img``/``cap`` + suffix) to
+                use; CFG passes the key its caption was prepared with.
 
         Returns:
             list of per-sample velocity tensors ``[C, F, H, W]`` (the flow direction).
@@ -368,7 +371,7 @@ class ZImageTransformer2DModel(nn.Module):
         x_seqlens = [len(xi) for xi in x]
         x = self.x_embedder(torch.cat(x, dim=0))
         x, x_freqs, x_mask, _ = self._prepare_sequence(
-            list(x.split(x_seqlens, dim=0)), self.rope_embedder["img"], x_pad_mask, self.x_pad_token, device
+            list(x.split(x_seqlens, dim=0)), self.rope_embedder[f"img{rope_key}"], x_pad_mask, self.x_pad_token, device
         )
         for layer in self.noise_refiner:
             x = layer(x, x_mask, x_freqs, adaln_input)
@@ -377,7 +380,7 @@ class ZImageTransformer2DModel(nn.Module):
         cap_seqlens = [len(ci) for ci in cap_feats]
         cap_feats = self.cap_embedder(torch.cat(cap_feats, dim=0))
         cap_feats, cap_freqs, cap_mask, _ = self._prepare_sequence(
-            list(cap_feats.split(cap_seqlens, dim=0)), self.rope_embedder["cap"], cap_pad_mask, self.cap_pad_token, device
+            list(cap_feats.split(cap_seqlens, dim=0)), self.rope_embedder[f"cap{rope_key}"], cap_pad_mask, self.cap_pad_token, device
         )
         for layer in self.context_refiner:
             cap_feats = layer(cap_feats, cap_mask, cap_freqs)

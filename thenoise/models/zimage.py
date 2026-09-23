@@ -159,6 +159,8 @@ class ZImageModel(DiffusionModel):
         # The DiT expects an F (frame) axis: [B, C, H, W] -> [B, C, 1, H, W].
         latents = latents.unsqueeze(2)
         self.dit.prepare_rope([latents[0]], [cond.cond[0]])
+        if cond.null is not None:
+            self.dit.prepare_rope([latents[0]], [cond.null[0]], key="_neg", clear=False)
         return latents
 
     def schedule(self, params: SamplingParams) -> list[Step]:
@@ -194,7 +196,7 @@ class ZImageModel(DiffusionModel):
             pos = self.dit(x_list, t_full, cap)[0].unsqueeze(0)  # [1, C, 1, H, W]
             v_pos = -pos
             if guidance_scale > 1.0 and cond.null is not None:
-                neg = self.dit(x_list, t_full, [cond.null[0]])[0].unsqueeze(0)
+                neg = self.dit(x_list, t_full, [cond.null[0]], rope_key="_neg")[0].unsqueeze(0)
                 # CFG over velocities: v = v_uncond + g * (v_pos - v_uncond),
                 # where v_pos = -pos (conditional) and v_uncond = -neg.
                 v_uncond = -neg

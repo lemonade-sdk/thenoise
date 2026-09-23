@@ -1,10 +1,9 @@
-"""LoRA loading, naming, fusing, applying and undoing.
+"""LoRA loading, naming, fusing, folding, applying and undoing.
 
 All of it is pure, tiny and CPU-only — and it is the code whose failure mode is
 "the LoRA silently does nothing", i.e. invisible to the user. Covers the
-spec/path helpers on the adapter, the naming-convention resolution and attention
-fusion in ``thenoise.utils.lora``, the bf16 apply→undo round-trip and
-``DiffusionModel.switch_loras``.
+spec/path helpers on the adapter, the naming-convention resolution, the stacked
+projections and ``DiffusionModel.switch_loras``.
 """
 from __future__ import annotations
 
@@ -15,27 +14,31 @@ import torch
 import torch.nn as nn
 
 from conftest import StubModel, write_safetensors
+from thenoise.dit.quantized import QuantizedLinear
 from thenoise.models.flux_klein import FluxKleinModel
 from thenoise.utils.lora import (
     FUSE_GATE_UP,
     FUSE_QKV,
+    LoraMode,
+    _fold,
     _fuse_stacked,
     _match_lora_keys,
     _normalize_lora_suffix,
     _projection_scale,
     apply_lora_to_model,
-    compute_lora_delta,
     undo_lora_on_model,
 )
-
-CPU = torch.device("cpu")
-
 
 def _fuse(lora_sd, spec):
     """Apply a fusion spec (``{fused: parts}``) as ``_normalize_lora_sd`` does."""
     for fused, parts in spec.items():
         lora_sd = _fuse_stacked(lora_sd, tuple(parts), fused)
     return lora_sd
+
+
+def _delta(down, up, scale: float = 1.0) -> torch.Tensor:
+    """The weight delta of a factor pair carrying ``alpha / rank * strength``."""
+    return (up * scale) @ down
 
 
 # ------------------------------------------------- LoRA specs and the lora dir
@@ -274,33 +277,24 @@ def test_fuse_qkv_builds_the_qkv_pair():
 
 
 def test_fuse_qkv_fused_delta_equals_the_stack_of_projection_deltas():
-    """The fused rank-3r delta with ``alpha = 3r`` scales to 1 and is the stack.
+    """The fused rank-3r delta is the stack of the three separate merges.
 
     That equality is the whole reason the fusion is correct: the three separate
     LoRAs, each applied with ``r/r == 1``, are reproduced by one application on
-    the fused projection (whose ``alpha`` defaults to ``down.size(0) == 3r``, also
-    a scale of 1).
+    the fused projection.
     """
     sd = _qkv_lora()
     fused = _fuse(sd, FUSE_QKV)
     per_projection = [
-        compute_lora_delta(
-            sd[f"blocks.0.attn.to_{w}.lora_A.weight"],
-            sd[f"blocks.0.attn.to_{w}.lora_B.weight"],
-            2.0,  # per-projection alpha == rank
-            1.0,
-            CPU,
-        )
+        _delta(sd[f"blocks.0.attn.to_{w}.lora_A.weight"],
+               sd[f"blocks.0.attn.to_{w}.lora_B.weight"])
         for w in "qkv"
     ]
-    fused_delta = compute_lora_delta(
+    fused_delta = _delta(
         fused["blocks.0.attn.qkv.lora_A.weight"],
         fused["blocks.0.attn.qkv.lora_B.weight"],
-        6.0,  # == down.size(0) == 3r -> scale 1
-        1.0,
-        CPU,
     )
-    assert torch.equal(fused_delta, torch.cat(per_projection, dim=0))
+    assert torch.allclose(fused_delta, torch.cat(per_projection, dim=0), rtol=1e-6)
 
 
 def test_fuse_qkv_folds_each_projection_alpha():
@@ -316,20 +310,18 @@ def test_fuse_qkv_folds_each_projection_alpha():
     fused = _fuse(sd, FUSE_QKV)
 
     per_projection = [
-        compute_lora_delta(
+        _delta(
             sd[f"blocks.0.attn.to_{w}.lora_A.weight"],
             sd[f"blocks.0.attn.to_{w}.lora_B.weight"],
-            2.0 if alphas[w] is None else alphas[w],
-            1.0,
-            CPU,
+            (2.0 if alphas[w] is None else alphas[w]) / 2.0,
         )
         for w in "qkv"
     ]
-    a = fused["blocks.0.attn.qkv.lora_A.weight"]
-    fused_delta = compute_lora_delta(
-        a, fused["blocks.0.attn.qkv.lora_B.weight"], a.size(0), 1.0, CPU
+    fused_delta = _delta(
+        fused["blocks.0.attn.qkv.lora_A.weight"],
+        fused["blocks.0.attn.qkv.lora_B.weight"],
     )
-    assert torch.allclose(fused_delta, torch.cat(per_projection, dim=0), rtol=2e-2, atol=2e-2)
+    assert torch.allclose(fused_delta, torch.cat(per_projection, dim=0), rtol=1e-6)
 
     # The consumed alphas must not resurface as "unused keys" warnings.
     assert not [k for k in fused if k.endswith(".alpha")]
@@ -346,19 +338,17 @@ def test_fuse_qkv_pads_missing_projections_with_zeros():
         assert a.shape == (2 * len(present), 4)
         assert b.shape == (18, 2 * len(present))
 
-        delta = compute_lora_delta(a, b, a.size(0), 1.0, CPU)
+        delta = _delta(a, b)
         assert delta.shape == (18, 4)
         for i, w in enumerate("qkv"):
             if w in present:
                 alpha = 2.0 if alphas is None or alphas.get(w) is None else alphas[w]
-                expected = compute_lora_delta(
+                expected = _delta(
                     sd[f"blocks.0.attn.to_{w}.lora_A.weight"],
                     sd[f"blocks.0.attn.to_{w}.lora_B.weight"],
-                    alpha,
-                    1.0,
-                    CPU,
+                    alpha / 2.0,
                 )
-                assert torch.allclose(delta[6 * i : 6 * i + 6], expected, rtol=2e-2, atol=2e-2)
+                assert torch.allclose(delta[6 * i : 6 * i + 6], expected, rtol=1e-6)
             else:
                 assert torch.equal(delta[6 * i : 6 * i + 6], torch.zeros(6, 4))
 
@@ -455,18 +445,15 @@ def test_fuse_gate_up_fused_delta_is_the_stack_of_the_two_merges():
     fused = _fuse(sd, FUSE_GATE_UP)
 
     per_part = [
-        compute_lora_delta(
-            sd[f"blocks.0.img_mlp.{which}.lora_A.weight"],
-            sd[f"blocks.0.img_mlp.{which}.lora_B.weight"],
-            2.0,  # per-part alpha == rank -> scale 1
-            1.0,
-            CPU,
-        )
+        _delta(sd[f"blocks.0.img_mlp.{which}.lora_A.weight"],
+               sd[f"blocks.0.img_mlp.{which}.lora_B.weight"])
         for which in ("gate_layer", "proj")
     ]
-    a = fused["blocks.0.img_mlp.gate_up.lora_A.weight"]
-    fused_delta = compute_lora_delta(a, fused["blocks.0.img_mlp.gate_up.lora_B.weight"], a.size(0), 1.0, CPU)
-    assert torch.equal(fused_delta, torch.cat(per_part, dim=0))
+    fused_delta = _delta(
+        fused["blocks.0.img_mlp.gate_up.lora_A.weight"],
+        fused["blocks.0.img_mlp.gate_up.lora_B.weight"],
+    )
+    assert torch.allclose(fused_delta, torch.cat(per_part, dim=0), rtol=1e-6)
 
 
 def test_fuse_gate_up_folds_each_part_alpha():
@@ -476,18 +463,18 @@ def test_fuse_gate_up_folds_each_part_alpha():
     fused = _fuse(sd, FUSE_GATE_UP)
 
     per_part = [
-        compute_lora_delta(
+        _delta(
             sd[f"blocks.0.img_mlp.{which}.lora_A.weight"],
             sd[f"blocks.0.img_mlp.{which}.lora_B.weight"],
-            alphas[which],
-            1.0,
-            CPU,
+            alphas[which] / 2.0,
         )
         for which in ("gate_layer", "proj")
     ]
-    a = fused["blocks.0.img_mlp.gate_up.lora_A.weight"]
-    fused_delta = compute_lora_delta(a, fused["blocks.0.img_mlp.gate_up.lora_B.weight"], a.size(0), 1.0, CPU)
-    assert torch.allclose(fused_delta, torch.cat(per_part, dim=0), rtol=2e-2, atol=2e-2)
+    fused_delta = _delta(
+        fused["blocks.0.img_mlp.gate_up.lora_A.weight"],
+        fused["blocks.0.img_mlp.gate_up.lora_B.weight"],
+    )
+    assert torch.allclose(fused_delta, torch.cat(per_part, dim=0), rtol=1e-6)
     assert not [k for k in fused if k.endswith(".alpha")]
 
 
@@ -501,17 +488,15 @@ def test_fuse_gate_up_pads_a_missing_part_with_zeros():
     assert a.shape == (2, 4)
     assert b.shape == (12, 2)
 
-    delta = compute_lora_delta(a, b, a.size(0), 1.0, CPU)
+    delta = _delta(a, b)
     assert torch.equal(delta[6:], torch.zeros(6, 4))
-    assert torch.equal(
+    assert torch.allclose(
         delta[:6],
-        compute_lora_delta(
+        _delta(
             sd["blocks.0.img_mlp.gate_layer.lora_A.weight"],
             sd["blocks.0.img_mlp.gate_layer.lora_B.weight"],
-            2.0,
-            1.0,
-            CPU,
         ),
+        rtol=1e-6,
     )
 
 
@@ -537,13 +522,13 @@ def test_fuse_gate_up_is_a_noop_for_qkv_factors_and_vice_versa():
 
 
 class _TinyNet(nn.Module):
-    """Two LoRA targets: a plain linear and an attention projection."""
+    """Two LoRA targets: a projection and an attention layer, both BF16."""
 
     def __init__(self):
         super().__init__()
-        self.proj = nn.Linear(4, 6, bias=False)
+        self.proj = QuantizedLinear(4, 6, bias=False)
         self.blocks = nn.ModuleList([nn.Module()])
-        self.blocks[0].attn = nn.Linear(4, 6, bias=False)
+        self.blocks[0].attn = QuantizedLinear(4, 6, bias=False)
         # Integer-valued weights keep the bf16 add/subtract round-trip exact.
         with torch.no_grad():
             self.proj.weight.fill_(1.0)
@@ -563,11 +548,11 @@ def test_bf16_apply_then_undo_restores_weights_bit_exactly():
     model = _TinyNet()
     original = {k: v.clone() for k, v in model.state_dict().items()}
 
-    result = apply_lora_to_model(model, [_int_lora("proj")], [1.0], CPU)
-    assert result["affected_keys"] == ("proj.weight",)
+    result = apply_lora_to_model(model, [_int_lora("proj")], [1.0])
+    assert result["targets"]["proj"].mode is LoraMode.BAKED
     assert not torch.equal(model.proj.weight, original["proj.weight"])
 
-    undo_lora_on_model(model, result, CPU)
+    undo_lora_on_model(model, result)
     for key, tensor in model.state_dict().items():
         assert torch.equal(tensor, original[key]), f"{key} not restored exactly"
 
@@ -577,15 +562,15 @@ def test_two_loras_on_one_weight_accumulate_into_a_single_delta():
     original = model.proj.weight.clone()
 
     first, second = _int_lora("proj"), _int_lora("proj")
-    result = apply_lora_to_model(model, [first, second], [1.0, 1.0], CPU)
+    result = apply_lora_to_model(model, [first, second], [1.0, 1.0])
     stacked = model.proj.weight.clone()
 
     # One LoRA with the doubled multiplier is the same delta (both are 1s).
     single = _TinyNet()
-    apply_lora_to_model(single, [_int_lora("proj")], [2.0], CPU)
+    apply_lora_to_model(single, [_int_lora("proj")], [2.0])
     assert torch.equal(stacked, single.proj.weight)
 
-    undo_lora_on_model(model, result, CPU)
+    undo_lora_on_model(model, result)
     assert torch.equal(model.proj.weight, original)
 
 
@@ -595,8 +580,8 @@ def test_apply_reports_and_skips_unused_keys(caplog):
     sd["nowhere.at.all.lora_A.weight"] = torch.ones(2, 4)
     sd["nowhere.at.all.lora_B.weight"] = torch.ones(6, 2)
 
-    result = apply_lora_to_model(model, [sd], [1.0], CPU)
-    assert result["affected_keys"] == ("proj.weight",)
+    result = apply_lora_to_model(model, [sd], [1.0])
+    assert set(result["targets"]) == {"proj"}
     assert "unused keys" in caplog.text
 
 
@@ -610,7 +595,7 @@ class _SwigluNet(nn.Module):
         super().__init__()
         self.blocks = nn.ModuleList([nn.Module()])
         self.blocks[0].img_mlp = nn.Module()
-        self.blocks[0].img_mlp.gate_up = nn.Linear(4, 12, bias=False)
+        self.blocks[0].img_mlp.gate_up = QuantizedLinear(4, 12, bias=False)
         with torch.no_grad():
             self.blocks[0].img_mlp.gate_up.weight.fill_(1.0)
 
@@ -631,13 +616,13 @@ def test_a_declared_fusion_lands_a_split_lora_on_the_fused_weight():
     original = model.blocks[0].img_mlp.gate_up.weight.clone()
 
     result = apply_lora_to_model(
-        model, [_peft_gate_up_lora()], [1.0], CPU, fusions=FUSE_GATE_UP
+        model, [_peft_gate_up_lora()], [1.0], fusions=FUSE_GATE_UP
     )
-    assert result["affected_keys"] == ("blocks.0.img_mlp.gate_up.weight",)
+    assert set(result["targets"]) == {"blocks.0.img_mlp.gate_up"}
     expected = torch.cat([2 * torch.ones(6, 4), 8 * torch.ones(6, 4)], dim=0)
     assert torch.equal(model.blocks[0].img_mlp.gate_up.weight, original + expected)
 
-    undo_lora_on_model(model, result, CPU)
+    undo_lora_on_model(model, result)
     assert torch.equal(model.blocks[0].img_mlp.gate_up.weight, original)
 
 
@@ -650,8 +635,8 @@ def test_an_undeclared_fusion_is_not_applied(caplog):
     model = _SwigluNet()
     original = model.blocks[0].img_mlp.gate_up.weight.clone()
 
-    result = apply_lora_to_model(model, [_peft_gate_up_lora()], [1.0], CPU)
-    assert result["affected_keys"] == ()
+    result = apply_lora_to_model(model, [_peft_gate_up_lora()], [1.0])
+    assert result["targets"] == {}
     assert torch.equal(model.blocks[0].img_mlp.gate_up.weight, original)
     assert "unused keys" in caplog.text
 
@@ -675,11 +660,10 @@ def test_switch_loras_uses_the_model_fusion_spec(tmp_path):
 
 
 def test_apply_with_no_loras_returns_an_empty_result():
-    result = apply_lora_to_model(_TinyNet(), [], [], CPU)
-    assert result["affected_keys"] == ()
-    assert result["lora_sds"] == []
+    result = apply_lora_to_model(_TinyNet(), [], [])
+    assert result["targets"] == {}
     # Undoing it is a no-op rather than an error.
-    undo_lora_on_model(_TinyNet(), result, CPU)
+    undo_lora_on_model(_TinyNet(), result)
 
 
 # ----------------------------------------------------------- switch_loras()
@@ -693,13 +677,13 @@ def switch_model(tmp_path, monkeypatch):
     events = []
     real_apply, real_undo = model_base.apply_lora_to_model, model_base.undo_lora_on_model
 
-    def spy_apply(model, lora_sds, multipliers, device, **kwargs):
+    def spy_apply(model, lora_sds, multipliers, **kwargs):
         events.append(("apply", len(lora_sds)))
-        return real_apply(model, lora_sds, multipliers, device, **kwargs)
+        return real_apply(model, lora_sds, multipliers, **kwargs)
 
-    def spy_undo(model, result, device):
+    def spy_undo(model, result):
         events.append(("undo", None))
-        return real_undo(model, result, device)
+        return real_undo(model, result)
 
     monkeypatch.setattr(model_base, "apply_lora_to_model", spy_apply)
     monkeypatch.setattr(model_base, "undo_lora_on_model", spy_undo)
@@ -757,7 +741,7 @@ def test_switch_loras_honours_the_model_key_map(tmp_path):
         def __init__(self):
             super().__init__()
             self.single_blocks = nn.ModuleList([nn.Module()])
-            self.single_blocks[0].linear1 = nn.Linear(4, 6, bias=False)
+            self.single_blocks[0].linear1 = QuantizedLinear(4, 6, bias=False)
             with torch.no_grad():
                 self.single_blocks[0].linear1.weight.fill_(1.0)
 
@@ -783,3 +767,28 @@ def test_switch_loras_without_a_lora_dir_does_not_apply(tmp_path):
 
     model.switch_loras(["style.safetensors:1.0"], dit)
     assert torch.equal(dit.proj.weight, original)
+
+
+# ------------------------------------------------- folding several LoRAs
+
+
+def test_fold_sums_several_loras_on_one_target():
+    """The folded pair's delta is the sum of the individual scaled deltas."""
+    torch.manual_seed(0)
+    pairs = [
+        (torch.randn(2, 8), torch.randn(6, 2), 1.0),
+        (torch.randn(4, 8), torch.randn(6, 4), 0.25),
+    ]
+    folded = _fold(pairs)
+    assert folded.down.shape == (6, 8)
+    assert folded.up.shape == (6, 6)
+    assert torch.allclose(
+        folded.delta(), sum(_delta(d, u, s) for d, u, s in pairs), rtol=2e-2, atol=2e-2
+    )
+
+
+def test_fold_passes_a_single_unscaled_pair_through():
+    """No alpha, full strength: the factors reach the layer bit-identically."""
+    down, up = torch.randn(3, 8), torch.randn(6, 3)
+    assert _fold([(down, up, 1.0)]).down is down
+    assert _fold([(down, up, 1.0)]).up is up
