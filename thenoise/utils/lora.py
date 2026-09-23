@@ -1,6 +1,17 @@
 import os
 import re
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple, TypedDict, Union
+from typing import (
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+    TypedDict,
+    Union,
+)
 import torch
 import torch.nn.functional as F
 
@@ -317,6 +328,100 @@ def compute_lora_delta(
     return delta * scale
 
 
+#: Baking a LoRA into a quantized weight only survives while the delta is wide
+#: against that weight's requantization step. Under it the delta rounds back to
+#: the stored int8 codes, while the requantization re-derives the row scales and
+#: re-rounds every other entry of the row too — so what lands is requantization
+#: noise carrying the delta's magnitude and none of its direction. The probe in
+#: ``scripts/lora_quant_probe.py`` measures this ratio (delta RMS / step) next to
+#: the realized bake cosine on real checkpoints: every LoRA reported broken sits
+#: at 0.01-0.06 (bake cos < 0.1, i.e. the LoRA does not arrive), every pair
+#: reported fine at 0.08 and up (most well above 0.2). Baking stays the default
+#: because it costs nothing per step, so only the layers below this ratio take
+#: the runtime branch: two rank-sized GEMMs per step on those layers, which is
+#: both faithful and the only thing that works there.
+_LORA_BAKE_MIN_RATIO = 0.1
+
+
+class _PendingQuantizedLora(NamedTuple):
+    """One LoRA's factors on one quantized module, before the bake/runtime call.
+
+    Carries what ``compute_lora_delta`` needs to rebuild the full delta later
+    (``alpha``, ``multiplier``) plus ``scale``, the same ``alpha / r * multiplier``
+    folded into ``up`` when several LoRAs are concatenated into one runtime branch.
+    """
+
+    down: torch.Tensor
+    up: torch.Tensor
+    alpha: Union[float, int, torch.Tensor]
+    multiplier: float
+    scale: float
+
+
+def _fold_lora_factors(
+    pendings: Sequence[_PendingQuantizedLora],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Sum several LoRAs on one module into a single ``(down, up)`` pair in FP32.
+
+    ``sum_i scale_i * up_i @ down_i`` equals ``cat([scale_i * up_i], dim=1) @
+    cat([down_i], dim=0)``: the rank axis is the one the product sums over, so
+    concatenating along it is the exact sum of any number of LoRAs at rank cost.
+    """
+    downs = [p.down.to(torch.float32) for p in pendings]
+    ups = [p.up.to(torch.float32) * p.scale for p in pendings]
+    return torch.cat(downs, dim=0), torch.cat(ups, dim=1)
+
+
+def _lora_row_norms_sq(down: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+    """Squared L2 norm of every output row of ``up @ down``, without building it.
+
+    ``row_j(up @ down)`` has squared norm ``up_j (down @ down.T) up_j.T``, so the
+    whole vector costs two ``[out, r]`` x ``[r, r]`` products instead of an
+    ``[out, in]`` delta — exact, and cheap enough to run on every quantized layer
+    of the model at LoRA switch time.
+    """
+    gram = down @ down.t()
+    return ((up @ gram) * up).sum(dim=1).clamp_min_(0)
+
+
+def lora_bake_ratio(
+    step: Optional[torch.Tensor],
+    pendings: Sequence[_PendingQuantizedLora],
+) -> Optional[torch.Tensor]:
+    """How wide the LoRAs in ``pendings`` are against a layer's quantization step.
+
+    Returns ``rms(delta) / mean(step)`` over the output rows the delta actually
+    touches, as a 0-dim tensor (this never calls ``.item()``, so a caller deciding
+    for hundreds of layers syncs once for all of them). ``None`` means no opinion:
+    the layout has no cheap step estimate (see ``QuantizedLinear.quant_step``), the
+    factors are conv-style, or there is no delta — in every case the caller bakes,
+    which is the behaviour this check replaced.
+
+    Rows are weighed instead of averaging over the whole matrix because a fused
+    projection (``qkv``, ``gate_up``) receives a delta filling only the rows of the
+    sub-projections the LoRA trained on: counting the untouched rows would report a
+    delta smaller than the one that layer's quantization grid has to carry, and
+    send healthy layers to the runtime path for no reason.
+    """
+    if step is None or not pendings:
+        return None
+    if any(p.down.ndim != 2 or p.up.ndim != 2 for p in pendings):
+        return None  # conv factors: no low-rank runtime path either
+    down, up = _fold_lora_factors(pendings)
+    row_sq = _lora_row_norms_sq(down, up)
+    step = step.to(row_sq.device).reshape(-1)
+    if step.numel() == 1:
+        step = step.expand(row_sq.numel())
+    keep = (row_sq > 0) & (step > 0)
+    rows = keep.sum().clamp_min(1)
+    # Row norms into a per-element RMS over the kept rows: the delta is [out, in]
+    # while the step is per row, and only the per-element form is comparable to
+    # the ``d/step`` column ``scripts/lora_quant_probe.py`` calibrates against.
+    rms = (row_sq * keep).sum().div(rows).div(down.size(1)).sqrt()
+    # Nothing kept -> 0/0 -> NaN, which the caller reads as "no opinion".
+    return rms / (step * keep).sum().div(rows)
+
+
 class LoRAApplyResult(TypedDict):
     """Result from ``apply_lora_to_model``: cached state for undo.
 
@@ -325,11 +430,13 @@ class LoRAApplyResult(TypedDict):
     ``affected_keys`` tracks exactly which BF16 model parameters were modified,
     so undo can skip the unaffected ones without iterating the full state dict.
 
-    For quantized ``QuantizedLinear`` layers the LoRA is baked into the
-    quantized weights (see ``QuantizedLinear.bake_lora``), so undo reloads the
-    original weights from disk: ``quantized_affected`` lists their module paths
-    (parallel to ``quantized_restore_keys``, the raw checkpoint keys), and
-    ``dit_path`` is the checkpoint file to read them back from.
+    A quantized ``QuantizedLinear`` either bakes the LoRA into its weights (see
+    ``QuantizedLinear.bake_lora``) — undo then reloads the original weights from
+    disk, so ``quantized_affected`` lists those module paths (parallel to
+    ``quantized_restore_keys``, the raw checkpoint keys) and ``dit_path`` is the
+    file to read them back from — or keeps it as a runtime branch (see
+    ``QuantizedLinear.set_runtime_lora``), which touches no weight at all, so
+    ``runtime_lora`` needs nothing but clearing.
     """
 
     lora_sds: List[Dict[str, torch.Tensor]]
@@ -337,6 +444,7 @@ class LoRAApplyResult(TypedDict):
     affected_keys: Tuple[str, ...]
     quantized_affected: Tuple[str, ...]
     quantized_restore_keys: Tuple[str, ...]
+    runtime_lora: Tuple[str, ...]
     dit_path: Optional[str]
 
 
@@ -390,23 +498,19 @@ def apply_lora_to_model(
     # Build key sets for each LoRA
     lora_weight_keys_list = [set(sd.keys()) for sd in lora_sds]
 
-    # Accumulate LoRA deltas per target module across all LoRAs (multiple
-    # LoRAs can affect the same layer). ``deltas`` maps module path -> delta.
+    # Accumulate LoRA deltas per BF16 target module across all LoRAs (multiple
+    # LoRAs can affect the same layer). ``deltas`` maps module path -> delta;
+    # quantized layers are collected separately by the bake/runtime check below.
     deltas: Dict[str, torch.Tensor] = {}
     affected_bf16: List[str] = []
     affected_quantized: List[str] = []
 
-    def _accumulate(
-        module_path: str,
-        delta: torch.Tensor,
-        *,
-        quantized: bool,
-    ) -> None:
+    def _accumulate_bf16(module_path: str, delta: torch.Tensor) -> None:
         if module_path in deltas:
             deltas[module_path] = deltas[module_path] + delta
         else:
             deltas[module_path] = delta
-        (affected_quantized if quantized else affected_bf16).append(module_path)
+        affected_bf16.append(module_path)
 
     # BF16 path: ``.weight`` parameters (plain linears, convs, norms).
     for model_key, model_weight in base_model.named_parameters():
@@ -432,20 +536,28 @@ def apply_lora_to_model(
                 multiplier,
                 calc_device,
             )
-            _accumulate(module_path, delta, quantized=False)
+            _accumulate_bf16(module_path, delta)
 
             # Remove consumed keys
             lora_weight_keys.discard(down_key)
             lora_weight_keys.discard(up_key)
             lora_weight_keys.discard(alpha_key)
 
-    # Quantized path: quantized ``QuantizedLinear`` layers have no bf16
-    # ``.weight`` parameter to mutate; their LoRA is baked into the quantized
-    # weights at switch time (dequantize -> add delta -> requantize), so the
-    # runtime forward is a single quantized GEMM with zero LoRA cost. Deltas
-    # from multiple LoRAs are accumulated per module and baked once, avoiding
-    # repeated lossy requantization. This must run before the unused-key
-    # warning so the consumed keys are not reported.
+    # Quantized path: a quantized ``QuantizedLinear`` has no BF16 ``.weight`` to
+    # mutate, so a LoRA either gets baked into the low-bit weight (dequantize ->
+    # add -> requantize, free per step) or runs as a low-rank branch on top of the
+    # quantized GEMM. Baking destroys a delta finer than the layer's
+    # requantization step, so every affected layer is measured first — from the
+    # rank factors and the stored quantization scale only, no dequantize and no
+    # materialized delta — and only the layers that fail go runtime.
+    #
+    # One decision per layer, made on the sum of all LoRAs hitting it: they share
+    # one quantization grid, and their sum is what a single requantization has to
+    # carry (baking them one by one would requantize repeatedly and compound the
+    # damage). Collection only here; deltas are computed in the apply pass below,
+    # so layers that go runtime never materialize one. This must run before the
+    # unused-key warning so the consumed keys are not reported.
+    quantized_pending: Dict[str, List[_PendingQuantizedLora]] = {}
     for module_path, module in base_model.named_modules():
         if not isinstance(module, QuantizedLinear) or not module._quantized:
             continue
@@ -457,14 +569,17 @@ def apply_lora_to_model(
             if match is None:
                 continue
             down_key, up_key, alpha_key = match
-            delta = compute_lora_delta(
-                lora_sd[down_key],
-                lora_sd[up_key],
-                lora_sd.get(alpha_key, lora_sd[down_key].size(0)),
-                multiplier,
-                calc_device,
+            down = lora_sd[down_key]
+            quantized_pending.setdefault(module_path, []).append(
+                _PendingQuantizedLora(
+                    down=down,
+                    up=lora_sd[up_key],
+                    alpha=lora_sd.get(alpha_key, down.size(0)),
+                    multiplier=multiplier,
+                    scale=_projection_scale(lora_sd, alpha_key, down.size(0))
+                    * multiplier,
+                )
             )
-            _accumulate(module_path, delta, quantized=True)
             lora_weight_keys.discard(down_key)
             lora_weight_keys.discard(up_key)
             lora_weight_keys.discard(alpha_key)
@@ -474,18 +589,71 @@ def apply_lora_to_model(
         if len(lora_weight_keys) > 0:
             logger.warning("LoRA %d has unused keys: %s", i, ", ".join(list(lora_weight_keys)[:10]))
 
-    # Apply the accumulated delta to each target layer (in-place, no state_dict
-    # copy). Each layer owns how to mutate itself: BF16 adds the delta, quantized
-    # bakes it in.
+    # Bake-vs-runtime decision for the quantized layers: one 0-dim ratio per
+    # layer, then a single sync for all of them (a ``.item()`` per layer would be
+    # hundreds of round-trips at LoRA switch time for nothing).
+    bake_ratios: Dict[str, float] = {}
+    if quantized_pending:
+        scored: List[Tuple[str, torch.Tensor]] = []
+        with torch.no_grad():
+            for path, pendings in quantized_pending.items():
+                ratio = lora_bake_ratio(
+                    base_model.get_submodule(path).quant_step(), pendings
+                )
+                if ratio is not None:
+                    scored.append((path, ratio))
+            if scored:
+                values = torch.stack([r for _, r in scored]).cpu().tolist()
+                bake_ratios = {path: value for (path, _), value in zip(scored, values)}
+
+    # Apply the LoRA to each target layer (in-place, no state_dict copy). Each
+    # layer owns how to mutate itself: BF16 adds the delta, quantized bakes it in
+    # or -- too fine for its grid -- keeps the factors as a runtime branch.
+    runtime_quantized: List[str] = []
     with torch.no_grad():
         for module_path, delta in deltas.items():
+            # Non-QuantizedLinear weight (e.g. a conv), or a QuantizedLinear still
+            # running BF16: a plain in-place add.
+            param = base_model.get_parameter(f"{module_path}.weight")
+            param.data.add_(delta.to(param.device, param.dtype))
+
+        for module_path, pendings in quantized_pending.items():
             module = base_model.get_submodule(module_path)
-            if isinstance(module, QuantizedLinear):
-                module.apply_lora(delta)
-            else:
-                # Non-QuantizedLinear weight (e.g. a conv): plain in-place add.
-                param = base_model.get_parameter(f"{module_path}.weight")
-                param.data.add_(delta.to(param.device, param.dtype))
+            # A leftover runtime branch would stack on top of a fresh bake.
+            module.clear_runtime_lora()
+            ratio = bake_ratios.get(module_path)
+            # NaN (an unreadable layout/geometry) reads as "no opinion" -> bake.
+            if ratio is not None and ratio < _LORA_BAKE_MIN_RATIO:
+                module.set_runtime_lora(*_fold_lora_factors(pendings))
+                runtime_quantized.append(module_path)
+                continue
+            delta = None
+            for pending in pendings:
+                term = compute_lora_delta(
+                    pending.down,
+                    pending.up,
+                    pending.alpha,
+                    pending.multiplier,
+                    calc_device,
+                )
+                delta = term if delta is None else delta + term
+            module.bake_lora(delta)
+            affected_quantized.append(module_path)
+
+    if quantized_pending:
+        logger.info(
+            "Quantized LoRA on %d layer(s): %d baked, %d runtime (bake ratio < %g%s)",
+            len(quantized_pending),
+            len(affected_quantized),
+            len(runtime_quantized),
+            _LORA_BAKE_MIN_RATIO,
+            f", min ratio {min(bake_ratios.values()):.4f}" if bake_ratios else "",
+        )
+        if runtime_quantized:
+            logger.debug(
+                "LoRA below the quantization step, applied at runtime: %s",
+                ", ".join(runtime_quantized),
+            )
 
     # For baked quantized LoRAs, record the raw checkpoint keys so undo can
     # reload the original weights from disk (captured at load time in the model).
@@ -499,6 +667,7 @@ def apply_lora_to_model(
         "affected_keys": tuple(f"{p}.weight" for p in dict.fromkeys(affected_bf16)),
         "quantized_affected": quantized_affected_unique,
         "quantized_restore_keys": quantized_restore_keys,
+        "runtime_lora": tuple(runtime_quantized),
         "dit_path": dit_path,
     }
 
@@ -514,17 +683,26 @@ def undo_lora_on_model(
     Deltas are recomputed from the cached LoRA state dicts, so no full-sized
     delta tensors need to be kept in memory.
     Only the affected parameters are touched — no full state_dict copy.
+
+    The two per-layer quantized paths undo the cheap ways: a runtime branch is
+    just dropped, a baked layer is reloaded from its checkpoint.
     """
     lora_sds = result["lora_sds"]
     multipliers = result["multipliers"]
     affected_keys = result.get("affected_keys")
     quantized_affected = result.get("quantized_affected")
     quantized_restore_keys = result.get("quantized_restore_keys")
+    runtime_lora = result.get("runtime_lora")
     dit_path = result.get("dit_path")
-    if not lora_sds and not quantized_affected:
+    if not lora_sds and not quantized_affected and not runtime_lora:
         return
 
     base_model = _unwrap_compiled(model)
+
+    # Runtime-LoRA layers: the quantized weight was never touched, so dropping the
+    # branch restores the layer exactly (no disk read, no requantization).
+    for module_path in runtime_lora or ():
+        base_model.get_submodule(module_path).clear_runtime_lora()
 
     # Baked quantized LoRAs: reload the original weights from the checkpoint
     # file (by the raw keys captured at load time) and restore them in place.

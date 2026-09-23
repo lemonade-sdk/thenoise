@@ -182,6 +182,196 @@ def test_apply_lora_mixed_quantized_and_bf16_layers():
     assert result["quantized_affected"] == ("q",)
 
 
+# ------------------------------------------------ quant_step (bake-vs-runtime input)
+
+
+def test_quant_step_is_the_stored_int8_scale():
+    """Per-row int8: the exporter's ``scale`` IS the step, row for row."""
+    qweight, scale = int8_pair()
+    layer = QuantizedLinear(IN_F, OUT_F, bias=False)
+    layer.load_quantized(int8_qt(qweight, scale))
+    step = layer.quant_step()
+    assert step.shape == (OUT_F,)
+    assert torch.allclose(step, scale.reshape(-1))
+
+
+def test_quant_step_broadcasts_a_per_tensor_scale():
+    qweight, _ = int8_pair()
+    layer = QuantizedLinear(IN_F, OUT_F, bias=False)
+    layer.load_quantized(int8_qt(qweight, torch.tensor([0.25], dtype=torch.float32)))
+    step = layer.quant_step()
+    assert step.shape == (OUT_F,)
+    assert torch.allclose(step, torch.full((OUT_F,), 0.25))
+
+
+@pytest.mark.parametrize("scale", [torch.rand(OUT_F, 4), torch.rand(3)])
+def test_quant_step_declines_an_unreadable_scale(scale):
+    """A non-per-row scale must not be read as a step (wrong beats no opinion)."""
+    qweight, _ = int8_pair()
+    layer = QuantizedLinear(IN_F, OUT_F, bias=False)
+    layer.load_quantized(int8_qt(qweight, scale))
+    assert layer.quant_step() is None
+
+
+def test_quant_step_declines_non_int8_layouts():
+    """FP8 scales relative to each weight, so its single scale is no step."""
+    layer = QuantizedLinear(IN_F, OUT_F, bias=False)
+    layer.load_quantized(wrapped_fp8_tensor())
+    assert layer.quant_step() is None
+
+
+# ------------------------------------------------------- runtime LoRA on a layer
+
+
+def _tiny_lora_factors(gain=1.0, rank=8):
+    return (
+        torch.randn(rank, IN_F, dtype=torch.bfloat16) * gain,
+        torch.randn(OUT_F, rank, dtype=torch.bfloat16),
+    )
+
+
+def _rel_err(got, expected) -> float:
+    return ((got.float() - expected.float()).norm() / expected.float().norm()).item()
+
+
+def test_runtime_lora_adds_the_low_rank_term_without_touching_the_weight():
+    layer = QuantizedLinear(IN_F, OUT_F, bias=False)
+    layer.load_quantized(wrapped_int8_tensor(realistic=True))
+    stored = layer.weight._qdata.clone()
+    weight = layer.weight.dequantize()
+    x = _bf16_x()
+    base = layer(x)
+
+    # A delta at 5% of the weight's own RMS: visible in a BF16 output, so a branch
+    # that is not added (or is added transposed) cannot slip through.
+    down, up = _tiny_lora_factors()
+    down = down.float() * (
+        0.05
+        * weight.float().pow(2).mean().sqrt()
+        / (up.float() @ down.float()).float().pow(2).mean().sqrt()
+    ).to(torch.bfloat16)
+    delta = (up.float() @ down.float()).float()
+
+    layer.set_runtime_lora(down, up)
+
+    assert torch.equal(layer.weight._qdata, stored)  # no dequantize, no requantize
+    assert _rel_err(layer(x), base.float() + (x.float() @ delta.t())) < 0.02
+    # And it really moved the output (a silently missing add-on cannot pass).
+    assert ((layer(x).float() - base.float()).norm() / base.float().norm()) > 0.02
+
+    layer.clear_runtime_lora()
+    assert torch.equal(layer(x), base)
+
+
+def test_bake_lora_refuses_a_layer_with_a_runtime_branch():
+    """Baking on top of a live branch would apply the LoRA twice."""
+    layer = QuantizedLinear(IN_F, OUT_F, bias=False)
+    layer.load_quantized(wrapped_int8_tensor())
+    layer.set_runtime_lora(*_tiny_lora_factors())
+    with pytest.raises(RuntimeError, match="runtime LoRA"):
+        layer.bake_lora(torch.zeros(OUT_F, IN_F, dtype=torch.bfloat16))
+
+
+# ------------------------------------------------- bake-vs-runtime routing
+
+
+def test_apply_lora_bakes_a_wide_delta():
+    """The normal case is unchanged: bake, free per step, restorable from disk."""
+    from thenoise.utils.lora import apply_lora_to_model
+
+    model = TinyDiT(quantized=True)
+    stored = model.q.weight._qdata.clone()
+    result = apply_lora_to_model(
+        model, [int8_lora_state_dict("q")], [1.0], torch.device("cpu")
+    )
+    assert result["runtime_lora"] == ()
+    assert result["quantized_affected"] == ("q",)
+    assert not torch.equal(model.q.weight._qdata, stored)
+
+
+def test_apply_lora_applies_a_sub_step_delta_at_runtime():
+    """A delta finer than the quantization step is not baked into noise.
+
+    The weight stays bit-identical, so undo needs neither a delta nor the
+    checkpoint: dropping the branch restores the layer exactly.
+    """
+    from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
+
+    model = TinyDiT(quantized=True)
+    stored = model.q.weight._qdata.clone()
+    x = _bf16_x()
+    base = model.q(x)
+    sd = int8_lora_state_dict("q", gain=1e-4)
+    result = apply_lora_to_model(model, [sd], [1.0], torch.device("cpu"))
+
+    assert result["runtime_lora"] == ("q",)
+    assert result["quantized_affected"] == ()
+    assert result["quantized_restore_keys"] == ()  # nothing baked -> nothing to reload
+    assert torch.equal(model.q.weight._qdata, stored)
+
+    delta = sd["q.lora_up.weight"].float() @ sd["q.lora_down.weight"].float()
+    branch = model.q._lora_branch(x)
+    assert _rel_err(branch, x.float() @ delta.t()) < 0.05
+
+    # No ``dit_path`` was recorded (or needed): undo works from memory alone.
+    undo_lora_on_model(model, result, torch.device("cpu"))
+    assert model.q._lora_down is None
+    assert torch.equal(model.q(x), base)
+    assert torch.equal(model.q.weight._qdata, stored)
+
+
+def test_apply_lora_merges_several_loras_on_one_quantized_layer():
+    """One decision per layer, on the sum: one branch, summed rank, scales folded."""
+    from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
+
+    model = TinyDiT(quantized=True)
+    first = int8_lora_state_dict("q", gain=1e-4)
+    second = int8_lora_state_dict("q", gain=2e-4)
+    second["q.alpha"] = torch.tensor(2.0)  # alpha/r = 0.25, on top of the 0.5 weight
+
+    result = apply_lora_to_model(
+        model, [first, second], [1.0, 0.5], torch.device("cpu")
+    )
+
+    assert result["runtime_lora"] == ("q",)
+    assert model.q._lora_down.shape == (16, IN_F)  # rank 8 + rank 8, one branch
+    assert model.q._lora_up.shape == (OUT_F, 16)
+
+    delta = (
+        first["q.lora_up.weight"].float() @ first["q.lora_down.weight"].float()
+        + 0.5
+        * (2.0 / 8.0)
+        * (
+            second["q.lora_up.weight"].float()
+            @ second["q.lora_down.weight"].float()
+        )
+    )
+    x = _bf16_x()
+    branch = model.q._lora_branch(x)
+    assert _rel_err(branch, x.float() @ delta.t()) < 0.05
+
+    undo_lora_on_model(model, result, torch.device("cpu"))
+    assert model.q._lora_down is None
+
+
+def test_baking_after_a_runtime_branch_clears_it():
+    """A fresh bake must not leave a previous runtime branch stacked on top."""
+    from thenoise.utils.lora import apply_lora_to_model
+
+    model = TinyDiT(quantized=True)
+    apply_lora_to_model(
+        model, [int8_lora_state_dict("q", gain=1e-4)], [1.0], torch.device("cpu")
+    )
+    assert model.q._lora_down is not None
+
+    result = apply_lora_to_model(
+        model, [int8_lora_state_dict("q")], [1.0], torch.device("cpu")
+    )
+    assert result["runtime_lora"] == ()
+    assert result["quantized_affected"] == ("q",)  # this time it baked
+    assert model.q._lora_down is None  # baked, then restored by delta
+
+
 # ------------------------------------------------------ is_quantized_checkpoint
 
 

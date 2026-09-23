@@ -141,11 +141,16 @@ def bf16_tensors(*, prefix: str = "", extra: Optional[dict] = None) -> dict:
     return tensors
 
 
-def int8_lora_state_dict(module: str = "q", rank: int = 8) -> dict:
-    """A LoRA state dict targeting ``module`` (sd-scripts style factor names)."""
+def int8_lora_state_dict(module: str = "q", rank: int = 8, gain: float = 1.0) -> dict:
+    """A LoRA state dict targeting ``module`` (sd-scripts style factor names).
+
+    ``gain`` scales the down factor, and so the whole delta: the default is orders
+    of magnitude wider than any quantization step (a bakeable LoRA), a small gain
+    makes it finer than one (the degenerate LoRAs the runtime path exists for).
+    """
     out_f, in_f = TINY_DIM
     return {
-        f"{module}.lora_down.weight": torch.randn(rank, in_f, dtype=torch.bfloat16),
+        f"{module}.lora_down.weight": torch.randn(rank, in_f, dtype=torch.bfloat16) * gain,
         f"{module}.lora_up.weight": torch.randn(out_f, rank, dtype=torch.bfloat16),
         f"{module}.alpha": torch.tensor(float(rank)),
     }
@@ -212,9 +217,25 @@ def int8_pair(shape=TINY_DIM):
     )
 
 
-def wrapped_int8_tensor(convrot: bool = True, groupsize: int = 256):
+def int8_realistic_pair(shape=TINY_DIM, sigma: float = 0.02):
+    """An int8 weight whose per-row scale actually matches its codes.
+
+    :func:`int8_pair` draws the scale independently of the codes, so the
+    dequantized weight is absurdly large. Harmless for layout tests, but a test
+    that needs a layer output and a small LoRA add-on to be comparable in BF16
+    needs weights of a plausible magnitude.
+    """
+    weight = torch.randn(*shape) * sigma
+    scale = (weight.abs().amax(dim=1, keepdim=True) / 127).to(torch.float32)
+    qweight = (weight / scale).round().clamp_(-127, 127).to(torch.int8)
+    return qweight, scale
+
+
+def wrapped_int8_tensor(
+    convrot: bool = True, groupsize: int = 256, realistic: bool = False
+):
     """A ready-made ``TensorWiseINT8Layout`` QuantizedTensor matching :data:`TINY_DIM`."""
-    qweight, scale = int8_pair()
+    qweight, scale = int8_realistic_pair() if realistic else int8_pair()
     return int8_qt(qweight, scale, convrot=convrot, groupsize=groupsize)
 
 

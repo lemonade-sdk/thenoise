@@ -19,12 +19,16 @@ from thenoise.models.flux_klein import FluxKleinModel
 from thenoise.utils.lora import (
     FUSE_GATE_UP,
     FUSE_QKV,
+    _LORA_BAKE_MIN_RATIO,
+    _PendingQuantizedLora,
     _fuse_stacked,
+    _lora_row_norms_sq,
     _match_lora_keys,
     _normalize_lora_suffix,
     _projection_scale,
     apply_lora_to_model,
     compute_lora_delta,
+    lora_bake_ratio,
     undo_lora_on_model,
 )
 
@@ -783,3 +787,84 @@ def test_switch_loras_without_a_lora_dir_does_not_apply(tmp_path):
 
     model.switch_loras(["style.safetensors:1.0"], dit)
     assert torch.equal(dit.proj.weight, original)
+
+
+# --------------------------------------- bake-vs-runtime ratio (quantized layers)
+
+
+def _pending(down, up, scale=1.0) -> _PendingQuantizedLora:
+    """A collected LoRA factor pair with its ``alpha / r * multiplier`` folded."""
+    return _PendingQuantizedLora(
+        down=down, up=up, alpha=down.size(0), multiplier=1.0, scale=scale
+    )
+
+
+def test_lora_row_norms_sq_matches_the_materialized_delta():
+    """The Gram trick is the exact per-row norm of ``up @ down``, no shortcut."""
+    down = torch.randn(6, 64, dtype=torch.float32)
+    up = torch.randn(32, 6, dtype=torch.float32)
+    delta = up @ down
+    assert torch.allclose(
+        _lora_row_norms_sq(down, up), delta.pow(2).sum(dim=1), rtol=1e-4, atol=1e-6
+    )
+
+
+def test_lora_bake_ratio_is_delta_rms_over_the_step():
+    torch.manual_seed(0)
+    down = torch.randn(4, 128) * 0.01
+    up = torch.randn(64, 4)
+    step = torch.full((64,), 0.02)
+    delta = up @ down
+    expected = delta.pow(2).mean().sqrt() / 0.02
+    assert torch.allclose(lora_bake_ratio(step, [_pending(down, up)]), expected, rtol=1e-4)
+
+
+def test_lora_bake_ratio_ignores_the_rows_a_fused_lora_never_touches():
+    """A ``qkv``/``gate_up`` delta filling part of the rows is measured on that part.
+
+    Averaging over the whole fused matrix would report a delta smaller by
+    ``sqrt(rows_touched / rows)`` and send a layer that quantizes fine to the
+    runtime path.
+    """
+    out_f, in_f = 512, 256
+    down = torch.zeros(1, in_f)
+    down[0, :64] = 1.0  # touched row's delta: norm 8
+    up = torch.zeros(out_f, 1)
+    up[0, 0] = 1.0  # one output row carries the whole delta
+    step = torch.ones(out_f)
+
+    ratio = lora_bake_ratio(step, [_pending(down, up)]).item()
+    assert abs(ratio - 8.0 / in_f**0.5) < 1e-5
+    assert ratio > _LORA_BAKE_MIN_RATIO  # that row's delta survives its step: bake
+    # What a whole-matrix RMS would have claimed instead: 22x smaller -> runtime.
+    assert 8.0 / (out_f * in_f) ** 0.5 < _LORA_BAKE_MIN_RATIO
+
+
+def test_lora_bake_ratio_weighs_the_sum_of_several_loras():
+    """One decision per layer, made on what a single requantization has to carry."""
+    torch.manual_seed(0)
+    first = _pending(torch.randn(4, 128) * 0.01, torch.randn(64, 4))
+    second = _pending(torch.randn(4, 128) * 0.02, torch.randn(64, 4), scale=0.5)
+    step = torch.full((64,), 0.02)
+    delta = first.scale * (first.up @ first.down) + second.scale * (second.up @ second.down)
+    expected = delta.pow(2).mean().sqrt() / 0.02
+    assert torch.allclose(lora_bake_ratio(step, [first, second]), expected, rtol=1e-4)
+
+
+@pytest.mark.parametrize(
+    "step,pendings",
+    [
+        (None, [_pending(torch.randn(2, 8), torch.randn(4, 2))]),  # layout unknown
+        (torch.ones(4), []),  # nothing targets this layer
+        (torch.ones(4), [_pending(torch.zeros(2, 8), torch.zeros(4, 2))]),  # zero delta
+    ],
+)
+def test_lora_bake_ratio_declines_to_vote(step, pendings):
+    """No opinion means the caller bakes, i.e. exactly yesterday's behaviour."""
+    ratio = lora_bake_ratio(step, pendings)
+    assert ratio is None or not (ratio < _LORA_BAKE_MIN_RATIO)
+
+
+def test_lora_bake_ratio_declines_conv_factors():
+    down = torch.randn(2, 8, 1, 1)
+    assert lora_bake_ratio(torch.ones(4), [_pending(down, torch.randn(4, 2, 1, 1))]) is None
