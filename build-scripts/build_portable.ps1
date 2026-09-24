@@ -32,6 +32,9 @@
 #   TORCH_VER       torch version + rocm stamp           
 #   TORCHVISION_VER torchvision version + rocm stamp     
 #   TORCH_INDEX     AMD torch wheel index                
+#   VERIFY          set to 0 to skip the torch/torchvision import smoke test
+#                   (falls back to a metadata check); used by the CI
+#                   skip_verify input
 # ===========================================================================
 param(
   [Parameter(Mandatory = $true, Position = 0)]
@@ -171,13 +174,24 @@ foreach ($d in @("test", "tkinter", "idlelib", "turtledemo", "ensurepip")) {
 say "Verifying bundle"
 # DLL resolution on Windows is PATH-based.
 $env:PATH = "$SPDir\_rocm_sdk_core\bin;$SPDir\torch\lib;$Root;${Root}\Scripts;$env:PATH"
-& $Py -c "import torch; assert 'rocm' in torch.__version__, torch.__version__; print('torch', torch.__version__)"
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& $Py -c "import torchvision; print('torchvision', torchvision.__version__)"
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& $Py -c "import thenoise; print('thenoise import OK')"
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-& $Py -m thenoise --help 2>$null
+# VERIFY=0 downgrades this to a metadata-only check (CI skip_verify input).
+# Importing torch here loads the bundled HIP/rocBLAS DLLs, which can fail on a
+# bare CI runner image for reasons that have nothing to do with the bundle (the
+# target machine has real AMD drivers installed). The real test is GPU
+# qualification (qualify_thenoise.ps1).
+if ($env:VERIFY -eq "0") {
+  warn "VERIFY=0 - skipping import check, verifying installed metadata only"
+  & $Py -c "import importlib.metadata as m; print('torch', m.version('torch'), '| torchvision', m.version('torchvision'), '| thenoise', m.version('thenoise'))"
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+} else {
+  & $Py -c "import torch; assert 'rocm' in torch.__version__, torch.__version__; print('torch', torch.__version__)"
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  & $Py -c "import torchvision; print('torchvision', torchvision.__version__)"
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  & $Py -c "import thenoise; print('thenoise import OK')"
+  if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+  & $Py -m thenoise --help 2>$null
+}
 say "=== Bundle size ==="
 $Size = (Get-ChildItem $Root -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
 say ("{0:N0} MB total" -f ($Size / 1MB))
