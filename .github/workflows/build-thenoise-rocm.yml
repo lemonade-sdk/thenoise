@@ -21,17 +21,21 @@ name: Build TheNoise + ROCm (portable)
 # workflow_dispatch inputs (each one exists so that a single unavailable
 # dependency never blocks a release):
 #   * gfx_target          comma-separated GPU targets
-#   * create_release      attach assets to a release when everything passed
+#   * create_release      assemble (and publish) a release when it passed
 #   * platforms           linux / windows / both — an outage on one platform's
 #                         runner must not block releasing the other
-#   * skip_qualification  release on build success alone (GPU box down). The
-#                         release notes then state that the bundles are not
-#                         GPU-qualified, so it stays visible to users.
+#   * skip_qualification  publish straight away instead of waiting for the
+#                         gfx1151 GPU test; the notes then state the bundles
+#                         are not GPU-qualified, so it stays visible to users
 #   * self_hosted         build on dev_lab instead of GitHub-hosted runners
-#   * skip_verify         tolerate the torch/torchvision import smoke test
-#                         inside build_portable.* (a runner-image limitation,
-#                         not a bundle defect; GPU qualification is the real
-#                         test)
+#
+# Publication is deliberately the LAST step and the ONLY one that waits for a
+# GPU. create-release assembles the release from the (GPU-free) build jobs and,
+# when qualification is expected to run, leaves it as a DRAFT; publish-release
+# flips it live once the gfx1151 test has passed. So if the GPU runners are
+# offline the run stops at "queued" with a complete, ready-to-publish draft
+# instead of blocking forever — and publish-thenoise-release.yml can publish
+# that draft at any time without rebuilding anything.
 
 on:
   push:
@@ -64,11 +68,6 @@ on:
         type: boolean
       self_hosted:
         description: 'Build on dev_lab runners instead of GitHub-hosted'
-        required: false
-        default: false
-        type: boolean
-      skip_verify:
-        description: 'Skip the torch import smoke test in the build scripts'
         required: false
         default: false
         type: boolean
@@ -161,14 +160,12 @@ jobs:
   # Builds each target's Linux portable bundle. Needs no GPU: it downloads a
   # standalone CPython, the ROCm torch wheels, then trims the result. The
   # in-script import smoke test passes on a GPU-less runner (HIP only needs its
-  # driver at device-enumeration time), so VERIFY can stay on here.
+  # driver at device-enumeration time), so it stays on unconditionally.
   build-linux:
     needs: [prepare-matrix]
     runs-on: ${{ fromJSON(needs.prepare-matrix.outputs.linux_runner) }}
     if: needs.prepare-matrix.outputs.build_linux == 'true'
     timeout-minutes: 90
-    env:
-      VERIFY: ${{ github.event.inputs.skip_verify == 'true' && '0' || '1' }}
     strategy:
       matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
       fail-fast: false
@@ -225,8 +222,6 @@ jobs:
     runs-on: ${{ fromJSON(needs.prepare-matrix.outputs.windows_runner) }}
     if: needs.prepare-matrix.outputs.build_windows == 'true'
     timeout-minutes: 90
-    env:
-      VERIFY: ${{ github.event.inputs.skip_verify == 'true' && '0' || '1' }}
     strategy:
       matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
       fail-fast: false
@@ -277,8 +272,9 @@ jobs:
 
   # Real GPU smoke test on the gfx1151 dev_lab box: imports + GPU visibility +
   # one end-to-end Anima generation (incl. first-run torch.compile). Runs only
-  # when gfx1151 was built AND qualification was not skipped; skipping it still
-  # releases, but the notes say the bundles were never generation-tested.
+  # when gfx1151 was built AND qualification was not skipped. It never blocks
+  # assembly of the release (see create-release); it gates publication (see
+  # publish-release).
   qualify-linux:
     needs: [prepare-matrix, build-linux]
     runs-on:
@@ -425,28 +421,36 @@ jobs:
         shell: powershell
         run: Remove-Item -Recurse -Force (Join-Path $env:RUNNER_TEMP "thenoise-qual-win") -ErrorAction SilentlyContinue
 
-  # Attaches every target's Linux and Windows archives to a single release
-  # named after the tag. Release creation is optional: automatic on a tag push,
-  # opt-in (create_release) on a manual run.
+  # Assembles every target's Linux and Windows archives into a single release
+  # named after the tag. Depends ONLY on the build jobs, so a GPU runner that is
+  # down can never stop a release from being assembled. Release creation is
+  # optional: automatic on a tag push, opt-in (create_release) on a manual run.
   #
-  # Gating rule: release when every job that RAN succeeded and at least one
+  # Gating rule: assemble when every job that RAN succeeded and at least one
   # platform produced assets. 'skipped' never blocks (that is how platforms=
-  # ... and skip_qualification release), 'failure' always blocks. So a dead
-  # Windows runner, or a down GPU box, degrades the release instead of blocking
-  # it — and the notes below state exactly what is missing.
+  # ... and skip_qualification release), 'failure' always blocks — a degraded
+  # release is honest about itself in the notes instead of silently claiming
+  # the usual full set.
+  #
+  # draft=true whenever GPU qualification is going to run (see publish-release),
+  # so the release is invisible until the gfx1151 test passes. With
+  # skip_qualification, or when gfx1151 was not built, it goes live at once.
   create-release:
-    needs: [prepare-matrix, build-linux, build-windows, qualify-linux, qualify-windows]
+    needs: [prepare-matrix, build-linux, build-windows]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+    timeout-minutes: 60
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      thenoise_version: ${{ steps.tag.outputs.thenoise_version }}
+      draft: ${{ steps.draftflag.outputs.draft }}
     if: |
       always() &&
       needs.prepare-matrix.result == 'success' &&
       (needs.build-linux.result == 'success' || needs.build-windows.result == 'success') &&
       (needs.build-linux.result == 'success' || needs.build-linux.result == 'skipped') &&
       (needs.build-windows.result == 'success' || needs.build-windows.result == 'skipped') &&
-      (needs.qualify-linux.result == 'success' || needs.qualify-linux.result == 'skipped') &&
-      (needs.qualify-windows.result == 'success' || needs.qualify-windows.result == 'skipped') &&
       (
         github.event_name == 'push' ||
         (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
@@ -545,6 +549,24 @@ jobs:
           ls -la ${upload_files} 2>/dev/null || true
           echo "UPLOAD_FILES=$upload_files" >> "$GITHUB_ENV"
 
+      - name: Decide release mode
+        id: draftflag
+        env:
+          SKIP_QUAL: ${{ needs.prepare-matrix.outputs.skip_qualification }}
+          GFX_TARGETS: ${{ needs.prepare-matrix.outputs.gfx_targets }}
+        run: |
+          # Draft iff a GPU qualification job is actually going to run in this
+          # run (same condition the qualify-* jobs use). Everything else —
+          # skip_qualification, or gfx1151 not in the target list — publishes
+          # straight away.
+          if [ "$SKIP_QUAL" != "true" ] && printf '%s' "$GFX_TARGETS" | grep -q gfx1151; then
+            echo "draft=true" >> "$GITHUB_OUTPUT"
+            echo "Release will be created as a DRAFT and published by publish-release."
+          else
+            echo "draft=false" >> "$GITHUB_OUTPUT"
+            echo "No GPU qualification expected: releasing immediately."
+          fi
+
       - name: Create Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -553,14 +575,15 @@ jobs:
           TV: ${{ steps.tag.outputs.torch_version }}
           LINUX_RESULT: ${{ needs.build-linux.result }}
           WINDOWS_RESULT: ${{ needs.build-windows.result }}
-          QUAL_LINUX: ${{ needs.qualify-linux.result }}
-          QUAL_WINDOWS: ${{ needs.qualify-windows.result }}
+          DRAFT: ${{ steps.draftflag.outputs.draft }}
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
           REPO="${{ github.repository }}"
-          # Build the notes from what actually got built and tested, so a
-          # degraded release (one platform, or no GPU qualification) is honest
-          # about itself instead of silently claiming the usual full set.
+          # Build the notes from what actually got built, so a degraded release
+          # (one platform, or no GPU qualification) is honest about itself
+          # instead of silently claiming the usual full set. The
+          # '**GPU qualification**' line is a marker: publish-release rewrites
+          # it to 'passed' when the gfx1151 test succeeds.
           platforms=""
           [ "$LINUX_RESULT" = success ] && platforms="Linux (x64)"
           [ "$WINDOWS_RESULT" = success ] && platforms="${platforms:+$platforms + }Windows (x64)"
@@ -571,6 +594,11 @@ jobs:
             echo "**PyTorch Version**: $TV"
             echo "**Platforms**: $platforms"
             echo "**Build Date**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            if [ "$DRAFT" = true ]; then
+              echo "**GPU qualification**: pending — this release is a draft until the gfx1151 end-to-end generation test passes."
+            else
+              echo "**GPU qualification**: skipped — these bundles were NOT GPU-qualified (build-time import checks only)."
+            fi
             echo
             echo 'Portable TheNoise builds for all GPU targets above. Each includes bundled Python, PyTorch ROCm and the ROCm runtime. No separate installation required.'
             echo '* Linux: run `./bin/thenoise`.'
@@ -585,43 +613,78 @@ jobs:
               echo "> [!WARNING]"
               echo "> No Windows assets in this release (Windows build job: $WINDOWS_RESULT)."
             fi
-            if [ "$QUAL_LINUX" != success ] && [ "$QUAL_WINDOWS" != success ]; then
-              echo
-              echo "> [!WARNING]"
-              echo "> **Not GPU-qualified.** No gfx1151 end-to-end generation test ran for this release (linux: $QUAL_LINUX, windows: $QUAL_WINDOWS). These bundles completed the build-time import checks only."
-            fi
           } > notes.md
           cat notes.md
+          args=(--repo "$REPO" --title "v$VERSION" --notes-file notes.md)
+          [ "$DRAFT" = true ] && args+=(--draft)
           # shellcheck disable=SC2086
           gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag 2>/dev/null || true
           # shellcheck disable=SC2086
-          gh release create "$TAG" --repo "$REPO" \
-            --title "v$VERSION" \
-            --notes-file notes.md \
-            $UPLOAD_FILES
+          gh release create "$TAG" "${args[@]}" $UPLOAD_FILES
 
-      - name: Attach qualification reports to release (gfx1151)
+  # The only job that makes a release visible, and the only one (besides
+  # qualification itself) that has to wait for a GPU runner. If the gfx1151 box
+  # is offline this job simply stays queued — the release is already fully
+  # assembled in the drafts list, so nothing is lost and nothing is rebuilt: use
+  # publish-thenoise-release.yml (or `gh release edit <tag> --draft=false`)
+  # whenever you decide to ship it. A FAILED qualification leaves the draft
+  # unpublished too; fix the runner and hit "Re-run failed jobs" to publish
+  # without rebuilding.
+  publish-release:
+    needs: [create-release, qualify-linux, qualify-windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    timeout-minutes: 15
+    if: |
+      always() &&
+      needs.create-release.result == 'success' &&
+      needs.create-release.outputs.draft == 'true' &&
+      (needs.qualify-linux.result == 'success' || needs.qualify-windows.result == 'success') &&
+      (needs.qualify-linux.result == 'success' || needs.qualify-linux.result == 'skipped') &&
+      (needs.qualify-windows.result == 'success' || needs.qualify-windows.result == 'skipped')
+    steps:
+      - name: Attach qualification reports (gfx1151)
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.create-release.outputs.tag }}
         run: |
-          TAG="${{ steps.tag.outputs.tag }}"
           REPO="${{ github.repository }}"
-          rm -rf qual && mkdir -p qual
-          if ! gh run download "${{ github.run_id }}" -n qualification-gfx1151 -D qual --repo "$REPO"; then
-            echo "::warning::linux qualification artifact not found; skipping"
-          else
-            if [ -f qual/qualification-report.json ]; then
-              cp qual/qualification-report.json "qualification-report-${TAG}-linux.json"
-              gh release upload "$TAG" "qualification-report-${TAG}-linux.json" --clobber --repo "$REPO"
+          for pair in "linux qualification-gfx1151" "windows qualification-gfx1151-win"; do
+            set -- $pair
+            rm -rf qual && mkdir -p qual
+            if ! gh run download "${{ github.run_id }}" -n "$2" -D qual --repo "$REPO"; then
+              echo "::warning::$2 artifact not found; skipping"
+              continue
             fi
-          fi
-          rm -rf qual && mkdir -p qual
-          if ! gh run download "${{ github.run_id }}" -n qualification-gfx1151-win -D qual --repo "$REPO"; then
-            echo "::warning::windows qualification artifact not found; skipping"
-          else
             if [ -f qual/qualification-report.json ]; then
-              cp qual/qualification-report.json "qualification-report-${TAG}-windows.json"
-              gh release upload "$TAG" "qualification-report-${TAG}-windows.json" --clobber --repo "$REPO"
+              cp qual/qualification-report.json "qualification-report-${TAG}-${1}.json"
+              gh release upload "$TAG" "qualification-report-${TAG}-${1}.json" --clobber --repo "$REPO"
             fi
+          done
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+          QUAL_LINUX: ${{ needs.qualify-linux.result }}
+          QUAL_WINDOWS: ${{ needs.qualify-windows.result }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          qualified=""
+          [ "$QUAL_LINUX" = success ] && qualified="Linux"
+          [ "$QUAL_WINDOWS" = success ] && qualified="${qualified:+$qualified + }Windows"
+          line="**GPU qualification**: passed — gfx1151 end-to-end generation on $qualified (see the attached qualification-report-*.json)."
+          gh release view "$TAG" --repo "$REPO" --json body -q .body > body.md
+          if grep -q '^\*\*GPU qualification\*\*:' body.md; then
+            sed -i "s|^\*\*GPU qualification\*\*:.*|$line|" body.md
+          else
+            printf '%s\n' "$line" >> body.md
           fi
+          gh release edit "$TAG" --repo "$REPO" --draft=false --notes-file body.md
+          # Not `gh ... | head`: with pipefail a SIGPIPE'd gh would fail the
+          # step after the release was already published.
+          gh release view "$TAG" --repo "$REPO" > final.md
+          head -n 15 final.md

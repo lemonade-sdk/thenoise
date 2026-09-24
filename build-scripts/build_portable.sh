@@ -21,9 +21,6 @@
 #   TORCH_VER       torch version + rocm stamp           
 #   TORCHVISION_VER torchvision version + rocm stamp     
 #   TORCH_INDEX     AMD torch wheel index                
-#   VERIFY          set to 0 to skip the torch/torchvision import smoke test
-#                   (falls back to a metadata check); used by the CI
-#                   skip_verify input.
 set -euo pipefail
 
 GFX_TARGET="${1:?usage: build_portable.sh <gfx_target>}"
@@ -228,20 +225,10 @@ verify_env() {
   export LD_LIBRARY_PATH
 }
 verify_env
-# VERIFY=0 downgrades this to a metadata-only check (CI skip_verify input).
-# These imports normally DO work on a GPU-less build machine — HIP needs its
-# driver only at device-enumeration time — but when they fail purely because of
-# what the runner image lacks, that is a runner problem and must not fail a
-# release build. The real test is GPU qualification (qualify_thenoise.sh).
-if [ "${VERIFY:-1}" != "0" ]; then
-  "$PY" -c "import torch; assert 'rocm' in torch.__version__, torch.__version__; print('torch', torch.__version__)"
-  "$PY" -c "import torchvision; print('torchvision', torchvision.__version__)"
-  "$PY" -c "import thenoise; print('thenoise import OK')"
-  "$PY" -m thenoise --help >/dev/null 2>&1 || true
-else
-  warn "VERIFY=0 — skipping import check, verifying installed metadata only"
-  "$PY" -c "import importlib.metadata as m; print('torch', m.version('torch'), '| torchvision', m.version('torchvision'), '| thenoise', m.version('thenoise'))"
-fi
+"$PY" -c "import torch; assert 'rocm' in torch.__version__, torch.__version__; print('torch', torch.__version__)"
+"$PY" -c "import torchvision; print('torchvision', torchvision.__version__)"
+"$PY" -c "import thenoise; print('thenoise import OK')"
+"$PY" -m thenoise --help >/dev/null 2>&1 || true
 bash -n "$ROOT/bin/thenoise"
 echo "=== Bundle size ==="
 du -sh "$ROOT"

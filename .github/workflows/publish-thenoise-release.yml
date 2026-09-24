@@ -1,0 +1,119 @@
+name: Publish TheNoise release (manual override)
+
+# Escape hatch for "the gfx1151 GPU runner is down but I want this out now".
+#
+# A tag push needs no GPU runner to assemble a release: the build jobs and
+# create-release run on GitHub-hosted runners, so within ~20 minutes a complete
+# DRAFT release (all assets + notes) exists even when qualification can never
+# start. publish-release in build-thenoise-rocm.yml flips that draft live when
+# the GPU test passes; if it can't, this workflow flips it by hand.
+#
+# It rebuilds and re-uploads nothing: ~15 seconds on a hosted runner, and it
+# works with every self-hosted runner offline. It is also how you re-publish a
+# release you deleted, or undo a --draft you set by hand.
+#
+# Inputs:
+#   * tag                 the release tag, e.g. thenoise-0.9.0-rocm10.1.0 —
+#                         the RELEASE tag, not the v* git tag that triggered it
+#   * confirm_unqualified required when the release carries no
+#                         qualification-report-*.json asset, i.e. the gfx1151
+#                         generation test never ran. Without it this workflow
+#                         refuses to publish, so shipping an unqualified build
+#                         is always a recorded, conscious decision.
+#
+# Equivalent one-liner if you have gh locally:
+#   gh release edit <tag> --repo lemonade-sdk/thenoise --draft=false
+# This file exists so the decision is recorded as a CI run and the notes are
+# updated to say what was (not) tested.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish (e.g. thenoise-0.9.0-rocm10.1.0)'
+        required: true
+        type: string
+      confirm_unqualified:
+        description: 'Publish even though gfx1151 qualification never ran'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      TAG: ${{ github.event.inputs.tag }}
+      CONFIRM_UNQUALIFIED: ${{ github.event.inputs.confirm_unqualified }}
+    steps:
+      - name: Inspect release
+        id: inspect
+        run: |
+          set -euo pipefail
+          [ -n "$TAG" ] || { echo "::error::tag input is empty"; exit 1; }
+          if ! gh release view "$TAG" --repo "$REPO" \
+              --json isDraft,assets,url > release.json 2>/dev/null; then
+            echo "::error::release '$TAG' not found in $REPO. This wants the release tag (thenoise-<version>-rocm<rocm>), not the v<version> git tag."
+            echo "Recent releases:"
+            gh release list --repo "$REPO" --limit 15 || true
+            exit 1
+          fi
+          python3 - release.json state.env <<'PY'
+          import json, sys
+          r = json.load(open(sys.argv[1]))
+          reports = sum(1 for a in r["assets"]
+                        if a["name"].startswith("qualification-report-"))
+          with open(sys.argv[2], "w") as out:
+              out.write(f"is_draft={str(r['isDraft']).lower()}\nreports={reports}\n")
+          print(f"Draft: {str(r['isDraft']).lower()}")
+          print(f"Qualification reports attached: {reports}")
+          print(f"URL: {r['url']}")
+          PY
+          cat state.env >> "$GITHUB_OUTPUT"
+          # shellcheck disable=SC1091
+          . ./state.env
+          if [ "$is_draft" != "true" ]; then
+            echo "Already published — the publish step will be a no-op."
+          elif [ "$reports" = "0" ] && [ "$CONFIRM_UNQUALIFIED" != "true" ]; then
+            echo "::error::'$TAG' has no qualification-report-*.json asset, so the gfx1151 generation test never ran. Either fix the dev_lab runner and re-run the build workflow's failed jobs, or re-run this workflow with confirm_unqualified=true to ship it anyway."
+            exit 1
+          fi
+
+      - name: Publish
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.inspect.outputs.is_draft }}" != "true" ]; then
+            echo "Not a draft; nothing to do."
+            exit 0
+          fi
+          # Rewrite the '**GPU qualification**' marker line that
+          # build-thenoise-rocm.yml wrote, so the public notes describe reality
+          # after a manual publish instead of still saying 'pending'.
+          gh release view "$TAG" --repo "$REPO" --json body -q .body > body.md
+          if [ "${{ steps.inspect.outputs.reports }}" != "0" ]; then
+            line="**GPU qualification**: passed — gfx1151 end-to-end generation (see the attached qualification-report-*.json). Published manually."
+          else
+            line="**GPU qualification**: SKIPPED — published manually without the gfx1151 end-to-end generation test (build-time import checks only)."
+            warn='> [!WARNING]\n> This release was published manually while the gfx1151 GPU qualification runner was unavailable. The bundles passed their build-time import checks but were never used for a real generation.\n'
+          fi
+          if grep -q '^\*\*GPU qualification\*\*:' body.md; then
+            sed -i "s|^\*\*GPU qualification\*\*:.*|$line|" body.md
+          else
+            printf '\n%s\n' "$line" >> body.md
+          fi
+          if [ "${{ steps.inspect.outputs.reports }}" = "0" ]; then
+            printf '\n%b' "$warn" >> body.md
+          fi
+          cat body.md
+          gh release edit "$TAG" --repo "$REPO" --draft=false --notes-file body.md
+          echo "Published $TAG"
+          # Not `gh ... | head`: with pipefail a SIGPIPE'd gh would fail the
+          # step after the release was already published.
+          gh release view "$TAG" --repo "$REPO" > final.md
+          head -n 20 final.md
