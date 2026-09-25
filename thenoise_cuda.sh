@@ -28,17 +28,18 @@ if [ ! -d "$VENV_DIR" ]; then
   uv venv "$VENV_DIR" --python 3.14 --managed-python
 fi
 
-# ---- 3. Install torch (Metal build) ----------------------------------------
+# ---- 3. Install torch (CUDA build) ----------------------------------------
 if ! "$VENV_DIR/bin/python" -c "import torch" &>/dev/null; then
-  echo "Installing Metal torch ..."
+  echo "Installing CUDA torch ..."
 
   uv pip install \
     "torch==2.14" \
-    "torchvision==0.29"
+    "torchvision==0.29" \
+    --index-url https://download.pytorch.org/whl/cu132
 fi
 
 # ---- 4. Install the project in editable mode ------------------------------
 uv pip install -e "$PROJECT_DIR"
 
 # ---- 5. Launch the project, forwarding all arguments ----------------------
-exec "$VENV_DIR/bin/python" -m thenoise "$@" --device mps
+exec "$VENV_DIR/bin/python" -m thenoise "$@"
