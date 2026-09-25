@@ -2,7 +2,7 @@
   <img src="thenoise/ui/logo2.png" alt="TheNoise" width="280" />
 </div>
 
-TheNoise is an open-source image generation / editing engine made specifically to run well on Strix Halo (gfx1151) and other ROCm-capable AMD iGPUs and dGPUs (gfx1150, gfx1152). It is tuned to perform extremely well on the machine it runs on.  
+TheNoise is an open-source image generation / editing engine made specifically to run well on Strix Halo (gfx1151) and other ROCm-capable AMD iGPUs and dGPUs. It is tuned to perform extremely well on the machine it runs on.  
 
 TheNoise loads one model at a time and generates images from text prompts. Editing-capable models - like Qwen-Image 2.1, Qwen-Image-Edit and FLUX.2 Klein - can also edit an existing image from a text instruction (image + prompt → edited image).
 
