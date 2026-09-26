@@ -293,13 +293,12 @@ def qwen_image21_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     # everything up to its own end (so no mask is needed).
     segments: list[tuple[int, int, Optional[torch.Tensor]]] = [
         (0, txt, causal_prefix_mask(txt, txt, ctx))]
-    keys: list[tuple[int, int]] = [(txt, txt)]
     cursor = txt
     for _ in range(refs):
         segments.append((cursor, cursor + tokens, None))
-        keys.append((tokens, cursor + tokens))
         cursor += tokens
     segments.append((cursor, full, None))
+    keys = [(end - start, end) for start, end, _ in segments]
 
     rows = randn(ctx, 2, dim)
     mods = tuple(modulation_rows(r, 0 if read else prefix, n)
@@ -393,8 +392,10 @@ def qwen_image_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
                                               for p in ("add_q_proj", "add_k_proj",
                                                         "add_v_proj", "to_add_out"))
     joint = txt + tokens + refs                     # ``read`` attends the cached refs too
-    flops = gemm_flops((img_side, img_tokens), (txt_side, txt)) + attn_flops(
-        heads, head_dim, ((joint, joint),))
+    flops = gemm_flops((img_side, img_tokens), (txt_side, txt),
+                       (gemm_params(blk.img_mod), temb.shape[0]),
+                       (gemm_params(blk.txt_mod), 1)) + attn_flops(
+        heads, head_dim, ((txt + img_tokens, joint),))   # keys outlast queries on ``read``
     return Case(run, flops, img_tokens + txt,
                 detail=f"img={img_tokens} txt={txt} refs={refs}")
 
@@ -478,7 +479,7 @@ def _flux2_double(ctx: Ctx, tokens: int, scenario: str, params, model: str) -> C
     flops = gemm_flops(
         (gemm_params(blk.img_attn) + gemm_params(blk.img_mlp), img_tokens),
         (gemm_params(blk.txt_attn) + gemm_params(blk.txt_mlp), txt),
-    ) + attn_flops(heads, head_dim, ((joint, joint),))
+    ) + attn_flops(heads, head_dim, ((txt + img_tokens, joint),))
     return Case(run, flops, img_tokens + txt,
                 detail=f"img={img_tokens} txt={txt} refs={refs}")
 
@@ -522,7 +523,7 @@ def _flux2_single(ctx: Ctx, tokens: int, scenario: str, params, model: str) -> C
 
     joint = txt + tokens + refs
     flops = gemm_flops((gemm_params(blk), txt + img_tokens)) + attn_flops(
-        heads, head_dim, ((joint, joint),))
+        heads, head_dim, ((txt + img_tokens, joint),))
     return Case(run, flops, txt + img_tokens, detail=f"txt+img={txt + img_tokens}")
 
 
