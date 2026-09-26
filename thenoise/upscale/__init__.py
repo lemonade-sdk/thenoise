@@ -29,6 +29,7 @@ from .inference_adaptors import (
     make_flux,
     make_flux2,
     make_ideogram4,
+    make_qwen21,
     make_sdxl,
     make_wan21,
 )
@@ -68,6 +69,7 @@ __all__ = [
     "make_flux",
     "make_flux2",
     "make_ideogram4",
+    "make_qwen21",
     "make_sdxl",
     "make_wan21",
     "load_esrgan",
