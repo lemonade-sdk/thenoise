@@ -74,14 +74,6 @@ on:
 
 env:
   GFX_TARGETS: ${{ github.event.inputs.gfx_target || 'gfx1151,gfx1150,gfx1152,gfx103X,gfx110X,gfx120X' }}
-  # Pinned deliberately: rc.repo.amd.com/rocm/whl-next is a moving index, so an
-  # unpinned "torch==2.14.0" lets each of the 12 matrix jobs (and any re-run
-  # days later) resolve a different ROCm stamp — while all of them are published
-  # under ONE release tag named after a single ROCm version. Bump these
-  # deliberately; build_portable.* read the same variable names.
-  TORCH_VER: 2.14.0+rocm10.1.0rc2
-  TORCHVISION_VER: 0.29.0a0+rocm10.1.0rc2
-  TORCH_INDEX: https://rc.repo.amd.com/rocm/whl-next/
 
 jobs:
   prepare-matrix:
@@ -96,29 +88,6 @@ jobs:
       linux_runner: ${{ steps.set.outputs.linux_runner }}
       windows_runner: ${{ steps.set.outputs.windows_runner }}
     steps:
-      - name: Preflight wheel index
-        env:
-          TORCH_INDEX: ${{ env.TORCH_INDEX }}
-          TORCH_VER: ${{ env.TORCH_VER }}
-          TORCHVISION_VER: ${{ env.TORCHVISION_VER }}
-        run: |
-          # Fail here in seconds rather than in 12 parallel build jobs if AMD's
-          # index is unreachable from GitHub's egress or the pinned stamp has
-          # vanished from it. Both wheel flavours must be present: linux_x86_64
-          # for the Linux matrix, win_amd64 for the Windows one.
-          set -euo pipefail
-          curl -fsSL --retry 3 --max-time 60 "$TORCH_INDEX"torch/ -o idx.html
-          curl -fsSL --retry 3 --max-time 60 "$TORCH_INDEX"torchvision/ -o idx_tv.html
-          t="torch-${TORCH_VER}"; tb="torch-${TORCH_VER%%+*}"
-          grep -qF "$t" idx.html || grep -qF "$tb" idx.html \
-            || { echo "::error::torch $TORCH_VER not found on $TORCH_INDEX"; exit 1; }
-          v="torchvision-${TORCHVISION_VER}"; vb="torchvision-${TORCHVISION_VER%%+*}"
-          grep -qF "$v" idx_tv.html || grep -qF "$vb" idx_tv.html \
-            || { echo "::error::torchvision $TORCHVISION_VER not found on $TORCH_INDEX"; exit 1; }
-          grep -qF 'win_amd64.whl' idx.html \
-            || { echo "::error::no win_amd64 wheels on $TORCH_INDEX"; exit 1; }
-          echo "Index OK ($TORCH_INDEX)"
-
       - name: Set matrix
         id: set
         env:
@@ -471,7 +440,7 @@ jobs:
           TV_W: ${{ needs.build-windows.outputs.torch_version }}
         run: |
           # Release tag follows the canonical scheme regardless of trigger:
-          # thenoise-<version>-rocm<rocm> (e.g. thenoise-0.9.0-rocm10.1.0rc2).
+          # thenoise-<version>-rocm<rocm> (e.g. thenoise-0.9.0-rocm10.1.0).
           # For a tag push, the pushed v* tag is just the trigger — the actual
           # release tag is derived from the build outputs. Linux and Windows
           # build the same torch/thenoise versions, so either platform's
