@@ -4,10 +4,6 @@ Qwen-Image 2.1 shares nothing but a name with Qwen-Image 1: a different DiT (see
 :mod:`thenoise.dit.qwen_image21.models`), a Wan-2.2-layout 64-channel/16x RGBA VAE,
 and a Qwen3-VL-8B conditioner.
 
-That VAE is the engine's first RGBA one, so this is the model the pipeline's channel
-count exists for (see ``DiffusionModel.pixel_channels``). The boundaries that cannot
-carry an alpha — the Qwen3-VL vision tokens and the pixel-domain upscaler —
-composite it onto white.
 
 The latent is the DiT's own input: ``img_in`` takes the VAE's 64 channels directly
 and one token is one latent cell, so unlike Qwen-Image 1 or Flux Klein there is no
@@ -56,7 +52,7 @@ from thenoise.models.base import (
     normalize_keys,
 )
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
-from thenoise.upscale import LatentUpscaler
+from thenoise.upscale import LatentUpscaler, VAEPixelUpscaler
 from thenoise.utils.image_tensor import flatten_alpha, resize_to_cover_center_crop
 from thenoise.utils.lora import FUSE_GATE_UP
 from thenoise.utils.math import round_up
@@ -307,11 +303,18 @@ class QwenImage21Model(DiffusionModel):
 
     # -------------------------------------------------------------- upscaling
     def _create_upscaler(self) -> LatentUpscaler:
-        raise NotImplementedError(
-            "no Sesqui latent upscaler exists for the Qwen-Image 2.1 VAE yet (it is "
-            "still training); add its latent format to _UPSCALER_FORMATS and return "
-            "the matching SesquiLSRUpscaler here once the weights are committed"
-        )
+        """Qwen-Image 2.1 VAE -> weight-free VAE round trip (decode, 2x, encode).
+
+        No Sesqui weights exist for this 64ch RGBA latent, so the round trip through
+        the model's own VAE is what backs the advertised 2x ``UPSCALE_SCALE``. It is
+        the lossier option: once weights for this latent format are committed, add
+        the format to ``_UPSCALER_FORMATS`` and returning the matching
+        ``SesquiLSRUpscaler`` here is the whole change.
+
+        Because the round trip goes through an RGBA VAE, unlike the RGB-only
+        pixel-domain upscaler, the alpha survives the upscale path intact.
+        """
+        return VAEPixelUpscaler(self.vae, scale=self.UPSCALE_SCALE)
 
 
 __all__ = ["QwenImage21Conditioning", "QwenImage21Model"]

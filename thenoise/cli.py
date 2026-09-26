@@ -62,8 +62,9 @@ def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png
                    help="LoRA to apply (format: 'style:0.8' or 'sub/style', "
                         ".safetensors auto-appended, repeatable)")
     p.add_argument("--upscale", action="store_true",
-                   help="upscale the latent 2x in latent space (SesquiLSR) and "
-                        "run a low-strength refine denoise before decoding")
+                   help="upscale the latent 2x in latent space and run a "
+                        "low-strength refine denoise "
+                        "before decoding")
     p.add_argument("--upscale-factor", type=float, default=1.0,
                    help="upscale factor, > 0.0 (default: 1.0 = no upscale); "
                         "max depends on the pixel upscaler scale: 'no-refiner' "

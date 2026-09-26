@@ -133,7 +133,7 @@ are optional and can be combined.
 
 ### Latent upscale + refiner (`refined`)
 
-Every model ships a built-in **latent (SesquiLSR) upscaler** that runs in latent
+Every model ships a built-in **latent upscaler** that runs in latent
 space before the VAE decode: it upscales the latent 2× and then runs a short,
 low-strength refine denoise at the upscaled size. This is the default
 `upscale_type` and needs **no extra model files** - a 2× upscale works out of the
