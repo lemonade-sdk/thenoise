@@ -16,6 +16,7 @@ from thenoise.models.base import (
     normalize_keys,
 )
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
+from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.math import round_up
 from thenoise.vae import load_qwen_vae
 
@@ -255,6 +256,6 @@ class Krea2Model(DiffusionModel):
         mu = self.DEFAULT_MU
         return math.exp(mu) / (math.exp(mu) + (1.0 / t - 1.0))
 
-    def _upscale_format(self) -> str:
-        """Qwen-Image VAE -> Wan21 z-score latent format."""
-        return "wan21"
+    def _create_upscaler(self) -> LatentUpscaler:
+        """Qwen-Image VAE -> Wan21 z-score Sesqui upscaler."""
+        return SesquiLSRUpscaler("wan21", device=self.device, dtype=self.dtype)

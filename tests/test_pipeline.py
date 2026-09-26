@@ -13,10 +13,9 @@ import json
 import pytest
 import torch
 
-from conftest import StubModel
+from conftest import StubLatentUpscaler, StubModel
 from thenoise.models.config import GenerateRequest, SamplingParams
 from thenoise.pipeline import PipelineController, _refine_schedule
-from thenoise.upscale.inference_adaptors import LatentFormatAdaptor
 from thenoise.upscale.pixel import PixelUpscalerManager
 from thenoise.utils.png import build_pnginfo
 
@@ -204,30 +203,21 @@ def test_decode_key_changes_when_refined():
 # ------------------------------------------------------- latent upscale + refine
 
 
-class _FakeUpscaler:
-    """Records the requested target and returns a blank latent of that size."""
-
-    def __init__(self):
-        self.targets = []
-
-    def __call__(self, raw, target):
-        self.targets.append(tuple(target))
-        return torch.full(
-            (1, raw.shape[1], target[0], target[1]), 0.5, dtype=raw.dtype
-        )
-
-
 class _RefineSpyModel(StubModel):
-    """Stub with an injected latent upscaler; logs the refine's inputs."""
+    """Stub with a mock latent upscaler injected; logs the refine's inputs.
+
+    The upscaler is the plain ``LatentUpscaler`` mock from conftest: what the
+    pipeline does with a real strategy is that strategy's own test, these are
+    about the refine.
+    """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.upscaler = _FakeUpscaler()
-        self.adaptor = LatentFormatAdaptor(external_channels=self.LATENT_CHANNELS)
+        self.upscaler = StubLatentUpscaler(self.UPSCALE_SCALE)
         self.refine_inputs = []
 
-    def load_latent_upscaler(self):
-        return self.upscaler, self.adaptor
+    def _create_upscaler(self):
+        return self.upscaler
 
     def prepare_latent(self, latents, cond, params, ref=None, ref_method="index"):
         self.refine_inputs.append((latents.clone(), params))
@@ -257,8 +247,9 @@ def test_upscale_and_refine(refine_steps, refine_denoise):
     latents = torch.ones(1, model.LATENT_CHANNELS, 8, 8)
     out = controller._upscale_and_refine(latents, model.encode_prompt(None), params)
 
-    # 2x latent upscale through the (identity) adaptor, in external coordinates.
-    assert model.upscaler.targets == [(16, 16)]
+    # The pipeline's whole share of the upscale: ask the model's upscaler once and
+    # take its canonical output (8x8 -> 16x16 latent) at face value.
+    assert model.upscaler.calls == 1
     assert out.shape == (1, model.LATENT_CHANNELS, 16, 16)
 
     refine_params = model.refine_inputs[0][1]
@@ -339,9 +330,20 @@ def test_generate_with_upscale_refines_and_decodes_the_larger_latent():
 
     model = controller.model
     assert image.size == (128, 128)  # 64 * latent 2x
+    assert model.upscaler.calls == 1  # upscaled once, not once per refine step
     assert model.calls["denoise_step"] == 2 + model.REFINE_STEPS
     assert model.calls["decode"] == 1
     assert model.calls["schedule"] == 1  # only the main run asks the model
+
+
+def test_generate_without_upscale_never_touches_the_upscaler():
+    """A plain run must not pay for the latent upscaler (it loads lazily)."""
+    model = _RefineSpyModel()
+    controller = _controller(model)
+    controller.generate(_request(steps=2))
+
+    assert model.upscaler.calls == 0
+    assert model._upscaler is None  # the plain path never asked the model for one
 
 
 # --------------------------------------------------------------------- postprocess

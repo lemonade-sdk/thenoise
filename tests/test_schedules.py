@@ -274,19 +274,22 @@ def test_file_size_counts_missing_as_zero():
     assert DiffusionModel._file_size("/nonexistent/nope.safetensors") == 0
 
 
-def test_load_latent_upscaler_is_lazy_and_cached(monkeypatch):
-    from thenoise.models import base as base_mod
+def test_get_upscaler_is_lazy_and_cached():
+    """The model builds its upscaler once, on the first request that needs it.
 
-    calls = []
+    ``_create_upscaler`` is what loads weights, so building twice would mean
+    loading twice and handing out two objects; building eagerly would tax every
+    plain generation.
+    """
+    built = []
 
-    def fake_load(fmt, device, dtype):
-        calls.append((fmt, device, dtype))
-        return "upscaler", "adaptor"
+    class _Spy(AnimaModel):
+        def _create_upscaler(self):
+            built.append(self)
+            return "upscaler"
 
-    monkeypatch.setattr(base_mod, "load_latent_upscaler", fake_load)
-    model = _bare(AnimaModel, _upscaler=None, _adaptor=None)
-    assert model.load_latent_upscaler() == ("upscaler", "adaptor")
-    assert calls == [("wan21", "cpu", torch.float32)]
-    # Second call is served from the cache; the loader never runs again.
-    assert model.load_latent_upscaler() == ("upscaler", "adaptor")
-    assert len(calls) == 1
+    model = _bare(_Spy, _upscaler=None)
+    assert built == []  # constructing the adapter loads nothing
+    assert model.get_upscaler() == "upscaler"
+    assert model.get_upscaler() == "upscaler"
+    assert len(built) == 1

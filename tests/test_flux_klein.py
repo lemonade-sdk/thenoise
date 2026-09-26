@@ -183,19 +183,14 @@ def test_resize_to_cover_center_crop_keeps_target_size():
 
 
 def test_flux2_upscaler_loads_and_runs():
-    from thenoise.upscale import load_latent_upscaler
+    from thenoise.upscale import SesquiLSRUpscaler
 
-    model, adaptor = load_latent_upscaler("flux2", device="cpu", dtype=torch.bfloat16)
-    # Canonical Flux Klein latent [B, 128, H//16, W//16] -> raw 32ch VAE latent.
+    upscaler = SesquiLSRUpscaler("flux2", device="cpu", dtype=torch.bfloat16)
+    # Canonical Flux Klein latent [B, 128, H//16, W//16] in and out at 2x. The raw
+    # 32ch latent is spatially 2x the canonical one, so the adaptor's spatial scale
+    # has to be applied to the network's target for this to come back 2x, not 4x.
     z = torch.randn(1, 128, 8, 8)
-    raw = adaptor.to_vae_latent(z).to(torch.bfloat16)
-    assert raw.shape == (1, 32, 16, 16)
-    # 2x upscale in external coords -> the raw latent target goes through the
-    # adaptor's spatial scale (2), i.e. raw 16x16 -> 32x32.
-    target = adaptor.vae_target_size((16, 16))
-    out = model(raw, target)
-    z_up = adaptor.from_vae_latent(out.float())
-    assert z_up.shape == (1, 128, 16, 16)
+    assert upscaler(z).shape == (1, 128, 16, 16)
 
 
 def _tiny_edit_inputs(model, seq=4, refseq=6, txtlen=8):

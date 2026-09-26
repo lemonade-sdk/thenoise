@@ -36,6 +36,7 @@ from thenoise.dit.kvcache import KVCache
 from thenoise.utils.text_encoder import find_tokenizer_dir
 from thenoise.models.base import Conditioning, DiffusionModel, Step, normalize_keys
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
+from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.lora import FUSE_QKV
 from thenoise.utils.math import round_up
 from thenoise.vae import load_flux2_vae
@@ -359,9 +360,9 @@ class FluxKleinModel(DiffusionModel):
         align = self.vae.spatial_compression
         return round_up(width, align), round_up(height, align)
 
-    def _upscale_format(self) -> str:
-        """Flux.2 VAE -> 128ch patched + BN-normalized latent format."""
-        return "flux2"
+    def _create_upscaler(self) -> LatentUpscaler:
+        """Flux.2 VAE -> 128ch patched + BN-normalized Sesqui upscaler."""
+        return SesquiLSRUpscaler("flux2", device=self.device, dtype=self.dtype)
 
     def percent_to_sigma(self, percent: float) -> float:
         """Percent -> sigma (used by the ER-SDE solver to nudge sigma_0 below 1).

@@ -15,6 +15,7 @@ from thenoise.models.base import (
     normalize_keys,
 )
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
+from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.math import round_up
 from thenoise.utils.text_encoder import load_qwen3_text_encoder, load_t5_tokenizer
 from thenoise.vae import load_qwen_vae
@@ -218,6 +219,6 @@ class AnimaModel(DiffusionModel):
         shift = self.DEFAULT_FLOW_SHIFT
         return (shift * t) / (1.0 + (shift - 1.0) * t)
 
-    def _upscale_format(self) -> str:
-        """Qwen-Image VAE -> Wan21 z-score latent format."""
-        return "wan21"
+    def _create_upscaler(self) -> LatentUpscaler:
+        """Qwen-Image VAE -> Wan21 z-score Sesqui upscaler."""
+        return SesquiLSRUpscaler("wan21", device=self.device, dtype=self.dtype)

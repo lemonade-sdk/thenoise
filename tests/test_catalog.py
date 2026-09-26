@@ -1,4 +1,4 @@
-"""The model catalog's shared contract: defaults, geometry and upscale formats.
+"""The model catalog's shared contract: defaults, geometry and latent upscalers.
 
 One table-driven test per contract, over every registered adapter, so a new model
 is covered by being added to ``MODEL_CATALOG`` rather than by writing yet another
@@ -13,7 +13,10 @@ from conftest import CATALOG_IDS
 from thenoise.models import MODEL_CATALOG
 from thenoise.models.base import DiffusionModel
 from thenoise.samplers import SAMPLERS, create_sampler
-from thenoise.upscale import _UPSCALER_FORMATS, load_latent_upscaler, upscale_weight_path
+from thenoise.upscale import (
+    SesquiLSRUpscaler,
+    _UPSCALER_FORMATS,
+)
 
 # Per-model public defaults (the values the API/CLI fall back to).
 MODEL_DEFAULTS = {
@@ -50,29 +53,11 @@ def test_model_defaults_extend_the_base_preferences(model):
     assert set(DiffusionModel.DEFAULT_PREFS) <= set(model.DEFAULT_PREFS)
 
 
-@pytest.mark.parametrize("model", MODEL_CATALOG, ids=CATALOG_IDS)
-def test_model_upscale_format_is_registered_with_weights(model):
-    """Each adapter names a latent format that has a committed upscaler.
-
-    An adapter may instead raise ``NotImplementedError`` to say its VAE has no
-    upscaler weights yet.
-    """
-    instance = object.__new__(model)  # the format is a class constant, no weights
-    try:
-        fmt = instance._upscale_format()
-    except NotImplementedError as exc:
-        pytest.skip(f"{model.name} has no latent upscaler yet: {exc}")
-    assert fmt in _UPSCALER_FORMATS, f"{model.name} names unknown format {fmt!r}"
-    _factory, filename, channels = _UPSCALER_FORMATS[fmt]
-    assert upscale_weight_path(filename).is_file()
-    assert channels > 0
-
-
 @pytest.fixture(scope="module")
 def latent_upscalers():
     """Each registered latent format loaded once (a few MB of committed weights)."""
     return {
-        fmt: load_latent_upscaler(fmt, device="cpu", dtype=torch.bfloat16)
+        fmt: SesquiLSRUpscaler(fmt, device="cpu", dtype=torch.bfloat16)
         for fmt in _UPSCALER_FORMATS
     }
 
@@ -81,23 +66,28 @@ def latent_upscalers():
 def test_latent_upscaler_matches_its_format_registry(fmt, latent_upscalers):
     """Registry channels/adaptor agree with the shipped weights and round-trip.
 
-    ``PipelineController._upscale_and_refine`` converts the canonical latent to
-    raw VAE space, upscales, and converts back — so ``to_vae_latent`` must land on
-    the registry's raw channel count and ``from_vae_latent`` must be its inverse.
+    ``SesquiLSRUpscaler`` converts the canonical latent to raw VAE space, upscales,
+    and converts back — so ``to_vae_latent`` must land on the registry's raw channel
+    count, and one call on a canonical latent must hand back a canonical latent at
+    the requested factor (whatever the raw space's own channel count and spatial
+    scale are).
     """
-    model, adaptor = latent_upscalers[fmt]
+    upscaler = latent_upscalers[fmt]
     _factory, filename, channels = _UPSCALER_FORMATS[fmt]
+    adaptor = upscaler.adaptor
 
     z = torch.randn(1, adaptor.external_channels, 4, 4)
     raw = adaptor.to_vae_latent(z).to(torch.bfloat16)
-    assert raw.shape[1] == channels, f"{fmt} ({filename}) carries {channels}ch"
+    assert raw.shape[1] == channels, f"{fmt} ({filename}) carries {raw.shape[1]}ch"
 
-    # The pipeline upscales by ``DiffusionModel.UPSCALE_SCALE`` (2) in *external*
-    # coords and hands the upscaler a target converted into VAE coords.
-    target = adaptor.vae_target_size((2 * 4, 2 * 4))
-    out = model(raw, target)
-    z_up = adaptor.from_vae_latent(out.float())
-    assert z_up.shape == (1, adaptor.external_channels, 8, 8)
+    # The whole transform, in canonical coords in and out.
+    z_up = upscaler(z)
+    assert z_up.shape == (
+        1,
+        adaptor.external_channels,
+        upscaler.scale * 4,
+        upscaler.scale * 4,
+    )
 
     # An identity-size pass through the adaptor pair must be lossless.
     identity = adaptor.from_vae_latent(adaptor.to_vae_latent(z).float())

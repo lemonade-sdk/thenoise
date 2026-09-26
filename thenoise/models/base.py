@@ -7,7 +7,10 @@ LoRAs). All *pipeline orchestration* — encode -> denoise -> decode -> postproc
 -> PIL, the inference lock, the stage cache, upscale planning, pixel-domain
 upscaling, PNG metadata — lives in ``thenoise.pipeline.PipelineController``.
 Pixel-domain upscaling (a pixel-space / postprocessing concern that needs no
-model) lives in ``thenoise.upscale.pixel.PixelUpscalerManager``.
+model) lives in ``thenoise.upscale.pixel.PixelUpscalerManager``. Latent-domain
+upscaling — what happens to the latent between the DiT and the refine — lives in
+the ``thenoise.upscale.base.LatentUpscaler`` object this class hands out from
+``get_upscaler``; the adapter only picks which strategy its VAE needs.
 
 Subclasses implement the model-specific kernels and load their own VAE:
 
@@ -20,8 +23,8 @@ Subclasses implement the model-specific kernels and load their own VAE:
   * ``finalize_latent(...)`` — model-internal -> canonical latent (once, post-loop).
   * ``resolve_size(...)``    — per-model size rounding / validation.
   * ``decode(...)``          — canonical latent -> pixels (the generation end).
-  * ``_upscale_format(...)``  — required: the latent-format name for this
-    model's VAE (selected by ``load_latent_upscaler``).
+  * ``_create_upscaler(...)`` — required: return this model's ``LatentUpscaler``
+    for its VAE (``get_upscaler`` caches it; the pipeline drives it).
 
 The VAE also owns the pixel width (``pixel_channels``: 3 for the RGB family, 4 for
 the RGBA Qwen-Image 2.1 one) and the adapter just reports it, so the pipeline can
@@ -71,7 +74,7 @@ from thenoise.memory import MemoryManager
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.device import get_device_memory
 from thenoise.samplers import Step
-from thenoise.upscale import load_latent_upscaler
+from thenoise.upscale import LatentUpscaler
 
 if TYPE_CHECKING:  # pragma: no cover - only for annotations
     from PIL import Image
@@ -245,10 +248,9 @@ class DiffusionModel(ABC):
         self._active_lora_result: Optional[LoRAApplyResult] = None
         self._active_lora_spec: Optional[str] = None
 
-        # Lazy latent upscaler (only loaded if upscale is requested).
-        # ``_upscale_format`` supplies the latent-format name matching the VAE.
-        self._upscaler = None
-        self._adaptor = None
+        # Lazy latent upscaler (only built if upscale is requested). Built by
+        # ``_create_upscaler``, which names the strategy for this model's VAE.
+        self._upscaler: Optional[LatentUpscaler] = None
 
     # ------------------------------------------------------------ preferences
     def pref(self, name: str, request_value: Any = None) -> Any:
@@ -551,25 +553,31 @@ class DiffusionModel(ABC):
         return list_safetensors(self.lora_dir)
 
     # ------------------------------------------------------- latent upscaler
-    @abstractmethod
-    def _upscale_format(self) -> str:
-        """Return the latent-format name matching this model's VAE.
+    def get_upscaler(self) -> LatentUpscaler:
+        """This model's latent upscaler, built once on first use (under the lock).
 
-        Concrete subclasses must override this to return the name of their VAE's
-        latent format (e.g. ``"wan21"`` for the shared Qwen-Image VAE). It is
-        passed to ``load_latent_upscaler``, which selects the adaptor and weight file.
+        Returns the model's ``LatentUpscaler``: called on the canonical latent the
+        DiT produced, it gives back the canonical latent at ``UPSCALE_SCALE`` times
+        the resolution, ready for the refine denoise. Loading weights is a model
+        concern, so the pipeline only ever sees this object — see ``_create_upscaler``
+        for what a model actually overrides.
+        """
+        if self._upscaler is None:
+            self._upscaler = self._create_upscaler()
+        return self._upscaler
+
+    @abstractmethod
+    def _create_upscaler(self) -> LatentUpscaler:
+        """Build this model's latent upscaler.
+
+        Concrete subclasses return the ``LatentUpscaler`` strategy matching their
+        VAE's latent format (today ``SesquiLSRUpscaler("<format>", ...)``), whose own
+        ``scale`` is what ``UPSCALE_SCALE`` must match. Called at most once, lazily,
+        by ``get_upscaler``; raising ``NotImplementedError`` declares a VAE whose
+        upscaler weights do not exist yet, which fails an upscale request rather
+        than silently skipping it.
         """
         ...
-
-    def load_latent_upscaler(self):
-        """Load the latent upscaler (once, lazily, under the lock)."""
-        if self._upscaler is None:
-            self._upscaler, self._adaptor = load_latent_upscaler(
-                self._upscale_format(),
-                device=self.device,
-                dtype=self.dtype,
-            )
-        return self._upscaler, self._adaptor
 
     # ------------------------------------------------------------ pixel format
     @property
