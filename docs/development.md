@@ -14,7 +14,7 @@ thenoise/                  the package
   dit/                     per-model DiT code (krea2, qwen_image, qwen_image21, anima, zimage, flux2)
   vae/                     VAE loaders (Qwen-Image, Flux, Flux.2, Wan 2.2)
   samplers/                denoising solvers (euler, er_sde)
-  upscale/                 latent (SesquiLSR) + pixel upscalers
+  upscale/                 latent + pixel upscalers
   postprocess/             grain, sharpening, Qwen-VAE enhance
   ui/                      web UI served by `serve`
   api.py / cli.py          HTTP API and CLI entry points

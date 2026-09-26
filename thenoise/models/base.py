@@ -568,15 +568,7 @@ class DiffusionModel(ABC):
 
     @abstractmethod
     def _create_upscaler(self) -> LatentUpscaler:
-        """Build this model's latent upscaler.
-
-        Concrete subclasses return the ``LatentUpscaler`` strategy matching their
-        VAE's latent format (today ``SesquiLSRUpscaler("<format>", ...)``), whose own
-        ``scale`` is what ``UPSCALE_SCALE`` must match. Called at most once, lazily,
-        by ``get_upscaler``; raising ``NotImplementedError`` declares a VAE whose
-        upscaler weights do not exist yet, which fails an upscale request rather
-        than silently skipping it.
-        """
+        """Build this model's latent upscaler."""
         ...
 
     # ------------------------------------------------------------ pixel format

@@ -4,10 +4,6 @@ Qwen-Image 2.1 shares nothing but a name with Qwen-Image 1: a different DiT (see
 :mod:`thenoise.dit.qwen_image21.models`), a Wan-2.2-layout 64-channel/16x RGBA VAE,
 and a Qwen3-VL-8B conditioner.
 
-That VAE is the engine's first RGBA one, so this is the model the pipeline's channel
-count exists for (see ``DiffusionModel.pixel_channels``). The boundaries that cannot
-carry an alpha — the Qwen3-VL vision tokens and the pixel-domain upscaler —
-composite it onto white.
 
 The latent is the DiT's own input: ``img_in`` takes the VAE's 64 channels directly
 and one token is one latent cell, so unlike Qwen-Image 1 or Flux Klein there is no
