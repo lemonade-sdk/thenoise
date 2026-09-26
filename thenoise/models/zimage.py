@@ -23,6 +23,7 @@ from thenoise.models.base import (
     normalize_keys,
 )
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
+from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.lora import FUSE_QKV
 from thenoise.utils.math import round_up
 from thenoise.vae import load_flux_vae
@@ -215,9 +216,9 @@ class ZImageModel(DiffusionModel):
         align = self.vae.spatial_compression * self.dit.patch_size
         return round_up(width, align), round_up(height, align)
 
-    def _upscale_format(self) -> str:
-        """Flux VAE -> affine shift/scale latent format."""
-        return "flux"
+    def _create_upscaler(self) -> LatentUpscaler:
+        """Flux VAE -> affine shift/scale Sesqui upscaler."""
+        return SesquiLSRUpscaler("flux", device=self.device, dtype=self.dtype)
 
     def percent_to_sigma(self, percent: float) -> float:
         """Percent -> sigma (used by the ER-SDE solver to nudge sigma_0 below 1).

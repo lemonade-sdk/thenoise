@@ -1,9 +1,11 @@
-"""SesquiLSR latent upscaler — vendored subset for the Wan/Qwen-Image VAE.
+"""The SesquiLSR latent-upscale network — vendored subset for thenoise.
 
 Copied and trimmed from https://github.com/LoganBooker/SesquiLSR (MIT).
 
-The upscaler operates on *raw* VAE latents (see ``inference_adaptors`` for the
-normalized<->raw conversion). We run it in bf16 to match the rest of the engine.
+This is the raw network only: it operates on *raw* VAE latents (see
+``inference_adaptors`` for the normalized<->raw conversion) and is driven by the
+``SesquiLSRUpscaler`` strategy in ``sesqui.py``. We run it in bf16 to match the
+rest of the engine.
 
 Original copyright/license notice follows.
 """
@@ -233,7 +235,13 @@ class LowRankReassemblyHead(nn.Module):
         return out
 
 
-class LatentUpscaler(nn.Module):
+class SesquiLSRNet(nn.Module):
+    """The vendored SesquiLSR network: raw VAE latent -> 2x raw VAE latent.
+
+    ``in_channels`` is the raw VAE latent width of the target format (see
+    ``sesqui._UPSCALER_FORMATS``); ``target_size`` is in raw-VAE-latent coords.
+    """
+
     def __init__(
         self,
         in_depth: int = 8,

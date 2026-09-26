@@ -56,6 +56,7 @@ from thenoise.models.base import (
     normalize_keys,
 )
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
+from thenoise.upscale import LatentUpscaler
 from thenoise.utils.image_tensor import flatten_alpha, resize_to_cover_center_crop
 from thenoise.utils.lora import FUSE_GATE_UP
 from thenoise.utils.math import round_up
@@ -305,11 +306,11 @@ class QwenImage21Model(DiffusionModel):
         return latents.to(device=dev, dtype=self.dtype), None
 
     # -------------------------------------------------------------- upscaling
-    def _upscale_format(self) -> str:
+    def _create_upscaler(self) -> LatentUpscaler:
         raise NotImplementedError(
             "no Sesqui latent upscaler exists for the Qwen-Image 2.1 VAE yet (it is "
-            "still training); name its latent format in _UPSCALER_FORMATS and return "
-            "it here once the weights are committed"
+            "still training); add its latent format to _UPSCALER_FORMATS and return "
+            "the matching SesquiLSRUpscaler here once the weights are committed"
         )
 
 

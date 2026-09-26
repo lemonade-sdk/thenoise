@@ -2,7 +2,8 @@
 
 Owns the orchestration of generate/edit — encode -> denoise -> decode ->
 postprocess -> PIL — delegating each stage to the model's kernels
-(``thenoise.models.base.DiffusionModel``) and the pixel-domain upscaler
+(``thenoise.models.base.DiffusionModel``), the model's latent upscaler
+(``thenoise.upscale.base.LatentUpscaler``) and the pixel-domain upscaler
 (``thenoise.upscale.pixel.PixelUpscalerManager``). Also owns the inference lock,
 the single-entry stage cache (with cascade invalidation), upscale planning, and
 cache-key construction.
@@ -30,7 +31,7 @@ with a different prompt never re-encodes it.
 Upscaling
 ---------
 Two modes driven by ``upscale_factor`` (f in (0.0, 8.0]) and ``upscale_type``:
-``refined`` (default) runs the latent Sesqui upscaler ``UPSCALE_SCALE``x plus a
+``refined`` (default) runs the model's latent upscaler ``UPSCALE_SCALE``x plus a
 low-strength refine, adding a pixel-domain upscaler above factor 2; ``no-refiner``
 uses only the pixel-domain upscaler (no latent 2x), limited to its detected scale.
 Pixel upscalers are selected by name from ``upscaler_dir`` (CLI ``--upscaler-dir``);
@@ -662,25 +663,17 @@ class PipelineController:
         cond: Conditioning,
         params: SamplingParams,
     ) -> torch.Tensor:
-        """Upscale the canonical latent ``UPSCALE_SCALE``x in latent space, then
-        run a short low-strength refine denoise at the new size.
+        """Hand the DiT's latent to the model's latent upscaler, then refine it.
 
-        Sesqui operates on raw VAE latents; the adaptor converts the canonical
-        latent to/from that raw space. The refined result is the canonical latent
-        at the upscaled spatial size, ready for ``decode``.
+        Everything latent-space is the upscaler's: it takes the canonical latent
+        the DiT produced and returns the canonical latent at ``UPSCALE_SCALE``
+        times the resolution, ready to feed back into the DiT. What is left here is
+        the short low-strength refine at that new size; its output is the canonical
+        latent that ``decode`` consumes.
         """
         model = self.model
-        upscaler, adaptor = model.load_latent_upscaler()
+        z_up = model.get_upscaler()(latents)
         scale = model.UPSCALE_SCALE
-        z = latents.to(device=model.device, dtype=model.dtype)
-
-        with torch.no_grad():
-            # Adaptor math in fp32; the model runs in bf16.
-            raw = adaptor.to_vae_latent(z).to(model.dtype)
-            h, w = z.shape[-2:]
-            target = adaptor.vae_target_size((scale * h, scale * w))
-            raw_up = upscaler(raw, target)
-            z_up = adaptor.from_vae_latent(raw_up.float()).to(model.dtype)
 
         # One short low-strength refine denoise at the upscaled size. Only the size
         # is forwarded: the refine brings its own sigma and step count (``_refine``).

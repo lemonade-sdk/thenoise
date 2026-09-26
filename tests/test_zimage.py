@@ -77,21 +77,10 @@ def test_zimage_upscale_format_is_flux():
 
 
 def test_flux_upscaler_loads_and_runs():
-    from thenoise.upscale import load_latent_upscaler
+    from thenoise.upscale import SesquiLSRUpscaler
 
-    model, adaptor = load_latent_upscaler("flux", device="cpu", dtype=torch.bfloat16)
-    # Canonical Z-Image (Flux) latent -> raw VAE latent -> 2x upscale -> back.
+    upscaler = SesquiLSRUpscaler("flux", device="cpu", dtype=torch.bfloat16)
+    # Canonical Z-Image (Flux) latent in, canonical latent at 2x out: the raw VAE
+    # space the network works in is entirely internal.
     z = torch.randn(1, 16, 8, 8)
-    raw = adaptor.to_vae_latent(z).to(torch.bfloat16)
-    out = model(raw, (16, 16))
-    z_up = adaptor.from_vae_latent(out.float())
-    assert z_up.shape == (1, 16, 16, 16)
-
-
-def test_load_upscaler_rejects_unknown_format():
-    import pytest
-
-    from thenoise.upscale import load_latent_upscaler
-
-    with pytest.raises(ValueError):
-        load_latent_upscaler("not_a_real_format", device="cpu", dtype=torch.bfloat16)
+    assert upscaler(z).shape == (1, 16, 16, 16)

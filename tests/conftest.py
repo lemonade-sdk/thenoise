@@ -34,6 +34,7 @@ from thenoise.models import (  # noqa: E402
 from thenoise.models.base import Conditioning, DiffusionModel  # noqa: E402
 from thenoise.models.config import ModelConfig, SamplingParams  # noqa: E402
 from thenoise.samplers import Step  # noqa: E402
+from thenoise.upscale import LatentUpscaler  # noqa: E402
 from thenoise.vae import AutoencoderKLFlux2  # noqa: E402
 
 
@@ -388,6 +389,31 @@ CATALOG_IDS = [cls.name for cls in MODEL_CATALOG]
 # ------------------------------------------------------------------------ stub models
 
 
+class StubLatentUpscaler(LatentUpscaler):
+    """A mock latent upscaler: the interface with no strategy, weights or device.
+
+    Pipeline tests must not care *how* the latent gets bigger, so this stands in
+    for any ``LatentUpscaler``: it grows the latent by ``scale`` and returns a
+    constant value, which lets a test reproduce the refine's input exactly.
+    ``calls`` counts invocations (i.e. that the pipeline asked at all, and once).
+    """
+
+    def __init__(self, scale: int, value: float = 0.5):
+        self.scale = scale
+        self.value = value
+        self.calls = 0
+
+    def __call__(self, latents: torch.Tensor) -> torch.Tensor:
+        self.calls += 1
+        h, w = latents.shape[-2:]
+        return torch.full(
+            (latents.shape[0], latents.shape[1], self.scale * h, self.scale * w),
+            self.value,
+            dtype=latents.dtype,
+            device=latents.device,
+        )
+
+
 class StubModel(DiffusionModel):
     """A fully functional weight-free adapter for pipeline/sampler tests.
 
@@ -495,8 +521,8 @@ class StubModel(DiffusionModel):
         self.lora_switches.append(list(lora_specs) if lora_specs else None)
         return super().switch_loras(lora_specs, dit)
 
-    def _upscale_format(self) -> str:
-        return "flux2"
+    def _create_upscaler(self) -> LatentUpscaler:
+        return StubLatentUpscaler(self.UPSCALE_SCALE)
 
 
 class EditingStubModel(StubModel):
@@ -535,8 +561,8 @@ def stub_model_cls():
         def denoise_step(self, latents, t, cond, guidance_scale, i):
             pass
 
-        def _upscale_format(self):
-            return "wan21"
+        def _create_upscaler(self):
+            return StubLatentUpscaler(self.UPSCALE_SCALE)
 
     return _Stub
 
