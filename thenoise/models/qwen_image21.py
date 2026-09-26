@@ -52,7 +52,7 @@ from thenoise.models.base import (
     normalize_keys,
 )
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
-from thenoise.upscale import LatentUpscaler, VAEPixelUpscaler
+from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.image_tensor import flatten_alpha, resize_to_cover_center_crop
 from thenoise.utils.lora import FUSE_GATE_UP
 from thenoise.utils.math import round_up
@@ -303,18 +303,8 @@ class QwenImage21Model(DiffusionModel):
 
     # -------------------------------------------------------------- upscaling
     def _create_upscaler(self) -> LatentUpscaler:
-        """Qwen-Image 2.1 VAE -> weight-free VAE round trip (decode, 2x, encode).
-
-        No Sesqui weights exist for this 64ch RGBA latent, so the round trip through
-        the model's own VAE is what backs the advertised 2x ``UPSCALE_SCALE``. It is
-        the lossier option: once weights for this latent format are committed, add
-        the format to ``_UPSCALER_FORMATS`` and returning the matching
-        ``SesquiLSRUpscaler`` here is the whole change.
-
-        Because the round trip goes through an RGBA VAE, unlike the RGB-only
-        pixel-domain upscaler, the alpha survives the upscale path intact.
-        """
-        return VAEPixelUpscaler(self.vae, scale=self.UPSCALE_SCALE)
+        """Qwen-Image 2.1 VAE -> its own Sesqui (64ch canonical latent)."""
+        return SesquiLSRUpscaler("qwen21", device=self.device, dtype=self.dtype)
 
 
 __all__ = ["QwenImage21Conditioning", "QwenImage21Model"]

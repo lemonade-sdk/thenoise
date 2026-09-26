@@ -7,12 +7,14 @@ operate on.
 
 thenoise's canonical latent is the *normalized* (per-channel z-score) latent
 ``(VAE_raw - mean) / std``, exactly the Qwen-Image / Wan21 / Anima latent
-format that ``make_wan21`` returns.
+format that ``make_wan21`` returns. Where an upscaler was trained on that same
+normalized space there is nothing to convert, and the adaptor is the identity
+(``make_qwen21``).
 
 The ``make_*`` constructors cover the other formats SesquiLSR supports (SDXL,
 Flux, Flux2, Ideogram4). They are imported here as groundwork for future VAE
-support: a model whose VAE uses a different latent format can build the matching
-adaptor and hand it to ``load_latent_upscaler``.
+support: a model whose VAE uses a different latent format builds the matching
+adaptor, which ``SesquiLSRUpscaler`` then drives.
 
 Copied and trimmed from https://github.com/LoganBooker/SesquiLSR (MIT).
 """
@@ -108,6 +110,11 @@ def make_wan21(
             3.2687, 2.1526, 2.8652, 1.5579, 1.6382, 1.1253, 2.8251, 1.9160,
         ])
     return _ZScoreAdaptor(external_channels=16, mean=latents_mean, std=latents_std)
+
+
+def make_qwen21() -> LatentFormatAdaptor:
+    """Qwen-Image 2.1 — 64ch latent."""
+    return LatentFormatAdaptor(external_channels=64)
 
 
 def make_sdxl() -> LatentFormatAdaptor:
@@ -349,6 +356,7 @@ class _ShiftScalePatchAdaptor(LatentFormatAdaptor):
 __all__ = [
     "LatentFormatAdaptor",
     "make_wan21",
+    "make_qwen21",
     "make_sdxl",
     "make_flux",
     "make_flux2",
