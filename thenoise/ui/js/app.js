@@ -500,6 +500,17 @@ function resetEditResult() {
 
 bindDropzone('edit_dropzone', 'edit_file', addEditRefs);
 
+document.addEventListener('paste', e => {
+  if ($('view-edit').classList.contains('hidden')) return;
+  const images = [...(e.clipboardData?.items || [])]
+    .filter(item => item.kind === 'file' && item.type.startsWith('image/'))
+    .map(item => item.getAsFile())
+    .filter(Boolean);
+  if (!images.length) return;
+  e.preventDefault();
+  addEditRefs(images);
+});
+
 const editHist = makeHistory({
   containerId: 'ehistory_items', rootId: 'ehistory', alt: 'edit',
   onSelect: (item) => {
