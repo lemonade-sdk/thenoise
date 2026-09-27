@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="thenoise/ui/logo2.png" alt="TheNoise" width="280" />
+  <img src="thenoise/ui/logo.png" alt="TheNoise" width="280" />
 </div>
 
 TheNoise is an open-source image generation / editing engine made specifically to run well on Strix Halo (gfx1151) and other ROCm-capable AMD iGPUs and dGPUs. It is tuned to perform extremely well on the machine it runs on.  
@@ -91,25 +91,37 @@ a warmup run.
 
 ## Quick start
 
-Install TheNoise and generate your first image in a few commands. The full walkthrough is in [docs/setup.md](docs/setup.md):
+Install TheNoise and generate your first image in a few commands.
+
+[`uv`](https://github.com/astral-sh/uv) is the only prerequisite - it provides
+the Python interpreter and installs every dependency. If you don't have it already do:
 
 ```bash
-# 1. grab the portable bundle for your GPU from the releases page, extract it
-tar -xzf thenoise-<version>-rocm<rocm>-gfx1151-x64.tar.gz
-cd thenoise-<version>-rocm<rocm>-gfx1151-x64
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source ~/.bashrc
+```
 
-# 2. download a model
-./bin/python3 scripts/download.py --model anima
+then proceed with TheNoise installation
 
-# 3. generate
-./bin/thenoise generate \
+```bash
+# 1. clone the repo
+git clone https://github.com/lemonade-sdk/thenoise.git
+cd thenoise
+
+# 2. bootstrap the environment
+./thenoise.sh --help
+
+# 3. download a model
+uv pip install -e ".[scripts]"
+.venv/bin/python scripts/download.py --model anima
+
+# 4. generate
+./thenoise.sh generate \
   --dit ./models/anima/split_files/diffusion_models/anima-turbo-v1.0.safetensors \
   --vae ./models/anima/split_files/vae/qwen_image_vae.safetensors \
   --text-encoder ./models/anima/split_files/text_encoders/qwen_3_06b_base.safetensors \
   --prompt "a fox walking in the snow" --out fox.png
 ```
-
-The portable bundle is self-contained: it needs no Python installation, build tools, or administrator rights on the target machine.
 
 ## Using TheNoise
 
