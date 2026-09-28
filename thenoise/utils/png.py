@@ -26,6 +26,7 @@ def build_pnginfo(
     sharpening: float,
     lora_specs: Optional[List[str]],
     pixel_upscaler: Optional[str],
+    sigmas: Optional[List[float]] = None,
 ) -> PngInfo:
     """Build a PngInfo object with generation metadata (JSON + human-readable).
 
@@ -54,6 +55,7 @@ def build_pnginfo(
         "sharpening": sharpening,
         "lora_specs": lora_specs,
         "pixel_upscaler": pixel_upscaler,
+        "sigmas": sigmas,
     })
     pnginfo.add_text("generation_data", gen_data)
 
@@ -80,6 +82,8 @@ def build_pnginfo(
         meta_parts.append(f"LoRA: {'; '.join(lora_specs)}")
     if pixel_upscaler:
         meta_parts.append(f"Pixel upscaler: {pixel_upscaler}")
+    if sigmas:
+        meta_parts.append(f"Sigmas: {'/'.join(f'{s:g}' for s in sigmas)}")
     parts.append(", ".join(meta_parts))
     pnginfo.add_text("parameters", "\n".join(parts))
 
