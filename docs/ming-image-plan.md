@@ -1,6 +1,10 @@
 # Ming-Image support plan
 
-Status: **in progress** — P1 (shared `dit/lumina` core) landed, nothing else yet.
+Status: **in progress** — P1 (shared `dit/lumina` core) and P2 (Ming DiT in both
+exports, VAE loader, dynamic-shift schedule, adapter + catalog + docs + tests) have
+landed. P3 is the text encoder: `MingImageModel._encode_prompt` is the one hole and
+raises `NotImplementedError`, so every kernel downstream of it is real and tested but
+nothing can draw yet (README marks the model `wip`).
 Scope agreed: text-to-image only for the first cut
 (no editing, no `Design-Layer`, no vision tower), default 1024×1024, int8-convrot supported
 for both DiT and text encoder like the other models, refactoring welcome — clean architecture
@@ -17,6 +21,25 @@ outranks API stability.
 > * `load_dit`'s per-tensor `value_map` cannot express "three checkpoint tensors become
 >   one parameter", so the `to_q/to_k/to_v → qkv` concat is a state-dict fold passed as
 >   the new `load_dit(..., state_map=...)` hook (`dit/lumina/keys.py`), not a `value_map`.
+
+> **P2 notes** (deviations from the sketch, all deliberate):
+>
+> * **Shift bucket**: `seq > 4096`, not the vendor's `>=`. The two differ only at
+>   exactly 1024² — the model's own default bucket — where `>=` gives 3.857 while the
+>   reference documents 3.16 there. `>` gives 3.158, i.e. ComfyUI's constant, and is
+>   identical above 1024². Commented in `dit/ming_image/sampling.py`, asserted in a test.
+> * **Runtime payload**: the Lumina exports carry `attention.comfy_attention.config`
+>   (a U8 JSON blob of ComfyUI's attention helper) next to the weights. It is not
+>   module state, so the loader runs `keys.drop_runtime_state` first — otherwise the
+>   strict load rejects an otherwise-complete checkpoint.
+> * **VAE**: one architecture constant and the two latent normalisations
+>   (`latents_mean/std` xor `scale_factor/shift_factor`); the pixel width is read off
+>   `encoder.conv_in`/`decoder.conv_out` and each named loader declares the width its
+>   model needs, so a mismatched file raises instead of silently writing the wrong
+>   number of channels. The latent width is validated against the file the same way.
+> * Ming-Image **is** in `MODEL_CATALOG` (P2 acceptance, per §6). `detect` reads
+>   `is_s3dit(keys) and not has_learned_pad_tokens(keys)`; Z-Image reads the same pair
+>   the other way round, because the int8 exports name every module identically.
 
 ## 0. Reference sources
 
@@ -179,7 +202,7 @@ scripts/download.py                      OK   `--model ming-image` already exist
 docs/models/ming-image.md                NEW
 README.md                                MOD  supported-models row (+ perf line later)
 pyproject.toml                           MOD  package list
-tests/{conftest,test_ming_image,test_schedules,test_vae,test_dit_utils}.py  MOD/NEW
+tests/{conftest,test_ming_image,test_lumina,test_vae,test_schedules}.py  MOD/NEW
 ```
 
 ## 3. Phase 1 — extract the shared Lumina core (no behaviour change)
@@ -425,13 +448,13 @@ fetches the right trio.
 
 ## 9. Sequencing
 
-1. **P1** shared `dit/lumina` core + Z-Image rewire + padding-mask helper + tests → no visible
-   change (maintainer regression check).
-2. **P2** Ming DiT (bf16 *and* int8 load paths), Ming VAE loader, dynamic-shift schedule,
-   adapter + catalog + docs + tests; verifiable end-to-end by temporarily feeding recorded
-   `cap_feats`/`direct_context` tensors.
+1. **P1 — done.** Shared `dit/lumina` core + Z-Image rewire + padding-mask helper + tests →
+   no visible change (maintainer regression check still open).
+2. **P2 — done.** Ming DiT (bf16 *and* int8 load paths), Ming VAE loader, dynamic-shift
+   schedule, adapter + catalog + docs + tests. Needs a real-hardware pass: bf16 + int8
+   loads of the shipped files, and a `--dit` run reaching the `NotImplementedError`.
 3. **P3** text encoder (tokenizer, thinker, MoE, connector) bf16 → int8 expert leaf →
    golden-prompt validation against ComfyUI.
 4. **P4** polish: Sesqui `"ming"` format measurement, perf numbers for the README table,
-   `docs/models/ming-image.md`, and (separately) the edit/`Design-Layer` capability
+   and (separately) the edit/`Design-Layer` capability
    (`vision` tower + `ref_frames` on the F axis + `edit`/`kv_cache` capabilities).

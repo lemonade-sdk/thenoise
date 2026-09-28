@@ -1,4 +1,4 @@
-"""Checkpoint-name helpers shared by the Lumina/S3-DiT loaders.
+"""Checkpoint-name helpers shared by the Lumina/S3-DiT loaders and detectors.
 
 The family stores the same modules under two generations of names:
 
@@ -16,10 +16,13 @@ AND a fold that concatenates the three projections into one weight. The fold
 cannot be a ``load_dit`` ``value_map`` (which is per-tensor, and the fused weight
 is three tensors), so it is a state-dict-level function passed as
 ``load_dit(..., state_map=...)``.
+
+An export can also carry state that is not in the module tree at all;
+:func:`drop_runtime_state` strips it so a strict load can still be strict.
 """
 from __future__ import annotations
 
-from typing import Callable, Dict, Tuple
+from typing import Callable, Dict, Iterable, Tuple
 
 import torch
 
@@ -37,6 +40,40 @@ _MODULE_RENAMES: Tuple[Tuple[str, str], ...] = (
     # ``to_out`` is stored as an nn.Sequential, the module is a plain projection.
     ("attention.to_out.0.", "attention.out."),
 )
+
+#: Runtime-only state a ComfyUI export serialises next to the real weights: the U8
+#: JSON blob of its attention helper. No module wants it, so a strict load must not.
+_RUNTIME_STATE_SUFFIXES: Tuple[str, ...] = (".comfy_attention.config",)
+
+
+def drop_runtime_state(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Copy without the keys that are not module state (see above)."""
+    return {
+        k: v for k, v in state_dict.items()
+        if not k.endswith(_RUNTIME_STATE_SUFFIXES)
+    }
+
+
+def is_s3dit(keys: Iterable[str]) -> bool:
+    """True for any Lumina/S3-DiT file: caption embedder + context refiner + patch
+    embedder, under either naming generation. ``keys`` must be wrapper-prefix free.
+    """
+    keys = list(keys)
+    has_cap = any(key.startswith("cap_embedder.") for key in keys)
+    has_context = any(key.startswith("context_refiner.") for key in keys)
+    has_patch_embed = any(
+        key.startswith("x_embedder.") or key.startswith("all_x_embedder.") for key in keys
+    )
+    return has_cap and has_context and has_patch_embed
+
+
+def has_learned_pad_tokens(keys: Iterable[str]) -> bool:
+    """True when the file ships Z-Image's learned alignment-pad tokens — the only
+    separator of the two family members, since Ming-Image zero-fills and masks pads.
+    """
+    return any(
+        key.startswith("x_pad_token") or key.startswith("cap_pad_token") for key in keys
+    )
 
 
 def lumina_key_map(key: str) -> str:
@@ -118,7 +155,10 @@ StateMap = Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]
 __all__ = [
     "QKV_PARTS",
     "StateMap",
+    "drop_runtime_state",
     "fuse_qkv",
+    "has_learned_pad_tokens",
+    "is_s3dit",
     "lumina_key_map",
     "lumina_state_map",
 ]

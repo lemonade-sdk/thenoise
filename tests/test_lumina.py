@@ -398,6 +398,40 @@ def test_lumina_state_map_loads_a_legacy_checkpoint(tmp_path):
         assert torch.equal(model.state_dict()[key], value), key
 
 
+def test_runtime_state_is_stripped_before_the_strict_load():
+    """A payload that is not module state must not reach the loader — and dropping it
+    must not mutate the caller's state dict.
+    """
+    from thenoise.dit.lumina.keys import drop_runtime_state
+
+    payload = "layers.0.attention.comfy_attention.config"
+    fused = "layers.0.attention.qkv.weight"
+    sd = {payload: torch.ones(4, dtype=torch.uint8), fused: torch.ones(3, 3)}
+
+    kept = drop_runtime_state(sd)
+    assert list(kept) == [fused]
+    assert payload in sd  # the checkpoint dict is untouched
+    assert drop_runtime_state({fused: torch.ones(1)}) == {fused: torch.ones(1)}
+
+
+def test_the_pad_tokens_split_the_two_family_members():
+    """One family signature, one separator — the rule both ``detect``s read. The
+    signature must take either spelling of the patch embedder, since that is what the
+    two releases' naming generations differ in.
+    """
+    from thenoise.dit.lumina.keys import has_learned_pad_tokens, is_s3dit
+
+    refiner = "context_refiner.0.attention_norm1.weight"
+    ming_bf16 = ["cap_embedder.1.weight", refiner, "all_x_embedder.2-1.weight"]
+    ming_int8 = ["cap_embedder.1.weight", refiner, "x_embedder.weight"]
+    zimage = [*ming_int8, "x_pad_token", "cap_pad_token"]
+
+    assert is_s3dit(ming_bf16) and is_s3dit(ming_int8) and is_s3dit(zimage)
+    assert has_learned_pad_tokens(zimage)
+    assert not has_learned_pad_tokens(ming_bf16) and not has_learned_pad_tokens(ming_int8)
+    assert not is_s3dit(["img_in.weight", "txt_in.weight", "x_pad_token"])
+
+
 # ----------------------------------------------------------------- Z-Image wiring
 
 

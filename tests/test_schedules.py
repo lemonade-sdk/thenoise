@@ -23,6 +23,7 @@ from thenoise.models import (
     AnimaModel,
     FluxKleinModel,
     Krea2Model,
+    MingImageModel,
     QwenImageModel,
     QwenImage21Model,
     ZImageModel,
@@ -67,6 +68,7 @@ BARE = {
         "_compression": 8,
     },
     "zimage": {"vae": _vae(16, 8), "dit": SimpleNamespace(patch_size=2)},
+    "ming_image": {"vae": _vae(16, 8, pixel_channels=4), "dit": SimpleNamespace(patch_size=2)},
     "flux_klein": {"vae": _vae(128, 16)},
     "qwen_image": {"vae": _vae(16, 8), "dit": SimpleNamespace(patch_size=2)},
     "qwen_image21": {"vae": _vae(64, 16, pixel_channels=4)},
@@ -75,7 +77,7 @@ BARE = {
 # The adapters whose step schedule shifts with the image token count. Krea 2 is
 # NOT one of them: it pins ``mu=DEFAULT_MU`` (the distilled checkpoint was trained
 # at a fixed shift), so its grid is resolution independent by design.
-RESOLUTION_AWARE = {"flux_klein", "qwen_image", "qwen_image21"}
+RESOLUTION_AWARE = {"flux_klein", "qwen_image", "qwen_image21", "ming_image"}
 
 
 @pytest.mark.parametrize("model_cls", MODEL_CATALOG, ids=CATALOG_IDS)
@@ -150,6 +152,7 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
         (AnimaModel, False, False),
         (Krea2Model, False, False),
         (ZImageModel, False, False),
+        (MingImageModel, False, False),
         (FluxKleinModel, True, True),
         (QwenImageModel, True, True),
         (QwenImage21Model, True, True),

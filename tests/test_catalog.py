@@ -23,6 +23,7 @@ MODEL_DEFAULTS = {
     "anima": {"steps": 8, "guidance": 1, "sampler": "er_sde", "kv_cache": False},
     "krea2": {"steps": 8, "guidance": 1.0, "sampler": "er_sde", "kv_cache": False},
     "zimage": {"steps": 8, "guidance": 1.0, "sampler": "euler", "kv_cache": False},
+    "ming_image": {"steps": 12, "guidance": 1.0, "sampler": "euler", "kv_cache": False},
     "flux_klein": {"steps": 4, "guidance": 1.0, "sampler": "euler", "kv_cache": False},
     "qwen_image": {"steps": 28, "guidance": 2.5, "sampler": "euler", "kv_cache": False},
     "qwen_image21": {"steps": 28, "guidance": 1.0, "sampler": "euler", "kv_cache": True},

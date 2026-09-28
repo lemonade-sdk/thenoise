@@ -27,6 +27,7 @@ from .inference_adaptors import (
     LatentFormatAdaptor,
     make_flux,
     make_flux2,
+    make_ming,
     make_wan21,
 )
 from .sesqui_net import SesquiLSRNet
@@ -39,10 +40,13 @@ _WEIGHT_DIR = Path(__file__).resolve().parent / "weights"
 # A format must be added here together with its upscaler weights before it can
 # be selected. ``wan21`` (Qwen-Image VAE: Krea2/Anima/Qwen-Image) and ``flux``
 # (Flux VAE: Z-Image) weights are committed.
+# ``ming`` is that same 16-channel latent under a scalar normalisation, so the
+# ``wan21`` network is reused with the affine adaptor (picture quality unmeasured).
 _UPSCALER_FORMATS = {
     "wan21": (make_wan21, "upscaler_Wan21.safetensors", 16),
     "flux":  (make_flux,  "upscaler_flux.safetensors", 16),
     "flux2": (make_flux2, "upscaler_flux2.safetensors", 32),
+    "ming":  (make_ming,  "upscaler_Wan21.safetensors", 16),
     # "sdxl":     (make_sdxl,     "upscaler_sdxl.safetensors", 4),  # not yet committed
     # "ideogram4":(make_ideogram4, "upscaler_ideogram4.safetensors", 32),  # not yet committed
 }

@@ -20,7 +20,6 @@
 # - GitHub: https://github.com/Wan-Video/Wan2.1
 # - arXiv: https://arxiv.org/abs/2503.20314
 
-import json
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
@@ -496,6 +495,52 @@ class QwenImageDecoder2d(nn.Module):
         return x
 
 
+#: The Qwen-Image VAE's latent normalisation: a per-channel z-score, unlike the
+#: scalar ``scale_factor`` of the Flux / Ming-Image family.
+QWEN_IMAGE_LATENTS_MEAN = [
+    -0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508,
+    0.4134, -0.0715, 0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921,
+]
+
+QWEN_IMAGE_LATENTS_STD = [
+    2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743,
+    3.2687, 2.1526, 2.8652, 1.5579, 1.6382, 1.1253, 2.8251, 1.9160,
+]
+
+
+def _latent_normalisation(
+    z_dim: int,
+    latents_mean: Optional[List[float]],
+    latents_std: Optional[List[float]],
+    scale_factor: Optional[float],
+    shift_factor: Optional[float],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(mean, inv_std)`` of the affine ``model = (raw - mean) * inv_std`` this family ships.
+
+    Either the per-channel z-score (Qwen-Image) or the scalar (Ming-Image); passing
+    both is a bug, passing neither keeps the Qwen-Image z-score.
+    """
+    scalar = scale_factor is not None or shift_factor is not None
+    if scalar:
+        if latents_mean is not None or latents_std is not None:
+            raise ValueError(
+                "pass either latents_mean/latents_std (the per-channel z-score) or "
+                "scale_factor/shift_factor (the scalar), not both"
+            )
+        mean = torch.tensor(0.0 if shift_factor is None else float(shift_factor))
+        inv_std = torch.tensor(1.0 if scale_factor is None else float(scale_factor))
+        return mean, inv_std
+
+    mean_values = QWEN_IMAGE_LATENTS_MEAN if latents_mean is None else latents_mean
+    std_values = QWEN_IMAGE_LATENTS_STD if latents_std is None else latents_std
+    if len(mean_values) != z_dim or len(std_values) != z_dim:
+        raise ValueError(
+            f"latent statistics of length {len(mean_values)}/{len(std_values)} "
+            f"cannot normalise a {z_dim}ch latent"
+        )
+    return torch.tensor(mean_values), 1.0 / torch.tensor(std_values)
+
+
 class AutoencoderKLQwenImage(nn.Module):
     r"""
     A VAE model with KL loss for encoding images into latents and decoding latent
@@ -504,6 +549,9 @@ class AutoencoderKLQwenImage(nn.Module):
     Only still-image (single-frame) inference is supported: video caching,
     tiling, slicing and spatial chunking have been removed. The encoder is kept
     for future image-to-image workflows.
+
+    Two shipped checkpoints share it and differ only in these knobs: Qwen-Image
+    (RGB pixels, per-channel z-scored latent) and Ming-Image (RGBA, scalar scale).
     """
 
     def __init__(
@@ -513,62 +561,24 @@ class AutoencoderKLQwenImage(nn.Module):
         dim_mult: Tuple[int] = [1, 2, 4, 4],
         num_res_blocks: int = 2,
         attn_scales: List[float] = [],
-        latents_mean: List[float] = [
-            -0.7571,
-            -0.7089,
-            -0.9113,
-            0.1075,
-            -0.1745,
-            0.9653,
-            -0.1517,
-            1.5508,
-            0.4134,
-            -0.0715,
-            0.5517,
-            -0.3632,
-            -0.1922,
-            -0.9497,
-            0.2503,
-            -0.2921,
-        ],
-        latents_std: List[float] = [
-            2.8184,
-            1.4541,
-            2.3275,
-            2.6558,
-            1.2196,
-            1.7708,
-            2.6052,
-            2.0743,
-            3.2687,
-            2.1526,
-            2.8652,
-            1.5579,
-            1.6382,
-            1.1253,
-            2.8251,
-            1.9160,
-        ],
+        latents_mean: Optional[List[float]] = None,
+        latents_std: Optional[List[float]] = None,
+        scale_factor: Optional[float] = None,
+        shift_factor: Optional[float] = None,
         input_channels: int = 3,
     ) -> None:
         super().__init__()
 
         self.z_dim = z_dim
         self.input_channels = input_channels
-        self.latents_mean = latents_mean
-        self.latents_std = latents_std
 
-        # Hoisted buffers (built once; moved with the module via `.to(device)`).
-        self.register_buffer(
-            "_latents_mean",
-            torch.tensor(latents_mean).view(1, self.z_dim, 1, 1),
-            persistent=False,
+        # Hoisted buffers (built once; moved with the module via `.to(device)`). The
+        # z-score lands as (1, z_dim, 1, 1), the scalar as (1, 1, 1, 1) and broadcasts.
+        mean, inv_std = _latent_normalisation(
+            z_dim, latents_mean, latents_std, scale_factor, shift_factor
         )
-        self.register_buffer(
-            "_latents_std",
-            (1.0 / torch.tensor(latents_std)).view(1, self.z_dim, 1, 1),
-            persistent=False,
-        )
+        self.register_buffer("_latents_mean", mean.view(1, -1, 1, 1), persistent=False)
+        self.register_buffer("_latents_inv_std", inv_std.view(1, -1, 1, 1), persistent=False)
 
         self.encoder = QwenImageEncoder2d(
             base_dim, z_dim * 2, dim_mult, num_res_blocks, attn_scales, input_channels
@@ -660,15 +670,15 @@ class AutoencoderKLQwenImage(nn.Module):
     def decode_to_pixels(self, latents: torch.Tensor) -> torch.Tensor:
         latents = latents.to(self.dtype)
         latents_mean = self._latents_mean.to(latents.device, latents.dtype)
-        latents_std = self._latents_std.to(latents.device, latents.dtype)
-        latents = latents / latents_std + latents_mean
+        latents_inv_std = self._latents_inv_std.to(latents.device, latents.dtype)
+        latents = latents / latents_inv_std + latents_mean
 
         image = self.decode(latents, return_dict=False)[0]  # -1 to 1
         return image.clamp(-1.0, 1.0)
 
     def encode_pixels_to_latents(self, pixels: torch.Tensor) -> torch.Tensor:
         """
-        Convert pixel values to latents and apply normalization using mean/std.
+        Convert pixel values to latents and apply the VAE's latent normalisation.
 
         Args:
             pixels (torch.Tensor): Input pixels in [0, 1] range with shape [B, C, H, W].
@@ -682,10 +692,9 @@ class AutoencoderKLQwenImage(nn.Module):
         posterior = self.encode(pixels, return_dict=False)[0]
         latents = posterior.mode()  # Use mode instead of sampling for deterministic results
 
-        # Apply normalization using mean/std
         latents_mean = self._latents_mean.to(latents.device, latents.dtype)
-        latents_std = self._latents_std.to(latents.device, latents.dtype)
-        latents = (latents - latents_mean) * latents_std
+        latents_inv_std = self._latents_inv_std.to(latents.device, latents.dtype)
+        latents = (latents - latents_mean) * latents_inv_std
 
         return latents
 
@@ -839,91 +848,47 @@ def convert_comfyui_state_dict(sd):
     return new_state_dict
 
 
-def load_qwen_vae(
+#: The architecture every checkpoint this module serves: four width stages over
+#: three downsampling stages (8x), a 16-channel latent, ``base_dim=96``.
+_WAN21_FAMILY_ARCH = dict(
+    base_dim=96,
+    z_dim=16,
+    dim_mult=[1, 2, 4, 4],
+    num_res_blocks=2,
+    attn_scales=[],
+)
+
+#: Ming-Image's latent normalisation: a SCALAR scale, ``canonical = raw * 8.0064``
+#: (the vendor's ``scaling_factor``, ComfyUI's ``latent_formats.MingImage``), no shift.
+MING_IMAGE_SCALE_FACTOR = 8.0064
+MING_IMAGE_SHIFT_FACTOR = 0.0
+
+
+def load_qwen_family_vae(
     vae_path: str,
     device: Union[str, torch.device],
-    input_channels: int = 3,
+    *,
+    latents_mean: Optional[List[float]] = None,
+    latents_std: Optional[List[float]] = None,
+    scale_factor: Optional[float] = None,
+    shift_factor: Optional[float] = None,
+    input_channels: Optional[int] = None,
+    dtype: Optional[torch.dtype] = None,
 ) -> AutoencoderKLQwenImage:
-    """Load the Qwen-Image VAE from a given path."""
-    VAE_CONFIG_JSON = """
-{
-  "_class_name": "AutoencoderKLQwenImage",
-  "_diffusers_version": "0.34.0.dev0",
-  "attn_scales": [],
-  "base_dim": 96,
-  "dim_mult": [
-    1,
-    2,
-    4,
-    4
-  ],
-  "latents_mean": [
-    -0.7571,
-    -0.7089,
-    -0.9113,
-    0.1075,
-    -0.1745,
-    0.9653,
-    -0.1517,
-    1.5508,
-    0.4134,
-    -0.0715,
-    0.5517,
-    -0.3632,
-    -0.1922,
-    -0.9497,
-    0.2503,
-    -0.2921
-  ],
-  "latents_std": [
-    2.8184,
-    1.4541,
-    2.3275,
-    2.6558,
-    1.2196,
-    1.7708,
-    2.6052,
-    2.0743,
-    3.2687,
-    2.1526,
-    2.8652,
-    1.5579,
-    1.6382,
-    1.1253,
-    2.8251,
-    1.916
-  ],
-  "num_res_blocks": 2,
-  "z_dim": 16
-}
-"""
-    logger.info("Initializing VAE")
+    """Load a Wan2.1-family (Qwen-Image layout) VAE as a single-frame model.
 
-    config = json.loads(VAE_CONFIG_JSON)
-    vae = AutoencoderKLQwenImage(
-        base_dim=config["base_dim"],
-        z_dim=config["z_dim"],
-        dim_mult=config["dim_mult"],
-        num_res_blocks=config["num_res_blocks"],
-        attn_scales=config["attn_scales"],
-        latents_mean=config["latents_mean"],
-        latents_std=config["latents_std"],
-        input_channels=input_channels,
-    )
-
+    Every file this module serves has :data:`_WAN21_FAMILY_ARCH`; the loaders below pick
+    the latent normalisation and declare the pixel width their model needs, which the
+    file must confirm. The video weight layout is collapsed to 2D on the way in.
+    """
     logger.info(f"Loading VAE from {vae_path}")
-    state_dict = load_safetensors(vae_path, device=device)
+    state_dict = load_safetensors(vae_path, device=device, dtype=dtype)
 
     # Convert ComfyUI VAE keys to official VAE keys
     state_dict = convert_comfyui_state_dict(state_dict)
 
-    # Collapse the 3D (video) weight layout to 2D for single-frame inference:
-    #   - every 5D conv weight -> 2D by its LAST time slice (index 2 for k=3,
-    #     index 0 for k=1). Causal padding pads the time axis by (2, 0), so the
-    #     single frame lands at the end of the padded axis and only that kernel
-    #     time slice contributes;
-    #   - residual/norm_out RMS gammas (C, 1, 1, 1) -> (C, 1, 1);
-    #   - drop the never-used `time_conv` layers entirely.
+    # Collapse the video layout to 2D: 5D conv weights -> their LAST time slice
+    # (causal padding puts the single frame there), gammas -> (C,1,1), time_conv dropped.
     state_dict = {k: v for k, v in state_dict.items() if ".time_conv." not in k}
     for key in state_dict:
         val = state_dict[key]
@@ -932,8 +897,91 @@ def load_qwen_vae(
         elif key.endswith(".gamma") and val.dim() == 4:
             state_dict[key] = val.reshape(val.shape[0], 1, 1)
 
+    config = dict(_WAN21_FAMILY_ARCH)
+    config["input_channels"] = _pixel_channels(state_dict, vae_path, input_channels)
+    config["z_dim"] = _latent_channels(state_dict, vae_path, config["z_dim"])
+
+    vae = AutoencoderKLQwenImage(
+        **config,
+        latents_mean=latents_mean,
+        latents_std=latents_std,
+        scale_factor=scale_factor,
+        shift_factor=shift_factor,
+    )
     info = vae.load_state_dict(state_dict, strict=True, assign=True)
-    logger.info(f"Loaded VAE: {info}")
+    logger.info(
+        "Loaded VAE: %s (%s)",
+        info,
+        " ".join(f"{k}={v}" for k, v in config.items()),
+    )
 
     vae.to(device)
     return vae
+
+
+def _pixel_channels(state_dict: dict, vae_path: str, declared: Optional[int] = None) -> int:
+    """The pixel width the file's encoder and decoder agree on, and ``declared`` allows."""
+    required = ("encoder.conv_in.weight", "decoder.conv_out.weight")
+    for key in required:
+        if key not in state_dict:
+            raise ValueError(f"'{key}' not found in {vae_path} (not a Qwen-Image VAE?)")
+    in_channels = state_dict["encoder.conv_in.weight"].shape[1]
+    out_channels = state_dict["decoder.conv_out.weight"].shape[0]
+    if in_channels != out_channels:
+        raise ValueError(
+            f"{vae_path}: the encoder takes {in_channels} pixel channels but the "
+            f"decoder returns {out_channels} — this is not one VAE's round trip"
+        )
+    if declared is not None and declared != in_channels:
+        raise ValueError(
+            f"{vae_path}: asked for input_channels={declared}, but the checkpoint "
+            f"is a {in_channels}-channel model"
+        )
+    return in_channels
+
+
+def _latent_channels(state_dict: dict, vae_path: str, declared: int) -> int:
+    """The latent width the file was built for, checked against the config's."""
+    required = ("encoder.conv_out.weight", "post_quant_conv.weight", "decoder.conv_in.weight")
+    for key in required:
+        if key not in state_dict:
+            raise ValueError(f"'{key}' not found in {vae_path} (not a Qwen-Image VAE?)")
+    # The encoder heads out at 2*z (the DiagonalGaussian parameters), the quant
+    # convolutions and the decoder input at z.
+    widths = {
+        "encoder.conv_out": state_dict["encoder.conv_out.weight"].shape[0] // 2,
+        "post_quant_conv": state_dict["post_quant_conv.weight"].shape[0],
+        "decoder.conv_in": state_dict["decoder.conv_in.weight"].shape[1],
+    }
+    found = set(widths.values())
+    if found != {declared}:
+        raise ValueError(
+            f"{vae_path}: the config says a {declared}ch latent, the file has "
+            f"{widths} — pass the z_dim the checkpoint was trained with"
+        )
+    return declared
+
+
+def load_qwen_vae(
+    vae_path: str,
+    device: Union[str, torch.device],
+    dtype: Optional[torch.dtype] = None,
+) -> AutoencoderKLQwenImage:
+    """The Qwen-Image VAE: RGB pixels, per-channel z-scored 16ch latent."""
+    return load_qwen_family_vae(vae_path, device, input_channels=3, dtype=dtype)
+
+
+def load_ming_vae(
+    vae_path: str,
+    device: Union[str, torch.device],
+    dtype: Optional[torch.dtype] = None,
+) -> AutoencoderKLQwenImage:
+    """The Ming-Image VAE: RGBA pixels, scalar-scaled 16ch latent."""
+    return load_qwen_family_vae(
+        vae_path,
+        device,
+        input_channels=4,
+        scale_factor=MING_IMAGE_SCALE_FACTOR,
+        shift_factor=MING_IMAGE_SHIFT_FACTOR,
+        dtype=dtype,
+    )

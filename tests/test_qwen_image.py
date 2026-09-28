@@ -119,12 +119,12 @@ def test_vendored_tokenizer_config_dir_exists():
 
 
 def test_qwen_upscale_format_is_wan21():
-    # Qwen-Image uses the shared Wan21 z-score latent format; the adaptor's
-    # per-channel mean/std must match the VAE's own encode/decode normalization.
+    # Qwen-Image uses the shared Wan21 z-score latent format; the adaptor's mean/std
+    # must match the VAE's own normalization, in its ``_latents_*`` buffers.
     adaptor = make_wan21()
     vae = AutoencoderKLQwenImage()
-    assert torch.allclose(adaptor.mean.view(-1), torch.tensor(vae.latents_mean))
-    assert torch.allclose(adaptor.std.view(-1), torch.tensor(vae.latents_std))
+    assert torch.allclose(adaptor.mean.view(-1), vae._latents_mean.view(-1))
+    assert torch.allclose(adaptor.std.view(-1), 1.0 / vae._latents_inv_std.view(-1))
 
 
 # ----------------------------------------------------------------- reference

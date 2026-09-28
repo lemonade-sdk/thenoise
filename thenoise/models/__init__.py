@@ -11,6 +11,7 @@ from .base import DiffusionModel
 from .anima import AnimaModel
 from .flux_klein import FluxKleinModel
 from .krea2 import Krea2Model
+from .ming_image import MingImageModel
 from .zimage import ZImageModel
 from .qwen_image import QwenImageModel
 from .qwen_image21 import QwenImage21Model
@@ -19,6 +20,7 @@ MODEL_CATALOG: List[Type[DiffusionModel]] = [
     Krea2Model,
     AnimaModel,
     ZImageModel,
+    MingImageModel,
     FluxKleinModel,
     QwenImageModel,
     QwenImage21Model,
