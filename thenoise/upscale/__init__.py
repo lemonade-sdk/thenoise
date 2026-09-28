@@ -5,7 +5,10 @@ Two independent families live here:
 *latent-domain* — ``base.LatentUpscaler`` is the interface the pipeline drives:
 a canonical latent goes in, the canonical latent at ``scale`` times the resolution
 comes out, ready for the refine denoise and the VAE decode. A model adapter picks
-the strategy that fits its VAE by returning one from ``_create_upscaler()``.
+the strategy that fits its VAE by returning one from ``_create_upscaler()``: a
+trained network on the latent (``sesqui``, for the formats in its registry), a
+trained bridge conditioned on the VAE's own decoder prefix
+(``qwen21_transcode``), or the weight-free VAE round trip (``vae_pixel``).
 
 *pixel-domain* — ``pixel.PixelUpscalerManager`` loads and runs postprocessing
 upscalers (Real-ESRGAN today) on decoded pixels. It needs no diffusion model and
@@ -22,9 +25,11 @@ from .inference_adaptors import (
     make_wan21,
 )
 from .base import LatentUpscaler
-from .sesqui import SesquiLSRUpscaler, upscale_weight_path, _UPSCALER_FORMATS
+from .sesqui import SesquiLSRUpscaler, _UPSCALER_FORMATS
 from .vae_pixel import VAEPixelUpscaler
+from .qwen21_transcode import Qwen21TranscodeUpscaler
 from .sesqui_net import SesquiLSRNet
+from .transcode_net import LatentTranscodeNet
 
 from .esrgan import load_esrgan, detect_esrgan_scale, detect_esrgan_scheme
 
@@ -54,8 +59,9 @@ __all__ = [
     "LatentFormatAdaptor",
     "SesquiLSRUpscaler",
     "VAEPixelUpscaler",
+    "Qwen21TranscodeUpscaler",
     "SesquiLSRNet",
-    "upscale_weight_path",
+    "LatentTranscodeNet",
     "make_flux",
     "make_flux2",
     "make_ideogram4",

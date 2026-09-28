@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import json
 import struct
+from pathlib import Path
 from typing import Dict, Union, Optional
 
 from thenoise.utils.setup_logging import setup_logging
@@ -273,4 +274,20 @@ def load_safetensors(
     return state_dict
 
 
+UPSCALE_WEIGHT_DIR = Path(__file__).resolve().parent.parent / "upscale" / "weights"
+
+def upscale_weight_path(filename: str) -> Path:
+    """Path to a latent-upscaler weight file vendored into the package.
+
+    Raises rather than handing back a nonexistent path: the only way to get here
+    is a package installed without its package-data, and a ``FileNotFoundError``
+    naming the directory says exactly that.
+    """
+    path = UPSCALE_WEIGHT_DIR / filename
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"upscaler weights not found at {path}; "
+            "the package was not installed with its package-data"
+        )
+    return path
 

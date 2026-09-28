@@ -29,6 +29,7 @@ from thenoise.vae.wan22 import (
     Wan22DupUp,
     Wan22ResidualBlock,
     strip_apply,
+    unpatchify,
 )
 
 TINY_MEAN = [0.1, 0.2, 0.3, 0.4]
@@ -276,6 +277,63 @@ def test_encode_pixels_to_latents_normalises_after_encode(tiny_vae, monkeypatch)
 
     expected = (torch.tensor(2.0) - torch.tensor(TINY_MEAN).view(1, 4, 1, 1)) / torch.tensor(TINY_STD).view(1, 4, 1, 1)
     assert torch.allclose(latents.float(), expected, atol=1e-6)
+
+
+# ------------------------------------------------------ decoder feature prefix
+
+
+@pytest.mark.parametrize("vae", [_tiny_vae(), _tiny_qwen21_vae()], ids=["wan22", "qwen21"])
+def test_all_the_blocks_plus_the_head_are_a_full_decode(vae):
+    """``decode_features(all blocks)`` is exactly ``decode`` minus the pixel head."""
+    vae = vae.eval().requires_grad_(False)
+    z = torch.randn(1, vae.z_dim, 1, 1)
+    raw = z / vae._latents_inv_std + vae._latents_mean
+
+    with torch.no_grad():
+        got = unpatchify(
+            vae.decoder.head(vae.decode_features(z, blocks=len(vae.decoder.upsamples))),
+            vae.patch_size,
+        )
+        want = vae.decode(raw)
+
+    assert torch.allclose(got, want, atol=1e-5)
+
+
+@pytest.mark.parametrize("vae", [_tiny_vae(), _tiny_qwen21_vae()], ids=["wan22", "qwen21"])
+def test_the_feature_grid_grows_with_the_blocks_taken(vae):
+    """Every block but the last doubles the grid (the last one only re-merges)."""
+    vae = vae.eval().requires_grad_(False)
+    stages = len(vae.decoder.upsamples)
+
+    with torch.no_grad():
+        for blocks in range(1, stages + 1):
+            z = torch.randn(1, vae.z_dim, 2, 2)
+            got = vae.decode_features(z, blocks=blocks).shape[-2:]
+            assert got == (2 ** min(blocks, stages - 1) * 2,) * 2, f"blocks={blocks}"
+
+
+def test_decode_features_denormalises_before_the_decoder(tiny_vae, monkeypatch):
+    """The caller passes the canonical latent; the raw space stays the VAE's."""
+    real = tiny_vae.conv2
+    seen = {}
+
+    class Spy(nn.Module):
+        def forward(self, x):
+            seen["z"] = x.clone()
+            return real(x)
+
+    monkeypatch.setattr(tiny_vae, "conv2", Spy())
+    with torch.no_grad():
+        tiny_vae.decode_features(torch.full((1, 4, 1, 1), 0.5))
+
+    expected = torch.tensor(TINY_STD).view(1, 4, 1, 1) * 0.5 + torch.tensor(TINY_MEAN).view(1, 4, 1, 1)
+    assert torch.allclose(seen["z"].float(), expected, atol=1e-6)
+
+
+def test_decode_features_refuses_a_block_count_the_decoder_does_not_have(tiny_vae):
+    for blocks in (0, len(tiny_vae.decoder.upsamples) + 1):
+        with pytest.raises(ValueError, match="cannot take features from block"):
+            tiny_vae.decode_features(torch.randn(1, 4, 1, 1), blocks=blocks)
 
 
 # ------------------------------------------------ single-frame shortcut folds

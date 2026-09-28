@@ -17,7 +17,6 @@ Usage:
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import Union
 
 import torch
@@ -30,10 +29,9 @@ from .inference_adaptors import (
     make_wan21,
 )
 from .sesqui_net import SesquiLSRNet
+from thenoise.utils.safetensors import load_safetensors, upscale_weight_path
 
 logger = logging.getLogger(__name__)
-
-_WEIGHT_DIR = Path(__file__).resolve().parent / "weights"
 
 # Latent format name -> (adaptor factory, weight filename, raw-VAE channel count).
 # A format must be added here together with its upscaler weights before it can
@@ -46,17 +44,6 @@ _UPSCALER_FORMATS = {
     # "sdxl":     (make_sdxl,     "upscaler_sdxl.safetensors", 4),  # not yet committed
     # "ideogram4":(make_ideogram4, "upscaler_ideogram4.safetensors", 32),  # not yet committed
 }
-
-
-def upscale_weight_path(filename: str) -> Path:
-    """Path to a committed upscaler weight file."""
-    path = _WEIGHT_DIR / filename
-    if not path.is_file():
-        raise FileNotFoundError(
-            f"upscaler weights not found at {path}; "
-            "the package was not installed with its package-data"
-        )
-    return path
 
 
 def _load_net(
@@ -73,8 +60,6 @@ def _load_net(
     The state dict is shipped as bf16 to match the engine's bf16-only convention
     (the upstream README notes half-precision has no quality effect).
     """
-    from safetensors.torch import load_file
-
     entry = _UPSCALER_FORMATS.get(format_name)
     if entry is None:
         raise ValueError(
@@ -86,7 +71,7 @@ def _load_net(
 
     path = upscale_weight_path(filename)
     logger.info("Loading Sesqui latent upscaler from %s", path)
-    state_dict = load_file(str(path), device=str(device))
+    state_dict = load_safetensors(path, device=device)
 
     net = SesquiLSRNet(in_channels=channels)
     net.load_state_dict(state_dict)
