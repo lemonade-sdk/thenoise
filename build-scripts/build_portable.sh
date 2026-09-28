@@ -13,6 +13,10 @@
 #
 # Usage: build_portable.sh <gfx_target>
 #
+# <gfx_target> is either an exact device (gfx1151) or a family name that
+# expands to every device variant of that family (gfx103X, gfx110X, gfx120X)
+# — see the device-extras mapping below.
+#
 # Environment overrides (all optional):
 #   THENOISE_ROOT   output bundle root  (default: $RUNNER_TEMP/thenoise-build/thenoise)
 #   PBS_TAG         python-build-standalone release tag
@@ -24,7 +28,6 @@
 set -euo pipefail
 
 GFX_TARGET="${1:?usage: build_portable.sh <gfx_target>}"
-GFX_ARCH="${GFX_TARGET//X/0}"
 ROOT="${THENOISE_ROOT:-${RUNNER_TEMP:-/tmp}/thenoise-build/thenoise}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -41,6 +44,24 @@ PY="$ROOT/bin/python${PYVER}"
 
 say() { printf '\033[1;34m[build] %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m[build:warning] %s\033[0m\n' "$*"; }
+
+# ------------------------------------------- gfx target -> wheel device extras --
+# The torch/torchvision wheels on the AMD index expose one extra PER DEVICE
+# (device-gfx1030 ... device-gfx1036, device-gfx1100 ... device-gfx1103,
+# device-gfx1200/1201/1250, ...); there is no device-gfx103X / gfx110X /
+# gfx120X extra. So the "family" targets used by CI must expand to every
+# variant in the family.
+
+case "$GFX_TARGET" in
+  gfx103X) GFX_DEVICES="device-gfx1030,device-gfx1031,device-gfx1032,device-gfx1033,device-gfx1034,device-gfx1035,device-gfx1036" ;;
+  gfx110X) GFX_DEVICES="device-gfx1100,device-gfx1101,device-gfx1102,device-gfx1103" ;;
+  gfx120X) GFX_DEVICES="device-gfx1200,device-gfx1201,device-gfx1250" ;;
+  *X)
+    warn "no device list for family target '$GFX_TARGET'; falling back to X->0 (${GFX_TARGET//X/0}). Add a case above if this family has more than one SKU."
+    GFX_DEVICES="device-${GFX_TARGET//X/0}" ;;
+  *)
+    GFX_DEVICES="device-${GFX_TARGET}" ;;
+esac
 
 # pip helper with a raised recursion limit. Some large dependency graphs (e.g.
 # vLLM's) make pip's resolvelib RecursionError; thenoise's is simpler, but this
@@ -96,14 +117,14 @@ rm -rf "$PY_TMP"
 "$PY" -m pip install --upgrade pip setuptools wheel
 
 # ---------------------------------------------------------- 2. torch + deps --
-say "Installing torch ${TORCH_VER} for ${GFX_TARGET}"
+say "Installing torch ${TORCH_VER} for ${GFX_TARGET} (${GFX_DEVICES})"
 export PATH="$ROOT/bin:$PATH"
 pip_deep install --index-url "$TORCH_INDEX" \
   --extra-index-url https://pypi.org/simple/ \
-  "torch[device-${GFX_ARCH}]==${TORCH_VER}"
+  "torch[${GFX_DEVICES}]==${TORCH_VER}"
 pip_deep install --index-url "$TORCH_INDEX" \
   --extra-index-url https://pypi.org/simple/ \
-  "torchvision[device-${GFX_ARCH}]==${TORCHVISION_VER}"
+  "torchvision[${GFX_DEVICES}]==${TORCHVISION_VER}"
 
 say "Installing thenoise + dependencies (from $REPO_ROOT)"
 # torch is intentionally absent from pyproject.toml. But a constraints file is cheap insurance
