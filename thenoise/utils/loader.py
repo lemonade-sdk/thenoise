@@ -163,6 +163,7 @@ def load_dit(
     expected_missing: tuple[str, ...] = (),
     key_map: Optional[Callable[[str], str]] = None,
     value_map: Optional[Callable[[str, torch.Tensor], tuple[str, torch.Tensor]]] = None,
+    state_map: Optional[Callable[[dict], dict]] = None,
 ) -> torch.nn.Module:
     """Load a DiT checkpoint into ``model``, selecting quantized vs BF16 automatically.
 
@@ -182,6 +183,17 @@ def load_dit(
             Applied before ``value_map``.
         value_map: optional ``(key, tensor) -> (new_key, new_tensor)`` transform
             applied on weights at load time. Applied after ``key_map``.
+        state_map: optional whole-state-dict fold, applied after ``value_map``.
+            The per-tensor maps cannot express a transform where ONE parameter is
+            several checkpoint tensors (e.g. stacking ``to_q/to_k/to_v`` into a
+            fused ``qkv``), which is why this exists. Applied on BOTH the quantized
+            and BF16 paths, so a fold must keep every ``.weight_scale`` /``.comfy_quant``
+            sibling with the weight it belongs to. Caveat: it renames module paths,
+            and the LoRA-undo restore map is keyed on the checkpoint's own names, so
+            folding a QUANTIZED checkpoint leaves baked-LoRA undo of the folded
+            layers unable to find its raw keys (it raises rather than restoring
+            nothing). Folding is for full-precision legacy exports; the int8 exports
+            are already fused.
 
     Returns:
         ``model`` (loaded in place, moved to ``device``).
@@ -198,6 +210,8 @@ def load_dit(
         sd = {key_map(k): v for k, v in sd.items()}
     if value_map is not None:
         sd = {nk: nv for nk, nv in (value_map(k, v) for k, v in sd.items())}
+    if state_map is not None:
+        sd = state_map(sd)
 
     if is_quantized_checkpoint(path):
         # The quantization profile (ConvRot group size / rotation flag for INT8,

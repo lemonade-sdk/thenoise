@@ -654,7 +654,7 @@ def _zimage_ids(ctx: Ctx, sizes: list[int], start: int) -> torch.Tensor:
     Mirrors ``_pad_with_ids``: the real grid first, then the (0,0,0) position repeated
     out to ``SEQ_MULTI_OF``, and the image grid starts after the padded caption.
     """
-    from thenoise.dit.zimage.models import SEQ_MULTI_OF
+    from thenoise.dit.lumina.models import SEQ_MULTI_OF
     from thenoise.utils.positions import grid_positions
 
     ids = grid_positions(sizes, start=[start, 0, 0], dtype=torch.int32, device=ctx.tdev)
@@ -663,7 +663,7 @@ def _zimage_ids(ctx: Ctx, sizes: list[int], start: int) -> torch.Tensor:
 
 
 def _zimage_case(ctx: Ctx, tokens: int, block: str, modulation: bool) -> Case:
-    from thenoise.dit.zimage.models import ZImageTransformerBlock
+    from thenoise.dit.lumina.models import LuminaTransformerBlock as ZImageTransformerBlock
 
     name = f"zimage/{block}"
     dim, heads, head_dim = 3840, 30, 128           # the config zimage/utils.py pins

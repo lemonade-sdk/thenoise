@@ -37,6 +37,7 @@ testpaths = ["tests"]
 packages = [
     "thenoise",
     "thenoise.dit",
+    "thenoise.dit.lumina",
     "thenoise.dit.krea2",
     "thenoise.dit.qwen_image",
     "thenoise.dit.qwen_image21",
