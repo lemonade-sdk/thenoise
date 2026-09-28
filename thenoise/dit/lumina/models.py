@@ -1,33 +1,9 @@
 # Lumina S3-DiT core — the shared single-stream transformer behind Z-Image and
-# Ming-Image.
+# Ming-Image (ported from diffusers, text-to-image path only).
 #
-# Ported from the diffusers ``ZImageTransformer2DModel`` for thenoise inference,
-# stripped to the text-to-image (basic, non-omni) path: no Omni/SigLIP, no
-# ControlNet, no gradient checkpointing. Weight key names are unchanged so the
-# official / ComfyUI checkpoints load as-is.
-#
-# The family members differ in exactly two structural ways, and both are
-# constructor data rather than subclasses:
-#
-#   * ``pad_mode`` — where a sequence gets padded up to a multiple of
-#     ``SEQ_MULTI_OF``, what the pad slots hold and whether attention reads them.
-#     ``"learned"`` (Z-Image) fills them with the learned ``x_pad_token`` /
-#     ``cap_pad_token`` embeddings and attends to them; ``"zero_masked"``
-#     (Ming-Image) zero-fills them and masks them out of attention (vendor
-#     ``zero_masked`` / ComfyUI ``masked_pad_multiple``). The pad-token parameters
-#     only exist in the first mode, which is also what tells the two checkpoints
-#     apart.
-#   * ``cap_extra`` — an optional second per-sample conditioning tensor, already
-#     at DiT width, concatenated to the caption AFTER ``cap_embedder``
-#     (Ming-Image's "directVLM" shallow features). It takes part in the caption
-#     length, the caption RoPE positions and the padding/mask math as the tail of
-#     the caption block.
-#
-# The Ming-Image deltas follow the Ant Group ``Ming-Image`` reference
-# implementation and ComfyUI's ``comfy/ldm/lumina/model.py`` (both Apache-2.0).
-#
-# Copyright 2025 Alibaba Z-Image Team and The HuggingFace Team. Licensed under
-# the Apache-2.0 License.
+# Family members differ by constructor data: ``pad_mode`` (learned vs zero_masked
+# padding) and ``cap_extra`` (optional second conditioning). Copyright Alibaba
+# Z-Image / HF, Apache-2.0.
 
 import torch
 import torch.nn as nn
@@ -275,9 +251,8 @@ class LuminaTransformer2DModel(nn.Module):
         self.t_embedder = TimestepEmbedder(min(dim, ADALN_EMBED_DIM), mid_size=1024)
         self.cap_embedder = nn.Sequential(RMSNorm(cap_feat_dim, eps=norm_eps), QuantizedLinear(cap_feat_dim, dim, bias=True))
 
-        # Learned alignment padding (Z-Image). ``zero_masked`` models ship no such
-        # tensors, so the parameters must not exist either — neither to load a
-        # checkpoint that lacks them, nor to attend to slots the model never trained.
+        # Learned padding (Z-Image); ``zero_masked`` models ship no such tensors, so
+        # these parameters must not exist either.
         self.x_pad_token = nn.Parameter(torch.zeros(1, dim)) if pad_mode == "learned" else None
         self.cap_pad_token = nn.Parameter(torch.zeros(1, dim)) if pad_mode == "learned" else None
 
@@ -369,10 +344,8 @@ class LuminaTransformer2DModel(nn.Module):
         cap_feats, cap_pos_ids, cap_valid, cap_padded = [], [], [], []
 
         for i, (image, cap_feat) in enumerate(zip(all_image, all_cap_feats)):
-            # The caption block is [caption, extra] and is padded to a multiple of
-            # ``SEQ_MULTI_OF`` as a whole, so the padding length depends on both.
-            # The grid is built for the ACTUAL token count and padded afterwards
-            # (padding it first would give the pads positions beyond the feats).
+            # The caption block is [caption, extra], padded as a whole; the grid is
+            # built for the actual token count and padded afterwards.
             cap_len = len(cap_feat)
             if all_cap_extra is not None:
                 cap_len += len(all_cap_extra[i])
@@ -402,9 +375,8 @@ class LuminaTransformer2DModel(nn.Module):
         ``stream.padded`` (so the frequencies split in lockstep); ``pad_to_batch``
         then right-pads the batch to its longest item.
         """
-        # ``pe`` is the concatenated per-token frequencies (batch dim of 1); drop that
-        # batch dim and split back into per-sample tensors so the shared pad helper can
-        # pad them in lockstep with the features.
+        # ``pe`` is concatenated per-token frequencies (batch dim 1); drop that dim
+        # and split back per sample so the pad helper pads in lockstep with features.
         positions = list(pe.squeeze(0).split(stream.padded, dim=0))
         feats, positions, _ = pad_to_batch(feats, positions)
         mask = self._attention_mask([[seg] for seg in stream.segments], device)
@@ -477,9 +449,8 @@ class LuminaTransformer2DModel(nn.Module):
         for layer in self.noise_refiner:
             x = layer(x, x_mask, x_freqs, adaln_input)
 
-        # Cap embed & refine. The embedder sees ONLY the caption features (it maps
-        # cap_feat_dim -> dim); the extra conditioning is already dim-wide and is
-        # spliced in afterwards, before the block is padded.
+        # Cap embed & refine. The embedder maps cap_feat_dim -> dim; extra conditioning
+        # is already dim-wide and is spliced in before the block is padded.
         cap = self.cap_embedder(torch.cat(cap_stream.feats, dim=0))
         cap = list(cap.split([len(c) for c in cap_stream.feats], dim=0))
         if cap_stream.extra is not None:

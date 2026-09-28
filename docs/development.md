@@ -11,7 +11,8 @@ the test suite, building the portable release bundles, and contributing.
 ```
 thenoise/                  the package
   models/                  per-model adapters (detect + DEFAULT_PREFS + sampling)
-  dit/                     per-model DiT code (krea2, qwen_image, qwen_image21, anima, zimage, flux2)
+  dit/                     per-model DiT code (lumina — the shared S3-DiT core behind
+                           zimage — krea2, qwen_image, qwen_image21, anima, flux2)
   vae/                     VAE loaders (Qwen-Image, Flux, Flux.2, Wan 2.2)
   samplers/                denoising solvers (euler, er_sde)
   upscale/                 latent + pixel upscalers

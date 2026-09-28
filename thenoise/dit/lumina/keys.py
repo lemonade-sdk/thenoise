@@ -26,13 +26,11 @@ import torch
 from thenoise.utils.qk_norm import qk_norm_key_map
 
 #: The three attention projections a legacy checkpoint stores separately, in the
-#: fused matrix's row order (``lumina.models.Attention`` splits ``qkv`` back in
-#: exactly this order).
+#: fused matrix's row order (``Attention`` splits ``qkv`` back in this order).
 QKV_PARTS: Tuple[str, ...] = ("to_q", "to_k", "to_v")
 
-#: The legacy dict-of-patch-config names (``all_x_embedder["2-1"]``) collapse to
-#: plain modules: a single-patch model has exactly one entry each, so the "which
-#: patch config" part of the name carries no information.
+#: Legacy dict-of-patch-config names (``all_x_embedder["2-1"]``) collapse to plain
+#: modules: a single-patch model has exactly one entry each.
 _MODULE_RENAMES: Tuple[Tuple[str, str], ...] = (
     ("all_x_embedder.2-1.", "x_embedder."),
     ("all_final_layer.2-1.", "final_layer."),
