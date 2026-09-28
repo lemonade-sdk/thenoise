@@ -70,6 +70,7 @@ class GenerateRequest:
     width: Optional[int] = None
     height: Optional[int] = None
     steps: Optional[int] = None
+    sigmas: Optional[List[float]] = None
     guidance_scale: Optional[float] = None
     seed: Optional[int] = None
     upscale: bool = False

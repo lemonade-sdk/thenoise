@@ -12,6 +12,7 @@ import torch
 
 from conftest import StubModel
 from thenoise.models.base import DiffusionModel
+from thenoise.pipeline import _sigma_steps
 from thenoise.samplers import SAMPLERS, Step, create_sampler
 from thenoise.samplers.er_sde import ErSdeSampler
 from thenoise.samplers.euler import EulerSampler
@@ -81,6 +82,21 @@ def test_one_denoise_step_per_schedule_step(name):
     else:
         # Euler walks the schedule in order, starting at the first timestep.
         assert model.timesteps == expected
+    assert out.shape == (1, 4, 8, 8)
+    assert torch.isfinite(out).all()
+
+
+@pytest.mark.parametrize("name", sorted(SAMPLERS))
+def test_solvers_accept_an_arbitrary_custom_sigma_grid(name):
+    """User sigmas need neither uniform spacing nor a full-strength start."""
+    model = _VelocityModel()
+    schedule = _sigma_steps([0.9, 0.7, 0.65, 0.2, 0.0], "cpu", torch.float32)
+
+    out = create_sampler(name, model).sample(
+        torch.randn(1, 4, 8, 8), schedule, None, guidance_scale=1.0, seed=7
+    )
+
+    assert model.calls["denoise_step"] == 4
     assert out.shape == (1, 4, 8, 8)
     assert torch.isfinite(out).all()
 
