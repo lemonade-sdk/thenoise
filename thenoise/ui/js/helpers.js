@@ -3,6 +3,54 @@
 
 const $ = id => document.getElementById(id);
 
+/* ---------- theme (light / dark) ---------- */
+const THEME_COLORS = { dark: '#0b0e14', light: '#f5f6f8' };
+
+function applyTheme(theme) {
+  document.body.classList.toggle('light', theme === 'light');
+  document.documentElement.style.colorScheme = theme;
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', THEME_COLORS[theme]);
+  const icon = $('theme_icon');
+  if (icon) icon.textContent = theme === 'light' ? '\u2600' : '\u263E'; // sun / moon
+  const label = $('theme_label');
+  if (label) label.textContent = theme === 'light' ? 'Light' : 'Dark';
+}
+
+function initTheme() {
+  const stored = localStorage.getItem('thenoise-theme');
+  const prefersLight = window.matchMedia &&
+    window.matchMedia('(prefers-color-scheme: light)').matches;
+  applyTheme(stored || (prefersLight ? 'light' : 'dark'));
+  const btn = $('theme_toggle');
+  if (btn) btn.addEventListener('click', () => {
+    const next = document.body.classList.contains('light') ? 'dark' : 'light';
+    localStorage.setItem('thenoise-theme', next);
+    applyTheme(next);
+  });
+}
+initTheme();
+
+/* ---------- sidebar side (left / right) ---------- */
+function applySidebar(right) {
+  document.body.classList.toggle('sidebar-right', right);
+  const label = $('sidebar_label');
+  if (label) label.textContent = right ? 'Right' : 'Left';
+  const icon = $('sidebar_icon');
+  if (icon) icon.textContent = right ? '\u21E4' : '\u21E5'; // ⇤ / ⇥
+}
+
+function initSidebar() {
+  applySidebar(localStorage.getItem('thenoise-sidebar') === 'right');
+  const btn = $('sidebar_toggle');
+  if (btn) btn.addEventListener('click', () => {
+    const next = document.body.classList.contains('sidebar-right') ? 'left' : 'right';
+    localStorage.setItem('thenoise-sidebar', next);
+    applySidebar(next === 'right');
+  });
+}
+initSidebar();
+
 function bindRange(sliderId, valId, digits = 2) {
   $(sliderId).addEventListener('input', e =>
     $(valId).textContent = parseFloat(e.target.value).toFixed(digits));

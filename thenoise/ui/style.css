@@ -12,6 +12,43 @@
   --accent-soft: rgba(227, 179, 65, .14);
   --ok: #4ec9b0;
   --err: #f07178;
+  /* derived/layer colors (theme-aware) */
+  --accent-hover: #d19c2a;
+  --btn-text: #fff;
+  --action-bg: rgba(11, 14, 20, .82);
+  --overlay-bg: rgba(11, 14, 20, .55);
+  --backdrop-bg: rgba(11, 14, 20, .6);
+  --spinner-track: rgba(255, 255, 255, .15);
+  --checker-bg: #0f131b;
+  --modal-shadow: 0 16px 48px rgba(0, 0, 0, .5);
+  --lora-shadow: 0 6px 24px rgba(0, 0, 0, .45);
+}
+
+/* ---------- light theme (body.light, toggled from the UI) ---------- */
+body.light {
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --panel-2: #eef1f5;
+  --input: #f4f6f9;
+  --border: #d5dae3;
+  --border-soft: #e6e9ef;
+  --text: #1b1f27;
+  --dim: #5a6474;
+  --faint: #98a1b3;
+  --accent: #b8860b;
+  --accent-soft: rgba(184, 134, 11, .12);
+  --ok: #1e9e8a;
+  --err: #d64550;
+  /* derived/layer colors */
+  --accent-hover: #a37410;
+  --btn-text: #fff;
+  --action-bg: rgba(255, 255, 255, .92);
+  --overlay-bg: rgba(255, 255, 255, .55);
+  --backdrop-bg: rgba(60, 70, 90, .45);
+  --spinner-track: rgba(0, 0, 0, .14);
+  --checker-bg: #ffffff;
+  --modal-shadow: 0 16px 48px rgba(0, 0, 0, .18);
+  --lora-shadow: 0 6px 24px rgba(0, 0, 0, .12);
 }
 
 /* ---------- reset & base ---------- */
@@ -146,6 +183,35 @@ body {
   border-bottom-color: var(--accent);
 }
 
+/* right-side preferences toolbar (theme + sidebar side) */
+.tabs-prefs {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin-left: auto;
+  padding-left: 1rem;
+}
+
+.pref-btn {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: .4rem;
+  padding: .4rem .75rem;
+  font-size: .78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.pref-btn:hover {
+  border-color: var(--faint);
+}
+
+.pref-icon {
+  font-size: .95rem;
+  line-height: 1;
+}
 /* ---------- no-model notice ---------- */
 .no-model {
   position: absolute;
@@ -220,6 +286,17 @@ body {
   display: flex;
   flex-direction: column;
   gap: 1.1rem;
+}
+
+/* ---------- sidebar on the right (body.sidebar-right) ---------- */
+/* Flip via flex ``order`` so the stacked mobile layout is unaffected. */
+body.sidebar-right .main {
+  order: 1;
+}
+body.sidebar-right .sidebar {
+  order: 2;
+  border-right: none;
+  border-left: 1px solid var(--border);
 }
 
 .sidebar h1 {
@@ -394,7 +471,7 @@ input[type=range]::-webkit-slider-thumb {
 /* ---------- primary button ---------- */
 .btn {
   background: var(--accent);
-  color: #fff;
+  color: var(--btn-text);
   border: none;
   border-radius: 8px;
   padding: .7rem 1rem;
@@ -405,7 +482,7 @@ input[type=range]::-webkit-slider-thumb {
 }
 
 .btn:hover:not(:disabled) {
-  background: #d19c2a;
+  background: var(--accent-hover);
 }
 
 .btn:active:not(:disabled) {
@@ -445,7 +522,7 @@ input[type=range]::-webkit-slider-thumb {
 /* RGBA models (see /health's pixel_channels): checkerboard behind the output so
    transparent pixels read as transparency instead of as the panel colour. */
 body.rgba_out .stage img {
-  background-color: #0f131b;
+  background-color: var(--checker-bg);
   background-image:
     linear-gradient(45deg, var(--border) 25%, transparent 25%),
     linear-gradient(-45deg, var(--border) 25%, transparent 25%),
@@ -485,7 +562,7 @@ body.rgba_out .stage img {
 }
 
 .stage .actions .ctrl {
-  background: rgba(11, 14, 20, .82);
+  background: var(--action-bg);
   color: var(--text);
   padding: .45rem .7rem;
   font-size: .78rem;
@@ -518,7 +595,7 @@ body.rgba_out .stage img {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(11, 14, 20, .55);
+  background: var(--overlay-bg);
   backdrop-filter: blur(1.5px);
 }
 
@@ -526,7 +603,7 @@ body.rgba_out .stage img {
   width: 42px;
   height: 42px;
   border-radius: 50%;
-  border: 3px solid rgba(255, 255, 255, .15);
+  border: 3px solid var(--spinner-track);
   border-top-color: var(--accent);
   animation: spin .8s linear infinite;
 }
@@ -594,7 +671,7 @@ body.rgba_out .stage img {
 .modal .backdrop {
   position: absolute;
   inset: 0;
-  background: rgba(11, 14, 20, .6);
+  background: var(--backdrop-bg);
 }
 
 .modal-box {
@@ -606,7 +683,7 @@ body.rgba_out .stage img {
   width: min(560px, calc(100vw - 2rem));
   max-height: 80vh;
   overflow-y: auto;
-  box-shadow: 0 16px 48px rgba(0, 0, 0, .5);
+  box-shadow: var(--modal-shadow);
 }
 
 .modal-head {
@@ -766,7 +843,7 @@ body.rgba_out .stage img {
   max-height: 180px;
   overflow-y: auto;
   z-index: 30;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, .45);
+  box-shadow: var(--lora-shadow);
   display: none;
 }
 
@@ -958,6 +1035,7 @@ body.rgba_out .stage img {
     width: 100%;
     min-width: 0;
     border-right: none;
+    border-left: none;
     border-top: 1px solid var(--border);
     padding: 1rem;
     overflow-y: visible;
