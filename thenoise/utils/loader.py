@@ -94,6 +94,7 @@ def load_text_encoder_weights(
     device: Union[str, torch.device],
     dtype: Optional[torch.dtype] = None,
     key_map: Optional[Callable[[str], str]] = None,
+    drop_keys: Optional[tuple[str, ...]] = None,
 ) -> torch.nn.Module:
     """Load a text-encoder checkpoint (single safetensors file), auto-selecting
     quantized vs BF16. No sharded-file support.
@@ -117,6 +118,12 @@ def load_text_encoder_weights(
         key_map: optional transform applied to checkpoint keys before loading (e.g.
             Krea 2's ComfyUI ``language_model.``/``visual.`` -> ``model.``
             layout).
+        drop_keys: optional tuple of key PREFIXES to drop before loading, on BOTH
+            paths. Text encoders carry things no module owns — a multimodal file
+            ships an image tower the text-to-image conditioner does not build, and
+            some store their tokenizer as a U8 payload tensor (Ming-Image's
+            ``tokenizer_json``). Dropping keeps the load strict: everything that
+            survives must land, so a genuinely missing weight still raises.
 
     Returns:
         ``model`` (loaded in place, moved to ``device``).
@@ -125,6 +132,8 @@ def load_text_encoder_weights(
 
     sd = load_safetensors(path, device=device, dtype=None)
     sd = {k: v for k, v in sd.items() if k != "lm_head" and not k.startswith("lm_head.")}
+    if drop_keys:
+        sd = {k: v for k, v in sd.items() if not k.startswith(drop_keys)}
     if key_map is not None:
         # A text-encoder ``key_map`` normalizes layout on BOTH paths (unlike a DiT
         # ``key_map``, which only renames on the quantized path).

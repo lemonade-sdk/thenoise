@@ -1,8 +1,8 @@
 """Ming-Image 0.1 adapter — the Lumina DiT with two conditioning tensors and RGBA.
 
 The kernels are Z-Image's shape (``t = 1 - sigma``, ``v = -out``) plus a second,
-already-DiT-wide conditioning tensor per branch. :meth:`_encode_prompt` is the one
-hole left (phase 3 of the plan); everything downstream of it is live.
+already-DiT-wide conditioning tensor per branch, which the BailingMM2 conditioner
+in :mod:`thenoise.text_encoders.ming_image` produces.
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import torch
 from thenoise.dit.lumina.keys import has_learned_pad_tokens, is_s3dit, lumina_key_map
 from thenoise.dit.ming_image import sampling as ming_sampling
 from thenoise.dit.ming_image.utils import load_ming_dit
+from thenoise.text_encoders.ming_image import encode_ming_prompt, load_ming_text_encoder
 from thenoise.models.base import (
     Conditioning,
     DiffusionModel,
@@ -82,9 +83,16 @@ class MingImageModel(DiffusionModel):
         self.dit = load_ming_dit(config.dit_path, device=self.offload_device, dtype=config.dtype)
         self.dit.eval().requires_grad_(False)
 
-        # Phase 3: the BailingMM2 conditioner. The empty slot keeps the pipeline's
-        # ``ensure("text_encoder")`` a no-op until there is a module to move.
-        self.text_encoder = None
+        # The BailingMM2 conditioner: 256 query tokens through the thinker plus a
+        # 28-layer bidirectional connector, which is where BOTH conditioning
+        # tensors come from. Its tokenizer travels inside the same file.
+        logger.info("Loading Ming-Image text encoder from %s", config.text_encoder_path)
+        self.text_encoder, self.tokenizer = load_ming_text_encoder(
+            config.text_encoder_path,
+            device=self.offload_device,
+            dtype=config.dtype,
+        )
+        self.text_encoder.eval().requires_grad_(False)
 
         logger.info("Loading Ming-Image VAE from %s", config.vae_path)
         self.vae = load_ming_vae(self.vae_path, device=self.device, dtype=config.dtype)
@@ -98,20 +106,33 @@ class MingImageModel(DiffusionModel):
 
     # ------------------------------------------------------------ kernels
     def encode_prompt(self, args: EncodePromptArgs) -> Conditioning:
+        if args.image is not None:
+            raise ValueError(
+                "Ming-Image editing is not implemented: the released file's image "
+                "tower (vision.* / linear_proj.*) is not loaded, so there is nothing "
+                "to condition on. Text-to-image only."
+            )
         cond, cond_extra = self._encode_prompt(args.prompt)
         null = null_extra = None
         if args.guidance_scale > 1.0:
-            null, null_extra = self._encode_prompt(args.negative_prompt)
+            if args.negative_prompt:
+                logger.info(
+                    "Ming-Image ignores --negative-prompt: its unconditional branch "
+                    "is the conditioning zeroed out, not a second encode (the "
+                    "reference deprecates the negative prompt)."
+                )
+            # The vendor's ``negative = condition * 0``: same length, no tokens. Same
+            # length matters — the branch's RoPE table is built from these shapes.
+            null = torch.zeros_like(cond)
+            null_extra = torch.zeros_like(cond_extra)
         return MingConditioning(
             cond=cond, cond_extra=cond_extra, null=null, null_extra=null_extra
         )
 
     def _encode_prompt(self, prompt: str) -> Tuple[torch.Tensor, torch.Tensor]:
-        """``(cap_feats [1, n, cap_feat_dim], direct_context [1, m, dim])`` — phase 3."""
-        raise NotImplementedError(
-            "Ming-Image text encoding is not implemented yet (phase 3 of "
-            "docs/ming-image-plan.md): the DiT, VAE and schedule are ready, the "
-            "BailingMM2 conditioner that produces cap_feats + direct_context is not."
+        """``(cap_feats [1, 256, cap_feat_dim], direct_context [1, P, dim])``."""
+        return encode_ming_prompt(
+            self.text_encoder, self.tokenizer, prompt, dtype=self.dtype
         )
 
     def init_latents(self, params: SamplingParams) -> torch.Tensor:

@@ -48,6 +48,7 @@ packages = [
     "thenoise.models",
     "thenoise.postprocess",
     "thenoise.samplers",
+    "thenoise.text_encoders",
     "thenoise.ui",
     "thenoise.upscale",
     "thenoise.utils",
