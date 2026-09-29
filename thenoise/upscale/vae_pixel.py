@@ -8,14 +8,6 @@ extra decode + encode per upscale request, and the lossiness of a VAE round trip
 the re-encoded latent is a reconstruction of an upsampled reconstruction, so any
 residual the VAE cannot represent is gone before the refine ever sees it.
 
-That makes it the fallback in this lineup: a trained latent-domain network
-(``sesqui.SesquiLSRUpscaler``) is both cheaper and better where its weights exist.
-It is the option for a VAE no upscaler was trained against, and it is genuinely
-generic — it speaks nothing but the engine's VAE interface
-(``decode_to_pixels`` / ``encode_pixels_to_latents``), so it carries an arbitrary
-latent format, channel count, spatial compression and pixel width (including
-alpha: an RGBA VAE round-trips its alpha through the resize like any other
-channel, which no RGB-only pixel-domain upscaler can do).
 
 The upscale itself happens in fp32 regardless of the VAE's dtype: bicubic has
 negative lobes and a bf16 mantissa is 8 bits wide, which is coarse enough to band

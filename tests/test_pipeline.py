@@ -9,13 +9,19 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 
 import pytest
 import torch
 
 from conftest import StubLatentUpscaler, StubModel
 from thenoise.models.config import GenerateRequest, SamplingParams
-from thenoise.pipeline import PipelineController, _refine_schedule
+from thenoise.pipeline import (
+    PipelineController,
+    _normalize_sigmas,
+    _refine_schedule,
+    _sigma_steps,
+)
 from thenoise.upscale.pixel import PixelUpscalerManager
 from thenoise.utils.png import build_pnginfo
 
@@ -324,6 +330,147 @@ def test_refine_steps_zero_opts_out_of_the_refine():
     assert model.refine_inputs == []  # no noise, no prepare, no denoise
 
 
+# --------------------------------------------------------------- custom sigmas
+
+
+@pytest.mark.parametrize(
+    "values,grid",
+    [
+        ([1.0, 0.5], (1.0, 0.5, 0.0)),
+        ([1.0, 0.5, 0.0], (1.0, 0.5, 0.0)),
+        ([0.9, 0.6, 0.3, 0.0], (0.9, 0.6, 0.3, 0.0)),
+    ],
+    ids=["implied-zero", "explicit-zero", "starts-below-one"],
+)
+def test_normalize_sigmas_returns_the_full_grid(values, grid):
+    """ComfyUI-style: the trailing 0.0 is implied, so N values are N steps."""
+    assert _normalize_sigmas(values) == grid
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        [],
+        [0.0],
+        [0.25, 0.75],
+        [0.5, 0.5],
+        [1.0, 1.0],
+        [1.5, 0.5],
+        [-0.1],
+        [float("nan")],
+        [float("inf")],
+        ["a", "b"],
+        "1.0, 0.5",
+    ],
+    ids=[
+        "empty", "only-zero", "ascending", "repeat", "repeat-one", "above-one",
+        "negative", "nan", "inf", "non-numeric", "string-not-list",
+    ],
+)
+def test_normalize_sigmas_rejects_a_bad_grid(values):
+    with pytest.raises(ValueError):
+        _normalize_sigmas(values)
+
+
+def test_sigma_steps_walk_the_grid_verbatim():
+    sub = _sigma_steps([1.0, 0.6, 0.2, 0.0], "cpu", torch.float32)
+
+    assert [float(s.t) for s in sub] == pytest.approx([1.0, 0.6, 0.2])
+    assert [float(s.delta) for s in sub] == pytest.approx([0.4, 0.4, 0.2])
+    assert sum(float(s.delta) for s in sub) == pytest.approx(1.0)  # lands on x0
+    # Tensors in the model's dtype, not floats: Anima's denoise_step calls t.expand().
+    assert all(isinstance(s.t, torch.Tensor) for s in sub)
+
+
+def test_resolve_sigmas_set_the_step_count():
+    model = StubModel()
+    model.checkpoint_prefs = {"steps": 6}  # a marker is overridden too
+    r = _controller(model)._resolve_pipeline(_request(sigmas=[1.0, 0.5]))
+
+    assert r.sigmas == (1.0, 0.5, 0.0)
+    assert r.steps == 2
+
+
+def test_resolve_sigmas_override_steps_with_a_warning(caplog):
+    caplog.set_level(logging.WARNING, logger="thenoise.pipeline")
+    r = _controller()._resolve_pipeline(_request(steps=8, sigmas=[1.0, 0.5]))
+
+    assert r.steps == 2
+    assert "overrides steps=8" in caplog.text
+
+
+def test_resolve_sigmas_agreeing_with_steps_stay_quiet(caplog):
+    caplog.set_level(logging.WARNING, logger="thenoise.pipeline")
+    _controller()._resolve_pipeline(_request(steps=2, sigmas=[1.0, 0.5]))
+    assert caplog.text == ""
+
+
+def test_generate_with_sigmas_bypasses_the_model_schedule():
+    controller = _controller()
+    controller.generate(_request(sigmas=[1.0, 0.6, 0.2]))
+
+    assert controller.model.calls["schedule"] == 0
+    assert controller.model.calls["denoise_step"] == 3
+
+
+def test_generate_without_sigmas_still_uses_the_model_schedule():
+    controller = _controller()
+    controller.generate(_request(steps=3))
+
+    assert controller.model.calls["schedule"] == 1
+    assert controller.model.calls["denoise_step"] == 3
+
+
+def test_custom_sigmas_hand_denoise_step_a_timestep_tensor():
+    model = _TensorTimestepModel()
+    _controller(model).generate(_request(sigmas=[1.0, 0.5, 0.2]))
+    assert model.calls["denoise_step"] == 3
+
+
+def test_different_sigma_grids_do_not_share_the_cached_latents():
+    """Same step count and seed, different grid: the latents are not reusable."""
+    controller = _controller()
+    controller.generate(_request(sigmas=[1.0, 0.5]))
+    controller.generate(_request(sigmas=[1.0, 0.25]))
+    assert controller.model.calls["denoise_step"] == 4
+
+
+def test_same_sigma_grid_twice_reuses_the_cached_latents():
+    controller = _controller()
+    controller.generate(_request(sigmas=[1.0, 0.5]))
+    controller.generate(_request(sigmas=[1.0, 0.5]))
+    assert controller.model.calls["denoise_step"] == 2
+
+
+def test_sigmas_do_not_leak_into_the_refine():
+    """The refine keeps its own strength and step count next to a custom grid."""
+    model = _RefineSpyModel()
+    model.REFINE_STEPS = 3
+    controller = _controller(model)
+    controller.generate(_request(sigmas=[1.0, 0.5], upscale=True))
+
+    assert model.calls["denoise_step"] == 2 + model.REFINE_STEPS
+    assert model.refine_inputs[-1][1].steps == model.REFINE_STEPS
+
+
+def test_finalize_records_custom_sigmas_in_the_metadata():
+    controller = _controller()
+    image = controller.generate(_request(sigmas=[1.0, 0.5]))
+
+    texts = _all_texts(image._pnginfo)
+    assert json.loads(texts["generation_data"])["sigmas"] == [1.0, 0.5, 0.0]
+    assert "Sigmas: 1/0.5/0" in texts["parameters"]
+
+
+def test_finalize_records_no_sigmas_for_the_model_schedule():
+    controller = _controller()
+    image = controller.generate(_request(steps=2))
+
+    texts = _all_texts(image._pnginfo)
+    assert json.loads(texts["generation_data"])["sigmas"] is None
+    assert "Sigmas" not in texts["parameters"]
+
+
 def test_generate_with_upscale_refines_and_decodes_the_larger_latent():
     controller = _controller(_RefineSpyModel())
     image = controller.generate(_request(upscale=True, steps=2))
@@ -447,6 +594,7 @@ def _parameters(**overrides) -> str:
         sharpening=0.0,
         lora_specs=None,
         pixel_upscaler=None,
+        sigmas=None,
     )
     kwargs.update(overrides)
     return _chunk_text(build_pnginfo(**kwargs), "parameters")
@@ -470,6 +618,7 @@ def test_pnginfo_json_block_covers_every_field():
         steps=8, guidance_scale=1.5, seed=3, upscale=True, upscale_factor=2.0,
         upscale_type="no-refiner", sampler="er_sde", qwen_vae_enhance=True,
         film_grain=0.5, sharpening=0.2, lora_specs=["a:1.0"], pixel_upscaler="x4",
+        sigmas=[1.0, 0.5, 0.0],
     )
     data = json.loads(_chunk_text(info, "generation_data"))
     assert data == {
@@ -478,6 +627,7 @@ def test_pnginfo_json_block_covers_every_field():
         "upscale": True, "upscale_factor": 2.0, "upscale_type": "no-refiner",
         "sampler": "er_sde", "qwen_vae_enhance": True, "film_grain": 0.5,
         "sharpening": 0.2, "lora_specs": ["a:1.0"], "pixel_upscaler": "x4",
+        "sigmas": [1.0, 0.5, 0.0],
     }
 
 
@@ -515,6 +665,15 @@ def test_pnginfo_parameters_joins_loras_and_pixel_upscaler():
     text = _parameters(lora_specs=["style:0.8", "pose:1.0"], pixel_upscaler="x4")
     assert "LoRA: style:0.8; pose:1.0" in text
     assert "Pixel upscaler: x4" in text
+
+
+def test_pnginfo_parameters_renders_sigmas_without_extra_commas():
+    """The tail line is parsed as comma-separated pairs: sigmas use ``/``."""
+    text = _parameters(sigmas=[1.0, 0.5, 0.125])
+    assert text.splitlines()[-1] == (
+        "Model: flux_klein, Steps: 4, Sampler: euler, Cfg scale: 1.0, Seed: 7, "
+        "Sigmas: 1/0.5/0.125"
+    )
 
 
 def test_build_upscale_pnginfo_carries_over_and_replaces():

@@ -13,6 +13,7 @@ default.
 - Reference-latent **KV cache** — exact, enabled by default
 - int8-convrot variant available (~17 GB instead of ~32 GB total)
 - Built-in defaults: **28 steps, guidance 1.0, euler**
+- Web UI **Schedule** presets for the community turbo recipes (see below)
 
 > Commands below assume a dev checkout (`./thenoise.sh`, `.venv/bin/python`).
 > On a [portable bundle](../setup.md) use `./bin/thenoise` and
@@ -106,3 +107,17 @@ Serve over HTTP with the web UI (open <http://localhost:8000/>):
 For every flag (size, steps, seed, multi-image references, KV cache, LoRAs,
 upscaling, post-processing), see the [CLI reference](../cli.md) and the
 [HTTP API reference](../api.md).
+
+## Schedule presets
+
+The web UI's **Schedule** dropdown replaces the step count with a hand-picked sigma
+grid, for the turbo recipes the community ships:
+
+| Schedule | Steps |
+|---|---|
+| `Pruna Image 2.1 8 steps` | 8 |
+| `Pruna Image 2.1 5 steps` | 5 |
+| `Viggle Turbo` | 6 |
+
+They go over the wire as [`sigmas`](../api.md#custom-sigmas), so the same grids can be
+posted to `/text2image` / `/edit` by hand.

@@ -16,6 +16,18 @@
   <button class="tab ctrl active" data-tab="generate">Generate</button>
   <button class="tab ctrl" data-tab="edit">Edit</button>
   <button class="tab ctrl" data-tab="upscale">Upscale</button>
+  <div class="tabs-prefs">
+    <button class="pref-btn ctrl" id="sidebar_toggle" title="Move the sidebar to the other side"
+      aria-label="Move the sidebar to the other side">
+      <span class="pref-icon" id="sidebar_icon">&#8680;</span>
+      <span id="sidebar_label">Left</span>
+    </button>
+    <button class="pref-btn ctrl" id="theme_toggle" title="Toggle light / dark theme"
+      aria-label="Toggle light / dark theme">
+      <span class="pref-icon" id="theme_icon"></span>
+      <span id="theme_label">Dark</span>
+    </button>
+  </div>
 </div>
 
 <div class="views">
@@ -71,6 +83,13 @@
       <option value="">auto</option>
       <option value="er_sde">er_sde</option>
       <option value="euler">euler</option>
+    </select>
+  </div>
+
+  <div class="field hidden" id="schedule_field">
+    <label class="label" for="schedule">Schedule <span class="hint" id="schedule_hint"></span></label>
+    <select id="schedule">
+      <option value="">auto</option>
     </select>
   </div>
 
@@ -223,6 +242,13 @@
       <option value="">auto</option>
       <option value="er_sde">er_sde</option>
       <option value="euler">euler</option>
+    </select>
+  </div>
+
+  <div class="field hidden" id="edit_schedule_field">
+    <label class="label" for="edit_schedule">Schedule <span class="hint" id="edit_schedule_hint"></span></label>
+    <select id="edit_schedule">
+      <option value="">auto</option>
     </select>
   </div>
 

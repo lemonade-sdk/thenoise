@@ -17,7 +17,7 @@ Each stage is cached (single-entry, on-device tensors); keys are computed from
   ---------------+-----------------------------------------------+-----------
   Reference      | image (content hash; edit only)          | reference latent
   Prompt         | prompt, negative_prompt, guidance_scale, lora_specs | Conditioning
-  Sampling       | prompt_key + size, steps, seed, sampler, lora_specs | latents
+  Sampling       | prompt_key + size, steps/sigmas, seed, sampler, lora_specs | latents
   Upscale+refine | (driven by decode cache hit below)      | —
   VAE decode     | sampling_key + refined constants        | pixels (fp32)
   Notch filter   | (not cached; runs right after decode)   | —
@@ -46,9 +46,11 @@ VAE's encoder and the RGB-only pixel upscaler.
 from __future__ import annotations
 
 import hashlib
+import logging
+import math
 import random
 from dataclasses import dataclass, replace
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 import torch
 from PIL import Image
@@ -73,6 +75,8 @@ from thenoise.postprocess.nyquist import nyquist_notch
 from thenoise.postprocess.rcas import rcas
 from thenoise.utils.png import build_pnginfo
 
+logger = logging.getLogger(__name__)
+
 
 # Largest side used for the edit output size when neither width nor height is
 # given; the first reference image's aspect ratio is preserved.
@@ -90,6 +94,9 @@ class _ResolvedRequest:
     width: int
     height: int
     steps: int
+    # Normalized custom sigma grid (terminal 0 included), or None for the model's
+    # own schedule.
+    sigmas: Optional[Tuple[float, ...]]
     guidance_scale: float
     factor: float
     upscale_type: str
@@ -102,6 +109,46 @@ class _ResolvedRequest:
     pixel_upscaler: Optional[str]
     kv_cache: bool
     ref_method: str
+
+
+def _normalize_sigmas(values: Sequence[float]) -> Tuple[float, ...]:
+    """Validate a user sigma list, returning the full grid (terminal 0 included).
+
+    ComfyUI-style: the values decrease from 1.0 toward 0.0 and the trailing 0.0 is
+    implied, so ``len(grid) - 1`` is the step count. Strictly decreasing is what
+    keeps the ER-SDE solver's ``logit(sigma)`` and ``1/(1-sigma)`` finite (only the
+    first sigma may be 1.0, where ``percent_to_sigma`` nudges it).
+    """
+    if not values:
+        raise ValueError("sigmas must not be empty")
+    try:
+        grid = [float(s) for s in values]
+    except (TypeError, ValueError):
+        raise ValueError("sigmas must be a list of numbers") from None
+    for s in grid:
+        if not math.isfinite(s) or not 0.0 <= s <= 1.0:
+            raise ValueError(f"sigmas must be finite values in [0.0, 1.0], got {s!r}")
+    if any(a <= b for a, b in zip(grid, grid[1:])):
+        raise ValueError(f"sigmas must be strictly decreasing, got {grid}")
+    if grid[-1] != 0.0:
+        grid.append(0.0)
+    if len(grid) < 2:
+        raise ValueError("sigmas must contain at least one value above 0.0")
+    return tuple(grid)
+
+
+def _sigma_steps(
+    grid: Sequence[float],
+    device: str,
+    dtype: torch.dtype,
+) -> list[Step]:
+    """Sigma grid (descending, ending on 0) -> one ``Step`` per grid gap.
+
+    Tensors in the model's own device/dtype because ``denoise_step`` consumes
+    ``Step.t`` the way it consumes its own ``schedule()`` output.
+    """
+    ts = torch.tensor(list(grid), device=device, dtype=dtype)
+    return [Step(t=ts[i], delta=ts[i] - ts[i + 1]) for i in range(len(grid) - 1)]
 
 
 def _refine_schedule(
@@ -117,16 +164,8 @@ def _refine_schedule(
     Deliberately NOT the tail of the model's own schedule: a shifted grid leaves
     whatever sigma the shift puts there at that index, so the same denoise value would 
     not mean the same strength on every model.
-
-    ``Step.t``/``delta`` are tensors in the model's own device/dtype because
-    ``denoise_step`` consumes them the way it consumes its own ``schedule()`` output.
     """
-    grid = torch.tensor(
-        [sigma * (1 - i / steps) for i in range(steps + 1)],
-        device=device,
-        dtype=dtype,
-    )
-    return [Step(t=grid[i], delta=grid[i] - grid[i + 1]) for i in range(steps)]
+    return _sigma_steps([sigma * (1 - i / steps) for i in range(steps + 1)], device, dtype)
 
 
 class PipelineController:
@@ -207,15 +246,17 @@ class PipelineController:
         sampler: str,
         ref_method: Optional[str] = None,
         kv_cache: bool = False,
+        sigmas: Optional[Tuple[float, ...]] = None,
     ) -> Tuple:
         """Cache key for the sampling (denoise stage).
 
-        Embeds the prompt key so any prompt/guidance/LoRA change cascades. The
-        edit path also embeds ``ref_method`` (it changes the reference packing, hence
-        the denoise output) and ``kv_cache`` (the KV cache changes the denoise
-        output, so cached latents must not be shared across the two modes).
+        Embeds the prompt key so any prompt/guidance/LoRA change cascades, and the
+        custom ``sigmas`` grid so two grids of the same length never share cached
+        latents. The edit path also embeds ``ref_method`` (it changes the reference
+        packing, hence the denoise output) and ``kv_cache`` (the KV cache changes the
+        denoise output, so cached latents must not be shared across the two modes).
         """
-        base = (prompt_key, width, height, steps, seed, sampler)
+        base = (prompt_key, width, height, steps, seed, sampler, sigmas)
         if ref_method is None:
             return ("sampling",) + base
         return ("sampling_edit",) + base + (ref_method, kv_cache)
@@ -335,7 +376,7 @@ class PipelineController:
         )
         sampling_key = self._cache_key_sampling(
             prompt_key, r.width, r.height, r.steps, r.seed, r.effective_sampler,
-            ref_method=ref_method, kv_cache=r.kv_cache,
+            ref_method=ref_method, kv_cache=r.kv_cache, sigmas=r.sigmas,
         )
         decode_key = self._cache_key_decode(sampling_key, r.refined)
 
@@ -396,7 +437,8 @@ class PipelineController:
                     self._cache.prompt_store(prompt_key, cond)
                 with torch.no_grad():
                     latents = self._denoise(
-                        cond, params, ref_latents, ref_method or "index"
+                        cond, params, ref_latents, ref_method or "index",
+                        sigmas=r.sigmas,
                     )
                 self._cache.sampling_store(sampling_key, latents)
 
@@ -425,13 +467,15 @@ class PipelineController:
         params: SamplingParams,
         ref_latents: Optional[list[torch.Tensor]] = None,
         ref_method: str = "index",
+        sigmas: Optional[Tuple[float, ...]] = None,
     ) -> torch.Tensor:
         """Shared denoising pipeline over the model's ``schedule``.
 
         Builds the latent and schedule, then delegates the loop to the selected
         solver sampler (``euler`` or ``er_sde``). Each sampler calls
         ``denoise_step`` once per schedule step and runs integration in fp32.
-        ``ref_latents``/``ref_method`` are only passed in the edit path.
+        ``ref_latents``/``ref_method`` are only set in the edit path. A ``sigmas``
+        grid replaces the model's own schedule verbatim (no shift applied).
         """
         model = self.model
         solver = create_sampler(params.sampler, model)
@@ -443,7 +487,10 @@ class PipelineController:
             )
         else:
             x = model.prepare_latent(latents, cond, params)
-        schedule = model.schedule(params)
+        if sigmas is not None:
+            schedule = _sigma_steps(sigmas, model.device, model.dtype)
+        else:
+            schedule = model.schedule(params)
         x = solver.sample(x, schedule, cond, params.guidance_scale, params.seed)
         return model.finalize_latent(x, params)
 
@@ -465,6 +512,16 @@ class PipelineController:
         effective_sampler = model.pref("sampler", request.sampler)
         ref_method = model.pref("ref_method", request.ref_method)
         kv_cache = model.pref("kv_cache", request.kv_cache)
+
+        sigmas: Optional[Tuple[float, ...]] = None
+        if request.sigmas is not None:
+            sigmas = _normalize_sigmas(request.sigmas)
+            steps = len(sigmas) - 1
+            if request.steps is not None and request.steps != steps:
+                logger.warning(
+                    "sigmas=%s overrides steps=%s: running %d steps",
+                    sigmas, request.steps, steps,
+                )
 
         # kv_cache only makes sense on an edit request.
         if request.kv_cache is None and request.image is None:
@@ -514,7 +571,8 @@ class PipelineController:
             seed = random.randint(0, 2**32 - 1)
 
         return _ResolvedRequest(
-            width=width, height=height, steps=steps, guidance_scale=guidance_scale,
+            width=width, height=height, steps=steps, sigmas=sigmas,
+            guidance_scale=guidance_scale,
             factor=factor, upscale_type=upscale_type, target_width=target_width,
             target_height=target_height, refined=refined, pixel_scale=pixel_scale,
             effective_sampler=effective_sampler, seed=seed, pixel_upscaler=pixel_upscaler,
@@ -576,6 +634,7 @@ class PipelineController:
             sharpening=request.sharpening,
             lora_specs=request.lora_specs,
             pixel_upscaler=r.pixel_upscaler,
+            sigmas=list(r.sigmas) if r.sigmas else None,
         )
         image._pnginfo = pnginfo
         return image

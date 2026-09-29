@@ -243,6 +243,36 @@ def test_text2image_passes_the_pixel_upscaler_through(tmp_path):
     assert runtime._pipeline.requests[-1].pixel_upscaler == "RealESRGAN_x4"
 
 
+def test_text2image_passes_sigmas_through(client):
+    runtime = _runtime()
+    res = client(runtime).post(
+        "/text2image", json={"prompt": "a fox", "sigmas": [1.0, 0.5, 0.2]}
+    )
+
+    assert res.status_code == 200
+    assert runtime._pipeline.requests[-1].sigmas == [1.0, 0.5, 0.2]
+
+
+def test_edit_passes_sigmas_through():
+    runtime = _runtime()
+    req = EditRequest(prompt="sunnier", image=_png_b64(), sigmas=[1.0, 0.0])
+    res = _endpoint(create_app(runtime), "/edit")(req)
+
+    assert res.status_code == 200
+    assert runtime._pipeline.edit_requests[-1].sigmas == [1.0, 0.0]
+
+
+def test_text2image_returns_400_for_an_invalid_field_value(client):
+    """A rejected sigma grid (or any invalid value) is the caller's error, not ours."""
+    runtime = _runtime(
+        pipeline=FakePipeline(generate_error=ValueError("sigmas must be strictly decreasing"))
+    )
+    res = client(runtime).post("/text2image", json={"prompt": "x", "sigmas": [0.2, 0.9]})
+
+    assert res.status_code == 400
+    assert "strictly decreasing" in res.text
+
+
 def test_text2image_returns_png_bytes_by_default(client):
     res = client(_runtime()).post("/text2image", json={"prompt": "a fox", "out": "png"})
     assert res.status_code == 200
@@ -429,8 +459,12 @@ def test_upscale_works_without_a_model(client, monkeypatch):
         ("/upscale", {"image_b64": "abc"}),
         # ``image`` is required on /edit.
         ("/edit", {"prompt": "x"}),
+        # ``sigmas`` is a list of numbers, not a ComfyUI string.
+        ("/text2image", {"prompt": "x", "sigmas": "1.0, 0.5"}),
+        ("/text2image", {"prompt": "x", "sigmas": ["abc"]}),
     ],
-    ids=["bad-out", "missing-prompt", "missing-upscaler", "missing-image"],
+    ids=["bad-out", "missing-prompt", "missing-upscaler", "missing-image",
+         "sigmas-string", "sigmas-not-numbers"],
 )
 def test_invalid_payload_is_rejected_by_pydantic(client, path, payload):
     assert client(_runtime()).post(path, json=payload).status_code == 422

@@ -35,6 +35,7 @@ class Text2ImageRequest(BaseModel):
     height: Optional[int] = None
 
     steps: Optional[int] = None
+    sigmas: Optional[List[float]] = None
     guidance_scale: Optional[float] = None
     seed: Optional[int] = None
     upscale: bool = False
@@ -60,6 +61,7 @@ class Text2ImageRequest(BaseModel):
             width=self.width,
             height=self.height,
             steps=self.steps,
+            sigmas=self.sigmas,
             guidance_scale=self.guidance_scale,
             seed=self.seed,
             upscale=self.upscale,
@@ -171,7 +173,9 @@ def create_app(runtime) -> FastAPI:
             return Response(status_code=503, content="no model is loaded")
         try:
             image = pipeline.generate(req.to_request())
-        except Exception as e:  # surface generation errors cleanly
+        except ValueError as e:
+            return Response(status_code=400, content=str(e))
+        except Exception as e:
             logger.exception("generation failed")
             return Response(status_code=500, content=f"generation failed: {e}")
 
