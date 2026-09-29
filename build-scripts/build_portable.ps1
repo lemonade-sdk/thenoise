@@ -23,6 +23,9 @@
 #     Linux build, _rocm_sdk_core\bin must NOT be removed.
 #
 # Usage: build_portable.ps1 <gfx_target>
+#   <gfx_target> is either an exact device (gfx1151) or a family name that
+#   expands to every device variant of that family (gfx103X, gfx110X,
+#   gfx120X) - see the device-extras mapping below.
 #
 # Environment overrides (all optional):
 #   THENOISE_ROOT   output bundle root  (default: $env:RUNNER_TEMP\thenoise-build\thenoise)
@@ -39,9 +42,6 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-
-# torch wheel device spec: gfx115X -> gfx1150 (mirror build_portable.sh).
-$GfxArch = $GfxTarget -creplace 'X', '0'
 
 $Root = $env:THENOISE_ROOT
 if (-not $Root) {
@@ -63,6 +63,27 @@ $Py = Join-Path $Root "python.exe"
 
 function say { param([string]$m) Write-Host "[build] $m" -ForegroundColor Blue }
 function warn { param([string]$m) Write-Host "[build:warning] $m" -ForegroundColor Yellow }
+
+# ------------------------------------------- gfx target -> wheel device extras --
+# The torch/torchvision wheels on the AMD index expose one extra PER DEVICE
+# (device-gfx1030 ... device-gfx1036, device-gfx1100 ... device-gfx1103,
+# device-gfx1200/1201/1250, ...); there is no device-gfx103X / gfx110X /
+# gfx120X extra. So the "family" targets used by CI must expand to every
+# variant in the family.
+switch -CaseSensitive ($GfxTarget) {
+  "gfx103X" { $GfxDevices = "device-gfx1030,device-gfx1031,device-gfx1032,device-gfx1033,device-gfx1034,device-gfx1035,device-gfx1036"; break }
+  "gfx110X" { $GfxDevices = "device-gfx1100,device-gfx1101,device-gfx1102,device-gfx1103"; break }
+  "gfx120X" { $GfxDevices = "device-gfx1200,device-gfx1201,device-gfx1250"; break }
+  default {
+    if ($GfxTarget -clike "*X") {
+      $fallback = $GfxTarget -creplace 'X', '0'
+      warn "no device list for family target '$GfxTarget'; falling back to X->0 ($fallback). Add a case above if this family has more than one SKU."
+      $GfxDevices = "device-$fallback"
+    } else {
+      $GfxDevices = "device-$GfxTarget"
+    }
+  }
+}
 
 # pip helper with a raised recursion limit. Some large dependency graphs (e.g.
 # vLLM's) make pip's resolvelib RecursionError; thenoise's is simpler, but this
@@ -101,14 +122,14 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # ---------------------------------------------------------- 2. torch + deps --
-say "Installing torch $TorchVer for $GfxTarget"
+say "Installing torch $TorchVer for $GfxTarget ($GfxDevices)"
 $env:PATH = "$Root;${Root}\Scripts;$env:PATH"
 pip-deep install --index-url $TorchIndex `
   --extra-index-url https://pypi.org/simple/ `
-  "torch[device-${GfxArch}]==${TorchVer}"
+  "torch[${GfxDevices}]==${TorchVer}"
 pip-deep install --index-url $TorchIndex `
   --extra-index-url https://pypi.org/simple/ `
-  "torchvision[device-${GfxArch}]==${TorchVisionVer}"
+  "torchvision[${GfxDevices}]==${TorchVisionVer}"
 pip-deep install "triton-windows<3.9"
 
 say "Installing thenoise + dependencies (from $RepoRoot)"
