@@ -204,13 +204,6 @@ def test_the_feature_must_be_exactly_2x_the_latent_grid():
             net(torch.zeros(1, TOY["feature_channels"], *size), latent)
 
 
-def test_the_latent_must_have_the_trained_width():
-    net = _toy_net()
-
-    with pytest.raises(ValueError, match="expected a 4-channel latent"):
-        net(torch.zeros(1, TOY["feature_channels"], 6, 6), torch.zeros(1, 6, 3, 5))
-
-
 # ------------------------------------------------------- the committed weights
 
 

@@ -44,22 +44,25 @@ class GatedSwiGLUStage(nn.Module):
     entry stage five, and ``load_state_dict`` therefore pins the widths too.
     """
 
-    def __init__(self, in_channels: int, out_channels: int, *, expansion: float = 1.0):
+    def __init__(self, channels: int):
         super().__init__()
-        hidden = max(1, round(out_channels * expansion))
-        self.norm = RMSNorm2D(in_channels)
-        self.input = nn.Conv2d(in_channels, 2 * hidden, 1, bias=False)
-        self.spatial = nn.Conv2d(hidden, hidden, 3, padding=1, groups=hidden, bias=False)
-        self.output = nn.Conv2d(hidden, out_channels, 1, bias=False)
-        self.shortcut = (
-            nn.Conv2d(in_channels, out_channels, 1, bias=False)
-            if in_channels != out_channels
-            else nn.Identity()
+        self.norm = RMSNorm2D(channels)
+        self.input = nn.Conv2d(channels, 2 * channels, 1, bias=False)
+        self.spatial = nn.Conv2d(
+            channels,
+            channels,
+            3,
+            padding=1,
+            padding_mode="reflect",
+            groups=channels,
+            bias=False,
         )
+        self.output = nn.Conv2d(channels, channels, 1, bias=False)
 
     def forward(self, x: Tensor) -> Tensor:
         value, gate = self.input(F.mish(self.norm(x))).chunk(2, 1)
-        return self.shortcut(x) + self.output(self.spatial(F.mish(value) * gate))
+        value = self.spatial(F.mish(value) * 2.0 * torch.tanh(0.5 * gate))
+        return x + self.output(value)
 
 
 class LatentTranscodeNet(nn.Module):
@@ -90,51 +93,29 @@ class LatentTranscodeNet(nn.Module):
         feature_channels: int = 1152,
         latent_channels: int = 64,
         width: int = 384,
-        depth: int = 6,
-        expansion: float = 1.0,
+        depth: int = 6
     ):
         super().__init__()
-        self.feature_channels = feature_channels
         self.latent_channels = latent_channels
+        self.feature_channels = feature_channels
 
-        # ``head``'s input width is the VAE side of the contract; everything else
-        # is internal to the bridge.
         self.head = nn.Conv2d(feature_channels, width, 1)
-
-        # The trunk that carries the *latent*, run at the source resolution and
-        # upsampled afterwards: cheaper than doing it at 4x the pixel count.
-        self.in_body = nn.Sequential(*(
-            GatedSwiGLUStage(
-                latent_channels if i == 0 else width, width, expansion=expansion
-            )
-            for i in range(depth)
-        ))
-        # The trunk that sees the fused feature, run at the target resolution.
-        self.body = nn.Sequential(*(
-            GatedSwiGLUStage(width, width, expansion=expansion) for _ in range(depth)
-        ))
-        self.out = nn.Conv2d(width, latent_channels, 3, padding=1)
-        self.skip = nn.Conv2d(latent_channels, latent_channels, 3, padding=1, bias=False)
+        self.body = nn.Sequential(*(GatedSwiGLUStage(width) for _ in range(depth)))
+        self.out = nn.Conv2d(width, latent_channels, 3, padding=1, padding_mode="reflect")
+        self.skip = nn.Conv2d(latent_channels, latent_channels, 3, padding=1, padding_mode="reflect")        
 
     def forward(self, feature: Tensor, latent: Tensor) -> Tensor:
         """``feature`` (2x the latent grid) + ``latent`` -> 2x latent."""
-        if latent.shape[1] != self.latent_channels:
-            raise ValueError(
-                f"expected a {self.latent_channels}-channel latent, got {latent.shape[1]}"
-            )
-        size = feature.shape[-2:]
-        if size != (self.scale * latent.shape[-2], self.scale * latent.shape[-1]):
+        size = (2 * latent.shape[-2], 2 * latent.shape[-1])
+        if feature.shape[-2:] != size:
             raise ValueError(
                 f"decoder-prefix feature must be exactly {self.scale}x the latent "
                 f"grid, got {tuple(size)} for a {tuple(latent.shape[-2:])} latent"
             )
 
-        trunk = F.interpolate(
-            self.in_body(latent), size=size, mode="bicubic", align_corners=False
-        )
-        hidden = self.body(self.head(feature) + trunk)
+        hidden = self.body(self.head(feature))
         skip = F.interpolate(latent, size=size, mode="bicubic", align_corners=False)
-        return self.skip(skip) + self.out(hidden)
+        return self.skip(skip + self.out(hidden))
 
 
 __all__ = ["LatentTranscodeNet", "GatedSwiGLUStage", "RMSNorm2D"]
