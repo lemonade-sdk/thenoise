@@ -7,6 +7,18 @@ from PIL import Image
 from thenoise.models import QwenImage21Model
 from thenoise.models.base import DiffusionModel
 from thenoise.models.config import EncodePromptArgs
+from thenoise.upscale import LatentTranscodeNet, Qwen21TranscodeUpscaler
+from thenoise.upscale import qwen21_transcode
+
+
+class FakeVAE:
+    """Just the surface the transcoder is allowed to reach for."""
+
+    z_dim = 4
+
+    def decode_features(self, latents, *, blocks=1):
+        b, _, h, w = latents.shape
+        return torch.zeros(b, 6, 2 * h, 2 * w, dtype=latents.dtype)
 
 
 def _bare(**attrs):
@@ -49,3 +61,23 @@ def test_the_adapter_does_not_override_the_shared_decode():
     """The alpha drop-out used to be a ``decode`` override; it must not come back."""
     assert "decode" not in QwenImage21Model.__dict__
     assert QwenImage21Model.decode is DiffusionModel.decode
+
+
+def test_the_adapter_upscales_with_the_trained_transcoder(monkeypatch):
+    """The advertised 2x is the bridge, conditioned on this model's own VAE."""
+    loaded = []
+
+    def fake_load(device, dtype):
+        loaded.append((device, dtype))
+        return LatentTranscodeNet(feature_channels=6, latent_channels=4, width=4, depth=1)
+
+    monkeypatch.setattr(qwen21_transcode, "_load_net", fake_load)
+    model = _bare(_upscaler=None, vae=FakeVAE())
+
+    upscaler = model.get_upscaler()
+
+    assert isinstance(upscaler, Qwen21TranscodeUpscaler)
+    assert upscaler.vae is model.vae  # conditioned on the model's own decoder
+    assert upscaler.scale == QwenImage21Model.UPSCALE_SCALE
+    assert loaded == [(torch.device("cpu"), torch.float32)]
+    assert model.get_upscaler() is upscaler  # built once, then cached

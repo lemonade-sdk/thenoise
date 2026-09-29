@@ -8,8 +8,7 @@ of the upscaled spatial size, ready to be fed back into the DiT for the refine
 (and then to the VAE decode).
 
 Keeping the latent math behind this one call is what lets different upscaler
-strategies (Sesqui today, others to come) be swapped by the model adapter alone,
-with no change in the pipeline.
+strategies.
 
 The contract is deliberately narrow:
 

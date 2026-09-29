@@ -533,6 +533,31 @@ class AutoencoderKLWan22(nn.Module):
         x = self.decoder(self.conv2(z))
         return unpatchify(x, self.patch_size)
 
+    def decode_features(self, latents: torch.Tensor, *, blocks: int = 1) -> torch.Tensor:
+        """Canonical latents -> the decoder's feature map ``blocks`` stages in.
+
+        The leading part of a normal decode — ``conv2``, the decoder's ``conv1``,
+        its ``middle``, then the first ``blocks`` upsample blocks — returned before
+        the remaining stages and the pixel ``head``.
+        
+        This exists for latent-domain tools that want the decoder's own view of the
+        image without paying for a full decode.
+        """
+        stages = len(self.decoder.upsamples)
+        if not 1 <= blocks <= stages:
+            raise ValueError(
+                f"this decoder has {stages} upsample block(s), cannot take features "
+                f"from block {blocks}"
+            )
+        latents = latents.to(self.device, self.dtype)
+        mean = self._latents_mean.to(latents.device, latents.dtype)
+        inv_std = self._latents_inv_std.to(latents.device, latents.dtype)
+        x = self.decoder.conv1(self.conv2(latents / inv_std + mean))
+        x = self.decoder.middle(x)
+        for block in self.decoder.upsamples[:blocks]:
+            x = block(x)
+        return x
+
     def _match_pixels(self, x: torch.Tensor) -> torch.Tensor:
         """Fit a pixel tensor to the VAE's channel count.
 
