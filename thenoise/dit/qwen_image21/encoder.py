@@ -29,8 +29,11 @@ from torch import Tensor, nn
 
 from thenoise.utils.qwen_configs import QWEN3_VL_8B_INSTRUCT_CONFIG
 from thenoise.utils.text_encoder import (
+    IM_END,
+    IM_START,
     QWEN25_TOKENIZER_CONFIG_DIR,
     QWEN3_VL_TOKENIZER_OVERRIDES,
+    VISION_BLOCK,
     find_tokenizer_dir,
     load_qwen3_vl_model,
     load_qwen3_vl_processor,
@@ -38,16 +41,6 @@ from thenoise.utils.text_encoder import (
 )
 
 logger = logging.getLogger(__name__)
-
-IM_START = "<|im_start|>"
-IM_END = "<|im_end|>"
-VISION_START = "<|vision_start|>"
-VISION_END = "<|vision_end|>"
-IMAGE_PAD = "<|image_pad|>"
-
-#: One reference image, as the language model sees it: a single (expanded) image pad
-#: between the vision markers.
-VISION_BLOCK = VISION_START + IMAGE_PAD + VISION_END
 
 #: The turn the model is conditioned with, and the system prompt that precedes it
 #: (dropped before the embeddings reach the DiT).

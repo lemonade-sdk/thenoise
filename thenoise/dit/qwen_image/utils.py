@@ -16,7 +16,12 @@ from transformers import Qwen2Tokenizer, Qwen2_5_VLForConditionalGeneration, Qwe
 from thenoise.utils.setup_logging import setup_logging
 from thenoise.utils.image_tensor import resize_to_area
 from thenoise.utils.sequence import make_key_padding_mask, pad_to_batch
-from thenoise.utils.text_encoder import QWEN_VL_DROP_IDX, QWEN_VL_PROMPT_SUFFIX, QWEN_VL_SYSTEM_PROMPT
+from thenoise.utils.text_encoder import (
+    QWEN_VL_DROP_IDX,
+    QWEN_VL_PROMPT_SUFFIX,
+    QWEN_VL_SYSTEM_PROMPT,
+    compute_drop_idx,
+)
 
 setup_logging()
 import logging
@@ -54,25 +59,6 @@ def get_qwen_prompt_embeds(
     hidden_states = encoder_hidden_states.hidden_states[-1]
     split_hidden_states = extract_masked_hidden(hidden_states, txt_tokens.attention_mask)
     return _mask_and_stack(split_hidden_states, drop_idx)
-
-
-def _compute_drop_idx(input_ids: torch.Tensor) -> int:
-    """Index where the user message content begins (after ``<|im_start|>user\n``).
-
-    The edit template drops the system prompt + user header so the DiT text
-    conditioning is the image/instruction content (matching Comfy's
-    ``template_end`` logic). The user content follows the second ``<|im_start|>``
-    (the user turn); we drop through the ``user\n`` header tokens that follow it.
-    """
-    ids = input_ids[0].tolist()
-    im_start = 151644
-    count = 0
-    for i, id_ in enumerate(ids):
-        if id_ == im_start:
-            count += 1
-            if count == 2:
-                return i + 3  # ``<|im_start|>`` ``user`` ``\n``
-    return 0
 
 
 def get_qwen_prompt_embeds_with_image(
@@ -118,7 +104,7 @@ def get_qwen_prompt_embeds_with_image(
     )
     hidden_states = encoder_hidden_states.hidden_states[-1]
     split_hidden_states = extract_masked_hidden(hidden_states, model_inputs.attention_mask)
-    drop_idx = _compute_drop_idx(model_inputs.input_ids)
+    drop_idx = compute_drop_idx(model_inputs.input_ids[0])
     return _mask_and_stack(split_hidden_states, drop_idx)
 
 

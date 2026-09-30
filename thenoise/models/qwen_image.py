@@ -19,6 +19,7 @@ import logging
 
 import torch
 
+from thenoise.dit.mage_flow.keys import MAGE_LAYERS, dit_block_count, is_qwen_image_family
 from thenoise.dit.qwen_image import models as qwen_models
 from thenoise.dit.qwen_image import sampling as qwen_sampling
 from thenoise.dit.qwen_image import utils as qwen_utils
@@ -62,21 +63,21 @@ class QwenImageModel(DiffusionModel):
 
     @staticmethod
     def detect(f) -> bool:
-        """True if this handle is a Qwen-Image DiT.
+        """True if this handle is a Qwen-Image DiT: the family's block layout, at the
+        family's DEEP end.
 
-        Qwen-Image's distinctive blocks are the dual-stream projections (``img_in.`` /
-        ``txt_in.``) and the joint time/text embedding (``time_text_embed.``). Keys
-        are normalized first so repackaged checkpoints resolve identically.
+        The dual-stream projections (``img_in.`` / ``txt_in.`` plus
+        ``time_text_embed.``) and the ``add_q_proj`` text stream (which rules out the
+        single-stream Qwen-Image 2.1, sharing those three prefixes) are byte-identical
+        in Mage-Flow — same block, same tensor names — so names alone cannot separate
+        the two. Depth does: 60 blocks here, 12 there. Each detector states its own half
+        of that split (see ``thenoise.dit.mage_flow.keys``), so neither depends on the
+        order of the catalog, and no shape is read (detection only ever sees names).
 
-        The dual-stream text projections (``add_q_proj``) are what separates it from
-        Qwen-Image 2.1, a single-stream model that carries the same three prefixes.
+        Keys are normalized first so repackaged checkpoints resolve identically.
         """
         keys = list(normalize_keys(f.keys()))
-        has_img_in = any(k.startswith("img_in.") for k in keys)
-        has_txt_in = any(k.startswith("txt_in.") for k in keys)
-        has_time_text_embed = any(k.startswith("time_text_embed.") for k in keys)
-        has_txt_stream = any(k.startswith("transformer_blocks.0.attn.add_q_proj.") for k in keys)
-        return has_img_in and has_txt_in and has_time_text_embed and has_txt_stream
+        return is_qwen_image_family(keys) and dit_block_count(keys) > MAGE_LAYERS
 
     def __init__(self, *, config: ModelConfig):
         super().__init__(config=config)

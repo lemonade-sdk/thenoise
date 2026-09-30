@@ -151,6 +151,23 @@ def resize_to_area(image: Image.Image, area: int = 384 * 384) -> Image.Image:
     return image
 
 
+def resize_to_long_edge(image: Image.Image, long_edge: int) -> Image.Image:
+    """Cap a PIL image's longest side at ``long_edge``, aspect preserved, never enlarged.
+
+    The other vision-token budget helper: where :func:`resize_to_area` fixes the
+    *area*, this fixes the dominant dimension, so a panoramic reference keeps its
+    pixels-per-unit-width — and an image already under the cap is left alone, because
+    growing one adds vision tokens but no information.
+    """
+    w, h = image.size
+    scale = long_edge / max(w, h)
+    if scale >= 1.0:
+        return image
+    new_w = max(1, round(w * scale))
+    new_h = max(1, round(h * scale))
+    return image.resize((new_w, new_h), Image.LANCZOS)
+
+
 __all__ = [
     "ALPHA_BACKGROUND",
     "has_alpha",
@@ -162,4 +179,5 @@ __all__ = [
     "center_crop",
     "resize_to_cover_center_crop",
     "resize_to_area",
+    "resize_to_long_edge",
 ]
