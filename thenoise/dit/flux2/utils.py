@@ -134,13 +134,12 @@ class Qwen3Embedder:
         device = self.device
         input_ids = inputs.input_ids.to(device)
         attention_mask = inputs.attention_mask.to(device)
-        with torch.no_grad():
-            output = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                output_hidden_states=True,
-                use_cache=False,
-            )
+        output = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            use_cache=False,
+        )
         out = torch.stack([output.hidden_states[k] for k in OUTPUT_LAYERS_QWEN3], dim=1)
         return rearrange(out, "b c l d -> b l (c d)")
 

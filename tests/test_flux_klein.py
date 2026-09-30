@@ -34,7 +34,7 @@ def tiny_flux2():
             mlp_ratio=1.5,
             use_guidance_embed=False,
         )
-    ).eval()
+    ).eval().requires_grad_(False)
 
 
 def _tiny_inputs(tiny_flux2, seq=4):
@@ -317,7 +317,7 @@ def test_kv_cache_multi_ref_caches_the_sum():
     torch.manual_seed(0)
     m = Flux2(Flux2Params(in_channels=8, context_in_dim=24, hidden_size=16, num_heads=2,
                           depth=1, depth_single_blocks=1, axes_dim=[2, 2, 2, 2],
-                          mlp_ratio=1.5, use_guidance_embed=False)).eval()
+                          mlp_ratio=1.5, use_guidance_embed=False)).eval().requires_grad_(False)
     inp = _tiny_edit_inputs(m, seq=4, refseq=3, txtlen=8)
     ref1 = torch.randn(1, 3, 8)
     ref2 = torch.randn(1, 5, 8)
@@ -344,7 +344,7 @@ def test_adapter_denoise_step_kv_fill_then_read():
     model.dtype = torch.float32
     model.dit = Flux2(Flux2Params(in_channels=8, context_in_dim=24, hidden_size=16, num_heads=2,
                                   depth=1, depth_single_blocks=1, axes_dim=[2, 2, 2, 2],
-                                  mlp_ratio=1.5, use_guidance_embed=False)).eval()
+                                  mlp_ratio=1.5, use_guidance_embed=False)).eval().requires_grad_(False)
     model.dit.pe_embedder.clear()
     model.dit.pe_embedder.store("img", torch.zeros(1, 4, 4, dtype=torch.long))
     model.dit.pe_embedder.store("ref", torch.full((1, 6, 4), FluxKleinModel.REF_INDEX, dtype=torch.long))

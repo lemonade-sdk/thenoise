@@ -649,4 +649,4 @@ def editing_stub_model():
 @pytest.fixture(scope="module")
 def flux2_vae():
     """One random-init Flux.2 VAE per module (building it costs ~0.2s)."""
-    return AutoencoderKLFlux2()
+    return AutoencoderKLFlux2().eval().requires_grad_(False)

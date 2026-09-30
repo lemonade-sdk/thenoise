@@ -97,9 +97,9 @@ SEQUENCE_LEN = len(IDS) - 1 + NUM_QUERIES
 
 
 def tiny_conditioner(**overrides) -> MingImageConditioner:
-    """A seeded, eval'd conditioner at test scale (the same numbers every call)."""
+    """A seeded, frozen conditioner at test scale (the same numbers every call)."""
     torch.manual_seed(0)
-    return MingImageConditioner(**{**TINY_CONDITIONER, **overrides}).eval()
+    return MingImageConditioner(**{**TINY_CONDITIONER, **overrides}).eval().requires_grad_(False)
 
 
 # ------------------------------------------------------------- a stand-in tokenizer
@@ -289,7 +289,7 @@ def test_the_query_tokens_are_the_ones_marked_as_image_tokens():
 
 def test_the_image_router_actually_decides_the_experts():
     torch.manual_seed(0)
-    block = SparseMoeBlock(TINY_THINKER).eval()
+    block = SparseMoeBlock(TINY_THINKER).eval().requires_grad_(False)
     x = torch.randn(1, 5, TINY_THINKER.hidden_size)
     all_image = torch.ones(1, 5, dtype=torch.bool)
     all_text = torch.zeros(1, 5, dtype=torch.bool)
@@ -385,7 +385,7 @@ def test_expert_dispatch_matches_a_dense_reference():
     back has to make the sum over a token's experts exact.
     """
     torch.manual_seed(0)
-    block = SparseMoeBlock(TINY_THINKER).eval()
+    block = SparseMoeBlock(TINY_THINKER).eval().requires_grad_(False)
     x = torch.randn(6, TINY_THINKER.hidden_size)
 
     idx, weight = block.gate(x)
@@ -414,7 +414,7 @@ def test_an_int8_bank_stays_int8():
     buy nothing.
     """
     torch.manual_seed(0)
-    bank = ExpertBank(4, 32, 64)
+    bank = ExpertBank(4, 32, 64).eval().requires_grad_(False)
     elements = bank.weight.numel()
 
     bank.load_quantized(_int8_bank(bank))
@@ -430,7 +430,7 @@ def test_the_expert_view_is_a_view_and_only_loses_one_step():
     per-expert GEMM costs nothing extra however big the bank is.
     """
     torch.manual_seed(0)
-    bank = ExpertBank(4, 32, 64)
+    bank = ExpertBank(4, 32, 64).eval().requires_grad_(False)
     dense = bank.weight.detach().clone()
     bank.load_quantized(_int8_bank(bank))
 
@@ -444,7 +444,7 @@ def test_the_expert_view_is_a_view_and_only_loses_one_step():
 
 def test_int8_expert_dispatch_stays_within_the_quantization_step():
     torch.manual_seed(0)
-    block = SparseMoeBlock(TINY_THINKER).eval().to(torch.bfloat16)
+    block = SparseMoeBlock(TINY_THINKER).eval().requires_grad_(False).to(torch.bfloat16)
     x = torch.randn(6, TINY_THINKER.hidden_size, dtype=torch.bfloat16)
     gate_up, down = block.experts.gate_up_proj, block.experts.down_proj
     idx, weight = block.gate(x)
@@ -521,6 +521,9 @@ def test_int8_file_loads_low_bit_and_draws_the_same_picture(tmp_path):
         config=TINY_CONDITIONER,
         with_tokenizer=False,
     )
+    # The loader leaves grad mode / weight state to ``MemoryManager.register``; a test
+    # that forwards without an adapter has to freeze what it loaded.
+    model.eval().requires_grad_(False)
 
     loaded_banks = [m for m in model.modules() if isinstance(m, ExpertBank)]
     assert loaded_banks, "the tiny thinker has no expert banks"

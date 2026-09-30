@@ -104,13 +104,12 @@ def resize_to_target(
     c, h, w = pixels.shape
     if (w, h) == (target_w, target_h):
         return pixels
-    with torch.no_grad():
-        return F.interpolate(
-            pixels.unsqueeze(0),
-            size=(target_h, target_w),
-            mode="bilinear",
-            align_corners=False,
-        )[0]
+    return F.interpolate(
+        pixels.unsqueeze(0),
+        size=(target_h, target_w),
+        mode="bilinear",
+        align_corners=False,
+    )[0]
 
 
 def center_crop(image: Image.Image, width: int, height: int) -> Image.Image:

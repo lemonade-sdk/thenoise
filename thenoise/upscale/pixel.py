@@ -150,8 +150,7 @@ class PixelUpscalerManager:
             rgb = rgb * a + _WHITE * (1.0 - a)
 
         x = (rgb.unsqueeze(0) + 1.0) / 2.0  # [-1, 1] -> [0, 1]
-        with torch.no_grad():
-            out = model.forward_tiled(x)
+        out = model.forward_tiled(x)
         out = (out * 2.0 - 1.0)[0]  # [0, 1] -> [-1, 1], batch axis gone
 
         if alpha is not None:

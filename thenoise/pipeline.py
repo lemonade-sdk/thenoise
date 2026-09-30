@@ -5,7 +5,8 @@ postprocess -> PIL — delegating each stage to the model's kernels
 (``thenoise.models.base.DiffusionModel``), the model's latent upscaler
 (``thenoise.upscale.base.LatentUpscaler``) and the pixel-domain upscaler
 (``thenoise.upscale.pixel.PixelUpscalerManager``). Also owns the inference lock,
-the single-entry stage cache (with cascade invalidation), upscale planning, and
+the inference-mode boundary around a whole request (``thenoise.inference``), the
+single-entry stage cache (with cascade invalidation), upscale planning, and
 cache-key construction.
 
 Pipeline caching
@@ -55,7 +56,7 @@ from typing import Optional, Sequence, Tuple
 import torch
 from PIL import Image
 
-from thenoise.locks import inference_lock
+from thenoise.inference import inference, inference_lock
 from thenoise.models.base import DiffusionModel, Conditioning
 from thenoise.models.config import EncodePromptArgs, GenerateRequest, SamplingParams
 from thenoise.samplers import Step, create_sampler
@@ -288,7 +289,10 @@ class PipelineController:
     def generate(self, request: GenerateRequest) -> Image.Image:
         """Text-to-image pipeline. Returns a single PIL image."""
         r = self._resolve_pipeline(request)
-        return self._finalize(self._run(request, r), request, r)
+        # The pipeline's inference-mode boundary: it covers every stage *and* the
+        # post-decode tail in ``_finalize`` (see ``thenoise.inference``).
+        with inference():
+            return self._finalize(self._run(request, r), request, r)
 
     def edit(self, request: GenerateRequest) -> Image.Image:
         """Reference-latent instruction editing. Returns a single PIL image.
@@ -330,10 +334,12 @@ class PipelineController:
 
         r = self._resolve_pipeline(local)
         ref_key = self._cache_key_reference(images, r.width, r.height)
-        return self._finalize(
-            self._run(local, r, ref_key=ref_key, ref_method=r.ref_method),
-            local, r,
-        )
+        # Same inference-mode boundary as ``generate`` (see ``thenoise.inference``).
+        with inference():
+            return self._finalize(
+                self._run(local, r, ref_key=ref_key, ref_method=r.ref_method),
+                local, r,
+            )
 
     def _edit_images(self, request: GenerateRequest) -> list[Image.Image]:
         """Normalize ``request.image`` (single OR list) to a list ([] if none)."""
@@ -435,11 +441,10 @@ class PipelineController:
                 if not self._cache.prompt_hit(prompt_key):
                     cond = model.fuse_text(cond_raw)
                     self._cache.prompt_store(prompt_key, cond)
-                with torch.no_grad():
-                    latents = self._denoise(
-                        cond, params, ref_latents, ref_method or "index",
-                        sigmas=r.sigmas,
-                    )
+                latents = self._denoise(
+                    cond, params, ref_latents, ref_method or "index",
+                    sigmas=r.sigmas,
+                )
                 self._cache.sampling_store(sampling_key, latents)
 
             # Stage 3/4: upscale + decode (interleaved so cache hits skip upscale).

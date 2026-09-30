@@ -177,7 +177,7 @@ TINY_QWEN = dict(
 def tiny_qwen():
     """A random-init Qwen-Image DiT with the smallest sensible config."""
     torch.manual_seed(0)
-    return QwenImageTransformer2DModel(**TINY_QWEN).eval()
+    return QwenImageTransformer2DModel(**TINY_QWEN).eval().requires_grad_(False)
 
 
 def _tiny_inputs(model, target=(2, 2), refs=(), txt_len=5):

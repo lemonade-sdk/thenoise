@@ -30,6 +30,7 @@ import torch
 
 from .base import LatentUpscaler
 from .transcode_net import LatentTranscodeNet
+from thenoise.inference import freeze
 from thenoise.utils.safetensors import load_safetensors, upscale_weight_path
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,8 @@ def _load_net(
 
     net = LatentTranscodeNet()
     net.load_state_dict(state_dict, strict=True)
-    net.to(device=device, dtype=dtype).eval().requires_grad_(False)
+    net.to(device=device, dtype=dtype)
+    freeze(net)
 
     logger.info("Latent transcoder ready on %s (%s)", device, dtype)
     return net
@@ -118,9 +120,8 @@ class Qwen21TranscodeUpscaler(LatentUpscaler):
         the final decode already expect, so neither needs to know this ran.
         """
         z = latents.to(device=self.device, dtype=self.dtype)
-        with torch.no_grad():
-            feature = self.vae.decode_features(z).to(device=self.device, dtype=self.dtype)
-            return self.net(feature, z)
+        feature = self.vae.decode_features(z).to(device=self.device, dtype=self.dtype)
+        return self.net(feature, z)
 
 
 __all__ = ["Qwen21TranscodeUpscaler"]

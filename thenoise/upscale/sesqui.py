@@ -29,6 +29,7 @@ from .inference_adaptors import (
     make_wan21,
 )
 from .sesqui_net import SesquiLSRNet
+from thenoise.inference import freeze
 from thenoise.utils.safetensors import load_safetensors, upscale_weight_path
 
 logger = logging.getLogger(__name__)
@@ -75,7 +76,8 @@ def _load_net(
 
     net = SesquiLSRNet(in_channels=channels)
     net.load_state_dict(state_dict)
-    net.to(device=device, dtype=dtype).eval().requires_grad_(False)
+    net.to(device=device, dtype=dtype)
+    freeze(net)
 
     logger.info("Latent upscaler ready on %s (%s)", device, dtype)
     return net, adaptor
@@ -124,13 +126,12 @@ class SesquiLSRUpscaler(LatentUpscaler):
         z = latents.to(device=self.device, dtype=self.dtype)
         scale = self.scale
 
-        with torch.no_grad():
-            # Adaptor math in fp32; the network runs in the model dtype.
-            raw = self.adaptor.to_vae_latent(z).to(self.dtype)
-            h, w = z.shape[-2:]
-            target = self.adaptor.vae_target_size((scale * h, scale * w))
-            raw_up = self.net(raw, target)
-            z_up = self.adaptor.from_vae_latent(raw_up.float()).to(self.dtype)
+        # Adaptor math in fp32; the network runs in the model dtype.
+        raw = self.adaptor.to_vae_latent(z).to(self.dtype)
+        h, w = z.shape[-2:]
+        target = self.adaptor.vae_target_size((scale * h, scale * w))
+        raw_up = self.net(raw, target)
+        z_up = self.adaptor.from_vae_latent(raw_up.float()).to(self.dtype)
 
         return z_up
 

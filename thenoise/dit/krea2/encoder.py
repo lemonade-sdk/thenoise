@@ -68,7 +68,7 @@ def load_qwen3_vl_conditioner(
         tokenizer_dir, max_length=max_length, overrides=QWEN3_VL_TOKENIZER_OVERRIDES
     )
     conditioner = Qwen3VLConditioner(qwen, tokenizer, processor, max_length=max_length, select_layers=select_layers)
-    return conditioner.eval().requires_grad_(False)
+    return conditioner
 
 
 class Qwen3VLConditioner(torch.nn.Module):
@@ -81,7 +81,7 @@ class Qwen3VLConditioner(torch.nn.Module):
         select_layers: tuple[int, ...] = (2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35),
     ):
         super().__init__()
-        self.qwen = qwen.eval().requires_grad_(False)
+        self.qwen = qwen
         self.tokenizer = tokenizer
         self.processor = processor
         self.max_length = max_length
@@ -101,22 +101,21 @@ class Qwen3VLConditioner(torch.nn.Module):
             suffix_inputs["attention_mask"].bool(),
         )
 
-        with torch.no_grad():
-            inputs = self.tokenizer(
-                text,
-                truncation=True,
-                return_length=False,
-                return_overflowing_tokens=False,
-                padding="max_length",
-                max_length=self.max_length + prefix_idx - self.prompt_template_encode_suffix_start_idx,
-                return_tensors="pt",
-            ).to(self.qwen.device, non_blocking=True)
-            input_ids = torch.cat([inputs["input_ids"], suffix_ids], dim=1)
-            mask = torch.cat([inputs["attention_mask"].bool(), suffix_mask], dim=1)
-            states = self.qwen.model(input_ids=input_ids, attention_mask=mask, output_hidden_states=True)
+        inputs = self.tokenizer(
+            text,
+            truncation=True,
+            return_length=False,
+            return_overflowing_tokens=False,
+            padding="max_length",
+            max_length=self.max_length + prefix_idx - self.prompt_template_encode_suffix_start_idx,
+            return_tensors="pt",
+        ).to(self.qwen.device, non_blocking=True)
+        input_ids = torch.cat([inputs["input_ids"], suffix_ids], dim=1)
+        mask = torch.cat([inputs["attention_mask"].bool(), suffix_mask], dim=1)
+        states = self.qwen.model(input_ids=input_ids, attention_mask=mask, output_hidden_states=True)
 
-            hiddens = torch.stack([states.hidden_states[i] for i in self.select_layers], dim=2)
-            hiddens = hiddens[:, prefix_idx:]
-            mask = mask[:, prefix_idx:]
+        hiddens = torch.stack([states.hidden_states[i] for i in self.select_layers], dim=2)
+        hiddens = hiddens[:, prefix_idx:]
+        mask = mask[:, prefix_idx:]
 
-            return hiddens, mask
+        return hiddens, mask

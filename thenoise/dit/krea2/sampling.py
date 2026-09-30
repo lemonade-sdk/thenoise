@@ -69,7 +69,6 @@ def timesteps(seq_len, steps, x1, x2, y1=0.5, y2=1.15, sigma=1.0, mu=None):
     return ts.tolist()
 
 
-@torch.no_grad()
 def encode_prompts(encoder, prompts, negative_prompts=None, *, cfg=True):
     """Encode prompts (and optional negatives) into gathered varlen text embeddings.
 

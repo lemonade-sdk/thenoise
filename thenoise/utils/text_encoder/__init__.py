@@ -153,7 +153,7 @@ def load_qwen3_model(
     load_text_encoder_weights(qwen3, path, device=device, dtype=dtype)
     if dtype is not None:
         qwen3.to(dtype)
-    return qwen3.eval().requires_grad_(False)
+    return qwen3
 
 
 def load_qwen3_text_encoder(
@@ -201,7 +201,7 @@ def load_qwen3_vl_model(
     )
     if dtype is not None:
         model.to(dtype)
-    return model.eval().requires_grad_(False)
+    return model
 
 
 def load_qwen2_5_vl_model(
@@ -226,7 +226,7 @@ def load_qwen2_5_vl_model(
         dtype=dtype,
         key_map=_convert_qwen2_5_vl_keys,
     )
-    return model.eval().requires_grad_(False)
+    return model
 
 
 def load_qwen3_tokenizer(

@@ -17,6 +17,10 @@ can hold all weights never pays any transfer cost.
 Only *weights / parameters* are managed here. Intermediate activations (latents,
 conditioning, pixels) are owned by the pipeline cache and stay on the compute
 device.
+
+Registering a component also freezes it (eval mode + ``requires_grad_(False)``):
+the registry is the single choke point every adapter's weights pass through, so
+the engine's inference-only contract is stated once — see ``thenoise.inference``.
 """
 from __future__ import annotations
 
@@ -25,6 +29,7 @@ from typing import Dict, Optional, Set, Union
 import torch
 from torch import nn
 
+from thenoise.inference import freeze
 from thenoise.utils.device import clean_memory_on_device
 
 
@@ -59,11 +64,19 @@ class MemoryManager:
 
     # ----------------------------------------------------------- registry
     def register(self, name: str, module: Optional[nn.Module]) -> None:
-        """Register ``module`` under ``name``, noting its initial residency.
+        """Register ``module`` under ``name``, freezing it and noting its residency.
 
         A module already on the load device (e.g. the always-resident VAE) is
         recorded as resident; a module on the offload device is not.
+
+        Freezing here (see ``thenoise.inference.freeze``) is deliberate: the
+        engine is inference-only, and this registry is the one point every
+        adapter passes its DiT, text encoder and VAE through, so no adapter or
+        loader has to remember ``eval().requires_grad_(False)`` itself. The
+        ``.eval()`` recurses into submodules, which covers wrappers too.
         """
+        if module is not None:
+            freeze(module)
         self._components[name] = module
         if module is not None and self._module_device(module) == self._load:
             self._resident.add(name)

@@ -24,6 +24,7 @@ from typing import (
 
 import torch
 
+from thenoise.inference import inference
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -343,7 +344,7 @@ def apply_lora_to_model(
     restore_map = getattr(base_model, "_quantized_restore_map", {})
     targets: Dict[str, _Undo] = {}
 
-    with torch.no_grad():
+    with inference():
         for path, module in _lora_targets(base_model):
             pairs = _match_pairs(f"{path}.weight", lora_keys, lora_sds, multipliers)
             if not pairs:
@@ -393,7 +394,7 @@ def undo_lora_on_model(
     dit_path = result["dit_path"]
     base_model = _unwrap_compiled(model)
 
-    with torch.no_grad():
+    with inference():
         for path, undo in targets.items():
             module = base_model.get_submodule(path)
             if undo.mode is LoraMode.RUNTIME:

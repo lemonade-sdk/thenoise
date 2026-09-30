@@ -111,7 +111,6 @@ class QwenImage21Model(DiffusionModel):
         self.dit = load_qwen_image21_dit(
             config.dit_path, device=self.offload_device, dtype=config.dtype
         )
-        self.dit.eval().requires_grad_(False)
 
         # A fused-MLP checkpoint matches a LoRA trained on the split SwiGLU names
         # only once its ``gate_layer``/``proj`` factors are fused onto ``gate_up``.
@@ -129,7 +128,6 @@ class QwenImage21Model(DiffusionModel):
 
         # Wan-2.2-layout VAE: 64ch latent, 16x, RGBA.
         self.vae = load_wan22_vae(self.vae_path, device=self.device, dtype=config.dtype)
-        self.vae.eval().requires_grad_(False)
         if self.vae.z_dim != self.dit.in_channels:
             raise ValueError(
                 f"the VAE's {self.vae.z_dim}ch latent does not feed this DiT's "
@@ -253,7 +251,7 @@ class QwenImage21Model(DiffusionModel):
         """
         dev = torch.device(self.device)
         t_full = torch.full((1,), float(t), dtype=latents.dtype, device=dev)
-        with torch.no_grad(), torch.autocast(device_type=dev.type, dtype=self.dtype):
+        with torch.autocast(device_type=dev.type, dtype=self.dtype):
             pos = self.dit(latents, t_full, self._seqs["cond"], self.kv_cache("cond"))
             if guidance_scale > 1.0 and "uncond" in self._seqs:
                 neg = self.dit(latents, t_full, self._seqs["uncond"], self.kv_cache("uncond"))
