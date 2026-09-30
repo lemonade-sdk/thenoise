@@ -1,6 +1,6 @@
 # Ming-Image 0.1
 
-**The Lumina/S3-DiT family, with real transparency.**
+**The Lumina/S3-DiT family, perfect for Web UI mockups.**
 
 Ming-Image is an S3-DiT — the same transformer family as
 [Z-Image](zimage.md) — conditioned by a condensed BailingMM2 ("Ling-mini-2.0")
