@@ -40,7 +40,9 @@ Not measured yet.
 
 ## Examples
 
-*Generated examples are pending the real-hardware validation run.*
+<img width="30%" alt="thenoise_3611708399" src="https://github.com/user-attachments/assets/7901b2eb-5c25-4524-9a43-7ed5f447d796" />
+<img width="60%" alt="thenoise_71" src="https://github.com/user-attachments/assets/9e6d7ded-d8e6-43e1-b49b-b4deb7465247" /><img width="70%" alt="thenoise_1 (1)" src="https://github.com/user-attachments/assets/41feaff3-1097-4fb6-a41b-502faf476fe2" />
+
 
 ## Download
 
