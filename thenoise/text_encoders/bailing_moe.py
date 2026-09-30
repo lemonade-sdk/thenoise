@@ -1,28 +1,5 @@
-"""BailingMoeV2 — the Ling-2.0-mini MoE language core of Ming-Image's conditioner.
-
-Vendored from Ant Group's ``modeling_bailing_moe_v2.py`` (Apache-2.0) and rewritten
-against this repo's primitives (``QuantizedLinear``, the shared ``RMSNorm``/
-``attention``/``split-half`` RoPE helpers), because the upstream file targets the
-transformers-4.x private API (``_prepare_4d_causal_attention_mask*``,
-``MoeModelOutputWithPast``, flash-attn classes) that transformers 5 dropped. Only
-what Ming-Image's text-to-image conditioner actually runs is kept:
-
-  * grouped-top-k routing with a **separate router for image tokens** (``MultiRouter``),
-    which the prompt's learnable query tokens go through, so it is not optional,
-  * the ``video_rope`` 3D position scheme with ``partial_rotary_factor=0.5``,
-  * fused QK-norm and GQA,
-  * fused expert banks (the checkpoint stores ``[experts, out, in]`` per projection,
-    not one module per expert).
-
-Dropped from the port: KV cache, generation, MoE load-balancing loss, dropout,
-tensor/pipeline parallelism, the audio and video streams, and the ``m_rope``/``3D``
-position variants (``rope_scaling.type`` is ``video_rope`` for this checkpoint).
-
-The module tree mirrors the checkpoint's own names exactly (``attention.qkv`` is
-named ``attention.query_key_value``, the QK norms stay ``q_norm``/``k_norm`` rather
-than this repo's ``QKNorm`` layout), so a Ming-Image text-encoder file loads with no
-key map at all.
-"""
+"""BailingMoeV2 — the Ling-2.0-mini MoE core of Ming-Image's conditioner, vendored from
+Ant Group's ``modeling_bailing_moe_v2.py`` and rewritten against this repo's primitives."""
 from __future__ import annotations
 
 import dataclasses
@@ -38,16 +15,12 @@ from thenoise.utils.attention import AttentionParams, attention
 from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.rope import apply_rope_split_half
 
-#: How the three position axes share the rotary frequencies (the reference's
-#: ``rope_scaling = {"type": "mrope", "mrope_section": [8, 12, 12]}``). For
-#: ``video_rope`` the temporal section keeps its own slots and the height/width
-#: sections interleave, so ``sum(sections)`` must be ``rotary_dim / 2``.
+#: How the three position axes share the rotary frequencies. ``sum(sections)``
+#: must be ``rotary_dim / 2`` for the ``video_rope`` interleaving below.
 MROPE_SECTION = (8, 12, 12)
 
-#: One ``(start, grid_h, grid_w)`` block marks a run of "image" tokens: ``grid_*``
-#: are in MERGED units (``grid_h * grid_w ==`` the number of tokens), ``start`` is
-#: the index of its first token. The conditioner's learnable-query run is such a
-#: block because the reference injects those embeddings at image-token positions.
+#: One ``(start, grid_h, grid_w)`` block marks a run of "image" tokens; ``grid_*``
+#: are in MERGED units (``grid_h * grid_w`` tokens), ``start`` is its first token.
 Block = tuple[int, int, int]
 
 
@@ -81,13 +54,8 @@ class BailingMoeV2Config:
 
 
 class BailingAttention(nn.Module):
-    """GQA attention with per-head QK-RMSNorm and partial ``video_rope``.
-
-    ``freqs`` carries the assembled (cos, sin) pair, ``[L, 1, 1, rotary_dim]``, so
-    the shared split-half helper rotates the first ``rotary_dim`` channels of each
-    head and leaves the rest — which is what ``partial_rotary_factor=0.5`` means
-    here (64 of 128).
-    """
+    """GQA attention with per-head QK-RMSNorm and partial ``video_rope``: the shared
+    split-half helper rotates the first ``rotary_dim`` channels, leaving the rest."""
 
     def __init__(self, config: BailingMoeV2Config) -> None:
         super().__init__()
@@ -95,14 +63,12 @@ class BailingAttention(nn.Module):
         self.num_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
         kv_dim = self.num_kv_heads * self.head_dim
-        # ``query_key_value``/``dense`` are the checkpoint's own names for the fused
-        # projection and its output.
+        # ``query_key_value``/``dense`` are the checkpoint's own names.
         self.query_key_value = QuantizedLinear(
             config.hidden_size, (self.num_heads + 2 * self.num_kv_heads) * self.head_dim, bias=False
         )
         self.dense = QuantizedLinear(self.num_heads * self.head_dim, config.hidden_size, bias=False)
-        # Two plain RMSNorms (not ``QKNorm``): the file stores ``q_norm``/``k_norm``,
-        # and ``QKNorm``'s ``query_norm``/``key_norm`` nesting would need a key map.
+        # Two plain RMSNorms (not ``QKNorm``) to match the file's ``q_norm``/``k_norm``.
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
@@ -110,8 +76,7 @@ class BailingAttention(nn.Module):
         heads = self.num_heads + 2 * self.num_kv_heads
         qkv = self.query_key_value(x).unflatten(-1, (heads, self.head_dim)).transpose(1, 2)
         query, key, value = qkv.split((self.num_heads, self.num_kv_heads, self.num_kv_heads), dim=1)
-        # Norm first, then rotate: the order the reference (and therefore the
-        # weights) were trained with.
+        # Norm first, then rotate: the order the reference (and the weights) used.
         query, key = self.q_norm(query), self.k_norm(key)
         cos, sin = freqs
         query = apply_rope_split_half(query, cos, sin)
@@ -121,11 +86,7 @@ class BailingAttention(nn.Module):
 
 
 class MLP(nn.Module):
-    """SwiGLU feed-forward (``down(silu(gate(x)) * up(x))``), bias-free.
-
-    Shared with the Ming connector, whose feed-forward is the same shape with
-    different widths.
-    """
+    """SwiGLU feed-forward (``down(silu(gate(x)) * up(x))``), bias-free."""
 
     def __init__(self, hidden_size: int, intermediate_size: int) -> None:
         super().__init__()
@@ -138,52 +99,30 @@ class MLP(nn.Module):
 
 
 class ExpertBank(nn.Module):
-    """Every expert of one projection, in a single ``[experts, out, in]`` weight.
-
-    That is the checkpoint's layout (``mlp.experts.gate_up_proj.weight``). A
-    quantized export keeps that layout low-bit rather than dequantizing it:
-    comfy-kitchen has no 3-D INT8 GEMM, but its per-row layouts run a 2-D weight
-    fine, and the grouped dispatch asks for exactly one expert at a time — so a
-    bank runs as ``experts`` row-sliced ``QuantizedTensor`` views
-    (:meth:`expert_weight`), which is also how ComfyUI runs its MoE banks.
-    """
+    """Every expert of one projection in a single ``[experts, out, in]`` weight; a
+    quantized export keeps it low-bit and runs one row-sliced view per expert."""
 
     def __init__(self, num_experts: int, out_features: int, in_features: int) -> None:
         super().__init__()
         self.num_experts = num_experts
         self.out_features = out_features
         self.in_features = in_features
-        # Not ``torch.empty``: the checkpoint overwrites every row, but uninitialised
-        # memory makes a hand-built model NaN, and a zero-filled bank makes the whole
-        # routed branch identically zero — which hides a routing bug just as well.
-        # Same bound ``nn.Linear`` derives from kaiming_uniform(a=sqrt(5)), per expert.
+        # Not ``torch.empty``: the checkpoint overwrites every row, and a zero-filled
+        # bank would hide a routing bug. Bound as ``nn.Linear`` derives from kaiming.
         bound = in_features**-0.5
         self.weight = nn.Parameter(torch.empty(num_experts, out_features, in_features))
         nn.init.uniform_(self.weight, -bound, bound)
         self._quantized = False
 
     def load_quantized(self, qt: torch.Tensor) -> None:
-        """Switch this bank to a low-bit weight of any layout (and stay low-bit).
-
-        The mirror of ``QuantizedLinear.load_quantized``: the ``QuantizedTensor``
-        replaces the parameter as a buffer, so the int8 bank plus its F32 scale
-        follow ``.to(device)`` like any other quantized weight.
-        """
+        """Switch this bank to a low-bit weight of any layout (and stay low-bit)."""
         del self.weight  # free the full-precision bank
         self.register_buffer("weight", qt)
         self._quantized = True
 
     def expert_weight(self, expert: int) -> torch.Tensor:
-        """One expert's ``[out, in]`` weight, still low-bit when the bank is.
-
-        Never index a 3-D ``QuantizedTensor``: ``self.weight[expert]`` goes through
-        the dequantize fallback and materialises the WHOLE bank (a GB per expert
-        access). The view is therefore rebuilt by hand — expert ``e``'s storage,
-        its own ``[out, 1]`` scale, a 2-D ``orig_shape`` — which is a slice of the
-        buffers, not a copy. (A multi-row slice is rejected outright: the per-row
-        layouts accept a scalar or a per-output-channel scale only, which is fine
-        because the dispatch runs one expert per GEMM anyway.)
-        """
+        """One expert's ``[out, in]`` weight, still low-bit when the bank is; the view
+        is a slice of the buffers, not a copy (never index the 3-D ``QuantizedTensor``)."""
         weight = self.weight
         if not self._quantized:
             return weight[expert]
@@ -199,16 +138,10 @@ class ExpertBank(nn.Module):
             clone_params=False,
         )
 
-    def forward(self, x: torch.Tensor, expert: int) -> torch.Tensor:
-        return F.linear(x, self.expert_weight(expert))
-
 
 class Gate(nn.Module):
-    """Sigmoid router with expert bias and group-limited top-k (fp32 math).
-
-    The bias shifts the *selection* score but is not part of the returned weight,
-    which is the normalized sigmoid score scaled by ``routed_scaling_factor``.
-    """
+    """Sigmoid router with expert bias and group-limited top-k (fp32 math); the bias
+    shifts only the *selection* score, not the returned normalized sigmoid weight."""
 
     def __init__(self, config: BailingMoeV2Config) -> None:
         super().__init__()
@@ -222,14 +155,12 @@ class Gate(nn.Module):
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         x = x.reshape(-1, x.shape[-1])
-        # The routing MATH is fp32 (sigmoid, the bias, the group sums), but the
-        # projection runs in the weight's own dtype: the file keeps ``gate.proj`` in
-        # bf16, and feeding it an fp32 activation is a dtype error, not a promotion.
+        # Routing math is fp32; the projection runs in the weight's own dtype.
         scores = torch.sigmoid(self.proj(x).float())
         selection = scores + self.expert_bias.to(scores.dtype)
 
-        # Pick the ``topk_group`` strongest groups (a group's score is the sum of its
-        # two best experts), then choose ``top_k`` experts among those groups only.
+        # Pick the ``topk_group`` strongest groups (sum of their two best experts),
+        # then choose ``top_k`` experts among those groups only.
         grouped = selection.view(-1, self.n_group, self.num_experts // self.n_group)
         group_scores = grouped.topk(2, dim=-1)[0].sum(dim=-1)
         groups = torch.topk(group_scores, k=self.topk_group, dim=-1, sorted=False)[1]
@@ -250,17 +181,9 @@ def expert_dispatch(
     gate_up: ExpertBank,
     down: ExpertBank,
 ) -> torch.Tensor:
-    """Route ``x`` through the fused banks: sort by expert, one GEMM per expert.
+    """Route ``x`` through the fused banks: sort by expert so each runs once on its own
+    tokens, one GEMM per expert, then scatter the sum back over each token's experts."""
 
-    Sorting (rather than masking) means each expert runs once, on exactly its own
-    tokens, and the scatter back makes the sum over a token's ``top_k`` experts exact.
-    ``gate_up`` stacks the gated and the up projection row-wise, so the SwiGLU split
-    is a ``chunk(2)``.
-
-    The banks travel as modules, not tensors: a quantized bank hands out one low-bit
-    ``[out, in]`` view per expert (:meth:`ExpertBank.expert_weight`), free for a
-    dense bank and the entire point for an int8 one.
-    """
     num_tokens, top_k = topk_idx.shape
     flat_idx = topk_idx.reshape(-1)
     order = torch.argsort(flat_idx)
@@ -289,7 +212,7 @@ def expert_dispatch(
 
 
 class Experts(nn.Module):
-    """The two fused expert banks of one MoE layer (``experts.gate_up_proj``/``down_proj``)."""
+    """The two fused expert banks of one MoE layer (``gate_up_proj``/``down_proj``)."""
 
     def __init__(self, config: BailingMoeV2Config) -> None:
         super().__init__()
@@ -302,12 +225,8 @@ class Experts(nn.Module):
 
 
 class SparseMoeBlock(nn.Module):
-    """Top-k experts + one shared expert, routed by a text and an image router.
-
-    Both routers score every token and the ``image_mask`` picks which answer to
-    use, so the learnable query tokens (which the conditioner injects as image
-    tokens) travel through entirely different experts than the prompt text.
-    """
+    """Top-k experts + one shared expert, routed by a text and an image router;
+    ``image_mask`` picks which answer to use so the query tokens take different experts."""
 
     def __init__(self, config: BailingMoeV2Config) -> None:
         super().__init__()
@@ -367,21 +286,9 @@ def video_rope(
     theta: float,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``video_rope`` cos/sin for a text sequence carrying image blocks.
+    """``video_rope`` cos/sin for a text sequence carrying image blocks: the text counter
+    steps over each block, and image tokens share one temporal/height position along width."""
 
-    ``get_t_scale_rope_index`` in the reference, expressed as frequencies directly.
-    Per axis:
-
-    * **text** — a plain ``0..L-1`` counter, but every image block costs the text ONE
-      position, so the counter steps over the block (``t`` after a block of ``n``
-      tokens drops back by ``n - 1``);
-    * **image** — all its tokens share one temporal/height position and spread along
-      width, centred on it (``w - (grid_w - 1) // 2``), which is why the block's own
-      tokens sit symmetrically around the text position they occupy;
-    * **frequencies** — the first ``sum(mrope_section[1:])`` slots of each half of the
-      rotary band alternate height/width and the rest take the temporal position,
-      duplicated over the two halves (the split-half convention).
-    """
     pos = torch.arange(seq_len, dtype=torch.float32, device=device)
     for start, grid_h, grid_w in blocks:
         pos[start + grid_h * grid_w :] -= grid_h * grid_w - 1
@@ -429,20 +336,11 @@ class BailingMoeV2(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         capture_pre_layers: Sequence[int] = (),
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        """Run the stack over ``inputs_embeds`` ``[B, L, hidden]``.
-
-        ``capture_pre_layers`` lists the reference's ``output_hidden_states`` indices
-        below the last one; index ``k`` there is the *input* of layer ``k`` (index 0
-        being the embeddings), so capturing before layer ``k`` reproduces it. The
-        post-final-norm state is always appended, which is what index
-        ``num_hidden_layers`` holds in the reference (transformers appends the hidden
-        states AFTER the trailing norm), so the returned list is exactly the set of
-        tensors ``selected_hidden_states_layers`` can ask for.
-        """
+        """Run the stack over ``inputs_embeds`` ``[B, L, hidden]``, capturing each
+        ``capture_pre_layers`` input state and always appending the post-final-norm one."""
         batch, seq_len, _ = inputs_embeds.shape
-        # The band is built in fp32 and cast down with the activations: an fp32
-        # cos/sin would promote q and k out of bf16 while v stayed put, and SDPA
-        # refuses the mismatch (the connector casts for exactly this reason).
+        # The band is built in fp32 and cast down with the activations; an fp32
+        # cos/sin would promote q and k out of bf16 while v stayed put.
         cos, sin = video_rope(
             seq_len, blocks, self.config.rotary_dim, self.config.rope_theta, inputs_embeds.device
         )
@@ -454,8 +352,7 @@ class BailingMoeV2(nn.Module):
             for start, grid_h, grid_w in blocks:
                 image_mask[:, start : start + grid_h * grid_w] = True
 
-        # Causal, plus the padding the caller marks out. ``attention`` takes a
-        # True-attends mask; the diagonal is included, a token always sees itself.
+        # Causal, plus the padding the caller marks out; the diagonal is included.
         mask = torch.ones((seq_len, seq_len), dtype=torch.bool, device=inputs_embeds.device).tril()
         if attention_mask is not None:
             mask = mask & attention_mask[:, None, None, :].bool()

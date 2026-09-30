@@ -1,39 +1,5 @@
 """The Ming-Image conditioner: the BailingMM2 thinker, its connector, and the two
-tensors the DiT is conditioned on.
-
-Ming-Image does not read its LLM's last hidden state as a caption. One causal
-pass over the prompt produces **two** tensors of different shape and provenance:
-
-* ``cap_feats`` ``[1, 256, 2560]`` — the prompt carries 256 learnable *query*
-  tokens, spliced over the ``<imagePatch>`` token as a fake image block. Their
-  thinker hidden states go through ``proj_in``, the 28-layer **bidirectional**
-  Qwen2 connector, and ``proj_out``. This is the tensor the DiT's
-  ``cap_embedder`` eats.
-* ``direct_context`` ``[1, P, 3840]`` — ``proj_directvlm`` of the three captured
-  thinker states (the inputs of layers 5 and 12, and the post-final-norm state)
-  over the **prompt span only** (``<image>`` excluded). Already DiT-wide, so the
-  Lumina core concatenates it *after* ``cap_embedder``.
-
-Those two tensors, not the LLM, are what makes Ming-Image its own model. The
-query block also decides *which experts* run: image positions route through
-``mlp.image_gate`` (``router_type: MultiRouter``), i.e. entirely different
-experts from the prompt text. Hence the block geometry (:data:`QUERY_BLOCK_GRID`)
-is part of this module's contract, not an implementation detail.
-
-Checkpoint facts this module is written against — measured from the released bf16
-and int8-convrot text-encoder files, not from the paper:
-
-``thinker.*`` (BailingMoeV2) ``connector.*`` ``query_tokens`` ``proj_in``
-``proj_out`` ``proj_directvlm.{0,1}`` ``tokenizer_json`` (a 12 MB U8 payload)
-``thinker.lm_head.*`` ``vision.*`` + ``linear_proj.*`` (the image tower, not
-built here). The module tree mirrors the file's own names exactly, so the load
-needs no key map; the four prefixes the conditioner does not build are dropped
-(:data:`TEXT_ENCODER_DROP_KEYS`) and the load stays strict.
-
-Ported from the vendor's ``modeling_bailingmm2.py`` (Ant Group `Ming-Image`,
-Apache-2.0) and cross-checked line by line against ComfyUI's condensed
-``comfy/text_encoders/ming_image.py``.
-"""
+tensors the DiT is conditioned on (``cap_feats`` + ``direct_context``)."""
 from __future__ import annotations
 
 import logging
@@ -67,20 +33,14 @@ logger = logging.getLogger(__name__)
 IMAGE_TOKEN = 157158  # <image>
 IMAGE_PATCH_TOKEN = 157157  # <imagePatch>: the row the query tokens replace
 IMAGE_END_TOKEN = 157159  # </image>
-#: The file's pad id. Batch is always 1, so it is only ever a name we know.
-PAD_TOKEN = 156892
 
-#: ``img_gen_scales`` is ``[16]``, so the learnable block is 16² = 256 tokens. The
-#: reference registers it as ``image_grid_thw = [1, 2, 2 * 256]``, which the vision
-#: merger's 2×2 fold turns into a ``1 x 256`` grid: one row, every token spread
-#: along the width axis. A different grid is not an error, it is a silently worse
-#: picture — the rope positions of the whole sequence follow this block.
+#: ``img_gen_scales`` is ``[16]``, so the learnable block is 16² = 256 tokens, a
+#: ``1 x 256`` grid (``image_grid_thw = [1, 2, 2 * 256]`` after the 2×2 fold).
 QUERY_TOKENS = 256
 QUERY_BLOCK_GRID: Tuple[int, int] = (1, QUERY_TOKENS)
 
 #: The vendor generator's own chat template: its default Chinese system turn, the
-#: ``detailed thinking off`` switch it always sends, and the query block appended
-#: after the open assistant turn.
+#: ``detailed thinking off`` switch it always sends, and the query block appended.
 T2I_PROMPT_TEMPLATE = (
     "<role>SYSTEM</role>你是一个友好的AI助手。\n\n"
     "detailed thinking off<|role_end|>"
@@ -89,10 +49,9 @@ T2I_PROMPT_TEMPLATE = (
     "<image><imagePatch></image>"
 )
 
-#: ``mlp/config.json``'s ``selected_hidden_states_layers``. In the reference's
-#: numbering, index ``k`` below the layer count is the INPUT of layer ``k``; the
-#: last entry (20 == the layer count) is the post-final-norm state, which
-#: :class:`~thenoise.text_encoders.bailing_moe.BailingMoeV2` always appends.
+#: ``mlp/config.json``'s ``selected_hidden_states_layers``; index ``k`` below the
+#: layer count is the INPUT of layer ``k``, and the last entry is the post-final-norm
+#: state the thinker appends.
 SELECTED_LAYERS: Tuple[int, ...] = (5, 12, 20)
 
 #: ``mlp/config.json``: ``diffusion_c_input_dim`` / ``diffusion_inner_dim``.
@@ -100,8 +59,7 @@ CAP_FEAT_DIM = 2560
 DIRECT_DIM = 3840
 
 #: What the released file carries that this module tree does not build: the image
-#: tower and its projection (the edit path), the LM head (never run), and the
-#: tokenizer payload (read on its own, see :func:`load_ming_tokenizer`).
+#: tower (edit path), the LM head (never run), and the tokenizer payload.
 TEXT_ENCODER_DROP_KEYS = (
     "vision.",
     "linear_proj.",
@@ -132,14 +90,8 @@ class MingConnectorConfig:
 
 
 class ConnectorAttention(nn.Module):
-    """GQA attention with separate, BIASED q/k/v and NO causal mask.
-
-    Both halves of that sentence are load-bearing: the file ships
-    ``self_attn.{q,k,v}_proj.bias`` (Qwen2, unlike the thinker), and the vendor
-    sets ``is_causal = False`` on every connector layer while handing it an
-    all-ones mask — the connector reads its query tokens as one bidirectional set,
-    not as a sequence.
-    """
+    """GQA attention with separate, BIASED q/k/v (Qwen2) and NO causal mask — the
+    connector reads its query tokens as one bidirectional set, not as a sequence."""
 
     def __init__(self, config: MingConnectorConfig) -> None:
         super().__init__()
@@ -159,8 +111,7 @@ class ConnectorAttention(nn.Module):
         # Full-head split-half RoPE: no partial factor here, unlike the thinker.
         query = apply_rope_split_half(query, *freqs)
         key = apply_rope_split_half(key, *freqs)
-        # The missing mask IS the bidirectionality: every query reads every key,
-        # which is what an all-ones 4D mask means to the reference.
+        # The missing mask IS the bidirectionality: every query reads every key.
         return self.o_proj(attention([query, key, value], attn_params=AttentionParams(None)))
 
 
@@ -181,12 +132,8 @@ class ConnectorDecoderLayer(nn.Module):
 
 
 class MingConnector(nn.Module):
-    """``connector.layers.*`` + ``connector.norm``: 28 bidirectional blocks, then RMSNorm.
-
-    The trailing norm belongs to this module because the reference reads
-    ``connector(...).hidden_states[-1]``, and transformers appends that state AFTER
-    the model's final norm.
-    """
+    """``connector.layers.*`` + ``connector.norm``: 28 bidirectional blocks, then RMSNorm;
+    the trailing norm belongs here because the reference reads the post-norm state."""
 
     def __init__(self, config: Optional[MingConnectorConfig] = None) -> None:
         super().__init__()
@@ -198,8 +145,7 @@ class MingConnector(nn.Module):
         self._rope = split_half_rope_1d(self.config.head_dim, self.config.rope_theta)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Positions are the plain ``0..L-1`` of the block handed to it; the thinker's
-        # ``video_rope`` business does not reach in here.
+        # Positions are the plain ``0..L-1`` of the block handed to it.
         cos, sin = self._rope(x.shape[1], x.device)
         freqs = (cos.to(x.dtype), sin.to(x.dtype))
         for layer in self.layers:
@@ -211,12 +157,8 @@ class MingConnector(nn.Module):
 
 
 class MingImageConditioner(nn.Module):
-    """The released conditioner end to end, under the checkpoint's own module names.
-
-    Built on meta and filled by :func:`load_ming_text_encoder`. The tree has no
-    ``vision``/``linear_proj``/``lm_head`` — those prefixes are dropped at load —
-    so anything else the file cannot place is a hard error rather than a zero fill.
-    """
+    """The released conditioner end to end, under the checkpoint's own module names;
+    built on meta and filled by :func:`load_ming_text_encoder`."""
 
     def __init__(
         self,
@@ -231,8 +173,7 @@ class MingImageConditioner(nn.Module):
         direct_norm_eps: float = 1e-5,
     ) -> None:
         super().__init__()
-        # A config stands for "build it" — what lets a caller (the loader, a test)
-        # resize either half without constructing it itself.
+        # A config stands for "build it" — lets a caller resize either half.
         if isinstance(thinker, BailingMoeV2Config):
             thinker = BailingMoeV2(thinker)
         if isinstance(connector, MingConnectorConfig):
@@ -244,7 +185,7 @@ class MingImageConditioner(nn.Module):
 
         layers = tuple(selected_layers)
         # Every entry but the last names a layer INPUT; the last must be the layer
-        # count itself, i.e. the post-final-norm state index 20 stands for.
+        # count itself (the post-final-norm state index 20 stands for).
         if not layers or layers[-1] != self.thinker.config.num_hidden_layers:
             raise ValueError(
                 f"selected_layers {layers} must end at the thinker's layer count "
@@ -262,9 +203,7 @@ class MingImageConditioner(nn.Module):
         self.num_queries = num_queries
         self.query_grid = tuple(query_grid)
         # Drawn like the embedding rows these stand in for: the checkpoint overwrites
-        # them, and an uninitialised ``torch.empty`` is garbage that bf16 then rounds
-        # into a different garbage (so a hand-built conditioner is not even
-        # reproducible through a save/load round-trip).
+        # them, and uninitialised ``torch.empty`` is garbage bf16 rounds into.
         self.query_tokens = nn.Parameter(torch.randn(num_queries, hidden))
 
         self.proj_in = QuantizedLinear(hidden, connector_hidden, bias=True)
@@ -280,13 +219,8 @@ class MingImageConditioner(nn.Module):
         return self.query_tokens.device
 
     def query_block(self, embeddings: torch.Tensor, query_index: int) -> torch.Tensor:
-        """Splice the learnable rows OVER the ``<imagePatch>`` embedding.
-
-        The result is ``[prompt 0..q-1][query tokens][</image>]``: the token under
-        ``q`` is REPLACED, not shifted. That is what makes the reference's ``:q-1``
-        prompt span, and the rope counter that steps one position over the block,
-        fall out of the same index.
-        """
+        """Splice the learnable rows OVER the ``<imagePatch>`` embedding (the token
+        under ``q`` is REPLACED, not shifted), giving ``[prompt][query][</image>]``."""
         if embeddings.shape[0] != 1:
             raise ValueError(
                 f"the Ming-Image conditioner encodes one prompt at a time, got "
@@ -302,11 +236,8 @@ class MingImageConditioner(nn.Module):
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """``input_ids`` ``[1, L]`` (from :func:`build_prompt_ids`) to the two tensors.
-
-        Returns ``(cap_feats [1, num_queries, cap_feat_dim], direct_context
-        [1, P, direct_dim])``.
-        """
+        """``input_ids`` ``[1, L]`` to ``(cap_feats [1, num_queries, cap_feat_dim],
+        direct_context [1, P, direct_dim])``."""
         if input_ids.shape[0] != 1:
             raise ValueError(
                 f"the Ming-Image conditioner encodes one prompt at a time, got "
@@ -336,8 +267,8 @@ class MingImageConditioner(nn.Module):
         block = hidden[:, q : q + self.num_queries]
         cap_feats = self.proj_out(self.connector(self.proj_in(block)))
 
-        # ``:q-1`` is the prompt span with ``<image>`` excluded — the vendor's
-        # ``labels < 0`` mask, i.e. exactly "the tokens the user sent".
+        # ``:q-1`` is the prompt span with ``<image>`` excluded (the vendor's ``labels
+        # < 0`` mask, i.e. exactly "the tokens the user sent").
         direct = torch.cat([state[:, : q - 1] for state in captured], dim=-1)
         return cap_feats, self.proj_directvlm(direct)
 
@@ -351,27 +282,19 @@ def build_prompt(prompt: str) -> str:
 
 
 def build_prompt_ids(tokenizer: Tokenizer, prompt: str) -> List[int]:
-    """Tokenize :func:`build_prompt` with ``add_special_tokens=False``.
-
-    Nothing is added because the template already spells out both delimiters —
-    letting the tokenizer prepend one would shift every rope position.
-    """
+    """Tokenize :func:`build_prompt` with ``add_special_tokens=False`` (the template
+    already spells out both delimiters, so prepending one would shift the rope)."""
     return tokenizer.encode(build_prompt(prompt), add_special_tokens=False).ids
 
 
 def check_query_block(ids: Sequence[int]) -> int:
-    """The index of the ``<imagePatch>`` token, asserted against its own delimiters.
-
-    Asserted rather than trusted: a template that stopped emitting the marker (or a
-    tokenizer that split it) would otherwise encode a picture out of whatever the
-    tokenizer made of the text, with no error anywhere.
-    """
+    """The index of the ``<imagePatch>`` token, asserted against its own delimiters so
+    a broken template or a split token fails loudly instead of drawing a wrong picture."""
     hits = [i for i, token in enumerate(ids) if token == IMAGE_PATCH_TOKEN]
     if len(hits) != 1:
         raise ValueError(f"expected exactly one <imagePatch> token, found {len(hits)}")
     q = hits[0]
-    # Bounds-guarded rather than indexed: a marker at either end is a broken
-    # template, which has to read as this error, not as an IndexError.
+    # Bounds-guarded rather than indexed: a marker at either end is a broken template.
     before = ids[q - 1] if q >= 1 else None
     after = ids[q + 1] if q + 1 < len(ids) else None
     if before != IMAGE_TOKEN or after != IMAGE_END_TOKEN:
@@ -384,12 +307,8 @@ def check_query_block(ids: Sequence[int]) -> int:
 
 
 def load_ming_tokenizer(path: str, *, tokenizer_dir: Optional[str] = None) -> Tokenizer:
-    """The tokenizer, which the text-encoder FILE carries as a U8 JSON payload.
-
-    Nothing to vendor and nothing extra to download. ``tokenizer_dir`` (a directory
-    holding ``tokenizer.json``) is the fallback for a file stripped of the payload,
-    e.g. a repackaging that dropped the non-weight tensor.
-    """
+    """The tokenizer, which the text-encoder FILE carries as a U8 JSON payload;
+    ``tokenizer_dir`` (holding ``tokenizer.json``) is the fallback for a stripped file."""
     raw = _read_tokenizer_json(path)
     if raw is None:
         candidate = os.path.join(tokenizer_dir, "tokenizer.json") if tokenizer_dir else None
@@ -426,20 +345,8 @@ def load_ming_text_encoder(
     with_tokenizer: bool = True,
     config: Optional[dict] = None,
 ) -> Tuple[MingImageConditioner, Optional[Tokenizer]]:
-    """Build the conditioner on meta, load one safetensors file into it, attach the tokenizer.
-
-    ``config`` overrides ``MingImageConditioner``'s constructor keywords (the same
-    escape hatch ``load_ming_dit`` has): the released defaults are an 18 B
-    conditioner, and a test that only wants to exercise the load path asks for a
-    tiny one here.
-
-    bf16 and int8-convrot are chosen from the file's own header by
-    ``load_text_encoder_weights``, like every other adapter. Nothing is
-    dequantized on the way in: the ``[experts, out, in]`` banks stay low-bit and
-    run one row-sliced ``QuantizedTensor`` per expert (see
-    :class:`~thenoise.text_encoders.bailing_moe.ExpertBank`), so an int8 text
-    encoder really is about a third of the bf16 one.
-    """
+    """Build the conditioner on meta, load one safetensors file into it, attach the
+    tokenizer; bf16/int8-convrot come from the file's header and the banks stay low-bit."""
     logger.info("Loading Ming-Image text encoder from %s", path)
 
     with init_empty_weights():
@@ -484,7 +391,6 @@ __all__ = [
     "MingConnectorConfig",
     "MingImageConditioner",
     "MingTokenizerError",
-    "PAD_TOKEN",
     "QUERY_BLOCK_GRID",
     "QUERY_TOKENS",
     "SELECTED_LAYERS",

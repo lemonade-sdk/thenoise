@@ -1,18 +1,5 @@
-"""Text encoders this repo has to own: architectures ``transformers`` cannot run.
-
-The adapters' other encoders are stock ``transformers`` models loaded through
-:mod:`thenoise.utils.text_encoder`. What lives here instead is a model's own
-conditioner, vendored against this repo's primitives (``QuantizedLinear``, the
-shared ``RMSNorm``/``attention``/RoPE helpers) because the upstream file depends
-on private transformers APIs the installed version dropped:
-
-* :mod:`~thenoise.text_encoders.bailing_moe` — BailingMoeV2, the Ling-2.0-mini MoE
-  language core (group-limited top-k routing with a separate *image* router,
-  fused ``[experts, out, in]`` banks, ``video_rope``).
-* :mod:`~thenoise.text_encoders.ming_image` — Ming-Image's conditioner on top of
-  it: the query-token block, the 28-layer bidirectional connector, and the two
-  conditioning tensors its DiT reads.
-"""
+"""Text encoders this repo has to own: architectures ``transformers`` cannot run —
+the BailingMoeV2 MoE language core and Ming-Image's conditioner on top of it."""
 from thenoise.text_encoders.bailing_moe import (
     MROPE_SECTION,
     BailingAttention,
@@ -34,7 +21,6 @@ from thenoise.text_encoders.ming_image import (
     IMAGE_END_TOKEN,
     IMAGE_PATCH_TOKEN,
     IMAGE_TOKEN,
-    PAD_TOKEN,
     QUERY_BLOCK_GRID,
     QUERY_TOKENS,
     SELECTED_LAYERS,
@@ -72,7 +58,6 @@ __all__ = [
     "MingConnectorConfig",
     "MingImageConditioner",
     "MingTokenizerError",
-    "PAD_TOKEN",
     "QUERY_BLOCK_GRID",
     "QUERY_TOKENS",
     "SELECTED_LAYERS",

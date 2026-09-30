@@ -122,8 +122,7 @@ def load_text_encoder_weights(
             paths. Text encoders carry things no module owns — a multimodal file
             ships an image tower the text-to-image conditioner does not build, and
             some store their tokenizer as a U8 payload tensor (Ming-Image's
-            ``tokenizer_json``). Dropping keeps the load strict: everything that
-            survives must land, so a genuinely missing weight still raises.
+            ``tokenizer_json``). Dropping keeps the load strict.
 
     Returns:
         ``model`` (loaded in place, moved to ``device``).

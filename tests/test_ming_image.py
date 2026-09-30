@@ -304,17 +304,17 @@ def test_the_shift_actually_moves_the_grid():
 
 
 def test_encode_prompt_says_what_is_missing():
-    """Without a conditioner the adapter must refuse, not draw a plausible picture of
-    nothing at all.
-    """
+    """Ming-Image editing is not implemented: an image must be refused, not ignored."""
     model = _bare_model()
-    with pytest.raises(NotImplementedError, match="docs/ming-image-plan.md"):
-        model.encode_prompt(EncodePromptArgs(prompt="a cat", guidance_scale=1.0))
+    with pytest.raises(ValueError, match="editing is not implemented"):
+        model.encode_prompt(
+            EncodePromptArgs(prompt="a cat", guidance_scale=1.0, image=object())
+        )
 
 
 def test_encode_prompt_pairs_each_branch_with_its_second_tensor(monkeypatch):
-    """The conditioning shape phase 3 has to fill: two tensors per branch, and no
-    uncond branch at all when guidance is off."""
+    """Two tensors per branch, and the uncond branch is the conditioning zeroed out
+    (not a second encode) — with no uncond branch at all when guidance is off."""
     model = _bare_model()
     cap = torch.zeros(1, 4, CAP_DIM)
     extra = torch.zeros(1, 3, DIM)
@@ -328,7 +328,9 @@ def test_encode_prompt_pairs_each_branch_with_its_second_tensor(monkeypatch):
     both = model.encode_prompt(
         EncodePromptArgs(prompt="a cat", negative_prompt="blur", guidance_scale=3.0)
     )
-    assert both.null is cap and both.null_extra is extra
+    assert both.null is not cap and both.null_extra is not extra
+    assert torch.equal(both.null, torch.zeros_like(cap))
+    assert torch.equal(both.null_extra, torch.zeros_like(extra))
 
 
 class _SpyVAE:
