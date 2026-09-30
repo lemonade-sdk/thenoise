@@ -402,7 +402,7 @@ def test_runtime_state_is_stripped_before_the_strict_load():
     """A payload that is not module state must not reach the loader — and dropping it
     must not mutate the caller's state dict.
     """
-    from thenoise.dit.lumina.keys import drop_runtime_state
+    from thenoise.utils.loader import drop_runtime_state
 
     payload = "layers.0.attention.comfy_attention.config"
     fused = "layers.0.attention.qkv.weight"

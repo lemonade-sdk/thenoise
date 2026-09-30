@@ -11,16 +11,11 @@ from typing import Optional, Union
 import torch
 from accelerate import init_empty_weights
 
-from thenoise.dit.lumina.keys import drop_runtime_state, lumina_key_map, lumina_state_map
+from thenoise.dit.lumina.keys import lumina_key_map, lumina_state_map
 from thenoise.dit.ming_image.models import MING_IMAGE_DIT_CONFIG, MingImageTransformer2DModel
 from thenoise.utils.loader import load_dit
 
 logger = logging.getLogger(__name__)
-
-
-def _state_map(state_dict: dict) -> dict:
-    """Drop the non-module state, then rename + fold onto this repo's module tree."""
-    return lumina_state_map(drop_runtime_state(state_dict))
 
 
 def load_ming_dit(
@@ -50,7 +45,7 @@ def load_ming_dit(
         # ``key_map`` rides along so the quantized LoRA-undo restore map, built from
         # the checkpoint's own names, ends up keyed on the renamed modules.
         key_map=lumina_key_map,
-        state_map=_state_map,
+        state_map=lumina_state_map,
     )
 
 

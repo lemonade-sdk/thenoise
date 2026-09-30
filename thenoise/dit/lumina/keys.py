@@ -1,25 +1,9 @@
 """Checkpoint-name helpers shared by the Lumina/S3-DiT loaders and detectors.
 
-The family stores the same modules under two generations of names:
-
-  * **Legacy Lumina** (the Ming-Image bf16 release, and ComfyUI's
-    ``all_x_embedder["2-1"]`` / ``all_final_layer["2-1"]`` dict-of-patch-config
-    layout): separate ``attention.to_q/to_k/to_v``, ``attention.to_out.0``,
-    ``attention.norm_q/norm_k``.
-  * **Fused** (the Z-Image release, and every int8-convrot export): one
-    ``attention.qkv`` (q, k, v as row blocks) and ``attention.out``, with the QK
-    norms stored as ``q_norm``/``k_norm`` (int8) or ``norm_q``/``norm_k`` (legacy).
-
-This repo's module tree is the fused layout everywhere (one GEMM, quant-friendly,
-and what ``FUSE_QKV`` covers for LoRAs), so a legacy checkpoint needs a key rename
-AND a fold that concatenates the three projections into one weight. The fold
-cannot be a ``load_dit`` ``value_map`` (which is per-tensor, and the fused weight
-is three tensors), so it is a state-dict-level function passed as
-``load_dit(..., state_map=...)``.
-
-An export can also carry state that is not in the module tree at all;
-:func:`drop_runtime_state` strips it so a strict load can still be strict.
-"""
+The family stores the same modules under two generations of names: legacy Lumina
+(separate ``to_q/to_k/to_v``, ``to_out.0``, ``norm_q/norm_k``) and the fused layout
+(``qkv``, ``out``, ``q_norm``/``k_norm``). This repo's tree is fused everywhere, so a
+legacy checkpoint needs a rename AND a fold that concatenates the three projections."""
 from __future__ import annotations
 
 from typing import Callable, Dict, Iterable, Tuple
@@ -40,18 +24,6 @@ _MODULE_RENAMES: Tuple[Tuple[str, str], ...] = (
     # ``to_out`` is stored as an nn.Sequential, the module is a plain projection.
     ("attention.to_out.0.", "attention.out."),
 )
-
-#: Runtime-only state a ComfyUI export serialises next to the real weights: the U8
-#: JSON blob of its attention helper. No module wants it, so a strict load must not.
-_RUNTIME_STATE_SUFFIXES: Tuple[str, ...] = (".comfy_attention.config",)
-
-
-def drop_runtime_state(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-    """Copy without the keys that are not module state (see above)."""
-    return {
-        k: v for k, v in state_dict.items()
-        if not k.endswith(_RUNTIME_STATE_SUFFIXES)
-    }
 
 
 def is_s3dit(keys: Iterable[str]) -> bool:
@@ -155,7 +127,6 @@ StateMap = Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]
 __all__ = [
     "QKV_PARTS",
     "StateMap",
-    "drop_runtime_state",
     "fuse_qkv",
     "has_learned_pad_tokens",
     "is_s3dit",

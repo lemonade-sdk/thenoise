@@ -1,25 +1,8 @@
 """Central quant-aware DiT loader.
 
 Every DiT adapter loads its weights through a single entry point, ``load_dit``,
-which automatically selects the correct quantization:
-
-* **Quantized** checkpoint (INT8 or FP8, detected via ``is_quantized_checkpoint``):
-  weights land via ``load_quantized_state_dict`` — quantized linears on modules
-  exposing ``load_quantized`` (``QuantizedLinear``) receive a reconstructed
-  ``comfy_kitchen.QuantizedTensor``, and full-precision params are cast to
-  ``dtype``.
-* **BF16 / plain** checkpoint: weights land via ``load_state_dict(assign=True)``,
-  with the loaded tensors cast to ``dtype``.
-
-The quantized loading helpers below are model-agnostic: any module exposing a
-``load_quantized(QuantizedTensor)`` method (e.g. ``thenoise.dit.quantized.
-QuantizedLinear``) is switched to its quantized layout at load time; every other
-layer is assigned normally. The loader detects the layout from the stored weight
-dtype (int8 vs FP8 E4M3/E5M2) and reconstructs a ``QuantizedTensor`` carrying the
-decoded ``comfy_quant`` marker profile, so inference rotates activations with the
-exact group size a layer was quantized at — and only when it was actually
-ConvRot-rotated.
-"""
+which automatically selects the correct quantization. Runtime-only state
+(``RUNTIME_STATE_SUFFIXES``) is dropped for every model."""
 from __future__ import annotations
 
 import dataclasses
@@ -48,6 +31,15 @@ logger = logging.getLogger(__name__)
 _WEIGHT_SCALE_SUFFIX = ".weight_scale"
 # U8 JSON marker ComfyUI stores per quantized layer, recording its profile.
 _COMFY_QUANT_SUFFIX = ".comfy_quant"
+
+#: Runtime-only state a ComfyUI export serialises next to the real weights (the U8
+#: JSON blob of its attention helper). No module wants it, so a strict load must not.
+RUNTIME_STATE_SUFFIXES: tuple[str, ...] = (".comfy_attention.config",)
+
+
+def drop_runtime_state(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Copy without the keys that are not module state (see above)."""
+    return {k: v for k, v in state_dict.items() if not k.endswith(RUNTIME_STATE_SUFFIXES)}
 
 
 def _build_int8_qt(qweight: torch.Tensor, scale: torch.Tensor, marker: dict) -> QuantizedTensor:
@@ -131,6 +123,7 @@ def load_text_encoder_weights(
 
     sd = load_safetensors(path, device=device, dtype=None)
     sd = {k: v for k, v in sd.items() if k != "lm_head" and not k.startswith("lm_head.")}
+    sd = drop_runtime_state(sd)
     if drop_keys:
         sd = {k: v for k, v in sd.items() if not k.startswith(drop_keys)}
     if key_map is not None:
@@ -171,6 +164,8 @@ def load_dit(
 ) -> torch.nn.Module:
     """Load a DiT checkpoint into ``model``, selecting quantized vs BF16 automatically.
 
+    Runtime state (``RUNTIME_STATE_SUFFIXES``) is always dropped first, on both paths.
+
     Args:
         model: the (meta-constructed) DiT to populate.
         path: safetensors checkpoint path.
@@ -207,6 +202,7 @@ def load_dit(
     # Load once (stripping wrapper prefixes) and apply ``drop_keys``/``key_map``/
     # ``value_map`` before branching, so both paths see the same prepared dict.
     sd = load_dit_safetensors(path, device=device, dtype=None)
+    sd = drop_runtime_state(sd)
     if drop_keys:
         sd = {k: v for k, v in sd.items() if not k.startswith(drop_keys)}
     if key_map is not None:
@@ -496,4 +492,6 @@ __all__ = [
     "load_quantized_state_dict",
     "build_quantized_restore_map",
     "restore_quantized_layer",
+    "RUNTIME_STATE_SUFFIXES",
+    "drop_runtime_state",
 ]
