@@ -734,4 +734,4 @@ def load_wan22_vae(
         " ".join(f"{k}={v}" for k, v in arch.items()),
     )
     vae.to(device, dtype)
-    return vae.eval().requires_grad_(False)
+    return vae

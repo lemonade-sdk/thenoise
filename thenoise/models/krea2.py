@@ -68,7 +68,6 @@ class Krea2Model(DiffusionModel):
             device=self.offload_device,
             dtype=config.dtype,
         )
-        self.dit.eval().requires_grad_(False)
 
         logger.info("Loading Krea 2 text encoder from %s", config.text_encoder_path)
         self.encoder = krea2_utils.load_krea2_text_encoder(
@@ -79,12 +78,7 @@ class Krea2Model(DiffusionModel):
         )
 
         # Qwen-Image VAE
-        self.vae = (
-            load_qwen_vae(self.vae_path, device=self.device)
-            .to(self.dtype)
-            .eval()
-            .requires_grad_(False)
-        )
+        self.vae = load_qwen_vae(self.vae_path, device=self.device).to(self.dtype)
 
         # VAE latent geometry (the VAE owns it): channels via ``vae.z_dim`` in
         # ``init_latents``, compression here since the schedule needs it per token.
@@ -120,17 +114,16 @@ class Krea2Model(DiffusionModel):
         ``switch_loras``.
         """
         dev = torch.device(self.device)
-        with torch.no_grad():
-            txt_fused = self.dit.fuse_text(
-                cond.cond.to(device=dev, dtype=self.dtype),
-                cond.cond_mask.to(device=dev),
+        txt_fused = self.dit.fuse_text(
+            cond.cond.to(device=dev, dtype=self.dtype),
+            cond.cond_mask.to(device=dev),
+        )
+        untxt_fused = None
+        if cond.null is not None:
+            untxt_fused = self.dit.fuse_text(
+                cond.null.to(device=dev, dtype=self.dtype),
+                cond.null_mask.to(device=dev),
             )
-            untxt_fused = None
-            if cond.null is not None:
-                untxt_fused = self.dit.fuse_text(
-                    cond.null.to(device=dev, dtype=self.dtype),
-                    cond.null_mask.to(device=dev),
-                )
         return Conditioning(
             cond=txt_fused,
             cond_mask=cond.cond_mask,

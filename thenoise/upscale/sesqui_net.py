@@ -19,6 +19,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
+from thenoise.inference import inference
+
 
 Activation = nn.Mish
 
@@ -138,7 +140,7 @@ class LowRankReassemblyHead(nn.Module):
         self.rank_gain = nn.Parameter(torch.tensor([2.0] + [0.0] * (rank - 1), dtype=torch.float32))
 
     def _init_pixel_shuffle(self) -> None:
-        with torch.no_grad():
+        with inference():
             self.ps_expand.weight.zero_()
             self.ps_expand.bias.zero_()
             w = self.ps_expand.weight.view(self.channels, 4, self.channels)

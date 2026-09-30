@@ -475,7 +475,6 @@ def test_load_wan22_vae_collapses_and_infers(tmp_path):
     vae = load_wan22_vae(path, device="cpu", latents_mean=TINY_MEAN, latents_std=TINY_STD)
 
     assert isinstance(vae, AutoencoderKLWan22)
-    assert vae.training is False
     # architecture inferred from the weights
     assert vae.z_dim == 4
     assert vae.encoder.conv1.weight.shape[1] == 12  # 3 channels x 2x2 patchify

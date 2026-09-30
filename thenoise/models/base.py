@@ -64,7 +64,7 @@ import logging
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple
 
 import torch
 from safetensors.torch import load_file
@@ -587,8 +587,7 @@ class DiffusionModel(ABC):
         own width, so an RGBA decode's alpha reaches the PNG output.
         """
         dev = torch.device(self.device)
-        with torch.no_grad():
-            pixels = self.vae.decode_to_pixels(latents.to(dev, dtype=self.vae.dtype))
+        pixels = self.vae.decode_to_pixels(latents.to(dev, dtype=self.vae.dtype))
         if pixels.ndim == 5:  # [B, C, 1, H, W] -> [B, C, H, W]
             pixels = pixels.squeeze(2)
         pixels = pixels.to(torch.float32)

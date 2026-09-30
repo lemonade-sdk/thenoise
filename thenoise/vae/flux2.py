@@ -19,7 +19,6 @@
 # Copyright 2024 Black Forest Labs. Flux is released under the Apache-2.0 License.
 from __future__ import annotations
 
-import math
 from typing import Optional, Union
 
 import torch
@@ -313,14 +312,16 @@ class AutoencoderKLFlux2(nn.Module):
         return next(self.decoder.parameters()).device
 
     def inv_normalize(self, z: torch.Tensor) -> torch.Tensor:
-        self.bn.eval()
         s = torch.sqrt(self.bn.running_var.view(1, -1, 1, 1) + self.bn_eps)
         m = self.bn.running_mean.view(1, -1, 1, 1)
         return z * s + m
 
     def normalize(self, z: torch.Tensor) -> torch.Tensor:
-        """Raw packed latent -> normalized canonical latent (``(z - mean) / sqrt(var)``)."""
-        self.bn.eval()
+        """Raw packed latent -> normalized canonical latent (``(z - mean) / sqrt(var)``).
+
+        Only the BN's running stats are read (its ``forward`` never runs), so the
+        module's train/eval flag is irrelevant here — it is set once at load.
+        """
         s = torch.sqrt(self.bn.running_var.view(1, -1, 1, 1) + self.bn_eps)
         m = self.bn.running_mean.view(1, -1, 1, 1)
         return (z.float() - m) / s
@@ -375,7 +376,7 @@ def load_flux2_vae(
     vae.to(device)
     if dtype is not None:
         vae.to(dtype)
-    return vae.eval().requires_grad_(False)
+    return vae
 
 
 __all__ = ["AutoencoderKLFlux2", "load_flux2_vae"]

@@ -90,20 +90,19 @@ class VAEPixelUpscaler(LatentUpscaler):
         latent the refine denoise and the final decode expect.
         """
         z = latents.to(device=self.device, dtype=self.dtype)
-        with torch.no_grad():
-            pixels = self.vae.decode_to_pixels(z)
-            if pixels.ndim == 5:  # [B, C, 1, H, W] -> [B, C, H, W] (video layout)
-                pixels = pixels.squeeze(2)
+        pixels = self.vae.decode_to_pixels(z)
+        if pixels.ndim == 5:  # [B, C, 1, H, W] -> [B, C, H, W] (video layout)
+            pixels = pixels.squeeze(2)
 
-            h, w = pixels.shape[-2:]
-            pixels = F.interpolate(
-                pixels.float(),
-                size=(h * self.scale, w * self.scale),
-                mode="bicubic",
-                align_corners=False,
-            ).clamp(-1.0, 1.0)
+        h, w = pixels.shape[-2:]
+        pixels = F.interpolate(
+            pixels.float(),
+            size=(h * self.scale, w * self.scale),
+            mode="bicubic",
+            align_corners=False,
+        ).clamp(-1.0, 1.0)
 
-            return self.vae.encode_pixels_to_latents(pixels.to(self.dtype))
+        return self.vae.encode_pixels_to_latents(pixels.to(self.dtype))
 
 
 __all__ = ["VAEPixelUpscaler"]

@@ -47,6 +47,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
+from thenoise.inference import freeze
+
 
 class ResidualDenseBlock(nn.Module):
     """``ResidualDenseBlock_4C``: 5-conv dense residual block.
@@ -155,7 +157,6 @@ class RRDBNet(nn.Module):
         )
         return self.conv_last(self.lrelu(self.conv_hr(feat)))
 
-    @torch.no_grad()
     def forward_tiled(
         self, img: Tensor, tile_size: int = 512, tile_pad: int = 48
     ) -> Tensor:
@@ -308,7 +309,8 @@ def load_esrgan(path: str, device: Union[str, torch.device]) -> tuple[RRDBNet, i
     scale = detect_esrgan_scale(path)
     model = RRDBNet(scale=scale)
     model.load_state_dict(state_dict)
-    model.to(device=device).eval().requires_grad_(False)
+    model.to(device=device)
+    freeze(model)
     return model, scale
 
 

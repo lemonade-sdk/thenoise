@@ -93,7 +93,7 @@ def test_load_flux_vae_reads_only_the_decoder_side(tmp_path, monkeypatch):
 
     assert isinstance(vae, AutoencoderKLFlux)
     assert vae.dtype == torch.bfloat16
-    assert vae.training is False
+    # freezing is the registry's job, not the loader's (see tests/test_memory.py)
     reference = source.state_dict()
     assert set(vae.state_dict()) == set(reference)
     for key, value in vae.state_dict().items():

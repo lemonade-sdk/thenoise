@@ -211,4 +211,4 @@ def load_flux_vae(
     vae.to(device)
     if dtype is not None:
         vae.to(dtype)
-    return vae.eval().requires_grad_(False)
+    return vae

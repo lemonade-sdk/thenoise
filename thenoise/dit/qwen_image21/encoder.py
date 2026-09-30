@@ -148,7 +148,6 @@ class QwenImage21TextEncoder(nn.Module):
         return torch.as_tensor(value).to(self.device, dtype)
 
     # --------------------------------------------------------------------- public
-    @torch.no_grad()
     def encode(
         self, prompt: str, images: Optional[Sequence] = None
     ) -> Tuple[Tensor, List[int]]:
@@ -219,7 +218,7 @@ def load_qwen_image21_text_encoder(
     )
     encoder = QwenImage21TextEncoder(qwen, tokenizer, load_qwen3_vl_processor(tokenizer))
     logger.info("Loaded Qwen-Image 2.1 text encoder (Qwen3-VL-8B) from %s", path)
-    return encoder.eval().requires_grad_(False)
+    return encoder
 
 
 __all__ = [

@@ -113,7 +113,6 @@ class FluxKleinModel(DiffusionModel):
         self.is_8b = self.params.context_in_dim == 12288
         logger.info("Loading Flux Klein DiT (%s) from %s", self.variant_label, config.dit_path)
         self.dit = load_flux2_dit(config.dit_path, self.params, device=self.offload_device, dtype=config.dtype)
-        self.dit.eval().requires_grad_(False)
 
         logger.info("Loading Flux Klein text encoder (Qwen3-%s) from %s", self.text_label, config.text_encoder_path)
         self.text_encoder = load_qwen3_embedder(
@@ -126,7 +125,6 @@ class FluxKleinModel(DiffusionModel):
 
         # Flux.2 VAE (encoder + decoder).
         self.vae = load_flux2_vae(self.vae_path, device=self.device, dtype=self.dtype)
-        self.vae.eval().requires_grad_(False)
 
         # Register swappable components with the memory manager.
         self.memory.register("dit", self.dit)
@@ -275,7 +273,7 @@ class FluxKleinModel(DiffusionModel):
         pe_ref = self.dit.pe_embedder["ref"]
         kv_cond = self.kv_cache("cond")
         kv_uncond = self.kv_cache("uncond")
-        with torch.no_grad(), torch.autocast(device_type=dev.type, dtype=self.dtype):
+        with torch.autocast(device_type=dev.type, dtype=self.dtype):
             pos = self._dit_forward(latents, t_full, self._txt, self.dit.pe_embedder["txt"], kv_cond, pe_img, pe_ref)
             if guidance_scale > 1.0 and self._un_txt is not None:
                 neg = self._dit_forward(latents, t_full, self._un_txt, self.dit.pe_embedder["txt_uncond"], kv_uncond, pe_img, pe_ref)

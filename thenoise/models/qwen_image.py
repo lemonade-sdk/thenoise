@@ -85,19 +85,16 @@ class QwenImageModel(DiffusionModel):
         self.dit = qwen_models.load_qwen_image_dit(
             config.dit_path, device=self.offload_device, dtype=config.dtype
         )
-        self.dit.eval().requires_grad_(False)
 
         tokenizer_dir = QWEN25_TOKENIZER_CONFIG_DIR
         logger.info("Loading Qwen2.5-VL text encoder from %s", config.text_encoder_path)
         self.text_encoder = load_qwen2_5_vl_model(
             config.text_encoder_path, dtype=config.dtype, device=self.offload_device
         )
-        self.text_encoder.eval().requires_grad_(False)
         self.tokenizer = load_qwen2_tokenizer(tokenizer_dir)
         self.vl_processor = load_qwen2_5_vl_processor(self.tokenizer)
 
         self.vae = load_qwen_vae(self.vae_path, device=self.device)
-        self.vae.eval().requires_grad_(False)
 
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)
@@ -245,7 +242,7 @@ class QwenImageModel(DiffusionModel):
         pe_img = self.dit.pe_embedder["img"]
         pe_ref = self.dit.pe_embedder["ref"]
 
-        with torch.no_grad(), torch.autocast(device_type=dev.type, dtype=self.dtype):
+        with torch.autocast(device_type=dev.type, dtype=self.dtype):
             pos = self._dit_forward(
                 latents, t_full, self._txt, self.dit.pe_embedder["txt"],
                 self.kv_cache("cond"), pe_img, pe_ref,

@@ -14,6 +14,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from thenoise.inference import inference
 from thenoise.utils.device import clean_memory_on_device
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,11 @@ class Runtime:
 
         self._unload()  # swap: only one model resident at a time
         logger.info("Loading model '%s'", name)
-        self._model = cls(config=config)
+        # The load-time inference-mode boundary (see ``thenoise.inference``):
+        # covers module construction, parameter inits and requantization. Weights
+        # are frozen per component by ``MemoryManager.register``.
+        with inference():
+            self._model = cls(config=config)
         self._model_name = name
         self._pipeline = PipelineController(self._model, self._pixel_upscalers)
 

@@ -48,10 +48,9 @@ def get_qwen_prompt_embeds(
     prompt = [prompt] if isinstance(prompt, str) else prompt
     txt = [prompt_template_encode.format(e) for e in prompt]
     txt_tokens = tokenizer(txt, padding=True, truncation=True, return_tensors="pt").to(vlm.device)
-    with torch.no_grad():
-        encoder_hidden_states = vlm.model(
-            input_ids=txt_tokens.input_ids, attention_mask=txt_tokens.attention_mask, output_hidden_states=True
-        )
+    encoder_hidden_states = vlm.model(
+        input_ids=txt_tokens.input_ids, attention_mask=txt_tokens.attention_mask, output_hidden_states=True
+    )
     hidden_states = encoder_hidden_states.hidden_states[-1]
     split_hidden_states = extract_masked_hidden(hidden_states, txt_tokens.attention_mask)
     return _mask_and_stack(split_hidden_states, drop_idx)
@@ -110,14 +109,13 @@ def get_qwen_prompt_embeds_with_image(
 
     txt = [template.format(e) for e in prompt]
     model_inputs = vl_processor(text=txt, images=vl_image_inputs, padding=True, return_tensors="pt").to(vlm.device)
-    with torch.no_grad():
-        encoder_hidden_states = vlm.model(
-            input_ids=model_inputs.input_ids,
-            attention_mask=model_inputs.attention_mask,
-            pixel_values=model_inputs.pixel_values if vl_image_inputs is not None else None,
-            image_grid_thw=model_inputs.image_grid_thw if vl_image_inputs is not None else None,
-            output_hidden_states=True,
-        )
+    encoder_hidden_states = vlm.model(
+        input_ids=model_inputs.input_ids,
+        attention_mask=model_inputs.attention_mask,
+        pixel_values=model_inputs.pixel_values if vl_image_inputs is not None else None,
+        image_grid_thw=model_inputs.image_grid_thw if vl_image_inputs is not None else None,
+        output_hidden_states=True,
+    )
     hidden_states = encoder_hidden_states.hidden_states[-1]
     split_hidden_states = extract_masked_hidden(hidden_states, model_inputs.attention_mask)
     drop_idx = _compute_drop_idx(model_inputs.input_ids)

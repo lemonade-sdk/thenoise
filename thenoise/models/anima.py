@@ -65,14 +65,12 @@ class AnimaModel(DiffusionModel):
             config.dit_path,
             dit_weight_dtype=config.dtype,
         )
-        self.dit.eval().requires_grad_(False)
 
         # Text encoder (Qwen3-0.6B) + tokenizers.
         logger.info("Loading Anima text encoder from %s", config.text_encoder_path)
         self.text_encoder, self.qwen3_tokenizer = load_qwen3_text_encoder(
             config.text_encoder_path, dtype=config.dtype, device=self.offload_device
         )
-        self.text_encoder.eval().requires_grad_(False)
         self.t5_tokenizer = load_t5_tokenizer(None)
 
         # Tokenize / encode strategies (called directly, not through the global registry).
@@ -85,12 +83,7 @@ class AnimaModel(DiffusionModel):
         self.encoding_strategy = AnimaTextEncodingStrategy()
 
         # Qwen-Image VAE (single-frame decode).
-        self.vae = (
-            load_qwen_vae(self.vae_path, device=self.device)
-            .to(self.dtype)
-            .eval()
-            .requires_grad_(False)
-        )
+        self.vae = load_qwen_vae(self.vae_path, device=self.device).to(self.dtype)
 
         # Register swappable components with the memory manager.
         self.memory.register("dit", self.dit)
@@ -106,13 +99,12 @@ class AnimaModel(DiffusionModel):
     ) -> Conditioning:
         """Text-encoder only: RAW Qwen3/T5 embeddings (DiT fusion in ``fuse_text``)."""
         dev = torch.device(self.device)
-        with torch.no_grad():
-            cond = self._encode_raw(args.prompt, dev)
-            null = (
-                self._encode_raw(args.negative_prompt, dev)
-                if args.guidance_scale > 1.0
-                else None
-            )
+        cond = self._encode_raw(args.prompt, dev)
+        null = (
+            self._encode_raw(args.negative_prompt, dev)
+            if args.guidance_scale > 1.0
+            else None
+        )
         return Conditioning(cond=cond, null=null)
 
     def _encode_raw(self, prompt: str, dev: torch.device):
@@ -129,9 +121,8 @@ class AnimaModel(DiffusionModel):
     def fuse_text(self, cond: Conditioning) -> Conditioning:
         """DiT-side fusion: raw embeddings -> LLM-adapter cross-attention conditioning."""
         dev = torch.device(self.device)
-        with torch.no_grad():
-            fused = self._fuse_raw(cond.cond, dev)
-            null = self._fuse_raw(cond.null, dev) if cond.null is not None else None
+        fused = self._fuse_raw(cond.cond, dev)
+        null = self._fuse_raw(cond.null, dev) if cond.null is not None else None
         return Conditioning(cond=fused, null=null)
 
     def _fuse_raw(self, embed, dev: torch.device) -> torch.Tensor:
@@ -188,11 +179,10 @@ class AnimaModel(DiffusionModel):
         i: int,
     ) -> torch.Tensor:
         t_expand = t.expand(latents.shape[0])
-        with torch.no_grad():
-            noise_pred = self.dit(latents, t_expand, cond.cond)
-            if guidance_scale > 1.0 and cond.null is not None:
-                uncond = self.dit(latents, t_expand, cond.null)
-                noise_pred = uncond + guidance_scale * (noise_pred - uncond)
+        noise_pred = self.dit(latents, t_expand, cond.cond)
+        if guidance_scale > 1.0 and cond.null is not None:
+            uncond = self.dit(latents, t_expand, cond.null)
+            noise_pred = uncond + guidance_scale * (noise_pred - uncond)
         return noise_pred
 
     def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:

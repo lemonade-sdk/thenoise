@@ -73,7 +73,6 @@ class ZImageModel(DiffusionModel):
 
         logger.info("Loading Z-Image DiT from %s", config.dit_path)
         self.dit = load_zimage_dit(config.dit_path, device=self.offload_device, dtype=config.dtype)
-        self.dit.eval().requires_grad_(False)
 
         logger.info("Loading Z-Image text encoder from %s", config.text_encoder_path)
         self.text_encoder, self.tokenizer = load_zimage_text_encoder(
@@ -82,11 +81,9 @@ class ZImageModel(DiffusionModel):
             device=self.offload_device,
             tokenizer_dir=find_tokenizer_dir(config.text_encoder_path),
         )
-        self.text_encoder.eval().requires_grad_(False)
 
         # Flux VAE (decoder-only).
         self.vae = load_flux_vae(self.vae_path, device=self.device, dtype=self.dtype)
-        self.vae.eval().requires_grad_(False)
 
         # Register swappable components with the memory manager.
         self.memory.register("dit", self.dit)
@@ -127,10 +124,9 @@ class ZImageModel(DiffusionModel):
         input_ids = inputs.input_ids.to(dev)
         mask = inputs.attention_mask.to(dev).bool()
 
-        with torch.no_grad():
-            out = self.text_encoder(input_ids=input_ids, attention_mask=mask, output_hidden_states=True)
-            emb = out.hidden_states[-2]  # [1, seq, 2560]
-            valid = emb[0][mask[0]]  # [n_valid, 2560]
+        out = self.text_encoder(input_ids=input_ids, attention_mask=mask, output_hidden_states=True)
+        emb = out.hidden_states[-2]  # [1, seq, 2560]
+        valid = emb[0][mask[0]]  # [n_valid, 2560]
         return valid.unsqueeze(0).to(self.dtype)
 
     def init_latents(self, params: SamplingParams) -> torch.Tensor:
@@ -185,20 +181,19 @@ class ZImageModel(DiffusionModel):
         # ``t`` is sigma (see ``schedule``); the DiT's model timestep is ``1 - sigma``.
         t_full = torch.full((1,), 1.0 - float(t), device=dev, dtype=latents.dtype)
 
-        with torch.no_grad():
-            # The scheduler integrates ``x + dt * noise_pred`` with ``noise_pred =
-            # -model_out``; our shared euler loop is ``x -= delta * v``, so the
-            # velocity v must be the NEGATED DiT output.
-            pos = self.dit(x_list, t_full, cap)[0].unsqueeze(0)  # [1, C, 1, H, W]
-            v_pos = -pos
-            if guidance_scale > 1.0 and cond.null is not None:
-                neg = self.dit(x_list, t_full, [cond.null[0]], rope_key="_neg")[0].unsqueeze(0)
-                # CFG over velocities: v = v_uncond + g * (v_pos - v_uncond),
-                # where v_pos = -pos (conditional) and v_uncond = -neg.
-                v_uncond = -neg
-                v = v_uncond + guidance_scale * (v_pos - v_uncond)
-            else:
-                v = v_pos
+        # The scheduler integrates ``x + dt * noise_pred`` with ``noise_pred =
+        # -model_out``; our shared euler loop is ``x -= delta * v``, so the
+        # velocity v must be the NEGATED DiT output.
+        pos = self.dit(x_list, t_full, cap)[0].unsqueeze(0)  # [1, C, 1, H, W]
+        v_pos = -pos
+        if guidance_scale > 1.0 and cond.null is not None:
+            neg = self.dit(x_list, t_full, [cond.null[0]], rope_key="_neg")[0].unsqueeze(0)
+            # CFG over velocities: v = v_uncond + g * (v_pos - v_uncond),
+            # where v_pos = -pos (conditional) and v_uncond = -neg.
+            v_uncond = -neg
+            v = v_uncond + guidance_scale * (v_pos - v_uncond)
+        else:
+            v = v_pos
         return v
 
     def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:
