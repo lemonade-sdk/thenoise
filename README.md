@@ -41,15 +41,12 @@ TheNoise ships:
 | **Anima**, small and fast | ✓ | — | [anima](docs/models/anima.md) |
 | **Krea 2**, highest image quality | ✓ | — | [krea2](docs/models/krea2.md) |
 | **Z-Image / Z-Image-Turbo**, quality at 8 steps | ✓ | — | [zimage](docs/models/zimage.md) |
-| **Ming-Image 0.1**, RGBA output with real transparency | wip | — | [ming-image](docs/models/ming-image.md) |
+| **Ming-Image 0.1**, RGBA output with real transparency | ✓ | — | [ming-image](docs/models/ming-image.md) |
 | **Flux.2 Klein 4B / 9B**, 4 steps, with editing | ✓ | ✓ | [flux2-klein](docs/models/flux2-klein.md) |
 | **Qwen-Image / Qwen-Image-Edit**, generation and editing | ✓ | ✓ | [qwen-image](docs/models/qwen-image.md) |
 | **Qwen-Image 2.1**, generation and editing in one model | ✓ | ✓ | [qwen-image-2.1](docs/models/qwen-image-2.1.md) |
 
 New models are added over time. PRs adding model support are welcome.
-
-<small>`wip` — support is landing: the checkpoint is detected and loads, but the
-model cannot draw yet (see its model page for what is missing).</small>
 
 ## How does it compare to ComfyUI?
 

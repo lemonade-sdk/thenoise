@@ -261,10 +261,8 @@ def test_image_seq_len_counts_2x2_patches_of_the_vae_latent():
 
 
 def test_the_shift_bucket_flips_above_the_reference_sequence():
-    """The one place ``>=`` and ``>`` differ, stated as a test (see ``sampling.py``).
-    One token past 1024², ``mu`` lands on the 1.35 ceiling immediately, because the
-    curve's ``max_image_seq_len`` becomes the sequence itself.
-    """
+    """The one place ``>=`` and ``>`` differ: at 1024² we take the 1.15 branch (shift
+    3.158), matching ComfyUI's hard-coded ``{"shift": 3.16}`` for Ming-Image."""
     assert image_seq_len(1024, 1024) == 4096
     assert dynamic_mu(1024, 1024) == pytest.approx(1.15)
     assert image_seq_len(1040, 1024) == 4160  # 65 * 64 tokens, just past the bucket

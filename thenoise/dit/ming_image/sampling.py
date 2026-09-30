@@ -33,8 +33,10 @@ def dynamic_mu(height: int, width: int) -> float:
     """The scheduler's ``mu`` for this pixel size (the shift is ``exp(mu)``)."""
     seq = image_seq_len(height, width)
     max_seq = max(REFERENCE_SEQ_LEN, seq)
-    # ``>`` where the vendor writes ``>=``: at exactly 1024² that takes the 1.35 branch
-    # (3.857), contradicting the 3.16 the same reference documents for this bucket.
+    # ``>`` where the vendor writes ``>=``: at exactly 1024² (seq == 4096) our ``>``
+    # takes the 1.15 branch (shift 3.158), matching ComfyUI's hard-coded
+    # ``sampling_settings = {"shift": 3.16}`` for Ming-Image. The vendor's ``>=``
+    # would give 3.857 there.
     max_shift = MAX_SHIFT_ABOVE if seq > REFERENCE_SEQ_LEN else MAX_SHIFT_BELOW
     return calculate_shift(seq, BASE_SEQ_LEN, max_seq, BASE_SHIFT, max_shift)
 
