@@ -203,6 +203,7 @@ def test_load_ming_dit_reads_the_int8_convrot_export(tmp_path):
     path = write_safetensors(tmp_path / "ming_int8.safetensors", _as_int8_convrot(sd))
 
     dit = load_ming_dit(path, device="cpu", dtype=torch.bfloat16, config=TINY_CONFIG)
+    dit.eval().requires_grad_(False)
 
     qkv = dit.layers[0].attention.qkv.weight
     assert hasattr(qkv, "dequantize"), "the qkv weight did not land quantized"

@@ -182,7 +182,7 @@ def test_the_scalar_normalisation_is_an_exact_inverse(monkeypatch):
         base_dim=4,
         scale_factor=MING_IMAGE_SCALE_FACTOR,
         input_channels=4,
-    ).eval()
+    ).eval().requires_grad_(False)
     raw = torch.full((1, 16, 1, 1), 0.05)
 
     monkeypatch.setattr(

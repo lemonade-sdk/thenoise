@@ -46,7 +46,7 @@ def _bf16_x(rows=4):
 
 
 def test_quantized_linear_bf16_forward():
-    layer = QuantizedLinear(IN_F, OUT_F, bias=False)
+    layer = QuantizedLinear(IN_F, OUT_F, bias=False).requires_grad_(False)
     torch.nn.init.ones_(layer.weight)
     layer = layer.to(torch.bfloat16)  # models are cast to bf16 by the adapter
     out = layer(_bf16_x())

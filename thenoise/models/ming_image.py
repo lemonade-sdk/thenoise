@@ -74,7 +74,6 @@ class MingImageModel(DiffusionModel):
 
         logger.info("Loading Ming-Image DiT from %s", config.dit_path)
         self.dit = load_ming_dit(config.dit_path, device=self.offload_device, dtype=config.dtype)
-        self.dit.eval().requires_grad_(False)
 
         # The BailingMM2 conditioner: 256 query tokens through the thinker plus a
         # 28-layer bidirectional connector; its tokenizer travels inside the file.
@@ -84,11 +83,9 @@ class MingImageModel(DiffusionModel):
             device=self.offload_device,
             dtype=config.dtype,
         )
-        self.text_encoder.eval().requires_grad_(False)
 
         logger.info("Loading Ming-Image VAE from %s", config.vae_path)
         self.vae = load_ming_vae(self.vae_path, device=self.device, dtype=config.dtype)
-        self.vae.eval().requires_grad_(False)
 
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)
@@ -186,23 +183,22 @@ class MingImageModel(DiffusionModel):
         # ``t`` is sigma (see ``schedule``); the DiT's model timestep is ``1 - sigma``.
         t_full = torch.full((1,), 1.0 - float(t), device=dev, dtype=latents.dtype)
 
-        with torch.no_grad():
         # Sign convention as in Z-Image: the reference integrates the negated DiT
         # output and our Euler loop subtracts, so ``v = -out``.
-            pos = self.dit(x_list, t_full, cap, extra)[0].unsqueeze(0)  # [1, C, 1, H, W]
-            v_pos = -pos
-            if guidance_scale > 1.0 and cond.null is not None:
-                neg = self.dit(
-                    x_list,
-                    t_full,
-                    [cond.null[0]],
-                    _branch(getattr(cond, "null_extra", None)),
-                    rope_key="_neg",
-                )[0].unsqueeze(0)
-                v_uncond = -neg
-                v = v_uncond + guidance_scale * (v_pos - v_uncond)
-            else:
-                v = v_pos
+        pos = self.dit(x_list, t_full, cap, extra)[0].unsqueeze(0)  # [1, C, 1, H, W]
+        v_pos = -pos
+        if guidance_scale > 1.0 and cond.null is not None:
+            neg = self.dit(
+                x_list,
+                t_full,
+                [cond.null[0]],
+                _branch(getattr(cond, "null_extra", None)),
+                rope_key="_neg",
+            )[0].unsqueeze(0)
+            v_uncond = -neg
+            v = v_uncond + guidance_scale * (v_pos - v_uncond)
+        else:
+            v = v_pos
         return v
 
     def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:

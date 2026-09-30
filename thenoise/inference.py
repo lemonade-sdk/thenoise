@@ -8,8 +8,7 @@ Two orthogonal knobs, one primitive each
 ----------------------------------------
 * ``inference()`` — **grad mode**. Everything it wraps builds no autograd graph
   and produces inference tensors. This is the only grad-mechanism in the engine;
-  ``torch.no_grad`` is deliberately not used anywhere else (see the guard test in
-  ``tests/test_inference_policy.py``).
+  ``torch.no_grad`` is deliberately not used anywhere else.
 * ``freeze(module)`` — **module/weight state**: ``eval()`` behaviour (Dropout,
   BatchNorm — e.g. the Flux.2 VAE's ``bn`` running stats) plus
   ``requires_grad_(False)`` weights. Not a grad-mode mechanism: ``inference()``

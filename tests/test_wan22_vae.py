@@ -185,7 +185,7 @@ def test_qwen21_normalises_with_its_own_stats(tiny_qwen21):
 
 
 def test_strip_apply_is_a_no_op_below_the_threshold():
-    conv = nn.Conv2d(4, 4, 3, padding=1).eval()
+    conv = nn.Conv2d(4, 4, 3, padding=1).eval().requires_grad_(False)
     x = torch.randn(1, 4, 8, 8)
     assert strip_apply(conv, x) is not None
     calls = []
@@ -195,7 +195,7 @@ def test_strip_apply_is_a_no_op_below_the_threshold():
 
 def test_strip_apply_matches_the_direct_conv(monkeypatch):
     """Forced tiny strips must give the same result as one full call."""
-    conv = nn.Conv2d(4, 6, 3, padding=1).eval()
+    conv = nn.Conv2d(4, 6, 3, padding=1).eval().requires_grad_(False)
     x = torch.randn(1, 4, 40, 7)
     monkeypatch.setattr(wan22_module, "STRIP_ELEMS", 256)
     assert torch.allclose(strip_apply(conv, x, halo=1), conv(x), atol=1e-5)
@@ -204,7 +204,7 @@ def test_strip_apply_matches_the_direct_conv(monkeypatch):
 def test_strip_apply_matches_the_direct_upsample(monkeypatch):
     fn = nn.Sequential(
         nn.Upsample(scale_factor=2, mode="nearest-exact"), nn.Conv2d(4, 4, 3, padding=1)
-    ).eval()
+    ).eval().requires_grad_(False)
     x = torch.randn(1, 4, 24, 5)
     monkeypatch.setattr(wan22_module, "STRIP_ELEMS", 128)
     assert torch.allclose(strip_apply(fn, x, scale=2, halo=1), fn(x), atol=1e-5)
@@ -224,7 +224,7 @@ def test_strip_apply_out_adds_in_place(monkeypatch):
 
 def test_residual_block_is_strip_invariant():
     """The stripped block (its normal path) equals the plain sequential one."""
-    blk = nn.Sequential(*[Wan22ResidualBlock(6, 8)]).eval()
+    blk = nn.Sequential(*[Wan22ResidualBlock(6, 8)]).eval().requires_grad_(False)
     x = torch.randn(1, 6, 32, 5)
     plain = x.clone()
     for layer in blk[0].residual:

@@ -224,7 +224,7 @@ def test_cap_extra_reaches_the_network_and_changes_the_output():
     from thenoise.dit.lumina.models import LuminaTransformer2DModel
 
     torch.manual_seed(0)
-    model = LuminaTransformer2DModel(pad_mode="zero_masked", **TINY_CONFIG).double().eval()
+    model = LuminaTransformer2DModel(pad_mode="zero_masked", **TINY_CONFIG).double().eval().requires_grad_(False)
     latent, cap, _ = _inputs(cap_len=40)
     t = torch.tensor([0.5], dtype=torch.float64)
 
@@ -447,7 +447,7 @@ def test_zimage_still_pads_with_its_learned_tokens_and_attends():
     from thenoise.utils.sequence import pad_to_length
 
     torch.manual_seed(0)
-    model = ZImageTransformer2DModel(**TINY_CONFIG).eval()
+    model = ZImageTransformer2DModel(**TINY_CONFIG).eval().requires_grad_(False)
     latent, cap, _ = _inputs(cap_len=33, height=4, width=4, dtype=torch.float64)
     model.double()
 

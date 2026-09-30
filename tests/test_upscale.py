@@ -318,7 +318,7 @@ def test_forward_tiled_pads_odd_dimensions():
 
     for scale in (2, 4):
         model = RRDBNet(scale=scale, num_feat=8, num_block=1, num_grow_ch=4)
-        model.eval()
+        model.eval().requires_grad_(False)
         h, w = 17, 15  # odd, and multi-tile under a small tile size
         x = torch.randn(1, 3, h, w)
         out = model.forward_tiled(x, tile_size=8, tile_pad=2)

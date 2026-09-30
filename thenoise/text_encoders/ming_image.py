@@ -360,10 +360,9 @@ def load_ming_text_encoder(
         drop_keys=TEXT_ENCODER_DROP_KEYS,
     )
     tokenizer = load_ming_tokenizer(path, tokenizer_dir=tokenizer_dir) if with_tokenizer else None
-    return model.eval().requires_grad_(False), tokenizer
+    return model, tokenizer
 
 
-@torch.no_grad()
 def encode_ming_prompt(
     conditioner: MingImageConditioner,
     tokenizer: Tokenizer,
