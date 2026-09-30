@@ -36,8 +36,7 @@ prompt produces a real alpha channel rather than a checkerboard.
 
 ## Performance (Strix Halo)
 
-- BF16 @ 12 steps: ~TBD (1024×768)
-- INT8-ConvRot @ 8 steps: **~TBD s**
+- INT8-ConvRot @ 12 steps: **~15.2 s**
 
 ## Examples
 

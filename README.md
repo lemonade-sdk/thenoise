@@ -78,7 +78,7 @@ a warmup run.
 | Flux.2 Klein 9B · INT8-ConvRot · 4 steps | 9.6s | 34.3s |
 | Qwen-Image 2512 · BF16 · 4 steps | 9.7s | 34.9s |
 | Qwen-Image 2.1 + [Qwen-Image-2.1 Turbo LoRA](https://huggingface.co/Viggle/Qwen-Image-2.1-viggle-turbo) · BF16 · 6 steps | 15s | 53s |
-| Ming-Image 0.1 · INT8-ConvRot · 12 steps | TBD | TBD |
+| Ming-Image 0.1 · INT8-ConvRot · 12 steps | 21s | 84.8s |
 
 *Image + simple instruction to edited image (editing):*
 

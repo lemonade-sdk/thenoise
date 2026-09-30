@@ -120,13 +120,6 @@ def make_flux() -> LatentFormatAdaptor:
     return _AffineAdaptor(external_channels=16, scale=0.3611, shift=0.1159)
 
 
-def make_ming() -> LatentFormatAdaptor:
-    """Ming-Image - the same 16ch Wan2.1-family latent, normalised by ONE number
-    (``model = raw * 8.0064``), so the affine adaptor and the ``wan21`` network fit.
-    """
-    return _AffineAdaptor(external_channels=16, scale=8.0064, shift=0.0)
-
-
 def make_flux2(
     running_mean: Tensor | None = None,
     running_var: Tensor | None = None,
@@ -358,7 +351,6 @@ __all__ = [
     "make_wan21",
     "make_sdxl",
     "make_flux",
-    "make_ming",
     "make_flux2",
     "make_ideogram4",
 ]

@@ -18,7 +18,7 @@ import pytest
 import torch
 
 from conftest import write_safetensors
-from thenoise.upscale.inference_adaptors import make_ming, make_wan21
+from thenoise.upscale.inference_adaptors import make_wan21
 from thenoise.vae import (
     AutoencoderKLFlux,
     AutoencoderKLFlux2,
@@ -210,14 +210,8 @@ def test_mixed_normalisations_are_an_error():
             make_wan21,
             lambda: AutoencoderKLQwenImage(base_dim=4),
         ),
-        (
-            make_ming,
-            lambda: AutoencoderKLQwenImage(
-                base_dim=4, scale_factor=MING_IMAGE_SCALE_FACTOR, input_channels=4
-            ),
-        ),
     ],
-    ids=["wan21", "ming"],
+    ids=["wan21"],
 )
 def test_the_upscaler_adaptor_means_what_the_vae_means(factory, vae):
     """Sesqui works on RAW latents, so its adaptor must be the VAE's own transform:

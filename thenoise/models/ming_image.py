@@ -19,7 +19,7 @@ from thenoise.models.base import (
     normalize_keys,
 )
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
-from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
+from thenoise.upscale import LatentUpscaler, VAEPixelUpscaler
 from thenoise.utils.lora import FUSE_QKV
 from thenoise.utils.math import round_up
 from thenoise.vae import load_ming_vae
@@ -216,9 +216,10 @@ class MingImageModel(DiffusionModel):
 
     # -------------------------------------------------------------- upscaling
     def _create_upscaler(self) -> LatentUpscaler:
-        """The Wan2.1 Sesqui network over Ming-Image's affine 16ch latent (same VAE
-        architecture, only the normalisation differs). Borrowed, not yet measured."""
-        return SesquiLSRUpscaler("ming", device=self.device, dtype=self.dtype)
+        """The weight-free VAE round trip: Ming's own VAE decodes, bicubic-upscales
+        the pixels, and encodes back — no trained upscaler network, whose Wan2.1
+        Sesqui weights give bad results on Ming's affine RGBA latent."""
+        return VAEPixelUpscaler(self.vae, scale=self.UPSCALE_SCALE)
 
 
 __all__ = ["MingConditioning", "MingImageModel"]
