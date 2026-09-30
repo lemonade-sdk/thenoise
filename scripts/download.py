@@ -16,7 +16,7 @@ Models:
                   https://huggingface.co/Comfy-Org/z_image_turbo
                   https://huggingface.co/Comfy-Org/z_image
   klein           Flux.2 Klein 4B / 9B (distilled or base)
-  ming-image      Ming-Image 0.1 (Design or Design-Layer)
+  ming-image      Ming-Image 0.1 (Design)
                   https://huggingface.co/Comfy-Org/Ming-Image
   qwen-image      Qwen-Image / Qwen-Image-Edit (latest dated checkpoints)
   qwen-image-2.1  Qwen-Image 2.1 (t2i + edit in one DiT)
@@ -37,7 +37,6 @@ Usage:
     python scripts/download.py --model klein --variant 9b
     python scripts/download.py --model klein --variant 4b --int8-convrot
     python scripts/download.py --model ming-image
-    python scripts/download.py --model ming-image --variant design-layer
     python scripts/download.py --model ming-image --int8-convrot
     python scripts/download.py --model qwen-image --edit-only
     python scripts/download.py --model qwen-image-2.1
@@ -161,13 +160,12 @@ def _klein_jobs(args: argparse.Namespace) -> list[Artifact]:
 
 
 def _ming_image_jobs(args: argparse.Namespace) -> list[Artifact]:
-    """Ming-Image 0.1: Design or Design-Layer DiT + Ling-mini-2.0 TE + VAE."""
+    """Ming-Image 0.1: Design DiT + Ling-mini-2.0 TE + VAE."""
     repo = "Comfy-Org/Ming-Image"
-    part = "_layer" if args.variant == "design-layer" else ""
     suffix = "int8_convrot" if args.int8_convrot else "bf16"
     return [
-        ("dit", repo, f"diffusion_models/ming_image_0.1_design{part}_{suffix}.safetensors"),
-        ("text_encoder", repo, f"text_encoders/ming_image_0.1_ling_mini_2.0{part}_{suffix}.safetensors"),
+        ("dit", repo, f"diffusion_models/ming_image_0.1_design_{suffix}.safetensors"),
+        ("text_encoder", repo, f"text_encoders/ming_image_0.1_ling_mini_2.0_{suffix}.safetensors"),
         ("vae", repo, "vae/ming_image_vae_bf16.safetensors"),
     ]
 
@@ -269,11 +267,8 @@ MODELS: dict[str, ModelSpec] = {
     ),
     "ming-image": ModelSpec(
         "ming-image", "./models/ming_image",
-        "Ming-Image 0.1 (Design or Design-Layer)",
+        "Ming-Image 0.1 (Design)",
         _ming_image_jobs,
-        variant_supported=True,
-        variant_choices=("design", "design-layer"),
-        default_variant="design",
     ),
     "qwen-image": ModelSpec(
         "qwen-image", "./models/qwen_image",
@@ -308,7 +303,6 @@ def _epilog() -> str:
         "  python scripts/download.py --model zimage --variant base",
         "  python scripts/download.py --model klein --variant 9b",
         "  python scripts/download.py --model ming-image",
-        "  python scripts/download.py --model ming-image --variant design-layer",
         "  python scripts/download.py --model ming-image --int8-convrot",
         "  python scripts/download.py --model qwen-image --edit-only",
         "  python scripts/download.py --model qwen-image-2.1 --int8-convrot",
@@ -340,8 +334,7 @@ def main() -> None:
         help=(
             "anima: DiT variant name (default: turbo-v1.0; others include base-v1.0, "
             "aesthetic-v1.1) | zimage: turbo | base (default: turbo) | "
-            "klein: 4b | 4b-base | 9b | 9b-base (default: 4b) | "
-            "ming-image: design | design-layer (default: design)"
+            "klein: 4b | 4b-base | 9b | 9b-base (default: 4b)"
         ),
     )
     ap.add_argument(
