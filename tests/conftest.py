@@ -27,6 +27,7 @@ from thenoise.models import (  # noqa: E402
     AnimaModel,
     FluxKleinModel,
     Krea2Model,
+    MingImageModel,
     QwenImageModel,
     QwenImage21Model,
     ZImageModel,
@@ -287,10 +288,14 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "model.diffusion_model.txtmlp.1.weight",
         ],
     ),
+    # The two S3-DiTs are the same transformer, so the learned pad tokens Z-Image
+    # ships are the whole separator: without them this key-set is a Ming-Image file.
     "zimage": (
         ZImageModel,
         [
             "x_embedder.weight",
+            "x_pad_token",
+            "cap_pad_token",
             "cap_embedder.1.weight",
             "context_refiner.0.attention_norm1.weight",
             "t_embedder.mlp.0.weight",
@@ -301,9 +306,45 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
         ZImageModel,
         [
             "model.diffusion_model.x_embedder.weight",
+            "model.diffusion_model.x_pad_token",
             "model.diffusion_model.cap_embedder.1.weight",
             "model.diffusion_model.context_refiner.0.attention_norm1.weight",
             "model.diffusion_model.layers.0.attention_norm1.weight",
+        ],
+    ),
+    # Ming-Image, bf16 release: legacy Lumina naming (``all_x_embedder["2-1"]``,
+    # separate ``to_q/to_k/to_v``) and NO pad tokens.
+    "ming_image": (
+        MingImageModel,
+        [
+            "all_x_embedder.2-1.weight",
+            "all_final_layer.2-1.linear.weight",
+            "cap_embedder.1.weight",
+            "context_refiner.0.attention.to_q.weight",
+            "layers.0.attention.to_q.weight",
+            "t_embedder.mlp.0.weight",
+        ],
+    ),
+    "ming_image_wrapped": (
+        MingImageModel,
+        [
+            "model.diffusion_model.all_x_embedder.2-1.weight",
+            "model.diffusion_model.cap_embedder.1.weight",
+            "model.diffusion_model.context_refiner.0.attention.to_q.weight",
+            "model.diffusion_model.layers.0.attention.to_q.weight",
+        ],
+    ),
+    # Ming-Image, int8-convrot release: already fused, and named EXACTLY like
+    # Z-Image apart from the missing pad tokens — the detection trap of this family.
+    "ming_image_int8": (
+        MingImageModel,
+        [
+            "x_embedder.weight",
+            "cap_embedder.1.weight",
+            "context_refiner.0.attention.qkv.weight",
+            "layers.0.attention.qkv.weight",
+            "layers.0.attention.q_norm.weight",
+            "final_layer.linear.weight",
         ],
     ),
     "flux_klein": (

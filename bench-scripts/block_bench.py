@@ -76,7 +76,6 @@ import json
 import math
 import os
 import re
-import socket
 import subprocess
 import sys
 import time
@@ -547,9 +546,8 @@ def krea2_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
                     cfg.bias, cfg.kvheads)
     seed_inputs(name, scenario, tokens)
 
-    # Positions and key-padding mask from the model's own ``prepare`` (image tokens
-    # first, so a sample's valid tokens are a contiguous prefix), then the same
-    # pad-to-256 the DiT applies around its block loop.
+    # Positions and key-padding mask from ``prepare`` (image tokens first), then the
+    # same pad-to-256 the DiT applies around its block loop.
     txtmask = torch.ones(1, txt, dtype=torch.bool, device=ctx.tdev)
     _, pos, full_mask = prepare(
         torch.zeros(1, cfg.channels, 2 * side, 2 * side, device=ctx.tdev), txt, cfg.patch,
@@ -654,7 +652,7 @@ def _zimage_ids(ctx: Ctx, sizes: list[int], start: int) -> torch.Tensor:
     Mirrors ``_pad_with_ids``: the real grid first, then the (0,0,0) position repeated
     out to ``SEQ_MULTI_OF``, and the image grid starts after the padded caption.
     """
-    from thenoise.dit.zimage.models import SEQ_MULTI_OF
+    from thenoise.dit.lumina.models import SEQ_MULTI_OF
     from thenoise.utils.positions import grid_positions
 
     ids = grid_positions(sizes, start=[start, 0, 0], dtype=torch.int32, device=ctx.tdev)
@@ -663,7 +661,7 @@ def _zimage_ids(ctx: Ctx, sizes: list[int], start: int) -> torch.Tensor:
 
 
 def _zimage_case(ctx: Ctx, tokens: int, block: str, modulation: bool) -> Case:
-    from thenoise.dit.zimage.models import ZImageTransformerBlock
+    from thenoise.dit.lumina.models import LuminaTransformerBlock as ZImageTransformerBlock
 
     name = f"zimage/{block}"
     dim, heads, head_dim = 3840, 30, 128           # the config zimage/utils.py pins
@@ -675,9 +673,8 @@ def _zimage_case(ctx: Ctx, tokens: int, block: str, modulation: bool) -> Case:
                     modulation=modulation)
     seed_inputs(name, block, tokens)
 
-    # Each stream is padded to a multiple of 32 and the image grid starts after the
-    # caption; a batch of one needs no key-padding mask (``make_key_padding_mask``
-    # returns None when every sequence is the batch max).
+    # Each stream pads to a multiple of 32; a batch of one needs no key-padding mask
+    # (``make_key_padding_mask`` returns None when all sequences are the batch max).
     cap_ids = _zimage_ids(ctx, [ctx.txt, 1, 1], 1)
     img_ids = _zimage_ids(ctx, [1, side, side], cap_ids.shape[0] + 1)
     if block == "context_refiner":

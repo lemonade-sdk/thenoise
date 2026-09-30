@@ -16,6 +16,8 @@ Models:
                   https://huggingface.co/Comfy-Org/z_image_turbo
                   https://huggingface.co/Comfy-Org/z_image
   klein           Flux.2 Klein 4B / 9B (distilled or base)
+  ming-image      Ming-Image 0.1 (Design)
+                  https://huggingface.co/Comfy-Org/Ming-Image
   qwen-image      Qwen-Image / Qwen-Image-Edit (latest dated checkpoints)
   qwen-image-2.1  Qwen-Image 2.1 (t2i + edit in one DiT)
                   https://huggingface.co/Comfy-Org/Qwen-Image-2.1
@@ -34,6 +36,8 @@ Usage:
     python scripts/download.py --model zimage --variant base
     python scripts/download.py --model klein --variant 9b
     python scripts/download.py --model klein --variant 4b --int8-convrot
+    python scripts/download.py --model ming-image
+    python scripts/download.py --model ming-image --int8-convrot
     python scripts/download.py --model qwen-image --edit-only
     python scripts/download.py --model qwen-image-2.1
     python scripts/download.py --model esrgan
@@ -155,6 +159,17 @@ def _klein_jobs(args: argparse.Namespace) -> list[Artifact]:
     ]
 
 
+def _ming_image_jobs(args: argparse.Namespace) -> list[Artifact]:
+    """Ming-Image 0.1: Design DiT + Ling-mini-2.0 TE + VAE."""
+    repo = "Comfy-Org/Ming-Image"
+    suffix = "int8_convrot" if args.int8_convrot else "bf16"
+    return [
+        ("dit", repo, f"diffusion_models/ming_image_0.1_design_{suffix}.safetensors"),
+        ("text_encoder", repo, f"text_encoders/ming_image_0.1_ling_mini_2.0_{suffix}.safetensors"),
+        ("vae", repo, "vae/ming_image_vae_bf16.safetensors"),
+    ]
+
+
 def _qwen_image_jobs(args: argparse.Namespace) -> list[Artifact]:
     """Qwen-Image / Qwen-Image-Edit: latest dated DiT(s) + shared TE + VAE."""
     image_repo = "Comfy-Org/Qwen-Image_ComfyUI"
@@ -250,6 +265,11 @@ MODELS: dict[str, ModelSpec] = {
         variant_choices=("4b", "4b-base", "9b", "9b-base"),
         default_variant="4b",
     ),
+    "ming-image": ModelSpec(
+        "ming-image", "./models/ming_image",
+        "Ming-Image 0.1 (Design)",
+        _ming_image_jobs,
+    ),
     "qwen-image": ModelSpec(
         "qwen-image", "./models/qwen_image",
         "Qwen-Image / Qwen-Image-Edit (latest dated checkpoints)",
@@ -282,6 +302,8 @@ def _epilog() -> str:
         "  python scripts/download.py --model krea2 --int8-convrot",
         "  python scripts/download.py --model zimage --variant base",
         "  python scripts/download.py --model klein --variant 9b",
+        "  python scripts/download.py --model ming-image",
+        "  python scripts/download.py --model ming-image --int8-convrot",
         "  python scripts/download.py --model qwen-image --edit-only",
         "  python scripts/download.py --model qwen-image-2.1 --int8-convrot",
         "  python scripts/download.py --model esrgan",

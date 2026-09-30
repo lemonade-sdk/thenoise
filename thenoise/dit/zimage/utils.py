@@ -12,9 +12,9 @@ from typing import Optional, Union
 import torch
 from accelerate import init_empty_weights
 
+from thenoise.dit.lumina.keys import lumina_key_map
 from thenoise.dit.zimage.models import ZImageTransformer2DModel
 from thenoise.utils.loader import load_dit
-from thenoise.utils.qk_norm import qk_norm_key_map
 from thenoise.utils.qwen_configs import QWEN3_4B_CONFIG
 from thenoise.utils.text_encoder import (
     QWEN25_TOKENIZER_CONFIG_DIR,
@@ -57,7 +57,9 @@ def load_zimage_dit(
     with init_empty_weights():
         dit = ZImageTransformer2DModel(**cfg)
 
-    return load_dit(dit, dit_path, device=device, dtype=dtype, key_map=qk_norm_key_map)
+    # Z-Image ships the fused attention layout already, so only the QK-norm rename
+    # ever applies; the shared map is a no-op for every other key.
+    return load_dit(dit, dit_path, device=device, dtype=dtype, key_map=lumina_key_map)
 
 
 def load_zimage_text_encoder(

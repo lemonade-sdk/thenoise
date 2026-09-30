@@ -56,6 +56,7 @@ All models and options (variants, `--int8-convrot`, ...):
 | Anima | `--model anima` | ~5.4 GB | [model page](models/anima.md) |
 | Krea 2 | `--model krea2` | ~35 GB | [model page](models/krea2.md) |
 | Z-Image / Z-Image-Turbo | `--model zimage` | ~21 GB | [model page](models/zimage.md) |
+| Ming-Image 0.1 | `--model ming-image` | 15–49 GB | [model page](models/ming-image.md) |
 | Flux.2 Klein 4B/9B | `--model klein --variant 9b` | 12–25 GB | [model page](models/flux2-klein.md) |
 | Qwen-Image / Edit | `--model qwen-image` | ~40 GB | [model page](models/qwen-image.md) |
 | Qwen-Image 2.1 | `--model qwen-image-2.1` | ~32 GB | [model page](models/qwen-image-2.1.md) |

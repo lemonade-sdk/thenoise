@@ -318,20 +318,6 @@ def test_pad_to_batch_pads_positions_in_lockstep():
     assert seqlens == [2, 1]
 
 
-def test_pad_to_batch_replaces_pad_positions_with_pad_token():
-    """Z-Image path: pad positions (True in replace_mask) are swapped for a token."""
-    from thenoise.utils.sequence import pad_to_batch
-
-    feat = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
-    replace_mask = torch.tensor([False, False, True])  # True = pad
-    pad_token = torch.tensor([[99.0, 99.0]])
-    out, _, seqlens = pad_to_batch([feat], [feat], pad_token=pad_token, replace_mask=[replace_mask])
-    assert torch.equal(out[0, 0], feat[0])
-    assert torch.equal(out[0, 1], feat[1])
-    assert torch.equal(out[0, 2], pad_token[0])
-    assert seqlens == [3]
-
-
 def test_make_key_padding_mask_is_none_on_uniform_lengths():
     from thenoise.utils.sequence import make_key_padding_mask
 
@@ -357,6 +343,87 @@ def test_make_key_padding_mask_matches_zimage_reference():
     mask = make_key_padding_mask(item_seqlens, "cpu")
     assert mask[0].sum().item() == 48
     assert mask[1].sum().item() == 64
+
+
+# --------------------------------------------------------- alignment pad-fill / mask
+
+
+def test_pad_to_length_fills_with_zeros_by_default():
+    from thenoise.utils.sequence import pad_to_length
+
+    seq = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+    out = pad_to_length([seq], [4])[0]
+    assert out.shape == (4, 2)
+    assert torch.equal(out[:2], seq)
+    assert torch.equal(out[2:], torch.zeros(2, 2))
+
+
+def test_pad_to_length_tiles_the_pad_token():
+    """The learned-pad path: every new slot is the SAME embedding."""
+    from thenoise.utils.sequence import pad_to_length
+
+    seq = torch.ones(3, 2)
+    pad_token = torch.full((1, 2), 9.0)
+    out = pad_to_length([seq], [6], pad_token=pad_token)[0]
+    assert torch.equal(out[:3], seq)
+    assert torch.equal(out[3:], torch.full((3, 2), 9.0))
+
+
+def test_pad_to_length_is_a_noop_when_already_long_enough():
+    """An aligned sequence is passed through as the SAME tensor (no copy)."""
+    from thenoise.utils.sequence import pad_to_length
+
+    seq = torch.ones(3, 2)
+    assert pad_to_length([seq], [3])[0] is seq
+
+
+def test_pad_to_length_refuses_to_trim():
+    from thenoise.utils.sequence import pad_to_length
+
+    with pytest.raises(ValueError, match="cannot pad"):
+        pad_to_length([torch.ones(5, 2)], [4])
+
+
+def test_alignment_padding_mask_holes_land_on_the_pads():
+    """Two segments (image then caption): each keeps its own valid prefix."""
+    from thenoise.utils.sequence import alignment_padding_mask
+
+    mask = alignment_padding_mask([[(4, 8), (3, 5)]], "cpu")
+    assert mask.shape == (1, 13)
+    assert mask[0].tolist() == (
+        [True] * 4 + [False] * 4 + [True] * 3 + [False] * 2
+    )
+
+
+def test_alignment_padding_mask_masks_the_batch_padding_too():
+    """An item shorter than the batch max loses its tail as well as its pads."""
+    from thenoise.utils.sequence import alignment_padding_mask
+
+    mask = alignment_padding_mask([[(4, 8)], [(1, 2)]], "cpu")
+    assert mask.shape == (2, 8)
+    assert mask[0].tolist() == [True] * 4 + [False] * 4
+    assert mask[1].tolist() == [True] + [False] * 7
+
+
+def test_alignment_padding_mask_uniform_and_unpadded_is_the_fast_path():
+    """Nothing masked -> ``None``, so the caller keeps the mask-free SDPA path."""
+    from thenoise.utils.sequence import alignment_padding_mask
+
+    assert alignment_padding_mask([[(8, 8)]], "cpu") is None
+    assert alignment_padding_mask([[(4, 4)], [(4, 4)]], "cpu") is None
+    # Two segments both fully attended: still nothing to mask.
+    assert alignment_padding_mask([[(4, 4), (4, 4)]], "cpu") is None
+    # ``always`` forces a real tensor for callers that consume it unconditionally.
+    assert alignment_padding_mask([[(8, 8)]], "cpu", always=True).shape == (1, 8)
+
+
+def test_alignment_padding_mask_reduces_to_a_valid_prefix_without_pads():
+    """With no padded segment it agrees with ``make_key_padding_mask`` per row."""
+    from thenoise.utils.sequence import alignment_padding_mask, make_key_padding_mask
+
+    lens = [48, 64]
+    aligned = alignment_padding_mask([[(n, n)] for n in lens], "cpu")
+    assert torch.equal(aligned, make_key_padding_mask(lens, "cpu", always=True))
 
 
 # ------------------------------------------------------------------ position ids

@@ -628,6 +628,38 @@ def test_load_dit_value_map_on_bf16(tmp_path):
     assert torch.equal(model.norm.weight, torch.full((OUT_F,), 3.0, dtype=torch.bfloat16))
 
 
+@pytest.mark.parametrize("quantized", [False, True], ids=["bf16", "int8"])
+def test_load_dit_state_map_stacks_several_tensors_into_one_parameter(tmp_path, quantized):
+    """``state_map`` is the hook for N checkpoint keys -> 1 parameter.
+
+    Neither per-key map can express it (a ``key_map`` sees one name at a time and a
+    ``value_map`` one tensor), and it has to run BEFORE the quantized/BF16 branch:
+    this checkpoint names its fused projection ``qkv``, so the fold has to move the
+    ``.weight_scale`` and ``.comfy_quant`` siblings along with the weight or the
+    quantized path would fail to see a quantized layer at all.
+    """
+    tensors = int8_tensors() if quantized else bf16_tensors()
+    tensors = {
+        (k.replace("q.", "qkv.", 1) if k.startswith("q.") else k): v
+        for k, v in tensors.items()
+    }
+    path = write_safetensors(tmp_path / "dit.safetensors", tensors)
+
+    def state_map(sd):
+        return {k.replace("qkv.", "q.", 1) if k.startswith("qkv.") else k: v for k, v in sd.items()}
+
+    model = load_dit(TinyDiT(), path, device="cpu", dtype=torch.bfloat16, state_map=state_map)
+
+    assert model.q._quantized is quantized
+    if quantized:
+        # The scale/marker siblings followed the weight, so the layer is still a
+        # real quantized one carrying the checkpoint's own codes.
+        assert torch.equal(model.q.weight._qdata, tensors["qkv.weight"])
+        assert torch.equal(model.q.weight.params.scale, tensors["qkv.weight_scale"])
+    else:
+        assert torch.equal(model.q.weight, tensors["qkv.weight"])
+
+
 class _BufModel(torch.nn.Module):
     """Model with an internal buffer that is deliberately not in the checkpoint."""
 

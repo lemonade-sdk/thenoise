@@ -10,6 +10,7 @@ import logging
 
 import torch
 
+from thenoise.dit.lumina.keys import has_learned_pad_tokens, is_s3dit
 from thenoise.dit.zimage import sampling as zimage_sampling
 from thenoise.dit.zimage.utils import (
     load_zimage_dit,
@@ -56,18 +57,12 @@ class ZImageModel(DiffusionModel):
 
     @staticmethod
     def detect(f) -> bool:
-        """True if this handle is the Z-Image S3-DiT.
-
-        Z-Image's distinctive blocks are the caption embedder (``cap_embedder.``),
-        the plain patch embedder (``x_embedder.``) and the context refiner
-        (``context_refiner.``). Keys are normalized first so repackaged checkpoints
-        (``model.diffusion_model.`` / ``net.``) resolve identically.
+        """True if this handle is the Z-Image S3-DiT: the family signature (keys
+        normalized first, so repackaged files resolve identically) plus the learned
+        padding it ships, which its Ming-Image sibling lacks.
         """
         keys = list(normalize_keys(f.keys()))
-        has_cap = any(k.startswith("cap_embedder.") for k in keys)
-        has_context = any(k.startswith("context_refiner.") for k in keys)
-        has_x_embed = any(k.startswith("x_embedder.") for k in keys)
-        return has_cap and has_context and has_x_embed
+        return is_s3dit(keys) and has_learned_pad_tokens(keys)
 
     def __init__(
         self,

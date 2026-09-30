@@ -44,6 +44,7 @@ TheNoise ships:
 | **Flux.2 Klein 4B / 9B**, 4 steps, with editing | ✓ | ✓ | [flux2-klein](docs/models/flux2-klein.md) |
 | **Qwen-Image / Qwen-Image-Edit**, generation and editing | ✓ | ✓ | [qwen-image](docs/models/qwen-image.md) |
 | **Qwen-Image 2.1**, generation and editing in one model | ✓ | ✓ | [qwen-image-2.1](docs/models/qwen-image-2.1.md) |
+| **Ming-Image 0.1**, RGBA output with real transparency | ✓ | — | [ming-image](docs/models/ming-image.md) |
 
 New models are added over time. PRs adding model support are welcome.
 
@@ -77,6 +78,7 @@ a warmup run.
 | Flux.2 Klein 9B · INT8-ConvRot · 4 steps | 9.6s | 34.3s |
 | Qwen-Image 2512 · BF16 · 4 steps | 9.7s | 34.9s |
 | Qwen-Image 2.1 + [Qwen-Image-2.1 Turbo LoRA](https://huggingface.co/Viggle/Qwen-Image-2.1-viggle-turbo) · BF16 · 6 steps | 15s | 53s |
+| Ming-Image 0.1 · INT8-ConvRot · 12 steps | 21s | 84.8s |
 
 *Image + simple instruction to edited image (editing):*
 
