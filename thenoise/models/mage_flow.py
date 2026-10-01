@@ -5,6 +5,10 @@ Native-resolution flow model: the latent is the VAE's raw 128-channel output at 
 are only rounded up to the VAE's 16-pixel cell. Both released checkpoints are the same
 architecture, so both are edit-capable.
 
+The codec is the Mage-VAE, but the Flux.2 AE is accepted in its place — the latent is
+the same shape and the Mage space was anchored to Flux.2's — and which of the two was
+passed is read off the file (see :func:`thenoise.vae.load_mage_family_vae`).
+
 Defaults are the **Turbo** recipe, because that is what the download script ships and
 no checkpoint carries a marker saying which variant it is — the CLI/API stays the
 source of truth:
@@ -36,7 +40,7 @@ from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, VAEPixelUpscaler
 from thenoise.utils.math import round_up
 from thenoise.utils.positions import grid_positions
-from thenoise.vae import load_mage_vae
+from thenoise.vae import load_mage_family_vae
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +80,8 @@ class MageFlowModel(DiffusionModel):
             config.text_encoder_path, dtype=config.dtype, device=self.offload_device
         )
 
-        logger.info("Loading Mage-VAE from %s", self.vae_path)
-        self.vae = load_mage_vae(self.vae_path, device=self.device, dtype=config.dtype)
+        logger.info("Loading Mage-Flow VAE from %s", self.vae_path)
+        self.vae = load_mage_family_vae(self.vae_path, device=self.device, dtype=config.dtype)
 
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)

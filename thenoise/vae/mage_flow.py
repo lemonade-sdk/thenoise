@@ -30,8 +30,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from thenoise.utils.safetensors import load_safetensors
+from thenoise.utils.safetensors import MemoryEfficientSafeOpen, load_safetensors
 from thenoise.utils.setup_logging import setup_logging
+from .flux2 import AutoencoderKLFlux2, load_flux2_vae
 
 setup_logging()
 import logging
@@ -585,4 +586,48 @@ def load_mage_vae(
     return vae
 
 
-__all__ = ["AutoencoderKLMageFlow", "load_mage_vae"]
+#: The key prefixes of the two codecs a Mage-Flow run can be pointed at. Both latents
+#: are 128 channels at 16x, so nothing about a run says which one is in use — only the
+#: file does.
+_MAGE_PREFIXES = ("student.", "pipeline.")
+_FLUX2_PREFIXES = ("encoder.", "decoder.", "bn.")
+
+
+def load_mage_family_vae(
+    vae_path: str,
+    device: Union[str, torch.device],
+    dtype: Optional[torch.dtype] = None,
+) -> Union[AutoencoderKLMageFlow, AutoencoderKLFlux2]:
+    """Load whichever codec ``vae_path`` holds: the Mage-VAE or the Flux.2 AE.
+
+    The Mage latent lives in a Flux.2-*anchored* space (see this module's docstring), so
+    the Flux.2 AE can encode and decode a Mage-Flow run's latents too — the shapes agree
+    and so do the statistics closely enough that people do exactly this. Both codecs
+    keep the same interface the adapter uses (``z_dim``, ``spatial_compression``,
+    ``pixel_channels``, ``encode_pixels_to_latents``, ``decode_to_pixels``), so the
+    choice changes nothing else about the run.
+
+    The names say which file this is, from the header alone: the Mage export is a
+    training artifact with its keys under ``student.``/``pipeline.``, the Flux.2 AE
+    carries ``encoder.``/``decoder.``/``bn.`` at the top level. The Mage file does contain
+    a Flux.2 encoder — under ``pipeline.y_embedder.encoder.``, which is not one of the
+    Flux.2 prefixes, and which ``load_mage_vae`` drops.
+
+    Mage is checked first as the native codec. Each loader then reads the weights itself;
+    this pass reads only the header.
+    """
+    with MemoryEfficientSafeOpen(vae_path) as f:
+        keys = list(f.keys())
+
+    if any(key.startswith(_MAGE_PREFIXES) for key in keys):
+        return load_mage_vae(vae_path, device, dtype=dtype)
+    if any(key.startswith(_FLUX2_PREFIXES) for key in keys):
+        logger.info("Mage-Flow codec: the Flux.2 AE rather than the Mage-VAE (%s)", vae_path)
+        return load_flux2_vae(vae_path, device, dtype=dtype)
+    raise ValueError(
+        f"{vae_path} is neither a Mage-VAE (no 'student.*'/'pipeline.*' keys) nor a "
+        "Flux.2 AE (no 'encoder.*'/'decoder.*'/'bn.*' keys)"
+    )
+
+
+__all__ = ["AutoencoderKLMageFlow", "load_mage_family_vae", "load_mage_vae"]

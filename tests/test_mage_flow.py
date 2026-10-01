@@ -41,6 +41,7 @@ from thenoise.upscale import VAEPixelUpscaler
 from thenoise.utils.rope import apply_rope
 from thenoise.utils.timestep import timestep_embedding
 from thenoise.vae import mage_flow as mage_vae
+from thenoise.vae.flux2 import AutoencoderKLFlux2
 from thenoise.vae.mage_flow import AutoencoderKLMageFlow, DConvEncoder, DConvDenoiser
 
 # Two heads of the released 128, so the (16, 56, 56) axis split is the real one.
@@ -750,3 +751,46 @@ def test_load_rejects_a_file_that_is_not_the_codec(tmp_path, monkeypatch):
     del partial["student.dconv_encoder.proj_out.bias"]
     with pytest.raises(Exception, match="[Mm]issing"):
         mage_vae.load_mage_vae(write_safetensors(tmp_path / "half.safetensors", partial), device="cpu")
+
+
+def test_both_codecs_answer_the_adapter_the_same_way():
+    """A Mage-Flow run only ever asks a codec for these, and either one has them."""
+    for codec_cls in (AutoencoderKLMageFlow, AutoencoderKLFlux2):
+        assert (codec_cls.z_dim, codec_cls.spatial_compression, codec_cls.pixel_channels) == (
+            128, 16, 3,
+        )
+        assert all(callable(getattr(codec_cls, op)) for op in ("encode_pixels_to_latents", "decode_to_pixels"))
+
+
+def test_the_codec_is_chosen_from_the_file(tmp_path, monkeypatch):
+    """The Flux.2 AE is a legitimate stand-in for the Mage-VAE; the names say which."""
+    monkeypatch.setattr(mage_vae, "AutoencoderKLMageFlow", _tiny_vae)
+    calls = []
+    monkeypatch.setattr(mage_vae, "load_flux2_vae", lambda path, device, dtype=None: calls.append(path) or "flux2")
+
+    # The Mage export even carries Flux.2 weights — the anchor encoder — under its own
+    # names, so "has an encoder.* key" is not the test; the top level is.
+    export = _training_names({k: v.clone() for k, v in _tiny_vae().state_dict().items()})
+    export["pipeline.y_embedder.encoder.conv_in.weight"] = torch.zeros(4, 128, 3, 3)
+    mage = mage_vae.load_mage_family_vae(
+        write_safetensors(tmp_path / "mage_vae.safetensors", export), "cpu", dtype=torch.bfloat16
+    )
+    assert isinstance(mage, AutoencoderKLMageFlow)
+    assert not calls
+
+    flux2 = write_safetensors(
+        tmp_path / "flux2_vae.safetensors",
+        {
+            "encoder.conv_in.weight": torch.zeros(4),
+            "decoder.conv_in.weight": torch.zeros(4),
+            "bn.running_mean": torch.zeros(128),
+        },
+    )
+    assert mage_vae.load_mage_family_vae(flux2, "cpu") == "flux2"
+    assert calls == [flux2]  # and straight to the Flux.2 loader, unchanged
+
+
+def test_a_file_that_is_neither_codec_is_refused(tmp_path):
+    path = write_safetensors(tmp_path / "dit.safetensors", {"img_in.weight": torch.zeros(4, 4)})
+    with pytest.raises(ValueError, match="neither a Mage-VAE"):
+        mage_vae.load_mage_family_vae(path, "cpu")
