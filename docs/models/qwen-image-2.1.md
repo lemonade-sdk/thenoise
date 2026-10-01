@@ -33,7 +33,10 @@ default.
 
 ## Performance (Strix Halo)
 
-TBD (1024×768).
+BF16, 1024×768, ViggleAI Turbo LoRA:
+
+- Generate @ 6 steps : **~11.6 s**
+- Edit @ 6 steps: ~13.1 s
 
 ## Examples
 
@@ -43,7 +46,7 @@ TBD (1024×768).
 <img width="45%" alt="thenoise_3144373276" src="https://github.com/user-attachments/assets/eeb66e4d-8c7e-43ad-8964-6ccd991a644e" />
 
 
-*Edited":*
+*Edited:*
 
 | Before | After | Prompt |
 |---|---|---|
