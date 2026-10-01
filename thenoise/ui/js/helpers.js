@@ -4,7 +4,6 @@
 const $ = id => document.getElementById(id);
 
 /* ---------- persisted preferences (light/dark, sidebar left/right) ---------- */
-// Shared plumbing for the two persisted toggles.
 function initToggle({ key, btnId, initial, current, apply, next }) {
   apply(initial());
   const btn = $(btnId);
@@ -34,13 +33,11 @@ function applyTheme(theme) {
 }
 
 initToggle({
-  key: 'thenoise-theme',
-  btnId: 'theme_toggle',
+  key: 'thenoise-theme', btnId: 'theme_toggle',
   initial: () => localStorage.getItem('thenoise-theme') ||
     (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'),
   current: () => document.body.classList.contains('light') ? 'light' : 'dark',
-  apply: applyTheme,
-  next: v => v === 'light' ? 'dark' : 'light',
+  apply: applyTheme, next: v => v === 'light' ? 'dark' : 'light',
 });
 
 /* ---------- sidebar side (left / right) ---------- */
@@ -59,12 +56,10 @@ function applySidebar(side) {
 }
 
 initToggle({
-  key: 'thenoise-sidebar',
-  btnId: 'sidebar_toggle',
+  key: 'thenoise-sidebar', btnId: 'sidebar_toggle',
   initial: () => localStorage.getItem('thenoise-sidebar') === 'right' ? 'right' : 'left',
   current: () => document.body.classList.contains('sidebar-right') ? 'right' : 'left',
-  apply: applySidebar,
-  next: v => v === 'right' ? 'left' : 'right',
+  apply: applySidebar, next: v => v === 'right' ? 'left' : 'right',
 });
 
 function bindRange(sliderId, valId, digits = 2) {
