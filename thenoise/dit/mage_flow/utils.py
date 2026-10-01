@@ -1,10 +1,9 @@
-"""Mage-Flow DiT checkpoint inspection: the architecture out of the safetensors header.
+"""The Mage-Flow DiT architecture, read out of the safetensors header.
 
-Nothing here is needed to *run* the model — ``MageFlowParams``' defaults are the
-released checkpoint's — but reading the geometry from the file is what lets a
-different-depth or different-width export (a base/RL variant, a future wider
-distillation) load without touching this package. Detection by *name* lives in
-:mod:`thenoise.dit.mage_flow.keys`; this is the shape pass, run once at load.
+``MageFlowParams``' defaults are the released checkpoint's; reading the geometry from
+the file is what lets a different-depth or different-width export load without touching
+this package. Detection by *name* lives in :mod:`thenoise.dit.mage_flow.keys`; this is
+the shape pass, run once at load.
 """
 from __future__ import annotations
 

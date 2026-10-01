@@ -1,26 +1,19 @@
 """Mage-Flow DiT — the 12-layer member of the Qwen-Image dual-stream family.
 
-The block is Qwen-Image's, so it is *literally reused* here
-(:class:`thenoise.dit.qwen_image.models.QwenImageTransformerBlock`): the checkpoint's
-tensor names are identical from ``img_in`` to ``proj_out``, and only ``eps`` differs
-(1e-6, the reference's value for both the block LayerNorms and the attention QK
-RMSNorms). What makes this a different model is three things around that block:
+The block is Qwen-Image's and is reused verbatim
+(:class:`thenoise.dit.qwen_image.models.QwenImageTransformerBlock`); only ``eps``
+differs (1e-6, for the block LayerNorms and the attention QK RMSNorms). Three things
+around the block make this model:
 
   * **patch 1** — one token per latent cell, the raw 128-channel VAE latent with no
-    2x2 packing (see :func:`latent_to_tokens`), so ``img_in`` is ``128 -> 3072`` and
-    ``proj_out`` is ``3072 -> 128``;
+    2x2 packing (see :func:`latent_to_tokens`);
   * **unrotated text** — the text stream sits at position 0, where RoPE is the
-    identity. The adapter stores one identity matrix for it rather than a per-token
-    table (``RopeCache`` broadcasts it over the text length);
-  * **a bf16-rounded timestep table** — the sinusoidal frequencies are rounded to the
-    timestep dtype *before* being multiplied, which the shared fp32
-    ``timestep_embedding`` does not do and which is worth up to ~1 radian at the high
-    frequency end (see :class:`MageTimestepProjEmbeddings`).
+    identity, so one matrix is stored for it instead of a per-token table;
+  * **a bf16-rounded timestep table** — see :class:`MageTimestepProjEmbeddings`.
 
-There is no timestep-zero reference conditioning: the timestep embedding has a single
-row, so the reference tokens of an edit are modulated at ``t`` exactly like the target
-ones. Their K/V therefore change every step and cannot be cached — which is why this
-model takes no ``kv``, no ``timestep_zero_index`` and no per-token modulation mask.
+The timestep embedding has a single row, so reference tokens are modulated at ``t``
+like the target ones and their K/V cannot be cached: no ``kv``, no
+``timestep_zero_index``, no per-token modulation mask.
 """
 from __future__ import annotations
 
@@ -49,8 +42,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-#: Layer-norm / RMS-norm epsilon of the reference implementation. Qwen-Image runs the
-#: same block at 1e-5; this checkpoint was trained at 1e-6.
+#: Layer-norm / RMS-norm epsilon of the reference implementation (Qwen-Image runs the
+#: same block at 1e-5).
 _EPS = 1e-6
 
 
@@ -76,9 +69,8 @@ class MageFlowParams:
 def latent_to_tokens(latents: torch.Tensor) -> torch.Tensor:
     """Canonical latent ``[B, C, H, W]`` -> tokens ``[B, H*W, C]``.
 
-    The patch-1 analogue of :func:`thenoise.utils.latents.pack_latents` (which merges
-    2x2 cells into ``C*4``): a Mage token IS a latent pixel, so this is a move + flatten
-    and the token width stays ``C``.
+    A Mage token IS a latent pixel, so unlike ``pack_latents`` there is no 2x2 merge:
+    the token width stays ``C``.
     """
     batch, channels, height, width = latents.shape
     return latents.movedim(1, -1).reshape(batch, height * width, channels)
@@ -91,14 +83,12 @@ def tokens_to_latent(tokens: torch.Tensor, height: int, width: int) -> torch.Ten
 
 
 class MageTimestepProjEmbeddings(nn.Module):
-    """Timestep embedding with the frequency table rounded to the timestep dtype.
+    """Timestep embedding whose frequency table is rounded to the timestep dtype.
 
-    The shared ``timestep_embedding`` builds ``exp(-log(10000) * i / half)`` in fp32 and
-    keeps it there. This model rounds it to the timestep dtype first (bf16, which is
-    what it always runs in), and that rounding is audible: a bf16 frequency is up to
-    ~0.4% off, and amplified by the x1000 time factor at ``t ~ 1`` that is close to a
-    radian of phase error at the highest frequency of the table. Reproduced literally —
-    round the table, then multiply by ``1000 * t`` — rather than approximated.
+    The shared ``timestep_embedding`` keeps ``exp(-log(10000) * i / half)`` in fp32.
+    This model rounds it to bf16 first, and the rounding is audible: amplified by the
+    x1000 time factor it is worth close to a radian at the top of the table. So it is
+    reproduced literally — round the table, then multiply — rather than approximated.
     """
 
     def __init__(self, embedding_dim: int):
@@ -107,9 +97,7 @@ class MageTimestepProjEmbeddings(nn.Module):
 
     def forward(self, timestep: torch.Tensor, hidden_states: torch.Tensor) -> torch.Tensor:
         half = 128
-        # ``timestep`` is the (shifted) sigma in [0, 1]: the reference forces it to
-        # bf16 before embedding it, so the table is rounded to bf16 whatever dtype the
-        # sampler happens to integrate in.
+        # ``timestep`` is the (shifted) sigma in [0, 1], forced to bf16 before embedding.
         t = timestep.to(torch.bfloat16)
         exponent = -math.log(10000) * torch.arange(
             half, dtype=torch.float32, device=t.device
@@ -118,8 +106,7 @@ class MageTimestepProjEmbeddings(nn.Module):
         angles = t[:, None].float() * freqs[None, :]
         angles = 1000.0 * angles
         emb = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
-        # ``flip_sin_to_cos``: [cos(...), sin(...)], the layout the MLP is trained on.
-        emb = torch.cat([emb[:, half:], emb[:, :half]], dim=-1)
+        emb = torch.cat([emb[:, half:], emb[:, :half]], dim=-1)  # ``flip_sin_to_cos``
         return self.timestep_embedder(emb.to(dtype=hidden_states.dtype))
 
 
@@ -159,7 +146,6 @@ class MageFlowTransformer2DModel(nn.Module):
         )
         # patch_size 1: one output value per latent cell, so no patch**2 factor.
         self.proj_out = QuantizedLinear(self.inner_dim, self.out_channels, bias=True)
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -171,14 +157,12 @@ class MageFlowTransformer2DModel(nn.Module):
     ) -> torch.Tensor:
         """One DiT forward, returning the velocity of the *target* tokens only.
 
-        ``hidden_states`` are the target latent tokens (``latent_to_tokens`` of the
-        noisy latent) and ``ref_tokens`` the edit's reference tokens, already packed the
-        same way and carrying their own positions inside ``img_pe`` (which the adapter
-        builds as target-then-references). Both stay in the sequence for every step:
-        there is no KV cache to drop the references into.
+        ``hidden_states`` are the target latent tokens and ``ref_tokens`` the edit's
+        references, packed the same way and carrying their own positions inside
+        ``img_pe``. Both stay in the sequence for every step.
 
-        Returns ``[B, num_target_tokens, out_channels]`` — still tokens; reshaping back
-        to the canonical 4D latent is ``tokens_to_latent``, called once by the adapter.
+        Returns ``[B, num_target_tokens, out_channels]`` — still tokens; see
+        :func:`tokens_to_latent` for the canonical latent.
         """
         num_img_tokens = hidden_states.shape[1]
         if ref_tokens is not None:
@@ -211,9 +195,8 @@ def load_mage_flow_dit(
 ) -> MageFlowTransformer2DModel:
     """Build the DiT on meta from the checkpoint's own geometry, then load its weights.
 
-    The int8 + ConvRot Turbo exports need no key remapping: the names are the module
-    names, and ``load_dit`` reconstructs the quantized layout from the
-    ``.weight_scale``/``.comfy_quant`` siblings.
+    The released exports need no key remapping: the names are the module names, and
+    ``load_dit`` reconstructs the quantized layout from the ``.weight_scale`` siblings.
     """
     with init_empty_weights():
         model = MageFlowTransformer2DModel(params)

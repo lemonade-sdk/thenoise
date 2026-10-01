@@ -13,6 +13,7 @@ import torch
 
 from conftest import write_safetensors
 from thenoise.dit.anima.utils import _count_anima_blocks
+from thenoise.utils.text_encoder import QWEN_VL_DROP_IDX, compute_drop_idx
 from thenoise.dit.krea2.sampling import (
     encode_prompts,
     gather_valid_text,
@@ -491,3 +492,24 @@ def test_broadcast_positions_repeats_a_single_index():
     assert torch.equal(pos[:, 1], pos[:, 2])
     assert pos[0].tolist() == [7.0, 7.0, 7.0]
     assert pos[3].tolist() == [10.0, 10.0, 10.0]
+
+
+# ------------------------------------------------------------- chat-template drop
+
+
+def test_drop_idx_skips_the_system_turn_and_the_user_header():
+    """The user content starts 3 tokens past the SECOND chat-start marker."""
+    ids = torch.tensor([151644, 1, 2, 151644, 9, 9, 9, 9])
+    assert compute_drop_idx(ids) == 6  # 3 markers + ``user`` + ``\n`` -> 2 tokens kept
+
+
+def test_drop_idx_counts_markers_rather_than_assuming_a_prefix_length():
+    """The prefix length depends on how the system prompt tokenizes, so it is counted:
+    Qwen-Image's t2i template lands on 34 (``QWEN_VL_DROP_IDX``), the edit template's
+    longer system prompt on 64, and only the marker count is common to both.
+    """
+    t2i = torch.tensor([151644] + [5] * 30 + [151644] + [6] * 10)
+    edit = torch.tensor([151644] + [5] * 60 + [151644] + [6] * 10)
+    assert compute_drop_idx(t2i) == QWEN_VL_DROP_IDX
+    assert compute_drop_idx(edit) == 64
+    assert compute_drop_idx(torch.tensor([151644, 1, 2, 3])) == 0  # no user turn at all

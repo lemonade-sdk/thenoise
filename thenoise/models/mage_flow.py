@@ -1,26 +1,17 @@
 """Mage-Flow adapter — 12-layer dual-stream DiT + Qwen3-VL-4B + Mage-VAE.
 
 Native-resolution flow model: the latent is the VAE's raw 128-channel output at 16x
-(one DiT token per latent cell, no packing), the schedule is a static shift so it does
-not care about the resolution, and sizes are only rounded up to the VAE's 16-pixel
-cell. Both released checkpoints are the same architecture, so both are edit-capable:
-the t2i one will happily take reference tokens, the edit one is the same weights plus
-the training that taught it to use them.
+(one DiT token per latent cell, no packing), the schedule is a static shift, and sizes
+are only rounded up to the VAE's 16-pixel cell. Both released checkpoints are the same
+architecture, so both are edit-capable.
 
-Defaults are the **Turbo** recipe (4 steps, guidance 1.0, Euler), because the int8
-ConvRot Turbo files are what the download script ships and no checkpoint carries a
-marker saying which variant it is — so the CLI/API stays the source of truth:
+Defaults are the **Turbo** recipe, because that is what the download script ships and
+no checkpoint carries a marker saying which variant it is — the CLI/API stays the
+source of truth:
 
     base     --steps 30 --guidance-scale 5
     RL       --steps 20 --guidance-scale 5
     turbo    (the default)
-
-Editing feeds the reference in twice, like Qwen-Image: as vision tokens in the text
-conditioning, and as latent tokens appended to the image stream. There is no KV cache
-(``CAPABILITIES["kv_cache"] = False``): the DiT has no timestep-zero conditioning, so
-its reference K/V change every step and freezing them would degrade edits silently.
-The reference positions follow Mage's own convention — the frame axis is the plain
-1-based reference index, 0 reserved for the target — with no Flux.2-style index scale.
 """
 from __future__ import annotations
 
@@ -53,8 +44,7 @@ logger = logging.getLogger(__name__)
 class MageFlowModel(DiffusionModel):
     name = "mage_flow"
 
-    # The distilled Turbo recipe: 4 steps, CFG off. See the module docstring for what
-    # to pass for the base / RL-aligned checkpoints.
+    # The Turbo recipe; the module docstring has the other variants.
     DEFAULT_PREFS = {
         **DiffusionModel.DEFAULT_PREFS,
         "steps": 4,
@@ -62,21 +52,13 @@ class MageFlowModel(DiffusionModel):
         "sampler": "euler",
     }
 
-    # Edit: yes, always — the architecture takes reference tokens whatever the
-    # checkpoint was last trained on. KV cache: no, because the single-row timestep
-    # embedding modulates the references at ``t`` like everything else, so their K/V
-    # are not step-invariant (see ``pack_reference_latent``).
+    # No KV cache: the single-row timestep embedding modulates the references at ``t``
+    # like everything else, so their K/V are not step-invariant.
     CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": False}
 
     @staticmethod
     def detect(f) -> bool:
-        """The Qwen-Image block layout at Mage-Flow's depth.
-
-        Names alone cannot separate this from Qwen-Image — the tensor names are the
-        same model's — so the family predicate and the block count do it together
-        (``thenoise.dit.mage_flow.keys``). Depth is exact rather than a "<= 12" bound:
-        a shallower export would be a different model, not this one.
-        """
+        """The Qwen-Image block layout at Mage-Flow's depth (``dit/mage_flow/keys``)."""
         keys = list(normalize_keys(f.keys()))
         return is_qwen_image_family(keys) and dit_block_count(keys) == MAGE_LAYERS
 
@@ -105,12 +87,11 @@ class MageFlowModel(DiffusionModel):
 
     # ------------------------------------------------------------ kernels
     def encode_prompt(self, args: EncodePromptArgs) -> Conditioning:
-        """Prompt (and reference images) -> conditioning, via the Qwen3-VL-4B conditioner.
+        """Prompt (and reference images) -> conditioning, via Qwen3-VL-4B.
 
-        The reference images go in as vision tokens of the same turn as the
-        instruction — for the negative branch too, which is what makes CFG compare
-        "edit like this" against "don't", rather than image-conditioned against
-        unconditioned.
+        The references are vision tokens of the same turn for the negative branch too,
+        so CFG compares "edit like this" against "don't" rather than image-conditioned
+        against unconditioned.
         """
         images = args.image or None
         cond, cond_mask = self.text_encoder(args.prompt, images)
@@ -140,12 +121,10 @@ class MageFlowModel(DiffusionModel):
     ) -> torch.Tensor:
         """Tokens + conditioning + positions, stashed once before the loop.
 
-        One RoPE build per run. The image entry carries the target's positions
-        followed by the references', and stays that way for every step — there is no
-        KV cache to drop the references into, so they are never separated again. The
-        text entry is a single identity rotation: Mage does not rotate its text tokens
-        at all, and ``apply_rope`` broadcasts the one matrix over the whole prompt
-        (which also means cond and uncond can share it).
+        One RoPE build per run. The image entry is the target's positions followed by
+        the references' and stays that way every step. The text entry is a single
+        identity rotation: this model does not rotate its text tokens, and
+        ``apply_rope`` broadcasts the one matrix over the whole prompt.
         """
         dev = torch.device(self.device)
         x = latent_to_tokens(latents.to(device=dev, dtype=self.dtype))
@@ -176,9 +155,8 @@ class MageFlowModel(DiffusionModel):
         return x
 
     def schedule(self, params: SamplingParams) -> list[Step]:
-        # Static shift: the grid is the same at every resolution (see
-        # ``thenoise.dit.mage_flow.sampling``). ``Step.t`` carries the shifted sigma,
-        # which is literally the timestep the DiT is fed.
+        # Static shift: the grid is the same at every resolution. ``Step.t`` is the
+        # shifted sigma, which is literally the timestep the DiT is fed.
         ts = mage_sampling.get_schedule(params.steps)
         return [Step(t=ts[i], delta=ts[i] - ts[i + 1]) for i in range(params.steps)]
 
@@ -192,9 +170,8 @@ class MageFlowModel(DiffusionModel):
     ) -> torch.Tensor:
         """One DiT forward (+ plain CFG), returning the velocity of the target tokens.
 
-        The CFG combination is left unnormalised: the renormalisation trick Qwen-Image
-        applies to its CFG output is not part of this recipe (upstream's optional
-        per-token renorm defaults to off).
+        The CFG combination is left unnormalised: upstream's per-token renorm defaults
+        to off.
         """
         dev = torch.device(self.device)
         t_full = torch.full((1,), float(t), dtype=latents.dtype, device=dev)
@@ -225,7 +202,7 @@ class MageFlowModel(DiffusionModel):
         return v
 
     def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:
-        """Tokens -> canonical latent, ready for the VAE decode."""
+        """Tokens -> canonical latent."""
         return tokens_to_latent(
             latents,
             params.height // self.vae.spatial_compression,
@@ -233,36 +210,18 @@ class MageFlowModel(DiffusionModel):
         )
 
     def resolve_size(self, width: int, height: int) -> tuple[int, int]:
-        """Round up to the VAE's cell: one token per latent cell, so 16 is all there is.
-
-        Native resolution is the point of the architecture — 512..2048 is a quality
-        range, not a constraint, and any aspect ratio works — so there is no bucket
-        quantisation and no clamping here.
-        """
+        """Round up to the pixel cell of one token: 512..2048 is a quality range, not a
+        constraint, so no bucket quantisation and no clamping."""
         align = self._pixels_per_token
         return round_up(width, align), round_up(height, align)
 
-    def percent_to_sigma(self, percent: float) -> float:
-        """Percent -> sigma, for the ER-SDE solver's SNR offset.
-
-        The shifted grid starts exactly on 1.0, where the solver's
-        ``sigma / (1 - sigma)`` blows up; nudge it below 1.
-        """
-        return 1.0 - percent
-
     @property
     def _pixels_per_token(self) -> int:
-        """Pixels per DiT token: the VAE's compression times the DiT's patch size.
-
-        The latent's geometry is the VAE's; the (patch-1, i.e. absent) patchify on top
-        is the DiT's, so the two stay separate concerns and a patch-2 Mage export
-        would need no arithmetic changes here.
-        """
+        """The VAE's compression times the DiT's patch size."""
         return self.vae.spatial_compression * self.dit.patch_size
 
     # ------------------------------------------------------------ editing
     def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
-        """Encode input pixels (``[C,H,W]`` in [-1, 1]) -> canonical reference latent."""
         return self.vae.encode_pixels_to_latents(pixels.unsqueeze(0))
 
     def pack_reference_latent(
@@ -273,12 +232,9 @@ class MageFlowModel(DiffusionModel):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Canonical reference latent -> (tokens, positions) at frame index ``ref_index``.
 
-        Only ``index`` exists: ``index_timestep_zero`` needs a second timestep row for
-        the reference tokens, and this DiT's embedding has one row for everything, so
-        the method cannot be honoured — it is rejected rather than silently run as
-        ``index`` (which is also why the KV cache, whose validity depends on it, is
-        off). ``ref_index`` is the plain 1-based reference position on the frame axis
-        (0 is the target); unlike Flux.2 there is no index scale to multiply by.
+        ``index_timestep_zero`` needs a second timestep row for the reference tokens
+        and this DiT's embedding has one row for everything, so the method is rejected
+        rather than silently run as ``index``.
         """
         if method != "index":
             raise ValueError(
@@ -300,15 +256,10 @@ class MageFlowModel(DiffusionModel):
 
     # -------------------------------------------------------------- upscaling
     def _create_upscaler(self) -> LatentUpscaler:
-        """The weight-free VAE round trip.
-
-        There is no trained transcoder for this space: the Sesqui ``flux2`` weights are
-        trained on Flux.2's BatchNorm-normalised *packed* latent, and Mage's latent is
-        the raw anchor space — same shape, different statistics, so reusing them would
-        be a silent mismatch. Ming-Image set the precedent of taking the round trip for
-        exactly that reason, and Mage-VAE is a one-step codec: this is the cheapest
-        refine path in the repo.
-        """
+        # The weight-free VAE round trip. No trained transcoder exists for this space:
+        # the Sesqui ``flux2`` weights are trained on Flux.2's BatchNorm-normalised
+        # packed latent and this latent is the raw anchor space — same shape,
+        # different statistics.
         return VAEPixelUpscaler(self.vae, scale=self.UPSCALE_SCALE)
 
 

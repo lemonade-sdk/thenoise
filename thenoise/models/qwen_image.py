@@ -63,18 +63,13 @@ class QwenImageModel(DiffusionModel):
 
     @staticmethod
     def detect(f) -> bool:
-        """True if this handle is a Qwen-Image DiT: the family's block layout, at the
-        family's DEEP end.
+        """True if this handle is a Qwen-Image DiT: the family's block layout, deep.
 
-        The dual-stream projections (``img_in.`` / ``txt_in.`` plus
-        ``time_text_embed.``) and the ``add_q_proj`` text stream (which rules out the
-        single-stream Qwen-Image 2.1, sharing those three prefixes) are byte-identical
-        in Mage-Flow — same block, same tensor names — so names alone cannot separate
-        the two. Depth does: 60 blocks here, 12 there. Each detector states its own half
-        of that split (see ``thenoise.dit.mage_flow.keys``), so neither depends on the
-        order of the catalog, and no shape is read (detection only ever sees names).
-
-        Keys are normalized first so repackaged checkpoints resolve identically.
+        The names are byte-identical in Mage-Flow — same block, same tensor names — so
+        depth is the separator: 60 blocks here, 12 there. Each detector states its own
+        half of that split (see ``thenoise.dit.mage_flow.keys``), so neither depends on
+        catalog order. Keys are normalized first so repackaged checkpoints resolve
+        identically.
         """
         keys = list(normalize_keys(f.keys()))
         return is_qwen_image_family(keys) and dit_block_count(keys) > MAGE_LAYERS

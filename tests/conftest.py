@@ -27,6 +27,7 @@ from thenoise.models import (  # noqa: E402
     AnimaModel,
     FluxKleinModel,
     Krea2Model,
+    MageFlowModel,
     MingImageModel,
     QwenImageModel,
     QwenImage21Model,
@@ -377,6 +378,8 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "transformer_blocks.0.attn.to_q.weight",
             "transformer_blocks.0.attn.add_q_proj.weight",
             "transformer_blocks.0.img_mlp.net.2.weight",
+            "transformer_blocks.59.attn.to_q.weight",
+            "norm_out.linear.weight",
             "proj_out.weight",
         ],
     ),
@@ -389,6 +392,38 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "model.diffusion_model.transformer_blocks.0.attn.to_q.weight",
             "model.diffusion_model.transformer_blocks.0.attn.add_q_proj.weight",
             "model.diffusion_model.transformer_blocks.0.img_mlp.net.2.weight",
+            "model.diffusion_model.transformer_blocks.59.attn.to_q.weight",
+            "model.diffusion_model.norm_out.linear.weight",
+            "model.diffusion_model.proj_out.weight",
+        ],
+    ),
+    # Mage-Flow IS the Qwen-Image block, at 12 layers instead of 60: the depth in the
+    # key-set is the only thing that separates the two (see dit/mage_flow/keys.py).
+    "mage_flow": (
+        MageFlowModel,
+        [
+            "img_in.weight",
+            "txt_in.weight",
+            "time_text_embed.timestep_embedder.linear_1.weight",
+            "txt_norm.weight",
+            "transformer_blocks.0.attn.add_q_proj.weight",
+            "transformer_blocks.0.img_mlp.net.2.weight",
+            "transformer_blocks.11.attn.to_q.weight",
+            "norm_out.linear.weight",
+            "proj_out.weight",
+        ],
+    ),
+    "mage_flow_wrapped": (
+        MageFlowModel,
+        [
+            "model.diffusion_model.img_in.weight",
+            "model.diffusion_model.txt_in.weight",
+            "model.diffusion_model.time_text_embed.timestep_embedder.linear_1.weight",
+            "model.diffusion_model.txt_norm.weight",
+            "model.diffusion_model.transformer_blocks.0.attn.add_q_proj.weight",
+            "model.diffusion_model.transformer_blocks.0.img_mlp.net.2.weight",
+            "model.diffusion_model.transformer_blocks.11.attn.to_q.weight",
+            "model.diffusion_model.norm_out.linear.weight",
             "model.diffusion_model.proj_out.weight",
         ],
     ),
@@ -420,6 +455,7 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
     ),
     # The two Qwen-Images share the img_in / txt_in / time_text_embed prefixes: the
     # detection matrix below pins down that neither claims the other's key-set.
+    # The same matrix is what keeps Mage-Flow (12 blocks) out of Qwen-Image's 60.
     "unknown": (None, ["some.random.key", "blocks.0.attn.gate.weight"]),
 }
 

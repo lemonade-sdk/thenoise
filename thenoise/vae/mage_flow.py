@@ -1,32 +1,25 @@
 """Mage-VAE — a symmetric *one-step diffusion codec*, not a KL-VAE.
 
-Ported from ComfyUI's ``comfy/ldm/mage_flow/vae.py`` (MIT), which is itself the
-microsoft/Mage codec. Only the ops change (``comfy.ops`` -> ``torch.nn``, ComfyUI's
-VAE attention helper -> ``F.scaled_dot_product_attention``); the module tree, and
-therefore the checkpoint key names, are verbatim.
+Ported from ComfyUI's ``comfy/ldm/mage_flow/vae.py`` (MIT), which is the microsoft/Mage
+codec. Only the ops change (``comfy.ops`` -> ``torch.nn``, ComfyUI's attention helper ->
+local SDPA); the module tree, and therefore the checkpoint key names, are verbatim.
 
-Both directions are a single forward at ``t = 0``, which is what makes this unlike
-anything else in ``thenoise/vae``:
+Both directions are a single forward at ``t = 0``:
 
   * **encode** — ``DConvEncoder`` predicts the latent of an image in one step, with a
     *zero latent* fed in as ``z_t`` and the image as the conditioning. Its ``proj_out``
-    is 256-wide (mean + logvar); we take the mean, so encode is deterministic
-    (upstream samples the posterior, which a cached reference-latent stage cannot
-    tolerate).
+    is 256-wide (mean + logvar); the mean is taken, so encode is deterministic.
   * **decode** — ``DConvDenoiser`` predicts the image in one step, with a *zero noise*
-    image and the latent injected as conditioning through ``CoDDecoder`` (the
-    ``y_embedder.decoder`` branch), plus a Nerf/DCT patch-position embedding on the
-    pixel path.
+    image and the latent injected through ``CoDDecoder`` (``y_embedder.decoder``), plus
+    a Nerf/DCT patch-position embedding on the pixel path.
 
-The latent is **128 channels at 16x**, used raw: no scaling, no shift, no BatchNorm,
-no 2x2 packing. It lives in a Flux.2-*anchored* space (an auxiliary loss pulls it
-toward Flux.2-VAE latents), which is a statement about its statistics, not about a
-transform to apply — ComfyUI's own config uses ``latent_formats.Flux2`` with
-``scale_factor=1.0, shift_factor=0.0``.
+The latent is **128 channels at 16x**, used raw: no scaling, no shift, no BatchNorm, no
+2x2 packing. It lives in a Flux.2-*anchored* space (an auxiliary loss pulled it toward
+Flux.2-VAE latents during training), which is a statement about its statistics, not a
+transform to apply.
 
-The export also ships the anchor Flux.2 encoder under ``pipeline.y_embedder.encoder.*``.
-It is only there because the checkpoint is a training artifact: nothing in the decode
-path uses it, so ``load_mage_vae`` drops it.
+The export also ships that anchor Flux.2 encoder under ``pipeline.y_embedder.encoder.*``.
+Nothing in the decode path uses it, so ``load_mage_vae`` drops it.
 """
 from __future__ import annotations
 
@@ -65,15 +58,10 @@ def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch
 def _attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     """Single-head attention over the token axis: ``[B, C, L] -> [B, C, L]``.
 
-    The codec has no learned head count — one head over the channel dim, the
-    full-precision attention ComfyUI selects for a VAE (no sliced/scaled
-    approximations on the decode path we hand to the user).
-
     Written out as matmul + softmax rather than ``F.scaled_dot_product_attention``:
     the fused ROCm SDPA backends are unreliable inside VAE decoders (broken pixels on
-    gfx1151, and a hard ``profiler is not initialized`` error on others), which is why
-    ``thenoise/vae/qwen_image.py`` spells its single-head attention out too. The window
-    is ``32x32`` tokens, so the explicit score matrix is not a memory concern.
+    gfx1151, a hard ``profiler is not initialized`` error on others). The window is
+    32x32 tokens, so the explicit score matrix is not a memory concern.
     """
     b, c, length = q.shape
     q, k, v = (t.view(b, 1, length, c) for t in (q, k, v))
@@ -95,11 +83,7 @@ class LayerNorm2d(nn.LayerNorm):
 
 
 class TimestepEmbedder(nn.Module):
-    """DConv-style timestep MLP (``max_period=10000``, 256 frequencies).
-
-    Unlike the DiT's timestep table, this one is NOT rounded to the compute dtype:
-    the codec always receives ``t = 0``, so the table's precision is moot here.
-    """
+    """DConv-style timestep MLP (``max_period=10000``, 256 frequencies)."""
 
     def __init__(self, hidden_size: int, frequency_embedding_size: int = 256):
         super().__init__()
@@ -328,10 +312,9 @@ class ResnetBlock(nn.Module):
 class AttnBlock(nn.Module):
     """Self-attention restricted to ``patch_size x patch_size`` windows.
 
-    The full-resolution decode cannot attend over every pixel, so the feature map is
-    tiled, each tile attends over its own ``d*d`` positions, and the tiles are pasted
-    back. A map whose sides are not multiples of the window is replicate-padded and
-    cropped again — which is why odd working sizes decode correctly.
+    The feature map is tiled, each tile attends over its own ``d*d`` positions, and the
+    tiles are pasted back. A map whose sides are not multiples of the window is
+    replicate-padded and cropped again.
     """
 
     def __init__(self, in_channels: int, patch_size: int = 32):
@@ -365,7 +348,6 @@ class AttnBlock(nn.Module):
                 t.reshape(b, c, nph, d, npw, d).permute(0, 2, 4, 1, 3, 5).reshape(b * np_, c, d * d)
             )
 
-        # [b*np, c, d*d]: attention over the d*d positions of each window.
         h_ = _attention(to_patches(q), to_patches(k), to_patches(v))
         h_ = h_.reshape(b, nph, npw, c, d, d).permute(0, 3, 1, 4, 2, 5).reshape(b, c, H_pad, W_pad)
         if pad_h or pad_w:
@@ -443,7 +425,7 @@ class DConvEncoder(nn.Module):
 
 
 class YEmbedder(nn.Module):
-    """The decoder's conditioning branch (the anchor Flux.2 encoder is dropped at load)."""
+    """The decoder's conditioning branch."""
 
     def __init__(self, ch: int = 384, z_ch: int = 128):
         super().__init__()
@@ -520,8 +502,7 @@ class AutoencoderKLMageFlow(nn.Module):
 
     ``encode_pixels_to_latents`` takes pixels ``[B, C, H, W]`` in [-1, 1] and returns
     the canonical latent ``[B, 128, H/16, W/16]``; ``decode_to_pixels`` is its inverse
-    and clamps to [-1, 1]. Neither scales or shifts the latent: there is nothing to
-    undo, the space is used as the codec produces it.
+    and clamps to [-1, 1]. Neither scales or shifts the latent.
     """
 
     z_dim = 128
@@ -546,12 +527,12 @@ class AutoencoderKLMageFlow(nn.Module):
         x = pixels.to(device=self.device, dtype=self.dtype)
         b, _, H, W = x.shape
         ps = self.dconv_encoder.patch_size
-        # The one-step prediction is conditioned on a zero latent: the encoder is the
-        # whole inference, there is no iterative refinement to seed.
+        # The one-step prediction is conditioned on a zero latent: there is no
+        # iterative refinement to seed.
         z_t = torch.zeros(b, self.dconv_encoder.z_ch, H // ps, W // ps, device=x.device, dtype=x.dtype)
         t = torch.zeros(b, device=x.device, dtype=x.dtype)
         out = self.dconv_encoder.forward_pred(z_t, t, x)
-        return out[:, : self.z_dim]  # posterior mean; deterministic (never sampled)
+        return out[:, : self.z_dim]  # posterior mean
 
     def decode_to_pixels(self, latents: torch.Tensor) -> torch.Tensor:
         """Canonical latent -> pixels ``[B, 3, H, W]`` in [-1, 1]."""
@@ -560,7 +541,6 @@ class AutoencoderKLMageFlow(nn.Module):
         b = z.shape[0]
         H = z.shape[2] * self.spatial_compression
         W = z.shape[3] * self.spatial_compression
-        # Symmetric with the encoder: the one-step prediction starts from zero noise.
         noise = torch.zeros(b, 3, H, W, device=z.device, dtype=z.dtype)
         t = torch.zeros(b, device=z.device, dtype=z.dtype)
         return self.decoder_model(noise, t, cond).clamp(-1.0, 1.0)
@@ -574,10 +554,9 @@ def load_mage_vae(
     """Load the Mage-VAE, remapping the export's training names onto the module tree.
 
     The file is a training artifact: the encoder lives under ``student.dconv_encoder.*``
-    and the codec's denoiser under ``pipeline.*``. ``pipeline.y_embedder.encoder.*`` —
-    the Flux.2 VAE the latent is anchored against — has no module here (it is a
-    training-time regulariser, not part of decode) and is dropped, which is what makes
-    the load strict.
+    and the denoiser under ``pipeline.*``. ``pipeline.y_embedder.encoder.*`` — the
+    Flux.2 anchor encoder — has no module here and is dropped, which is what makes the
+    load strict.
     """
     device = torch.device(device)
     logger.info("Loading Mage-VAE from %s", vae_path)

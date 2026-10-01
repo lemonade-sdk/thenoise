@@ -1,28 +1,21 @@
 """Mage-Flow text encoder — Qwen3-VL-4B, conditioned on the *normed* last hidden state.
 
-Same conditioner shape as the other Qwen-VL adapters: the LM (vision tower included)
-turns ``prompt`` + optional reference images into a ``[1, L, 2560]`` conditioning
-tensor the DiT's ``txt_in`` eats. Three things are Mage's own:
+The LM (vision tower included) turns ``prompt`` + optional reference images into the
+``[1, L, 2560]`` conditioning the DiT's ``txt_in`` eats. Three things are Mage's own:
 
-  * **which hidden state** — Mage conditions on the LM's last hidden state WITH the
-    final RMSNorm applied (ComfyUI's ``layer_norm_hidden_state = True``), i.e. plain
-    ``.last_hidden_state``. Qwen-Image 2.1 taps the same layer *before* that norm, so
-    it hooks it; here the model's own output is the answer.
-  * **what is kept** — only the template prefix is removed (the system turn and the
-    ``user`` header, via the shared :func:`compute_drop_idx`: 34 tokens t2i, 64 for
-    the edit template's longer system prompt). The reference images' *vision tokens
-    stay in the conditioning*: an edit's reference reaches the DiT twice, once here
-    as text-stream tokens and once as latent tokens appended to the image stream.
-  * **the templates** — the t2i one is the shared
-    ``QWEN_VL_SYSTEM_PROMPT``/``QWEN_VL_PROMPT_SUFFIX`` pair verbatim; the edit one
-    swaps in the image-instruction system prompt and leads the user turn with one
-    ``Image N: <vision>`` block per reference. Neither appends a thinking block: both
-    end at the assistant header.
+  * it conditions on ``.last_hidden_state``, i.e. WITH the final RMSNorm applied
+    (ComfyUI's ``layer_norm_hidden_state = True``);
+  * only the template prefix is dropped (the system turn and the ``user`` header, via
+    the shared :func:`compute_drop_idx`) — the reference images' *vision tokens stay in
+    the conditioning*, so an edit's reference reaches the DiT as both text-stream and
+    latent tokens;
+  * the edit template leads the user turn with one ``Image N: <vision>`` block per
+    reference, and neither template appends a thinking block.
 
-The reference images are downsized for the *conditioning* path only (long edge
-capped at :data:`VL_COND_LONG_EDGE`): a full-resolution edit image would inject
-thousands of vision tokens and drown the instruction. The VAE reference latent the
-DiT gets is untouched by this — it is encoded separately, at full working resolution.
+Reference images are downsized for the *conditioning* path only (long edge capped at
+:data:`VL_COND_LONG_EDGE`): a full-resolution edit image would inject thousands of
+vision tokens and drown the instruction. The VAE reference latent is encoded separately,
+at full working resolution.
 """
 from __future__ import annotations
 
@@ -77,9 +70,7 @@ MAGE_EDIT_TEMPLATE = _EDIT_SYSTEM_PROMPT + "{}" + QWEN_VL_PROMPT_SUFFIX
 def prompt_template(prompt: str, num_images: int) -> str:
     """The chat-wrapped prompt, with one labelled vision block per reference.
 
-    The user turn leads with ``Image 1: ``, ``Image 2: ``, ... each followed by its
-    vision block (the training-time multi-reference layout). An empty prompt becomes
-    a single space so the user turn is never empty — an empty turn changes how the
+    An empty prompt becomes a single space: an empty user turn changes how the
     surrounding markers tokenize.
     """
     if not prompt:
@@ -91,18 +82,14 @@ def prompt_template(prompt: str, num_images: int) -> str:
 
 
 def _as_image_list(images) -> list:
-    """Normalize ``None`` / a single image / a sequence of them to a list."""
+    """``None`` / a single image / a sequence of them -> a list."""
     if images is None:
         return []
     return list(images) if isinstance(images, (list, tuple)) else [images]
 
 
 class MageFlowTextEncoder(nn.Module):
-    """Qwen3-VL-4B conditioner: ``(prompt, images) -> (embeddings, mask)``.
-
-    Registered with the memory manager like any other text encoder; the
-    tokenizer/processor are pure Python and stay put.
-    """
+    """Qwen3-VL-4B conditioner: ``(prompt, images) -> (embeddings, mask)``."""
 
     def __init__(self, qwen: nn.Module, tokenizer, processor) -> None:
         super().__init__()
@@ -126,11 +113,9 @@ class MageFlowTextEncoder(nn.Module):
     ) -> Tuple[Tensor, Tensor]:
         """Encode one prompt -> ``(embeds [1, L, hidden], mask [1, L])``.
 
-        ``images`` are PIL images in prompt order (single image or list); they are
-        capped to :data:`VL_COND_LONG_EDGE` here, so a caller passing a
-        full-resolution edit image is not accidentally conditioning on it at that
-        size. The mask is all-ones — one sequence is never padded, and it exists to
-        report the conditioning length like Qwen-Image's does.
+        ``images`` are PIL images in prompt order (single image or list), capped to
+        :data:`VL_COND_LONG_EDGE` here. The mask is all-ones — one sequence is never
+        padded — and exists to report the conditioning length.
         """
         images = _as_image_list(images)
         condition_images = [resize_to_long_edge(img, VL_COND_LONG_EDGE) for img in images]
@@ -146,13 +131,12 @@ class MageFlowTextEncoder(nn.Module):
         if condition_images:
             model_inputs["pixel_values"] = self._to_model(inputs["pixel_values"], self.dtype)
             model_inputs["image_grid_thw"] = self._to_model(inputs["image_grid_thw"], torch.long)
-            # M-RoPE needs the per-token modality map; the model refuses to guess it.
             model_inputs["mm_token_type_ids"] = self._to_model(
                 inputs["mm_token_type_ids"], torch.long
-            )
+            )  # M-RoPE needs the per-token modality map
 
-        # ``.model`` is the bare Qwen3VLModel (no LM head) and its ``last_hidden_state``
-        # is already post-final-RMSNorm — exactly the tensor Mage conditions on.
+        # ``.model`` is the bare Qwen3VLModel and its ``last_hidden_state`` is already
+        # post-final-RMSNorm — exactly the tensor Mage conditions on.
         hidden = self.qwen.model(**model_inputs).last_hidden_state
 
         drop = compute_drop_idx(input_ids[0])
@@ -176,8 +160,8 @@ def load_mage_flow_text_encoder(
     """Load the Qwen3-VL-4B conditioner + tokenizer/processor for Mage-Flow.
 
     ``path`` is a single safetensors file (official HF or ComfyUI layout, bf16 or
-    int8-convrot) — the same file Krea 2 loads. The tokenizer defaults to a
-    ``tokenizer/`` directory next to the checkpoint, else the vendored Qwen config.
+    int8-convrot). The tokenizer defaults to a ``tokenizer/`` directory next to the
+    checkpoint, else the vendored Qwen config.
     """
     qwen = load_qwen3_vl_model(
         path, dtype=dtype, device=device, config=QWEN3_VL_4B_INSTRUCT_CONFIG
