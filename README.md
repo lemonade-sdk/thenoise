@@ -4,7 +4,7 @@
 
 TheNoise is an open-source image generation / editing engine made specifically to run well on Strix Halo (gfx1151) and other ROCm-capable AMD iGPUs and dGPUs. It is tuned to perform extremely well on the machine it runs on.  
 
-TheNoise loads one model at a time and generates images from text prompts. Editing-capable models - like Qwen-Image 2.1, Qwen-Image-Edit and FLUX.2 Klein - can also edit an existing image from a text instruction (image + prompt → edited image).
+TheNoise loads one model at a time and generates images from text prompts. Editing-capable models - like Qwen-Image 2.1, Qwen-Image-Edit and FLUX.2 Klein, Mage-Flow - can also edit an existing image from a text instruction (image + prompt → edited image).
 
 TheNoise can be used standalone, from the command line or through a webui or through an OpenAI-compatible server like [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends), with which it is already integrated.
 
@@ -39,6 +39,7 @@ TheNoise ships:
 | Model | Generate | Edit | Details |
 |---|---|---|---|
 | **Anima**, small and fast | ✓ | — | [anima](docs/models/anima.md) |
+| **Mage-Flow / Turbo**, the fastest model, with editing | ✓ | ✓ | [mage-flow](docs/models/mage-flow.md) |
 | **Krea 2**, highest image quality | ✓ | — | [krea2](docs/models/krea2.md) |
 | **Z-Image / Z-Image-Turbo**, quality at 8 steps | ✓ | — | [zimage](docs/models/zimage.md) |
 | **Flux.2 Klein 4B / 9B**, 4 steps, with editing | ✓ | ✓ | [flux2-klein](docs/models/flux2-klein.md) |
@@ -74,6 +75,7 @@ a warmup run.
 | Krea 2 Turbo · INT8-ConvRot · 8 steps | 26.7s | 99s |
 | Anima Base · 20 steps · CGF 3 | 29.7s | 111s |
 | Anima Turbo · 8 steps | 6.6s | 25.1s |
+| Mage-Flow Turbo · BF16 · 4 steps | 2.4s | 8.4s |
 | Z-Image Turbo · 8 steps | 14.3s | 53.8s |
 | Flux.2 Klein 9B · INT8-ConvRot · 4 steps | 9.6s | 34.3s |
 | Qwen-Image 2512 · BF16 · 4 steps | 9.7s | 34.9s |
@@ -88,6 +90,7 @@ a warmup run.
 | Qwen-Image-Edit 2511 · BF16 · 4 steps | 15.8s | 10.6s |
 | Qwen-Image 2.1 · BF16 · 4 steps | 15.4s | 9.8s |
 | Qwen-Image 2.1 · INT8-ConvRot · 4 steps | 14.4s | 9.2s |
+| Mage-Flow Turbo · BF16 · 4 steps | 4.9s | — *(no KV cache)* |
 
 <small>TheNoise 0.9.0, Strix Halo (gfx1151, 128 GB unified)</small>
 

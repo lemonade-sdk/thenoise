@@ -83,10 +83,7 @@ Then open <http://localhost:8000/> for the web UI. Full endpoint reference:
 ## Edit an image
 
 Edits an existing image from an instruction (image + prompt → edited image).
-Requires an editing-capable model — [Flux.2 Klein](models/flux2-klein.md),
-[Qwen-Image / Qwen-Image-Edit](models/qwen-image.md) and
-[Qwen-Image 2.1](models/qwen-image-2.1.md) - and shares all generation flags
-with `generate`.
+Requires an editing-capable model and shares all generation flags with `generate`.
 
 `--image` is repeatable: the **first** image is resized to 1024 on its largest
 side (aspect preserved) and sets the output size; the rest are used as

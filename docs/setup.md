@@ -66,6 +66,7 @@ All models and options (variants, `--int8-convrot`, ...):
 | Flux.2 Klein 4B/9B | `--model klein --variant 9b` | 12–25 GB | [model page](models/flux2-klein.md) |
 | Qwen-Image / Edit | `--model qwen-image` | ~40 GB | [model page](models/qwen-image.md) |
 | Qwen-Image 2.1 | `--model qwen-image-2.1` | ~32 GB | [model page](models/qwen-image-2.1.md) |
+| Mage-Flow / Turbo | `--model mage-flow` | 18–25 GB | [model page](models/mage-flow.md) |
 | Real-ESRGAN x4 *(optional, upscaling)* | `--model esrgan` | ~0.7 GB | [CLI: upscaling](cli.md#upscaling) |
 
 Models land in `./models/<model>/` next to the bundle.

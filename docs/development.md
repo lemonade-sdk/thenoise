@@ -13,8 +13,8 @@ thenoise/                  the package
   models/                  per-model adapters (detect + DEFAULT_PREFS + sampling)
   dit/                     per-model DiT code (lumina — the shared S3-DiT core behind
                            zimage and ming_image; krea2, qwen_image, qwen_image21,
-                           anima, flux2)
-  vae/                     VAE loaders (Qwen-Image, Flux, Flux.2, Wan 2.2)
+                           anima, flux2, mage_flow)
+  vae/                     VAE loaders (Qwen-Image, Flux, Flux.2, Wan 2.2, Mage)
   samplers/                denoising solvers (euler, er_sde)
   upscale/                 latent + pixel upscalers
   postprocess/             grain, sharpening, Qwen-VAE enhance
