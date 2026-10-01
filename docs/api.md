@@ -114,9 +114,7 @@ curl -s localhost:8000/text2image \
 ## `POST /edit`
 
 Instruction-based editing: image(s) + prompt → edited image. Requires an
-editing-capable model ([Flux.2 Klein](models/flux2-klein.md),
-[Qwen-Image / Qwen-Image-Edit](models/qwen-image.md),
-[Qwen-Image 2.1](models/qwen-image-2.1.md)); otherwise returns **HTTP 400**.
+editing-capable model; otherwise returns **HTTP 400**.
 
 Accepts all `/text2image` fields plus:
 
