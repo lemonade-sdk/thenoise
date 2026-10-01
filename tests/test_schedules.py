@@ -1,10 +1,10 @@
 """Per-model schedules and size resolution, over the whole catalog.
 
-One parametrized contract for all four adapters: the step list is ``steps`` long,
-starts at t=1, is strictly decreasing, ends on a grid whose last point is 0, and
-its ``delta`` is the step to the next grid point (that is what both solvers
-integrate). Resolution dependence is asserted where a model's schedule has it and
-asserted *absent* where it does not.
+One parametrized contract for every adapter: the step list is ``steps`` long, starts
+at t=1, is strictly decreasing, ends on a grid whose last point is 0, and its
+``delta`` is the step to the next grid point (that is what both solvers integrate).
+Resolution dependence is asserted where a model's schedule has it and asserted
+*absent* where it does not.
 
 The adapters are built bare (``object.__new__``) with the couple of attributes
 their kernel reads: no checkpoints, no device.
@@ -23,6 +23,7 @@ from thenoise.models import (
     AnimaModel,
     FluxKleinModel,
     Krea2Model,
+    MageFlowModel,
     MingImageModel,
     QwenImageModel,
     QwenImage21Model,
@@ -70,6 +71,7 @@ BARE = {
     "zimage": {"vae": _vae(16, 8), "dit": SimpleNamespace(patch_size=2)},
     "ming_image": {"vae": _vae(16, 8, pixel_channels=4), "dit": SimpleNamespace(patch_size=2)},
     "flux_klein": {"vae": _vae(128, 16)},
+    "mage_flow": {"vae": _vae(128, 16), "dit": SimpleNamespace(patch_size=1)},
     "qwen_image": {"vae": _vae(16, 8), "dit": SimpleNamespace(patch_size=2)},
     "qwen_image21": {"vae": _vae(64, 16, pixel_channels=4)},
 }
@@ -154,6 +156,7 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
         (ZImageModel, False, False),
         (MingImageModel, False, False),
         (FluxKleinModel, True, True),
+        (MageFlowModel, True, False),
         (QwenImageModel, True, True),
         (QwenImage21Model, True, True),
     ],

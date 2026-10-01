@@ -12,6 +12,9 @@ function here. The vendored tokenizer data lives under ``configs/``:
 
 The model configs themselves are vendored in ``thenoise.utils.qwen_configs`` so
 the encoders are built without fetching ``config.json`` from the Hub.
+
+The module also carries the chat-template pieces the conditioners share: the
+system-prompt/suffix pair and :func:`compute_drop_idx`.
 """
 from __future__ import annotations
 
@@ -66,6 +69,17 @@ QWEN3_VL_TOKENIZER_OVERRIDES = {
 }
 QWEN2_5_VL_TOKENIZER_OVERRIDES: dict = {}
 
+#: The chat and vision marker spellings shared by every multimodal conditioner here.
+#: A processor looks the vision ones up by name on its tokenizer; ``VISION_BLOCK`` is
+#: one reference image as the language model sees it, expanded to the patch tokens by
+#: the processor.
+IM_START = "<|im_start|>"
+IM_END = "<|im_end|>"
+VISION_START = "<|vision_start|>"
+VISION_END = "<|vision_end|>"
+IMAGE_PAD = "<|image_pad|>"
+VISION_BLOCK = VISION_START + IMAGE_PAD + VISION_END
+
 #: Shared Qwen image-description prompt template (text-to-image path): a system
 #: prompt instructing the model to describe
 #: the image, the closing ``user`` header, and the number of tokens that prefix
@@ -80,6 +94,31 @@ QWEN_VL_SYSTEM_PROMPT = (
 QWEN_VL_PROMPT_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n"
 #: Token index where the user message content begins (after ``<|im_start|>user\n``).
 QWEN_VL_DROP_IDX = 34
+
+#: Token id of the chat-start marker: an added special token, so it does not move with
+#: the vocabulary variant.
+QWEN_CHAT_START_ID = 151644
+
+
+def compute_drop_idx(
+    input_ids: torch.Tensor, im_start_id: int = QWEN_CHAT_START_ID
+) -> int:
+    """Index where the user message content begins (after the ``user`` header).
+    The user turn is the SECOND chat-start marker (the first opens the system turn) and
+    its content starts three tokens later, at ``index + 3``. Counted from the token ids
+    because the prefix length depends on how the system prompt tokenizes. Returns 0
+    (drop nothing) when there is no second marker.
+
+    ``input_ids`` is a single sequence with no batch axis (``input_ids[0]``).
+    """
+    ids = input_ids.tolist()
+    count = 0
+    for i, id_ in enumerate(ids):
+        if id_ == im_start_id:
+            count += 1
+            if count == 2:
+                return i + 3  # ``<|im_start|>`` ``user`` ``\n``
+    return 0
 
 
 def find_tokenizer_dir(text_encoder_path: str, max_depth: int = 3) -> Optional[str]:
@@ -350,6 +389,14 @@ __all__ = [
     "QWEN_VL_SYSTEM_PROMPT",
     "QWEN_VL_PROMPT_SUFFIX",
     "QWEN_VL_DROP_IDX",
+    "QWEN_CHAT_START_ID",
+    "compute_drop_idx",
+    "IM_START",
+    "IM_END",
+    "VISION_START",
+    "VISION_END",
+    "IMAGE_PAD",
+    "VISION_BLOCK",
     "QWEN3_06B_TOKENIZER_OVERRIDES",
     "QWEN3_VL_TOKENIZER_OVERRIDES",
     "QWEN2_5_VL_TOKENIZER_OVERRIDES",

@@ -19,6 +19,7 @@ from thenoise.utils.image_tensor import (
     load_image,
     pil_to_pixels,
     pixels_to_pil,
+    resize_to_long_edge,
 )
 
 
@@ -167,3 +168,20 @@ def test_rgba_pixels_survive_the_round_trip():
 def test_opaque_pixels_do_not_grow_an_alpha_on_the_way_out():
     """An RGB VAE's output stays RGB: no alpha is invented on the way to the PNG."""
     assert pixels_to_pil(pil_to_pixels(Image.new("RGB", (4, 4), "gray"), 3)).mode == "RGB"
+
+
+# ---------------------------------------------------------------- vision-token cap
+
+
+def test_long_edge_cap_keeps_the_dominant_dimension():
+    """Where ``resize_to_area`` fixes the area, this fixes the long side: a
+    panoramic reference keeps its pixels-per-unit-width."""
+    out = resize_to_long_edge(Image.new("RGB", (1600, 400)), 384)
+    assert out.size == (384, 96)
+
+
+def test_long_edge_cap_never_enlarges():
+    """Growing an image adds vision tokens but no information."""
+    small = Image.new("RGB", (300, 300))
+    assert resize_to_long_edge(small, 384) is small
+    assert resize_to_long_edge(Image.new("RGB", (384, 20)), 384).size == (384, 20)

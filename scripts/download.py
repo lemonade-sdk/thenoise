@@ -21,6 +21,8 @@ Models:
   qwen-image      Qwen-Image / Qwen-Image-Edit (latest dated checkpoints)
   qwen-image-2.1  Qwen-Image 2.1 (t2i + edit in one DiT)
                   https://huggingface.co/Comfy-Org/Qwen-Image-2.1
+  mage-flow       Microsoft Mage-Flow (t2i + edit; base / RL / turbo)
+                  https://huggingface.co/Comfy-Org/Mage-Flow
   esrgan          Real-ESRGAN x4 pixel upscaler (optional, for upscaling)
                   https://huggingface.co/Comfy-Org/Real-ESRGAN_repackaged
 
@@ -40,6 +42,9 @@ Usage:
     python scripts/download.py --model ming-image --int8-convrot
     python scripts/download.py --model qwen-image --edit-only
     python scripts/download.py --model qwen-image-2.1
+    python scripts/download.py --model mage-flow
+    python scripts/download.py --model mage-flow --variant base
+    python scripts/download.py --model mage-flow --int8-convrot --edit-only
     python scripts/download.py --model esrgan
     python scripts/download.py --model krea2 --dry-run
 """
@@ -215,6 +220,40 @@ def _qwen_image_21_jobs(args: argparse.Namespace) -> list[Artifact]:
     ]
 
 
+#: Mage-Flow variant -> (t2i DiT file stem, edit DiT file stem, int8-convrot release).
+#: The un-distilled ``base`` checkpoints were never published in int8-convrot.
+_MAGE_FLOW_REPO = "Comfy-Org/Mage-Flow"
+_MAGE_FLOW_VARIANTS = {
+    "base": ("mage_flow_base", "mage_flow_edit_base", False),
+    "rl": ("mage_flow", "mage_flow_edit", True),
+    "turbo": ("mage_flow_turbo", "mage_flow_edit_turbo", True),
+}
+
+
+def _mage_flow_jobs(args: argparse.Namespace) -> list[Artifact]:
+    """Mage-Flow: t2i and/or edit DiT + shared Qwen3-VL-4B TE + Mage VAE."""
+    stem, edit_stem, has_int8 = _MAGE_FLOW_VARIANTS[args.variant]
+    if args.int8_convrot and not has_int8:
+        raise SystemExit(
+            f"error: --int8-convrot is not available for variant '{args.variant}' "
+            "(no int8-convrot release for the base checkpoints)"
+        )
+    suffix = "int8_convrot" if args.int8_convrot else "bf16"
+
+    jobs: list[Artifact] = []
+    if not args.edit_only:
+        jobs.append(("dit (t2i)", _MAGE_FLOW_REPO,
+                     f"diffusion_models/{stem}_{suffix}.safetensors"))
+    if not args.image_only:
+        jobs.append(("dit (edit)", _MAGE_FLOW_REPO,
+                     f"diffusion_models/{edit_stem}_{suffix}.safetensors"))
+    jobs += [
+        ("text_encoder", _MAGE_FLOW_REPO, "text_encoders/qwen3vl_4b_bf16.safetensors"),
+        ("vae", _MAGE_FLOW_REPO, "vae/mage_flow_vae_bf16.safetensors"),
+    ]
+    return jobs
+
+
 def _esrgan_jobs(args: argparse.Namespace) -> list[Artifact]:
     """Real-ESRGAN x4 pixel upscaler (no DiT/TE/VAE)."""
     return [
@@ -280,6 +319,14 @@ MODELS: dict[str, ModelSpec] = {
         "Qwen-Image 2.1 (t2i + edit in one DiT)",
         _qwen_image_21_jobs,
     ),
+    "mage-flow": ModelSpec(
+        "mage-flow", "./models/mage_flow",
+        "Microsoft Mage-Flow (t2i + edit; base / RL / turbo)",
+        _mage_flow_jobs,
+        variant_supported=True,
+        variant_choices=("base", "rl", "turbo"),
+        default_variant="turbo",
+    ),
     "esrgan": ModelSpec(
         "esrgan", "./models/esrgan",
         "Real-ESRGAN x4 pixel upscaler (optional; used for upscaling)",
@@ -306,6 +353,9 @@ def _epilog() -> str:
         "  python scripts/download.py --model ming-image --int8-convrot",
         "  python scripts/download.py --model qwen-image --edit-only",
         "  python scripts/download.py --model qwen-image-2.1 --int8-convrot",
+        "  python scripts/download.py --model mage-flow",
+        "  python scripts/download.py --model mage-flow --variant base",
+        "  python scripts/download.py --model mage-flow --int8-convrot --edit-only",
         "  python scripts/download.py --model esrgan",
     ]
     return "\n".join(lines)
@@ -334,7 +384,8 @@ def main() -> None:
         help=(
             "anima: DiT variant name (default: turbo-v1.0; others include base-v1.0, "
             "aesthetic-v1.1) | zimage: turbo | base (default: turbo) | "
-            "klein: 4b | 4b-base | 9b | 9b-base (default: 4b)"
+            "klein: 4b | 4b-base | 9b | 9b-base (default: 4b) | "
+            "mage-flow: turbo | rl | base (default: turbo)"
         ),
     )
     ap.add_argument(
@@ -343,11 +394,11 @@ def main() -> None:
     )
     ap.add_argument(
         "--image-only", action="store_true",
-        help="qwen-image: only the Qwen-Image DiT (shared TE + VAE are still fetched)",
+        help="qwen-image / mage-flow: only the t2i DiT (shared TE + VAE are still fetched)",
     )
     ap.add_argument(
         "--edit-only", action="store_true",
-        help="qwen-image: only the Qwen-Image-Edit DiT (shared TE + VAE are still fetched)",
+        help="qwen-image / mage-flow: only the edit DiT (shared TE + VAE are still fetched)",
     )
     ap.add_argument(
         "--dry-run", action="store_true",
@@ -370,8 +421,8 @@ def main() -> None:
             )
     if args.include_raw and args.model != "krea2":
         ap.error("--include-raw is only supported by --model krea2")
-    if (args.image_only or args.edit_only) and args.model != "qwen-image":
-        ap.error("--image-only / --edit-only are only supported by --model qwen-image")
+    if (args.image_only or args.edit_only) and args.model not in ("qwen-image", "mage-flow"):
+        ap.error("--image-only / --edit-only are only supported by --model mage-flow, qwen-image")
     if args.image_only and args.edit_only:
         ap.error("--image-only and --edit-only are mutually exclusive")
     if args.int8_convrot and not spec.has_int8:
