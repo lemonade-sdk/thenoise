@@ -302,6 +302,124 @@ def test_detect_params_refuses_a_foreign_checkpoint(tmp_path):
         detect_params(path)
 
 
+# ------------------------------------------------------------ low-rank modulation
+
+
+def _lowrank(rank: int = 16, dtype=torch.bfloat16) -> MageFlowTransformer2DModel:
+    """The tiny DiT with the low-rank AdaLN heads.
+
+    ``.to(dtype)`` leaves the FP32 factors alone, so its ``state_dict`` is already the
+    BF16-trunk / FP32-factor split the export uses.
+    """
+    torch.manual_seed(0)
+    return (
+        MageFlowTransformer2DModel(MageFlowParams(**TINY, modulation_rank=rank), compute_dtype=dtype)
+        .to(dtype)
+        .eval()
+        .requires_grad_(False)
+    )
+
+
+def _factors(state_dict) -> set:
+    """The modulation tensors of a low-rank state dict: the shared projection + heads."""
+    return {
+        key
+        for key in state_dict
+        if key.startswith("modulation_down.") or key.endswith(("img_mod.1.weight", "img_mod.1.bias"))
+        or key.endswith(("txt_mod.1.weight", "txt_mod.1.bias"))
+    }
+
+
+def test_the_low_rank_export_is_still_the_same_model():
+    """``modulation_down`` is the only new name, and it does not change the family."""
+    names = [
+        "img_in.weight",
+        "txt_in.weight",
+        "time_text_embed.timestep_embedder.linear_1.weight",
+        "transformer_blocks.0.attn.add_q_proj.weight",
+        "transformer_blocks.0.img_mlp.net.2.weight",
+        "transformer_blocks.0.img_mod.1.weight",
+        "norm_out.linear.weight",
+        "proj_out.weight",
+        "modulation_down.weight",
+        f"transformer_blocks.{MAGE_LAYERS - 1}.attn.to_q.weight",
+    ]
+    assert is_qwen_image_family(names)
+    assert MageFlowModel.detect(FakeHandle(names)) is True
+
+
+def test_detect_params_reads_the_modulation_rank(tmp_path):
+    lowrank = write_safetensors(
+        tmp_path / "lowrank.safetensors",
+        {k: v.clone() for k, v in _lowrank().state_dict().items()},
+    )
+    assert detect_params(lowrank).modulation_rank == 16
+
+    dense = write_safetensors(
+        tmp_path / "dense.safetensors",
+        {k: v.clone() for k, v in _tiny_dit(torch.float32).state_dict().items()},
+    )
+    assert detect_params(dense).modulation_rank is None
+
+
+def test_detect_params_refuses_mismatched_modulation_factors(tmp_path):
+    tensors = {k: v.clone() for k, v in _lowrank().state_dict().items()}
+    tensors["transformer_blocks.0.img_mod.1.weight"] = torch.zeros(1536, 8)
+    with pytest.raises(ValueError, match="does not match the modulation heads"):
+        detect_params(write_safetensors(tmp_path / "mixed_up.safetensors", tensors))
+
+
+def test_the_low_rank_heads_keep_the_checkpoint_names(tmp_path):
+    source = {k: v.clone() for k, v in _lowrank().state_dict().items()}
+    assert _factors(source)  # the export's FP32 section is not empty
+    path = write_safetensors(tmp_path / "mage_lowrank.safetensors", source)
+
+    dit = load_mage_flow_dit(
+        path, MageFlowParams(**TINY, modulation_rank=16), device="cpu", dtype=torch.bfloat16
+    )
+    assert set(dit.state_dict()) == set(source)
+
+    loaded = dit.state_dict()
+    assert {key for key, value in loaded.items() if value.dtype == torch.float32} == _factors(source)
+    assert dit.proj_out.weight.dtype == torch.bfloat16
+
+    _store_positions(dit)
+    assert torch.isfinite(_forward(dit, torch.randn(1, 12, Z), torch.randn(1, 5, CTX)).float()).all()
+
+
+def test_the_heads_are_fed_the_shared_low_rank_vector():
+    """SiLU out to the shared projection, the rank-wide vector into the heads."""
+    dit = _lowrank()
+    head = dit.transformer_blocks[0].img_mod[1]
+    assert isinstance(dit.transformer_blocks[0].img_mod[0], torch.nn.Identity)
+    assert head.in_features == dit.params.modulation_rank < dit.inner_dim
+
+    seen = {}
+    head.register_forward_pre_hook(lambda module, args: seen.__setitem__("in", args[0]))
+    head.register_forward_hook(lambda module, args, out: seen.__setitem__("out", out))
+
+    _store_positions(dit)
+    with torch.no_grad():
+        temb = dit.time_text_embed(
+            torch.tensor([0.5], dtype=torch.bfloat16), torch.zeros(1, 12, dit.inner_dim, dtype=torch.bfloat16)
+        )
+        _forward(dit, torch.randn(1, 12, Z), torch.randn(1, 5, CTX))
+        expected = dit.modulation_down(torch.nn.functional.silu(temb).float())
+
+    assert seen["in"].dtype == torch.float32
+    assert seen["in"].shape == (1, dit.params.modulation_rank)
+    assert torch.allclose(seen["in"], expected, atol=1e-2)
+    assert seen["out"].dtype == torch.bfloat16  # the residual path stays in the trunk dtype
+
+
+def test_the_output_head_is_still_modulated_at_full_width():
+    """Only the blocks move to the low-rank vector; ``norm_out`` keeps the whole ``temb``."""
+    dit = _lowrank()
+    assert dit.modulation_down.out_features == dit.params.modulation_rank < dit.inner_dim
+    assert dit.norm_out.linear.in_features == dit.inner_dim
+    assert dit.time_text_embed.timestep_embedder.linear_2.out_features == dit.inner_dim
+
+
 # --------------------------------------------------------------------- adapter
 
 

@@ -2,13 +2,14 @@
 
 ``MageFlowParams``' defaults are the released checkpoint's; reading the geometry from
 the file is what lets a different-depth or different-width export load without touching
-this package. Detection by *name* lives in :mod:`thenoise.dit.mage_flow.keys`; this is
+this package — and what tells the dense AdaLN heads from the low-rank modulation
+variant. Detection by *name* lives in :mod:`thenoise.dit.mage_flow.keys`; this is
 the shape pass, run once at load.
 """
 from __future__ import annotations
 
 import logging
-from typing import Tuple
+from typing import Optional, Tuple
 
 from thenoise.dit.mage_flow.keys import dit_block_count
 from thenoise.dit.mage_flow.models import MageFlowParams
@@ -57,13 +58,34 @@ def detect_params(dit_path: str) -> MageFlowParams:
         num_heads=inner_dim // head_dim,
         head_dim=head_dim,
         context_dim=shapes["txt_in.weight"][1],
+        modulation_rank=_modulation_rank(shapes),
     )
     logger.info(
-        "Mage-Flow DiT: %d layers, %dx%d, in/out %d/%d, context %d",
+        "Mage-Flow DiT: %d layers, %dx%d, in/out %d/%d, context %d%s",
         params.num_layers, params.num_heads, params.head_dim,
         params.in_channels, params.out_channels, params.context_dim,
+        "" if params.modulation_rank is None else f", modulation rank {params.modulation_rank}",
     )
     return params
+
+
+def _modulation_rank(shapes: dict) -> Optional[int]:
+    """The low-rank export's shared modulation width, or ``None`` for the dense heads.
+
+    The variant is the presence of ``modulation_down``; its width has to agree with the
+    per-block heads it feeds, which is the one way a mixed-up export shows itself.
+    """
+    down = shapes.get("modulation_down.weight")
+    if down is None:
+        return None
+    rank = down[0]
+    heads = shapes["transformer_blocks.0.img_mod.1.weight"]
+    if heads[1] != rank:
+        raise ValueError(
+            f"low-rank modulation width {rank} does not match the modulation heads "
+            f"(input {heads[1]})"
+        )
+    return rank
 
 
 __all__ = ["detect_params"]
