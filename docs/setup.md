@@ -40,6 +40,12 @@ cat thenoise-*.part*.tar.gz | tar -xz
 
 No installation step: the extracted directory *is* TheNoise.
 
+On Windows, extract into a short folder such as
+`%LOCALAPPDATA%\Programs\thenoise`. With Windows
+long paths disabled (the default), the GPU libraries cannot open their kernel
+files from a folder path longer than 87 characters, so the launcher refuses to
+start there. CPU-only use works at any depth with `THENOISE_ALLOW_DEEP_PATH=1`.
+
 ## 2. Download a model
 
 The bundle ships the model download helper (`scripts/download.py`) with
