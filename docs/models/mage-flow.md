@@ -62,15 +62,16 @@ Turbo BF16:
 
 *Generated — Turbo @ 4 steps:*
 
-<!-- TODO: add 1-2 generated images here, e.g. -->
-<!-- <img width="45%" alt="thenoise_..." src="..." /> -->
+<img width="45%" alt="c3773587-d948-4592-86fe-741f2e854ed2" src="https://github.com/user-attachments/assets/511d1bbe-4f81-41a0-840e-3315b454d673" />
+<img width="45%" alt="9aa0cc36-2ec8-4aa5-bc2e-eac17970b125" src="https://github.com/user-attachments/assets/ddae7d8c-b7a4-4652-b0df-53f2bbc49208" />
 
 *Edited — Turbo @ 4 steps:*
 
-<!-- TODO: add before/after pairs here, e.g. -->
-<!-- | Before | After | Prompt | -->
-<!-- |---|---|---| -->
-<!-- | <img width="100%" alt="thenoise_..." src="..." /> | <img width="100%" alt="thenoise_edit_..." src="..." /> | "…" | -->
+| Before | After | Prompt |
+|---|---|---|
+| <img width="100%" alt="9aa0cc36-2ec8-4aa5-bc2e-eac17970b125" src="https://github.com/user-attachments/assets/ddae7d8c-b7a4-4652-b0df-53f2bbc49208" /> | <img width="100%" alt="7367543c-1f6e-482d-aa61-aff09a0da276" src="https://github.com/user-attachments/assets/f1a7f3bf-d08c-4709-9d08-0269e1001262" /> | Paint the sketch with colors |
+| <img width="100%" alt="9aa0cc36-2ec8-4aa5-bc2e-eac17970b125" src="https://github.com/user-attachments/assets/ddae7d8c-b7a4-4652-b0df-53f2bbc49208" /> | <img width="100%" alt="9aee500e-9fbb-4a7e-b354-95f0ab1d963a" src="https://github.com/user-attachments/assets/b8787ef7-5e87-45bd-a782-6696199bd041" /> | Make this realistic |
+| <img width="100%" alt="9aa0cc36-2ec8-4aa5-bc2e-eac17970b125" src="https://github.com/user-attachments/assets/ddae7d8c-b7a4-4652-b0df-53f2bbc49208" /> | <img width="100%" alt="287e215f-08dd-45ca-83dd-690927f2c99f" src="https://github.com/user-attachments/assets/b136c5de-93e5-4bc4-bd07-ea19c33d40b4" /> | Write in diagonal on top "Rome, 2026" in hand-writing font. Make image colorful. |
 
 ## Download
 
