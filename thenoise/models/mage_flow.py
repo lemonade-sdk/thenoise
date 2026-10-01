@@ -37,7 +37,7 @@ from thenoise.dit.mage_flow.utils import detect_params
 from thenoise.dit.qwen_image.models import build_video_positions
 from thenoise.models.base import Conditioning, DiffusionModel, Step, normalize_keys
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
-from thenoise.upscale import LatentUpscaler, VAEPixelUpscaler
+from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.math import round_up
 from thenoise.utils.positions import grid_positions
 from thenoise.vae import load_mage_family_vae
@@ -260,11 +260,8 @@ class MageFlowModel(DiffusionModel):
 
     # -------------------------------------------------------------- upscaling
     def _create_upscaler(self) -> LatentUpscaler:
-        # The weight-free VAE round trip. No trained transcoder exists for this space:
-        # the Sesqui ``flux2`` weights are trained on Flux.2's BatchNorm-normalised
-        # packed latent and this latent is the raw anchor space — same shape,
-        # different statistics.
-        return VAEPixelUpscaler(self.vae, scale=self.UPSCALE_SCALE)
+        """Mage latent -> the trained Flux.2 Sesqui transcoder."""
+        return SesquiLSRUpscaler("flux2", device=self.device, dtype=self.dtype)
 
 
 __all__ = ["MageFlowModel"]

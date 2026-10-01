@@ -37,7 +37,7 @@ from thenoise.models.base import Conditioning
 from thenoise.models.config import EncodePromptArgs, SamplingParams
 from thenoise.models.mage_flow import MageFlowModel
 from thenoise.samplers import EulerSampler
-from thenoise.upscale import VAEPixelUpscaler
+from thenoise.upscale import SesquiLSRUpscaler
 from thenoise.utils.rope import apply_rope
 from thenoise.utils.timestep import timestep_embedding
 from thenoise.vae import mage_flow as mage_vae
@@ -561,12 +561,15 @@ def test_sizes_round_up_to_the_pixel_cell_of_one_token():
     assert model.resolve_size(512, 2048) == (512, 2048)  # no bucket, no clamp
 
 
-def test_upscaling_is_the_weight_free_vae_round_trip():
+def test_upscaling_is_the_trained_flux2_transcoder():
+    """The Mage latent goes through the Flux.2 Sesqui bridge, as a Flux.2 latent would."""
     model = _bare(vae=FakeVAE(), _upscaler=None)
     upscaler = model.get_upscaler()
-    assert isinstance(upscaler, VAEPixelUpscaler)
-    assert upscaler.vae is model.vae  # the model's own VAE, not a second set of weights
+    assert isinstance(upscaler, SesquiLSRUpscaler)
+    assert upscaler.format == "flux2"
     assert upscaler.scale == MageFlowModel.UPSCALE_SCALE
+
+    assert upscaler(torch.randn(1, 128, 8, 8)).shape == (1, 128, 16, 16)
 
 
 # ---------------------------------------------------------------- text encoder

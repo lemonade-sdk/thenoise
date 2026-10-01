@@ -598,24 +598,7 @@ def load_mage_family_vae(
     device: Union[str, torch.device],
     dtype: Optional[torch.dtype] = None,
 ) -> Union[AutoencoderKLMageFlow, AutoencoderKLFlux2]:
-    """Load whichever codec ``vae_path`` holds: the Mage-VAE or the Flux.2 AE.
-
-    The Mage latent lives in a Flux.2-*anchored* space (see this module's docstring), so
-    the Flux.2 AE can encode and decode a Mage-Flow run's latents too — the shapes agree
-    and so do the statistics closely enough that people do exactly this. Both codecs
-    keep the same interface the adapter uses (``z_dim``, ``spatial_compression``,
-    ``pixel_channels``, ``encode_pixels_to_latents``, ``decode_to_pixels``), so the
-    choice changes nothing else about the run.
-
-    The names say which file this is, from the header alone: the Mage export is a
-    training artifact with its keys under ``student.``/``pipeline.``, the Flux.2 AE
-    carries ``encoder.``/``decoder.``/``bn.`` at the top level. The Mage file does contain
-    a Flux.2 encoder — under ``pipeline.y_embedder.encoder.``, which is not one of the
-    Flux.2 prefixes, and which ``load_mage_vae`` drops.
-
-    Mage is checked first as the native codec. Each loader then reads the weights itself;
-    this pass reads only the header.
-    """
+    """Load whichever codec ``vae_path`` holds: the Mage-VAE or the Flux.2 AE."""
     with MemoryEfficientSafeOpen(vae_path) as f:
         keys = list(f.keys())
 
