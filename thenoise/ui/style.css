@@ -26,6 +26,7 @@
 
 /* ---------- light theme (body.light, toggled from the UI) ---------- */
 body.light {
+  color-scheme: light;
   --bg: #f5f6f8;
   --panel: #ffffff;
   --panel-2: #eef1f5;
@@ -41,7 +42,6 @@ body.light {
   --err: #d64550;
   /* derived/layer colors */
   --accent-hover: #a37410;
-  --btn-text: #fff;
   --action-bg: rgba(255, 255, 255, .92);
   --overlay-bg: rgba(255, 255, 255, .55);
   --backdrop-bg: rgba(60, 70, 90, .45);
@@ -68,6 +68,7 @@ body {
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   background: var(--bg);
   color: var(--text);
+  color-scheme: dark;
   display: flex;
   flex-direction: column;
   min-height: 100vh;

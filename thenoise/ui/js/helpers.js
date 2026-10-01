@@ -3,53 +3,69 @@
 
 const $ = id => document.getElementById(id);
 
-/* ---------- theme (light / dark) ---------- */
-const THEME_COLORS = { dark: '#0b0e14', light: '#f5f6f8' };
-
-function applyTheme(theme) {
-  document.body.classList.toggle('light', theme === 'light');
-  document.documentElement.style.colorScheme = theme;
-  const meta = document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute('content', THEME_COLORS[theme]);
-  const icon = $('theme_icon');
-  if (icon) icon.textContent = theme === 'light' ? '\u2600' : '\u263E'; // sun / moon
-  const label = $('theme_label');
-  if (label) label.textContent = theme === 'light' ? 'Light' : 'Dark';
-}
-
-function initTheme() {
-  const stored = localStorage.getItem('thenoise-theme');
-  const prefersLight = window.matchMedia &&
-    window.matchMedia('(prefers-color-scheme: light)').matches;
-  applyTheme(stored || (prefersLight ? 'light' : 'dark'));
-  const btn = $('theme_toggle');
+/* ---------- persisted preferences (light/dark, sidebar left/right) ---------- */
+// Shared plumbing for the two persisted toggles.
+function initToggle({ key, btnId, initial, current, apply, next }) {
+  apply(initial());
+  const btn = $(btnId);
   if (btn) btn.addEventListener('click', () => {
-    const next = document.body.classList.contains('light') ? 'dark' : 'light';
-    localStorage.setItem('thenoise-theme', next);
-    applyTheme(next);
+    const value = next(current());
+    localStorage.setItem(key, value);
+    apply(value);
   });
 }
-initTheme();
+
+/* ---------- theme (light / dark) ---------- */
+const THEME_UI = {
+  light: { icon: '\u2600', label: 'Light' }, 
+  dark: { icon: '\u263E', label: 'Dark' },
+};
+
+function applyTheme(theme) {
+  const light = theme === 'light';
+  document.body.classList.toggle('light', light);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', getComputedStyle(document.body).getPropertyValue('--bg').trim());
+  const ui = THEME_UI[theme];
+  const icon = $('theme_icon');
+  if (icon) icon.textContent = ui.icon;
+  const label = $('theme_label');
+  if (label) label.textContent = ui.label;
+}
+
+initToggle({
+  key: 'thenoise-theme',
+  btnId: 'theme_toggle',
+  initial: () => localStorage.getItem('thenoise-theme') ||
+    (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'),
+  current: () => document.body.classList.contains('light') ? 'light' : 'dark',
+  apply: applyTheme,
+  next: v => v === 'light' ? 'dark' : 'light',
+});
 
 /* ---------- sidebar side (left / right) ---------- */
-function applySidebar(right) {
+const SIDEBAR_UI = {
+  left: { icon: '\u21E5' },
+  right: { icon: '\u21E4' },
+};
+
+function applySidebar(side) {
+  const right = side === 'right';
   document.body.classList.toggle('sidebar-right', right);
   const label = $('sidebar_label');
   if (label) label.textContent = right ? 'Right' : 'Left';
   const icon = $('sidebar_icon');
-  if (icon) icon.textContent = right ? '\u21E4' : '\u21E5'; // ⇤ / ⇥
+  if (icon) icon.textContent = right ? SIDEBAR_UI.right.icon : SIDEBAR_UI.left.icon;
 }
 
-function initSidebar() {
-  applySidebar(localStorage.getItem('thenoise-sidebar') === 'right');
-  const btn = $('sidebar_toggle');
-  if (btn) btn.addEventListener('click', () => {
-    const next = document.body.classList.contains('sidebar-right') ? 'left' : 'right';
-    localStorage.setItem('thenoise-sidebar', next);
-    applySidebar(next === 'right');
-  });
-}
-initSidebar();
+initToggle({
+  key: 'thenoise-sidebar',
+  btnId: 'sidebar_toggle',
+  initial: () => localStorage.getItem('thenoise-sidebar') === 'right' ? 'right' : 'left',
+  current: () => document.body.classList.contains('sidebar-right') ? 'right' : 'left',
+  apply: applySidebar,
+  next: v => v === 'right' ? 'left' : 'right',
+});
 
 function bindRange(sliderId, valId, digits = 2) {
   $(sliderId).addEventListener('input', e =>
