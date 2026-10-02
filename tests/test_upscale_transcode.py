@@ -86,11 +86,14 @@ def _upscaler(vae=None, *, fake_load, dtype: torch.dtype = torch.float32, **net_
 
 
 def test_the_bridge_is_a_latent_upscaler_2x_by_construction(fake_load):
-    """The pipeline's only handle on it is the interface, and the factor is fixed."""
+    """The pipeline's only handle on it is the interface, and the factor is fixed:
+    canonical latent in, canonical latent out at double the resolution.
+    """
     up = _upscaler(fake_load=fake_load)
 
     assert isinstance(up, LatentUpscaler)
     assert Qwen21TranscodeUpscaler.scale == 2 == up.scale
+    assert up(torch.zeros(1, 4, 3, 5)).shape == (1, 4, 6, 10)
 
 
 def test_the_bridge_conditions_on_the_canonical_latent_untouched(fake_load):
@@ -108,13 +111,6 @@ def test_the_bridge_conditions_on_the_canonical_latent_untouched(fake_load):
     _upscaler(vae, fake_load=fake_load)(z)
 
     assert vae.seen == [(tuple(z.shape), torch.float32, 1)]
-
-
-def test_the_bridge_returns_the_canonical_latent_at_2x(fake_load):
-    """Canonical in, canonical out at double the resolution — the pipeline's contract."""
-    up = _upscaler(fake_load=fake_load)
-
-    assert up(torch.zeros(1, 4, 3, 5)).shape == (1, 4, 6, 10)
 
 
 def test_the_bridge_runs_and_returns_in_its_own_dtype(fake_load):

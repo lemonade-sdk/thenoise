@@ -1,10 +1,9 @@
 """The Mage-Flow DiT architecture, read out of the safetensors header.
 
-``MageFlowParams``' defaults are the released checkpoint's; reading the geometry from
-the file is what lets a different-depth or different-width export load without touching
-this package — and what tells the dense AdaLN heads from the low-rank modulation
-variant. Detection by *name* lives in :mod:`thenoise.dit.mage_flow.keys`; this is
-the shape pass, run once at load.
+Reading the geometry from the file lets a different-depth or different-width export
+load without touching this package, and tells the dense AdaLN heads from the
+low-rank modulation variant. Detection by *name* lives in
+:mod:`thenoise.dit.mage_flow.keys`.
 """
 from __future__ import annotations
 
@@ -72,8 +71,8 @@ def detect_params(dit_path: str) -> MageFlowParams:
 def _modulation_rank(shapes: dict) -> Optional[int]:
     """The low-rank export's shared modulation width, or ``None`` for the dense heads.
 
-    The variant is the presence of ``modulation_down``; its width has to agree with the
-    per-block heads it feeds, which is the one way a mixed-up export shows itself.
+    The variant is the presence of ``modulation_down``; its width must agree with the
+    per-block heads it feeds.
     """
     down = shapes.get("modulation_down.weight")
     if down is None:

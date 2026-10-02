@@ -12,6 +12,12 @@ from typing import Optional
 
 import torch
 
+# Every tensor in the suite is toy-sized, and the intra-op thread pool spends more in
+# barrier time than it can win back: one tiny Lumina forward is ~0.25s on 24 threads
+# and ~0.01s on one, which is most of the suite's wall time. One thread is also a
+# deterministic reduction order.
+torch.set_num_threads(1)
+
 # Tests exercise model math, not Inductor. ``Flux2.forward`` wraps every block in
 # ``torch.compile(fullgraph=True)``, so the first forward in a process would pay
 # the whole compile cost (~7s) to assert a shape and ``isfinite``. Disabling

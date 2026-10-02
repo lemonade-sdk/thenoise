@@ -1,10 +1,9 @@
 """The shared Lumina/S3-DiT core, and the two padding conventions it parameterises.
 
 Weight-free and GPU-free: a tiny transformer (2 heads, head_dim 128 = the 32+48+48
-axis split the real models use) is enough to pin down the things a wrong build would
-only reveal as a bad picture — where the alignment pads go, who is allowed to attend
-to them, where the image's temporal position starts, and where a second conditioning
-tensor lands. Plus the checkpoint-name maps both loaders share.
+axis split the real models use) pins down what a wrong build would only reveal as a
+bad picture — where the alignment pads go, who may attend to them, where the image's
+temporal position starts, and where a second conditioning tensor lands.
 """
 from __future__ import annotations
 
@@ -34,10 +33,8 @@ TINY_CONFIG = dict(
 def _blocks_run_eagerly(monkeypatch):
     """Call the transformer blocks un-compiled.
 
-    ``conftest`` disables dynamo for the whole suite (the tests check model math,
-    not Inductor), and a ``fullgraph=True`` block *raises* rather than falling back
-    to eager when dynamo is off. Unwrap to the pre-compile function so these tests
-    can actually run a forward.
+    ``conftest`` disables dynamo suite-wide, and a ``fullgraph=True`` block *raises*
+    rather than falling back when dynamo is off: unwrap to the pre-compile function.
     """
     from thenoise.dit.lumina.models import LuminaTransformerBlock
 
@@ -74,11 +71,10 @@ def _inputs(cap_len=37, height=8, width=8, extra_len=0, dtype=torch.float64):
 
 
 def test_learned_mode_owns_pad_tokens_and_zero_masked_does_not():
-    """The pad tokens are the ONE parameter that tells the two family members apart.
-
-    Z-Image ships them and Ming-Image does not, so a ``zero_masked`` model that
-    declared them could never load its own checkpoint (the loader is strict), and a
-    ``learned`` model without them would pad with garbage it then attends to.
+    """The pad tokens are the ONE parameter that tells the two family members apart:
+    Z-Image ships them, Ming-Image does not. A ``zero_masked`` model that declared
+    them could never load its own checkpoint (the loader is strict); a ``learned``
+    model without them pads with garbage it then attends to.
     """
     from thenoise.dit.lumina.models import LuminaTransformer2DModel
 
@@ -138,22 +134,17 @@ def test_extra_conditioning_extends_the_caption_block(core):
     assert cap_stream.pos_ids[0][-1].tolist() == [64, 0, 0]
     assert x_stream.pos_ids[0][0].tolist() == [65, 0, 0]
 
-
-def test_extra_conditioning_moves_the_image_positions(core):
-    """The rule the whole caption-block layout exists to enforce."""
+    # Growing the caption can also push it into the NEXT padded block, which moves
+    # the image's start without changing its token count: 30 valid pads to 32, but
+    # 30+10 pads to 64.
     latent, cap, _ = _inputs(cap_len=30)
-    x_without, cap_without = core.patchify_and_embed([latent], [cap], 2, 1, None)
-
-    extra = torch.zeros(10, TINY_CONFIG["dim"], dtype=torch.float64)
-    x_with, cap_with = core.patchify_and_embed([latent], [cap], 2, 1, [extra])
-
-    # 30 valid padded to 32, but 30+10 valid padded to 64. The image's own token
-    # count is unchanged; its START moves with the caption's padded length, which
-    # is all the RoPE geometry can key on.
-    assert cap_without.padded == [32] and cap_with.padded == [64]
-    assert x_without.padded == x_with.padded == [32]
-    assert x_without.pos_ids[0][0, 0] == 33
-    assert x_with.pos_ids[0][0, 0] == 65
+    x_short, cap_short = core.patchify_and_embed([latent], [cap], 2, 1, None)
+    x_long, cap_long = core.patchify_and_embed(
+        [latent], [cap], 2, 1, [torch.zeros(10, TINY_CONFIG["dim"], dtype=torch.float64)]
+    )
+    assert cap_short.padded == [32] and cap_long.padded == [64]
+    assert x_short.padded == x_long.padded == [32]
+    assert x_short.pos_ids[0][0, 0] == 33 and x_long.pos_ids[0][0, 0] == 65
 
 
 def test_extra_length_mismatch_is_an_error(core):
@@ -176,68 +167,32 @@ def test_position_ids_cover_the_padded_length_and_pads_sit_at_the_origin(core):
 # ------------------------------------------------------------------------- forward
 
 
-@pytest.mark.parametrize("extra_len", [0, 24])
-def test_forward_shapes_and_finiteness(core, extra_len):
-    latent, cap, extra = _inputs(cap_len=37, height=8, width=8, extra_len=extra_len)
-    extras = [extra] if extra is not None else None
-    t = torch.tensor([0.42], dtype=torch.float64)
-
-    core.prepare_rope([latent], [cap], extras)
-    out = core([latent], t, [cap], extras)[0]
-    assert out.shape == (16, 1, 8, 8)
-    assert torch.isfinite(out).all()
-
-
-def test_forward_matches_preparing_rope_per_branch(core):
-    """The ``rope_key`` split behaves like a fresh preparation of the same caption."""
-    latent, cap, _ = _inputs(cap_len=30)
-    t = torch.tensor([0.75], dtype=torch.float64)
-
-    core.prepare_rope([latent], [cap], key="")
-    direct = core([latent], t, [cap])[0]
-
-    core.prepare_rope([latent], [cap], key="_neg", clear=False)
-    keyed = core([latent], t, [cap], rope_key="_neg")[0]
-    assert torch.allclose(direct, keyed)
-
-
-def test_pad_slots_hold_the_pad_token_in_learned_mode():
-    """A learned pad slot is the model's own embedding, not a zero."""
-    from thenoise.dit.lumina.models import LuminaTransformer2DModel
-    from thenoise.utils.sequence import pad_to_length
-
-    core = LuminaTransformer2DModel(pad_mode="learned", **TINY_CONFIG)
-    feats = [torch.ones(3, 4, dtype=torch.float64)]
-    pad_token = torch.full((1, 4), 7.0, dtype=torch.float64)
-    padded = pad_to_length(feats, [5], pad_token=pad_token)
-    assert torch.equal(padded[0][:3], feats[0])
-    assert torch.equal(padded[0][3:], pad_token.expand(2, 4))
-
-
-def test_cap_extra_reaches_the_network_and_changes_the_output():
-    """``cap_extra=None`` and an all-zero extra are NOT the same forward.
-
-    Zero-padding the caption tail still lengthens the stream and shifts the image
-    positions, so if a forward ever ignored ``cap_extra`` this would fail silently
-    in the direction that matters (the conditioning being dropped).
-    """
-    from thenoise.dit.lumina.models import LuminaTransformer2DModel
-
-    torch.manual_seed(0)
-    model = LuminaTransformer2DModel(pad_mode="zero_masked", **TINY_CONFIG).double().eval().requires_grad_(False)
-    latent, cap, _ = _inputs(cap_len=40)
+def test_forward_shape_rope_keys_and_the_extra_conditioning_tail(core):
+    latent, cap, _ = _inputs(cap_len=40, height=8, width=8)
     t = torch.tensor([0.5], dtype=torch.float64)
 
-    model.prepare_rope([latent], [cap])
-    base = model([latent], t, [cap])[0]
+    core.prepare_rope([latent], [cap])
+    base = core([latent], t, [cap])[0]
+    assert base.shape == (16, 1, 8, 8)
+    assert torch.isfinite(base).all()
 
+    # A table prepared under a second ``rope_key`` behaves like a fresh preparation
+    # of the same caption (the two CFG branches must agree).
+    core.prepare_rope([latent], [cap], key="_neg", clear=False)
+    assert torch.allclose(base, core([latent], t, [cap], rope_key="_neg")[0])
+
+    # ``cap_extra=None`` and an ALL-ZERO extra are not the same forward: zero-padding
+    # the caption tail still lengthens the stream and shifts the image positions. A
+    # forward that dropped ``cap_extra`` would fail here, silently in the direction
+    # that matters (the conditioning being ignored).
     zero_extra = torch.zeros(16, TINY_CONFIG["dim"], dtype=torch.float64)
-    model.prepare_rope([latent], [cap], [zero_extra])
-    with_extra = model([latent], t, [cap], [zero_extra])[0]
+    core.prepare_rope([latent], [cap], [zero_extra])
+    with_extra = core([latent], t, [cap], [zero_extra])[0]
+    assert torch.isfinite(with_extra).all()
     assert not torch.allclose(base, with_extra)
 
     real_extra = torch.randn(16, TINY_CONFIG["dim"], dtype=torch.float64)
-    assert not torch.allclose(with_extra, model([latent], t, [cap], [real_extra])[0])
+    assert not torch.allclose(with_extra, core([latent], t, [cap], [real_extra])[0])
 
 
 def test_batch_of_two_different_caption_lengths(core):
@@ -286,14 +241,10 @@ def test_zero_masked_punches_holes_and_learned_does_not():
         [True, True] + [False] * 6
     )
 
-
-def test_single_stream_masks_only_its_own_pads(core):
-    """A refiner stream is one segment: valid, then the alignment pad run."""
-    from thenoise.dit.lumina.models import LuminaTransformer2DModel
-
-    model = LuminaTransformer2DModel(pad_mode="zero_masked", **TINY_CONFIG)
-    mask = model._attention_mask([[(5, 8)]], torch.device("cpu"))
-    assert mask[0].tolist() == [True] * 5 + [False] * 3
+    # A refiner stream is a single segment: valid, then the alignment pad run.
+    assert masked._attention_mask([[(5, 8)]], torch.device("cpu"))[0].tolist() == (
+        [True] * 5 + [False] * 3
+    )
 
 
 # --------------------------------------------------------------- checkpoint naming
@@ -416,8 +367,8 @@ def test_runtime_state_is_stripped_before_the_strict_load():
 
 def test_the_pad_tokens_split_the_two_family_members():
     """One family signature, one separator — the rule both ``detect``s read. The
-    signature must take either spelling of the patch embedder, since that is what the
-    two releases' naming generations differ in.
+    signature takes either spelling of the patch embedder, since that is where the
+    two releases' naming generations differ.
     """
     from thenoise.dit.lumina.keys import has_learned_pad_tokens, is_s3dit
 
@@ -438,10 +389,8 @@ def test_the_pad_tokens_split_the_two_family_members():
 def test_zimage_still_pads_with_its_learned_tokens_and_attends():
     """End-to-end Z-Image behaviour through the shared core (the regression guard).
 
-    A caption that needs padding must produce (a) pad slots holding the learned
-    ``cap_pad_token`` and (b) an attention mask that keeps them, both of which are
-    Z-Image's documented behaviour and both of which the refactor could silently
-    have changed.
+    A caption that needs padding must produce pad slots holding the learned
+    ``cap_pad_token`` and an attention mask that keeps them.
     """
     from thenoise.dit.zimage.models import ZImageTransformer2DModel
     from thenoise.utils.sequence import pad_to_length

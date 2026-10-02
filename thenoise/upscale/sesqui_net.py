@@ -1,11 +1,8 @@
 """The SesquiLSR latent-upscale network — vendored subset for thenoise.
 
-Copied and trimmed from https://github.com/LoganBooker/SesquiLSR (MIT).
+The raw network only: it operates on *raw* VAE latents.
 
-This is the raw network only: it operates on *raw* VAE latents (see
-``inference_adaptors`` for the normalized<->raw conversion) and is driven by the
-``SesquiLSRUpscaler`` strategy in ``sesqui.py``. We run it in bf16 to match the
-rest of the engine.
+Copied and trimmed from https://github.com/LoganBooker/SesquiLSR (MIT).
 
 Original copyright/license notice follows.
 """
@@ -26,8 +23,6 @@ Activation = nn.Mish
 
 
 # IR LayerNorm from https://arxiv.org/abs/2504.06629
-# Removed bias to reduce chances of mean drift, also it didn't really make
-# much of a difference with it in.
 class IRLayerNorm(nn.Module):
     def __init__(self, channels: int):
         super().__init__()
@@ -240,8 +235,8 @@ class LowRankReassemblyHead(nn.Module):
 class SesquiLSRNet(nn.Module):
     """The vendored SesquiLSR network: raw VAE latent -> 2x raw VAE latent.
 
-    ``in_channels`` is the raw VAE latent width of the target format (see
-    ``sesqui._UPSCALER_FORMATS``); ``target_size`` is in raw-VAE-latent coords.
+    ``in_channels`` is the raw VAE latent width of the target format and
+    ``target_size`` is in raw-VAE-latent coords.
     """
 
     def __init__(
@@ -275,8 +270,6 @@ class SesquiLSRNet(nn.Module):
             Activation(),
             nn.Conv2d(width // 2, in_channels, 3, padding=1, padding_mode="reflect", bias=True),
         )
-        # Give the model a way to do light correction on the skip so the trunk/head can focus on
-        # detail/damage control.
         self.skip_conv = nn.Conv2d(in_channels, in_channels, 5, padding=2, padding_mode="reflect", bias=False)
         nn.init.dirac_(self.skip_conv.weight)
 
@@ -287,6 +280,6 @@ class SesquiLSRNet(nn.Module):
         h = self.out_blocks(h)
         h = self.tail_conv(h)
 
-        # Magic sauce. Learn correction on crude upsample.
+        # Learn correction on the crude upsample.
         x_up = self.skip_conv(F.interpolate(x, size=target_size, mode="bicubic", align_corners=False))
         return h + x_up

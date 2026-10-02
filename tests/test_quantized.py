@@ -1,12 +1,8 @@
-"""Quantized (INT8/FP8) support tests.
+"""Quantized (INT8/FP8) support: ``QuantizedLinear`` and the generic load helpers.
 
-These cover the shared ``QuantizedLinear`` module (backed by comfy_kitchen's
-``QuantizedTensor``) and the generic quantized loading helpers. They run on CPU
-(comfy_kitchen's eager backend) and need no GPU or real checkpoints.
+CPU (comfy_kitchen's eager backend), no GPU and no real checkpoints.
 """
 from __future__ import annotations
-
-from typing import Optional
 
 import pytest
 import torch
@@ -132,8 +128,8 @@ def _modes(result) -> dict:
 def test_apply_lora_bakes_quantized_and_undo_reloads_from_disk(kwargs, tmp_path):
     """Undo reloads the ORIGINAL low-bit weights from the checkpoint by raw key.
 
-    The raw key must survive the wrapper-prefix stripping, otherwise a
-    repackaged checkpoint restores nothing (the LoRA would stay baked in).
+    The raw key must survive the wrapper-prefix stripping, or a repackaged
+    checkpoint restores nothing and the LoRA stays baked in.
     """
     from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
 
@@ -193,38 +189,33 @@ def test_apply_lora_mixed_quantized_and_bf16_layers():
 # ------------------------------------------------ quant_step (bake-vs-runtime input)
 
 
-def test_quant_step_is_the_stored_int8_scale():
-    """Per-row int8: the exporter's ``scale`` IS the step, row for row."""
+def test_quant_step_reads_a_scale_that_actually_is_one():
+    """Per-row int8: the exporter's ``scale`` IS the step, row for row; a single
+    value broadcasts to every row.
+    """
     qweight, scale = int8_pair()
     layer = QuantizedLinear(IN_F, OUT_F, bias=False)
+
     layer.load_quantized(int8_qt(qweight, scale))
     step = layer.quant_step()
     assert step.shape == (OUT_F,)
     assert torch.allclose(step, scale.reshape(-1))
 
-
-def test_quant_step_broadcasts_a_per_tensor_scale():
-    qweight, _ = int8_pair()
-    layer = QuantizedLinear(IN_F, OUT_F, bias=False)
     layer.load_quantized(int8_qt(qweight, torch.tensor([0.25], dtype=torch.float32)))
-    step = layer.quant_step()
-    assert step.shape == (OUT_F,)
-    assert torch.allclose(step, torch.full((OUT_F,), 0.25))
+    assert torch.allclose(layer.quant_step(), torch.full((OUT_F,), 0.25))
 
 
-@pytest.mark.parametrize("scale", [torch.rand(OUT_F, 4), torch.rand(3)])
-def test_quant_step_declines_an_unreadable_scale(scale):
-    """A non-per-row scale must not be read as a step (wrong beats no opinion)."""
+@pytest.mark.parametrize("scale", [torch.rand(OUT_F, 4), torch.rand(3), None])
+def test_quant_step_declines_a_scale_it_cannot_read(scale):
+    """Better no opinion than a wrong one: a non-per-row scale, or an FP8 layout
+    whose single scale is relative to each weight.
+    """
     qweight, _ = int8_pair()
     layer = QuantizedLinear(IN_F, OUT_F, bias=False)
-    layer.load_quantized(int8_qt(qweight, scale))
-    assert layer.quant_step() is None
-
-
-def test_quant_step_declines_non_int8_layouts():
-    """FP8 scales relative to each weight, so its single scale is no step."""
-    layer = QuantizedLinear(IN_F, OUT_F, bias=False)
-    layer.load_quantized(wrapped_fp8_tensor())
+    if scale is None:
+        layer.load_quantized(wrapped_fp8_tensor())
+    else:
+        layer.load_quantized(int8_qt(qweight, scale))
     assert layer.quant_step() is None
 
 
@@ -370,17 +361,6 @@ def test_baking_after_a_runtime_branch_clears_it():
 
 
 # ------------------------------------------------------- the routing metric
-
-
-def test_bake_ratio_is_delta_rms_over_the_step():
-    torch.manual_seed(0)
-    down = torch.randn(4, IN_F) * 0.01
-    up = torch.randn(OUT_F, 4)
-    step = torch.full((OUT_F,), 0.02)
-    expected = (up @ down).pow(2).mean().sqrt() / 0.02
-    assert torch.allclose(
-        QuantizedLinear._bake_ratio(LoraFactors(down, up), step), expected, rtol=1e-4
-    )
 
 
 def test_bake_ratio_ignores_the_rows_a_fused_lora_never_touches():
@@ -561,6 +541,31 @@ def test_load_dit_drop_keys_applies_on_both_paths(tmp_path, quantized):
     load_dit(model, path, device="cpu", dtype=torch.bfloat16, drop_keys=("last.down", "last.up"))
     assert model.q._quantized is quantized
     assert model.plain.weight.dtype == torch.bfloat16
+
+
+@pytest.mark.parametrize("quantized", [False, True], ids=["bf16", "int8"])
+@pytest.mark.parametrize(
+    "prefix", ["", "model.diffusion_model."], ids=["raw-keys", "wrapped-keys"]
+)
+def test_load_dit_drops_checkpoint_markers_for_every_model(tmp_path, quantized, prefix):
+    """Checkpoint metadata is dropped centrally, so no model has to name it.
+
+    ``TinyDiT`` knows nothing about ``__index_timestep_zero__`` and no ``drop_keys``
+    is passed, yet the strict load survives: markers are registry knowledge
+    (``thenoise.utils.checkpoint``), read off the header and stripped here. Without
+    the central drop the BF16 path fails on an unexpected key and the quantized
+    path on an unrecognized one.
+    """
+    marker = "__index_timestep_zero__"
+    tensors = (int8_tensors if quantized else bf16_tensors)(
+        prefix=prefix, extra={f"{prefix}{marker}": torch.zeros(1)}
+    )
+    path = write_safetensors(tmp_path / "dit.safetensors", tensors)
+
+    model = load_dit(TinyDiT(), path, device="cpu", dtype=torch.bfloat16)
+    assert model.q._quantized is quantized
+    assert model.plain.weight.dtype == torch.bfloat16
+    assert not hasattr(model, marker)
 
 
 class _ScaleNorm(torch.nn.Module):

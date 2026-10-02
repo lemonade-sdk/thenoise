@@ -1,14 +1,10 @@
 """Mage-Flow flow-matching schedule: a *static* shift of a uniform sigma grid.
 
 Upstream is ``FlowMatchEulerDiscreteScheduler(num_train_timesteps=1000, shift=6.0,
-use_dynamic_shifting=False)`` fed ``linspace(1, 1/steps, steps)``, whose step is
-
-    sigma' = shift * sigma / (1 + (shift - 1) * sigma)
-
-— ``generalized_time_shift(sigma, log(shift), 1.0)``, the shared helper. With dynamic
-shifting off the grid is resolution-INDEPENDENT, unlike the mu-steered ones, and the
-model is fed the shifted sigma itself (the x1000 happens in its timestep embedder),
-which is exactly the ``Step.t`` convention of this repo's Euler loop.
+use_dynamic_shifting=False)`` fed ``linspace(1, 1/steps, steps)``, whose shift is
+``generalized_time_shift(sigma, log(shift), 1.0)``. With dynamic shifting off the
+grid is resolution-independent, and the model is fed the shifted sigma itself (the
+x1000 happens in its timestep embedder).
 """
 from __future__ import annotations
 
@@ -19,7 +15,7 @@ import torch
 
 from thenoise.utils.math import generalized_time_shift
 
-#: The reference's sampling shift (ComfyUI's ``sampling_settings["shift"]``).
+#: The reference's sampling shift.
 SHIFT = 6.0
 
 

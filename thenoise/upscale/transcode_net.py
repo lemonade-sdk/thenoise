@@ -1,9 +1,9 @@
 """The latent-transcode upscale network — vendored subset for thenoise.
 
-Copied and trimmed from https://github.com/LoganBooker/SesquiLSR (MIT).
+The raw network only: it takes the pipeline's latent plus a feature map from the
+model's own VAE decoder and returns the latent at 2x the resolution.
 
-This is the raw network only. It takes the pipeline's latent plus a feature map
-from the model's own VAE decoder and returns the latent at 2x the resolution.
+Copied and trimmed from https://github.com/LoganBooker/SesquiLSR (MIT).
 
 Original copyright/license notice follows.
 """
@@ -19,12 +19,7 @@ from torch import Tensor
 
 
 class RMSNorm2D(nn.Module):
-    """Channel-wise RMS norm with the statistic taken in fp32.
-
-    The mean square is computed on an upcast and the scale cast back, so a bf16
-    feature does not lose its normalisation to an 8-bit mantissa — the same reason
-    the engine's VAE latent arithmetic runs in fp32.
-    """
+    """Channel-wise RMS norm with the statistic taken in fp32."""
 
     def __init__(self, channels: int, eps: float = 1e-6):
         super().__init__()
@@ -37,12 +32,7 @@ class RMSNorm2D(nn.Module):
 
 
 class GatedSwiGLUStage(nn.Module):
-    """One pre-norm gated stage: pointwise expand, depthwise mix, pointwise down.
-
-    ``shortcut`` exists only where the stage changes width, which is exactly the
-    first stage of the trunk — so most stages carry four parameter tensors and the
-    entry stage five, and ``load_state_dict`` therefore pins the widths too.
-    """
+    """Pre-norm gated stage: pointwise expand, depthwise mix, pointwise down."""
 
     def __init__(self, channels: int):
         super().__init__()
@@ -68,20 +58,12 @@ class GatedSwiGLUStage(nn.Module):
 class LatentTranscodeNet(nn.Module):
     """Latent + VAE-decoder feature -> the latent at 2x the resolution.
 
-    Two paths are summed on the way out:
-
-      * ``out(body(head(feature) + trunk))`` — the detail. The decoder feature is
-        projected to the trunk width and added to the trunk's own upsampled latent,
-        so the bridge corrects the crude interpolation instead of inventing the
-        image from scratch;
-      * ``skip(interpolate(latent))`` — a 3x3 correction on the bicubic upsample,
-        which is what makes a zeroed trunk degrade into a plain resize rather than
-        into noise.
+    The detail path is ``out(body(head(feature)))``; it is added to a bicubic
+    upsample of the latent and refined by ``skip``, so the bridge is a residual
+    correction on a crude resize.
 
     ``feature_channels`` is the channel width of the VAE-decoder feature and
-    ``latent_channels`` the pipeline's latent width; for Qwen-Image 2.1 they are
-    the decoder's first upsample stage (``dec_dim * dim_mult[-1]``) and its
-    ``z_dim``. ``depth``/``expansion``/``width`` are the trunk's.
+    ``latent_channels`` the pipeline's latent width.
     """
 
     #: Fixed by the two ``F.interpolate`` calls below: 2x or not at all.

@@ -1,4 +1,4 @@
-# Anima model loading/saving utilities
+# Anima model loading utilities
 
 from typing import Optional, Union
 import torch
@@ -17,14 +17,11 @@ logger = logging.getLogger(__name__)
 
 
 def _count_anima_blocks(dit_path: str) -> int:
-    """Count the number of main transformer blocks in an Anima checkpoint.
+    """Count the main transformer blocks in an Anima checkpoint.
 
-    Anima comes in variants with different block counts (the base 2.1B has 28
-    blocks, the 2.9B "tune" has 40) while otherwise sharing the same
-    architecture (model_channels / num_heads unchanged). Count ``blocks.{i}.``
-    keys from the safetensors header -- after stripping generic wrap prefixes
-    so raw (``net.``) and repackaged (``model.diffusion_model.``) checkpoints
-    count identically -- rather than hardcoding a single block count.
+    Anima ships variants with different depths on the same architecture, so the
+    count comes from the ``blocks.{i}.`` keys of the safetensors header, with wrap
+    prefixes stripped so raw and repackaged files count identically.
     """
     from thenoise.utils.safetensors import MemoryEfficientSafeOpen
 
@@ -50,23 +47,13 @@ def load_anima_model(
     dit_path: str,
     dit_weight_dtype: Optional[torch.dtype] = None,
 ) -> anima_models.Anima:
-    """
-    Load Anima model from the specified checkpoint.
-
-    Args:
-        device (Union[str, torch.device]): Device to load the model weights on.
-        dit_path (str): Path to the DiT model checkpoint.
-        dit_weight_dtype (Optional[torch.dtype]): Data type of the DiT weights.
-            If None, it will be loaded as is (same as the state_dict). if not None, model weights will be casted to this dtype.
-    """
+    """Load the Anima DiT, deriving its block count from the checkpoint."""
     device = torch.device(device)
 
-    # The block count varies by checkpoint (base 2.1B = 28, 2.9B tune = 40),
-    # so derive it from the checkpoint instead of hardcoding.
     num_blocks = _count_anima_blocks(dit_path)
     logger.info("Detected Anima DiT with %d transformer blocks", num_blocks)
 
-    # We currently support fixed DiT config for Anima models
+    # Fixed DiT config for all Anima checkpoints
     dit_config = {
         "max_img_h": 512,
         "max_img_w": 512,

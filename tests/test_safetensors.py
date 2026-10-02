@@ -1,8 +1,7 @@
-"""Safetensors header/reader helpers.
+"""Safetensors header/reader helpers, on tiny throwaway files.
 
-Everything here runs on tiny throwaway files: header parsing (keys, metadata,
-dtype/shape-only reads), the generic wrapper-prefix stripping shared by detection
-and loading, and both ``load_safetensors`` strategies.
+Header parsing (keys, metadata, dtype/shape-only reads), the generic wrapper-prefix
+stripping shared by detection and loading, and both ``load_safetensors`` strategies.
 """
 from __future__ import annotations
 
@@ -52,12 +51,9 @@ def test_reader_reads_dtype_shape_and_values(tmp_path):
             assert got.dtype == expected.dtype, key
             if expected.numel():
                 assert torch.equal(got.float(), expected.float()), key
-
-
-def test_reader_can_cast_on_read(tmp_path):
-    path = write_safetensors(tmp_path / "cast.safetensors", {"w": torch.ones(2, 2)})
-    with MemoryEfficientSafeOpen(path) as f:
-        assert f.get_tensor("w", device=torch.device("cpu"), dtype=torch.bfloat16).dtype == torch.bfloat16
+        # An explicit dtype casts on read.
+        cast = f.get_tensor("f32", device=torch.device("cpu"), dtype=torch.bfloat16)
+        assert cast.dtype == torch.bfloat16
 
 
 def test_reader_missing_key_raises(tmp_path):
@@ -76,16 +72,21 @@ def test_strip_wrap_prefixes_removes_each_known_wrapper(prefix):
     assert list(stripped) == ["blocks.0.attn.weight"]
 
 
-def test_strip_wrap_prefixes_leaves_bare_and_similar_keys_alone():
-    keys = ["blocks.0.attn.weight", "model.other.weight", "nets.foo.weight", "net"]
-    assert list(strip_wrap_prefixes({k: torch.ones(1) for k in keys})) == keys
+def test_strip_wrap_prefixes_leaves_other_keys_alone_and_never_mutates():
+    source = {
+        "blocks.0.attn.weight": torch.ones(1),
+        "model.other.weight": torch.ones(1),  # similar but not a known wrapper
+        "nets.foo.weight": torch.ones(1),
+        "net": torch.ones(1),
+        "net.w": torch.ones(1),
+    }
 
-
-def test_strip_wrap_prefixes_returns_a_new_dict():
-    source = {"net.w": torch.ones(1), "w2": torch.ones(1)}
     stripped = strip_wrap_prefixes(source)
-    assert "net.w" in source  # the input dict is never mutated
-    assert set(stripped) == {"w", "w2"}
+
+    assert set(stripped) == {
+        "blocks.0.attn.weight", "model.other.weight", "nets.foo.weight", "net", "w",
+    }
+    assert set(source) - set(stripped) == {"net.w"}  # the input dict is untouched
 
 
 # --------------------------------------------------------------- load helpers
@@ -106,32 +107,20 @@ def test_load_safetensors(tmp_path):
 
 
 @pytest.mark.parametrize("prefix", ["", "model.diffusion_model.", "net."])
-def test_load_dit_safetensors_strips_the_wrapper(tmp_path, prefix):
-    path = write_safetensors(
-        tmp_path / "dit.safetensors", {f"{prefix}blocks.0.weight": torch.ones(2, 2)}
+def test_load_dit_safetensors_strips_the_wrapper_then_drops_keys(tmp_path, prefix):
+    """Names come back bare, and ``drop_keys`` is matched against the stripped name
+    (so a wrapped ``last.down`` still drops) on a quantized file too.
+    """
+    tensors = int8_tensors(
+        prefix=prefix,
+        extra={
+            f"{prefix}last.down.w": torch.ones(1),
+            f"{prefix}last.other": torch.ones(1),
+        },
     )
-    assert list(load_dit_safetensors(path, device="cpu")) == ["blocks.0.weight"]
-
-
-def test_load_dit_safetensors_drop_keys(tmp_path):
-    tensors = {
-        "blocks.0.weight": torch.ones(2),
-        "last.down.weight": torch.ones(2),
-        "last.up.weight": torch.ones(2),
-        "last.other": torch.ones(2),
-    }
     path = write_safetensors(tmp_path / "dit.safetensors", tensors)
 
-    kept = load_dit_safetensors(path, device="cpu", drop_keys=("last.down", "last.up"))
-    assert set(kept) == {"blocks.0.weight", "last.other"}
-
-
-def test_load_dit_safetensors_drop_keys_on_a_quantized_file(tmp_path):
-    """Drop happens after wrapper stripping, so a wrapped file is handled too."""
-    path = write_safetensors(
-        tmp_path / "int8.safetensors",
-        int8_tensors(prefix="model.diffusion_model.", extra={"last.down.w": torch.ones(1)}),
-    )
     kept = load_dit_safetensors(path, device="cpu", drop_keys=("last.down",))
-    assert "q.weight" in kept
-    assert not any(k.startswith("last.down") for k in kept)
+
+    assert {"q.weight", "plain.weight", "last.other"} <= set(kept)
+    assert not any("last.down" in key for key in kept)

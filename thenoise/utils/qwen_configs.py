@@ -1,11 +1,8 @@
 """Vendored configs for the Qwen text encoders used by the DiT adapters.
 
 Each config is a plain dict reproducing the model's ``config.json`` so the encoder
-is built without fetching the config from the Hub. Qwen3 and Qwen2.5-VL are natively
-supported by transformers (no remote code), so ``Qwen3Config(**...)`` /
-``Qwen2_5_VLConfig(**...)`` reproduce ``AutoConfig.from_pretrained`` exactly.
-
-Mirror the upstream ``config.json`` if the vendors ever revise them.
+is built without fetching the config from the Hub. Mirror the upstream
+``config.json`` if a vendor ever revises it.
 """
 
 # --------------------------------------------------------------------------- Qwen3 (LLM)
@@ -143,8 +140,7 @@ QWEN3_VL_4B_INSTRUCT_CONFIG = {
     "vision_start_token_id": 151652,
 }
 
-#: Qwen-Image 2.1's conditioner: the 8B LM (hidden 4096) and a deeper, wider vision
-#: tower than the 4B (hidden 1152 / depth 27 / deepstack taps 8, 16, 24).
+#: The 8B variant: hidden 4096 and a deeper, wider vision tower than the 4B.
 QWEN3_VL_8B_INSTRUCT_CONFIG = {
     "architectures": ["Qwen3VLForConditionalGeneration"],
     "image_token_id": 151655,
@@ -195,9 +191,8 @@ QWEN3_VL_8B_INSTRUCT_CONFIG = {
     "vision_start_token_id": 151652,
 }
 
-# Qwen3-VL image preprocessing (shared by the 4B and 8B): mean/std 0.5 (unlike
-# Qwen2.5-VL's CLIP normalization), patch 16 merged 2x2 -> one vision token per 32x32
-# pixels. Mirror the upstream ``preprocessor_config.json`` if that ever changes.
+# Qwen3-VL image preprocessing (shared by the 4B and 8B): mean/std 0.5, patch 16
+# merged 2x2 -> one vision token per 32x32 pixels.
 QWEN3_VL_PREPROCESSOR_CONFIG = {
     "size": {"longest_edge": 16777216, "shortest_edge": 65536},
     "patch_size": 16,

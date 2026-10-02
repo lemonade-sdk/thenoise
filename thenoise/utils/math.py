@@ -11,12 +11,7 @@ def round_up(value: int, multiple: int) -> int:
 
 
 def generalized_time_shift(t, mu: float, sigma: float) -> float:
-    """Generalized time/SNR shift: ``exp(mu) / (exp(mu) + (1/t - 1)^sigma)``.
-
-    Shared by the flow-matching samplers (Flux.2, Qwen-Image, Krea 2, Ming-Image):
-    all of them apply the same shift to a uniform ``1 -> 0`` grid, only the
-    ``mu``/``sigma`` source differs per model.
-    """
+    """Generalized time/SNR shift: ``exp(mu) / (exp(mu) + (1/t - 1)^sigma)``."""
     return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
 
 
@@ -30,8 +25,7 @@ def calculate_shift(
 ) -> float:
     """Linearly interpolate the flow-matching shift for a sequence length.
 
-    Used by the dynamic-shift samplers (e.g. Qwen-Image): short sequences get
-    ``base_shift``, long sequences get ``max_shift``, linearly in between.
+    Short sequences get ``base_shift``, long sequences ``max_shift``.
     """
     m = (max_shift - base_shift) / (max_seq_len - base_seq_len)
     b = base_shift - m * base_seq_len

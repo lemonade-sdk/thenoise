@@ -1,9 +1,8 @@
 """The Flux VAE (used by Z-Image, and the latent format of the Flux upscaler).
 
-Decode-only by design (this engine never encodes pixels), so the tests cover the
-8x decode geometry, the documented latent normalization and the checkpoint
-loader's key handling. A reduced-channel instance keeps all of it sub-second;
-the shipped constants are asserted on the class.
+Decode-only by design (this engine never encodes pixels): the 8x decode geometry,
+the latent normalization and the checkpoint loader's key handling, on a
+reduced-channel instance.
 """
 from __future__ import annotations
 
@@ -26,13 +25,6 @@ def tiny_vae():
     return _tiny_vae().eval().requires_grad_(False)
 
 
-def test_documented_latent_normalization_constants():
-    """The Flux latent is affine-normalized; the values must match the checkpoint."""
-    assert AutoencoderKLFlux.z_dim == 16
-    assert AutoencoderKLFlux.scaling_factor == pytest.approx(0.3611)
-    assert AutoencoderKLFlux.shift_factor == pytest.approx(0.1159)
-
-
 def test_decode_upsamples_the_latent_8x_and_clamps(tiny_vae):
     with torch.no_grad():
         pixels = tiny_vae.decode_to_pixels(torch.randn(1, 16, 4, 4))
@@ -48,11 +40,14 @@ def test_decode_accepts_odd_latent_sizes(tiny_vae):
 
 
 def test_decode_applies_the_affine_latent_transform(tiny_vae, monkeypatch):
-    """``decode_to_pixels`` undoes ``(raw - shift) * scale`` before the decoder.
+    """``decode_to_pixels`` undoes ``(raw - shift) * scale`` before the decoder — the
+    exact inverse of the Flux latent-format adaptor used by the Sesqui upscale path.
 
-    This is the exact inverse of the Flux latent-format adaptor used by the
-    Sesqui upscale path, so the two must agree.
+    The constants are the ones shipped in the checkpoint (transcribed here).
     """
+    assert AutoencoderKLFlux.z_dim == 16
+    assert AutoencoderKLFlux.scaling_factor == pytest.approx(0.3611)
+    assert AutoencoderKLFlux.shift_factor == pytest.approx(0.1159)
     seen = {}
 
     def spy_decode(z):

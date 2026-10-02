@@ -1,9 +1,10 @@
 """Checkpoint-name helpers shared by the Lumina/S3-DiT loaders and detectors.
 
-The family stores the same modules under two generations of names: legacy Lumina
-(separate ``to_q/to_k/to_v``, ``to_out.0``, ``norm_q/norm_k``) and the fused layout
-(``qkv``, ``out``, ``q_norm``/``k_norm``). This repo's tree is fused everywhere, so a
-legacy checkpoint needs a rename AND a fold that concatenates the three projections."""
+Checkpoints store the same modules under two generations of names: legacy (separate
+``to_q/to_k/to_v``, ``to_out.0``, ``norm_q/norm_k``) and the fused layout (``qkv``,
+``out``, ``q_norm``/``k_norm``). This repo's tree is fused everywhere, so a legacy
+checkpoint needs a rename plus a fold of the three projections.
+"""
 from __future__ import annotations
 
 from typing import Callable, Dict, Iterable, Tuple
@@ -12,23 +13,22 @@ import torch
 
 from thenoise.utils.qk_norm import qk_norm_key_map
 
-#: The three attention projections a legacy checkpoint stores separately, in the
-#: fused matrix's row order (``Attention`` splits ``qkv`` back in this order).
+#: The three separate projections, in the fused matrix's row order.
 QKV_PARTS: Tuple[str, ...] = ("to_q", "to_k", "to_v")
 
-#: Legacy dict-of-patch-config names (``all_x_embedder["2-1"]``) collapse to plain
-#: modules: a single-patch model has exactly one entry each.
+#: Legacy dict-of-patch-config names collapse to plain modules.
 _MODULE_RENAMES: Tuple[Tuple[str, str], ...] = (
     ("all_x_embedder.2-1.", "x_embedder."),
     ("all_final_layer.2-1.", "final_layer."),
-    # ``to_out`` is stored as an nn.Sequential, the module is a plain projection.
+    # ``to_out`` is stored as an nn.Sequential.
     ("attention.to_out.0.", "attention.out."),
 )
 
 
 def is_s3dit(keys: Iterable[str]) -> bool:
-    """True for any Lumina/S3-DiT file: caption embedder + context refiner + patch
-    embedder, under either naming generation. ``keys`` must be wrapper-prefix free.
+    """True for any Lumina/S3-DiT file, under either naming generation.
+
+    ``keys`` must be wrapper-prefix free.
     """
     keys = list(keys)
     has_cap = any(key.startswith("cap_embedder.") for key in keys)
@@ -40,21 +40,17 @@ def is_s3dit(keys: Iterable[str]) -> bool:
 
 
 def has_learned_pad_tokens(keys: Iterable[str]) -> bool:
-    """True when the file ships Z-Image's learned alignment-pad tokens — the only
-    separator of the two family members, since Ming-Image zero-fills and masks pads.
-    """
+    """True when the file ships learned alignment-pad tokens."""
     return any(
         key.startswith("x_pad_token") or key.startswith("cap_pad_token") for key in keys
     )
 
 
 def lumina_key_map(key: str) -> str:
-    """Rename a legacy Lumina checkpoint key onto this repo's fused module tree.
+    """Rename a legacy checkpoint key onto this repo's fused module tree.
 
-    Names only (values untouched) — pair it with :func:`fuse_qkv` for a checkpoint
-    that still stores the three attention projections apart. The QK norms are
-    mapped for BOTH legacy spellings, because the int8 export names them
-    ``q_norm``/``k_norm`` and the legacy bf16 one ``norm_q``/``norm_k``.
+    Names only — pair it with :func:`fuse_qkv`. Both legacy QK-norm spellings are
+    mapped: ``q_norm``/``k_norm`` and ``norm_q``/``norm_k``.
     """
     for old, new in _MODULE_RENAMES:
         if old in key:
@@ -66,11 +62,8 @@ def lumina_key_map(key: str) -> str:
 def fuse_qkv(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
     """Stack per-projection ``to_q/to_k/to_v`` weights into one ``qkv`` weight.
 
-    Concatenated on dim 0 in ``q, k, v`` order, i.e. the row order the fused module
-    is built for. Keys that are not one of the three parts pass through untouched,
-    so a checkpoint that already ships a fused ``qkv`` comes back unchanged — the
-    fold is safe to apply unconditionally, and an incomplete trio is left alone for
-    the loader's strict check to report rather than half-fusing silently.
+    Concatenated on dim 0 in ``q, k, v`` order. Safe to apply unconditionally: other
+    keys pass through, and an incomplete trio is left for the loader's strict check.
     """
     grouped: Dict[str, Dict[str, Dict[str, torch.Tensor]]] = {}
     for key, tensor in state_dict.items():
@@ -88,8 +81,7 @@ def fuse_qkv(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         for part in QKV_PARTS:
             for attr in parts[part]:
                 fused.pop(_proj_key(head, part, attr), None)
-        # The projections are bias-free in this family; kept for completeness, in
-        # the same row order as the weight.
+        # The projections are bias-free in this family; kept for completeness.
         if all("bias" in parts[p] for p in QKV_PARTS):
             fused[_proj_key(head, "qkv", "bias")] = torch.cat(
                 [parts[p]["bias"] for p in QKV_PARTS], dim=0

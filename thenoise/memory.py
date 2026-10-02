@@ -1,26 +1,18 @@
 """Device placement / residency manager for a model's swappable components.
 
-A ``DiffusionModel`` owns exactly one ``MemoryManager``. Each heavy component
-(the DiT, the text encoder) is *registered* with it; the pipeline controller
-``ensure``s the components the current stage needs and ``offload``s the rest, so
-on a dGPU (dedicated VRAM separated from system RAM) only the weights in active
-use are resident on the compute device at any time.
+A ``DiffusionModel`` owns exactly one ``MemoryManager``. Each heavy component (the
+DiT, the text encoder) is registered with it; the pipeline ``ensure``s the
+components a stage needs and ``offload``s the rest, so on a dGPU only the weights
+in active use are resident. It is a strict single-transition state machine per
+request, with no LRU and no keep-resident hint.
 
-The manager is a strict single-transition state machine per request: a component is
-ensured (moved to the load device) and later offloaded (moved back) at
-statically-known stage boundaries. There is no LRU and no keep-resident hint.
+When ``offload_device == load_device`` (resident mode — enough unified memory for
+every component) every move is a no-op. Only *weights / parameters* are managed
+here; intermediate activations belong to the pipeline cache.
 
-When ``offload_device == load_device`` (resident mode — e.g. an iGPU with enough
-unified memory to fit every component) every move is a no-op, so a system that
-can hold all weights never pays any transfer cost.
-
-Only *weights / parameters* are managed here. Intermediate activations (latents,
-conditioning, pixels) are owned by the pipeline cache and stay on the compute
-device.
-
-Registering a component also freezes it (eval mode + ``requires_grad_(False)``):
-the registry is the single choke point every adapter's weights pass through, so
-the engine's inference-only contract is stated once — see ``thenoise.inference``.
+Registering a component also freezes it (eval mode + ``requires_grad_(False)``), so
+the engine's inference-only contract is stated at the one choke point every
+adapter's weights pass through.
 """
 from __future__ import annotations
 
@@ -67,13 +59,8 @@ class MemoryManager:
         """Register ``module`` under ``name``, freezing it and noting its residency.
 
         A module already on the load device (e.g. the always-resident VAE) is
-        recorded as resident; a module on the offload device is not.
-
-        Freezing here (see ``thenoise.inference.freeze``) is deliberate: the
-        engine is inference-only, and this registry is the one point every
-        adapter passes its DiT, text encoder and VAE through, so no adapter or
-        loader has to remember ``eval().requires_grad_(False)`` itself. The
-        ``.eval()`` recurses into submodules, which covers wrappers too.
+        recorded as resident. The ``.eval()`` of freezing recurses into
+        submodules, which covers wrappers.
         """
         if module is not None:
             freeze(module)
@@ -100,9 +87,7 @@ class MemoryManager:
     def offload(self, *names: str) -> None:
         """Move each named component to the offload device and free compute memory.
 
-        In resident mode (``offload_device == load_device``) this is a no-op that
-        simply marks the components resident, so a machine with enough memory never
-        moves anything.
+        In resident mode this is a no-op that simply marks the components resident.
         """
         if self._load == self._offload:
             self._resident.update(names)
@@ -126,9 +111,8 @@ class MemoryManager:
     def _module_device(module: nn.Module) -> Optional[torch.device]:
         """Current device of ``module`` (an ``nn.Module`` or a wrapper).
 
-        Wrappers such as FluxKlein's ``Qwen3Embedder`` expose a ``device``
-        attribute/property; plain modules are probed via their first parameter or
-        buffer."""
+        Wrappers expose a ``device`` attribute/property; plain modules are probed
+        via their first parameter or buffer."""
         if hasattr(module, "device"):
             return module.device
         for p in module.parameters():

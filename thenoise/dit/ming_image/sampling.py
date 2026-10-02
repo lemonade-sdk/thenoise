@@ -1,7 +1,7 @@
-"""Ming-Image's flow-matching schedule — the DYNAMIC shift the reference actually runs.
+"""Ming-Image's flow-matching schedule — a dynamic shift.
 
-``generator.py`` overrides the shipped static ``shift: 6.0``, so ``mu`` ramps with
-the image token count (see :func:`dynamic_mu`) and the shift is ``exp(mu)``.
+``mu`` ramps with the image token count (see :func:`dynamic_mu`) and the shift is
+``exp(mu)``; the reference's ``generator.py`` overrides the shipped static shift.
 """
 from __future__ import annotations
 
@@ -15,8 +15,7 @@ from thenoise.utils.math import calculate_shift, generalized_time_shift
 #: Pixels per DiT token: the VAE's 8x compression and the DiT's 2x2 patch.
 TOKEN_PIXELS = 16
 
-# The shift curve's endpoints (the vendor's ``calculate_shift`` arguments). Its knee
-# is the 4096-token (1024x1024) training bucket, 1.15 below it and 1.35 above.
+# Shift curve endpoints; the knee is the 4096-token (1024x1024) training bucket.
 BASE_SEQ_LEN = 256
 BASE_SHIFT = 0.5
 REFERENCE_SEQ_LEN = 4096
@@ -33,10 +32,8 @@ def dynamic_mu(height: int, width: int) -> float:
     """The scheduler's ``mu`` for this pixel size (the shift is ``exp(mu)``)."""
     seq = image_seq_len(height, width)
     max_seq = max(REFERENCE_SEQ_LEN, seq)
-    # ``>`` where the vendor writes ``>=``: at exactly 1024² (seq == 4096) our ``>``
-    # takes the 1.15 branch (shift 3.158), matching ComfyUI's hard-coded
-    # ``sampling_settings = {"shift": 3.16}`` for Ming-Image. The vendor's ``>=``
-    # would give 3.857 there.
+    # ``>`` rather than the reference's ``>=``: at exactly 1024² (seq == 4096) this
+    # takes the 1.15 branch, matching its hard-coded shift of 3.16.
     max_shift = MAX_SHIFT_ABOVE if seq > REFERENCE_SEQ_LEN else MAX_SHIFT_BELOW
     return calculate_shift(seq, BASE_SEQ_LEN, max_seq, BASE_SHIFT, max_shift)
 

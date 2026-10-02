@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 
-# The single config shipped with the OSS checkpoints (single_mmdit_large_wide).
+# The config shipped with the OSS checkpoints.
 single_mmdit_large_wide = SingleMMDiTConfig(
     features=6144,
     tdim=256,
@@ -39,12 +39,10 @@ single_mmdit_large_wide = SingleMMDiTConfig(
 
 
 def _krea2_rms_map(key: str, tensor):
-    """Reconcile Krea2's zero-centered RMSNorm ``scale`` with the shared ``weight``.
+    """Reconcile the checkpoint's zero-centered RMSNorm ``scale`` with ``weight``.
 
-    The shared ``RMSNorm`` (``thenoise.utils.rms_norm``) stores the effective weight
-    (ones-init). Krea2's checkpoint keeps a zero-centered ``scale`` where
-    ``weight = scale + 1``, so rename ``.scale -> .weight`` and shift the value up
-    by one. Applied at load time only; the runtime module is the shared one.
+    ``weight = scale + 1``, so rename ``.scale -> .weight`` and shift the value by
+    one; load-time only.
     """
     if key.endswith(".scale"):
         return key[: -len(".scale")] + ".weight", tensor + 1.0
@@ -84,9 +82,11 @@ def load_krea2_text_encoder(
     tokenizer_dir: Optional[str] = None,
     tokenizer_repo: str = QWEN3_VL_4B_INSTRUCT_REPO_ID,
 ) -> Qwen3VLConditioner:
-    """Load the Qwen3-VL-4B conditioner used by K2: weights from ``path`` (local safetensors,
-    ComfyUI or official key layout), tokenizer from ``tokenizer_dir`` (a local directory) when
-    given, else from the vendored ``configs/tokenizer/`` directory, else from ``tokenizer_repo``."""
+    """Load the Qwen3-VL-4B conditioner used by K2.
+
+    The tokenizer comes from ``tokenizer_dir`` when given, else the vendored
+    ``configs/tokenizer/`` directory, else ``tokenizer_repo``.
+    """
     return load_qwen3_vl_conditioner(
         path,
         dtype=dtype,

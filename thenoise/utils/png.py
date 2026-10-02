@@ -30,13 +30,11 @@ def build_pnginfo(
 ) -> PngInfo:
     """Build a PngInfo object with generation metadata (JSON + human-readable).
 
-    Writes two text chunks:
-      * ``generation_data`` — full JSON of all resolved parameters
-      * ``parameters`` — human-readable text for older-software compatibility
+    Writes a ``generation_data`` chunk with the full JSON of all resolved
+    parameters and a ``parameters`` chunk of human-readable text.
     """
     pnginfo = PngInfo()
 
-    # JSON metadata (all resolved parameters + model name)
     gen_data = json.dumps({
         "model": model,
         "prompt": prompt,
@@ -59,9 +57,8 @@ def build_pnginfo(
     })
     pnginfo.add_text("generation_data", gen_data)
 
-    # Human-readable "parameters" text (A1111 compatibility)
-    # Format: prompt lines, optional "Negative prompt: " line,
-    # then a single last line of comma-separated "Key: value" pairs.
+    # Human-readable "parameters" text (A1111-compatible): prompt lines, optional
+    # "Negative prompt: " line, then one line of comma-separated "Key: value" pairs.
     parts: list[str] = [prompt]
     if negative_prompt:
         parts.append(f"Negative prompt: {negative_prompt}")
@@ -97,18 +94,13 @@ def build_upscale_pnginfo(
 ) -> PngInfo:
     """Build a PngInfo carrying over pre-existing text chunks + upscale metadata.
 
-    Copies any pre-existing text chunks already present on ``image`` (tEXt,
-    zTXt and iTXt) into a fresh :class:`PngInfo`, then adds an ``upscale_data``
-    JSON chunk recording the upscaler model and the applied upscale factor.
-
-    An existing ``upscale_data`` chunk on the source image is deliberately not
-    copied (it is replaced by the current record below) so repeated upscales do
-    not accumulate duplicate records.
+    Copies the text chunks already present on ``image`` (tEXt, zTXt, iTXt) into a
+    fresh :class:`PngInfo`, then adds an ``upscale_data`` JSON chunk. An existing
+    ``upscale_data`` chunk is replaced rather than copied, so repeated upscales do
+    not accumulate records.
     """
     pnginfo = PngInfo()
 
-    # Carry over pre-existing text chunks (values are str for tEXt/zTXt and
-    # iTXt objects for iTXt chunks). Skip ``upscale_data`` — replaced below.
     for key, value in getattr(image, "info", {}).items():
         if not isinstance(key, str):
             continue
@@ -117,7 +109,6 @@ def build_upscale_pnginfo(
         if isinstance(value, str) or isinstance(value, iTXt):
             pnginfo.add_text(key, value)
 
-    # Upscale metadata (JSON).
     pnginfo.add_text(
         "upscale_data",
         json.dumps({

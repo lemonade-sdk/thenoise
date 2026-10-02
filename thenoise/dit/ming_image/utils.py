@@ -1,7 +1,7 @@
 """Ming-Image DiT loading — one module tree, both released checkpoint namings.
 
-The bf16 export is legacy Lumina (split ``to_q/to_k/to_v``), the int8-convrot one is
-already fused; ``lumina_state_map`` covers both — its qkv fold is a no-op when fused.
+``lumina_state_map`` covers the split (bf16) and fused (int8-convrot) exports: its
+qkv fold is a no-op when the file is already fused.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def load_ming_dit(
 ) -> MingImageTransformer2DModel:
     """Build the Ming-Image S3-DiT on meta and load weights (bf16 or int8-convrot).
 
-    Nothing is dropped or tolerated: a file this loader cannot fill is an error.
+    A file this loader cannot fill is an error.
     """
     device = torch.device(device)
     cfg = dict(MING_IMAGE_DIT_CONFIG)
@@ -42,8 +42,6 @@ def load_ming_dit(
         dit_path,
         device=device,
         dtype=dtype,
-        # ``key_map`` rides along so the quantized LoRA-undo restore map, built from
-        # the checkpoint's own names, ends up keyed on the renamed modules.
         key_map=lumina_key_map,
         state_map=lumina_state_map,
     )

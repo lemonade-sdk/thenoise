@@ -2,21 +2,11 @@
 
 A ``LatentUpscaler`` owns *everything* that happens to a latent between the DiT
 and the next DiT pass in the upscale-and-refine path: the format conversions the
-upscaler network needs, the network itself, and the upscale factor. The pipeline
-hands it the canonical latent the DiT produced and gets back a canonical latent
-of the upscaled spatial size, ready to be fed back into the DiT for the refine
-(and then to the VAE decode).
+upscaler network needs, the network itself, and the upscale factor.
 
-Keeping the latent math behind this one call is what lets different upscaler
-strategies.
-
-The contract is deliberately narrow:
-
-  * input and output are the *canonical* 4D latent ``[B, C, H, W]`` — the VAE's
-    own latent format, exactly what ``DiffusionModel.init_latents`` produces and
-    ``decode`` consumes;
-  * the output is the input at ``scale`` times the spatial resolution, in the
-    same (canonical) space, so the refine needs no conversion of its own.
+The contract: input and output are the *canonical* 4D latent ``[B, C, H, W]`` —
+the VAE's own latent format — and the output is the input at ``scale`` times the
+spatial resolution, in the same space.
 """
 from __future__ import annotations
 

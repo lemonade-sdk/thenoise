@@ -1,18 +1,16 @@
 """Shared rotary-position-embedding (RoPE) machinery.
 
-Two rotation conventions are supported, each with a small builder that produces
-the frequency tensors and an ``apply_*`` that consumes them:
+Two rotation conventions, each with a builder producing the frequency tensors and
+an ``apply_*`` that consumes them:
 
   * **2x2 matrix** (``[cos, -sin, sin, cos]`` per adjacent pair, carried as a
     ``[B, L, dim/2, 2, 2]`` tensor). No complex ops, so ``torch.compile`` can
     codegen the attention path.
-  * **split-half** (precomputed ``cos/sin`` pairs, applied to the two halves of
-    the head dim via ``_rotate_half``).
+  * **split-half** (precomputed ``cos/sin`` pairs applied to the two halves of the
+    head dim).
 
-``RopeCache`` is the shared caching layer: it stores frequencies under simple
-string names, computing them on demand through a model-supplied builder. Each
-name maps to exactly one computed value and ``store`` overwrites the previous
-one, so the cache never grows beyond the fixed set of names a caller uses.
+``RopeCache`` stores frequencies under simple string names, computing them on
+demand through a model-supplied builder.
 """
 from __future__ import annotations
 
@@ -33,8 +31,8 @@ def rope(pos: torch.Tensor, dim: int, theta: float) -> torch.Tensor:
 def matrix_rope(dims: list[int], theta: float):
     """Builder for the 2x2-matrix convention.
 
-    Returns a callable ``pos -> [B, L, dim/2, 2, 2]`` that embeds ``pos``
-    (``[B, L, n_axes]``) axis-by-axis with its own ``dims[i]`` and ``theta``.
+    Returns ``pos -> [B, L, dim/2, 2, 2]``, embedding ``pos`` (``[B, L, n_axes]``)
+    axis-by-axis with its own ``dims[i]`` and ``theta``.
     """
     def build(pos: torch.Tensor) -> torch.Tensor:
         return torch.cat([rope(pos[..., i], d, theta) for i, d in enumerate(dims)], dim=-3)
@@ -54,7 +52,7 @@ def apply_rope(
 
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
-    """Split-half rotation: swap the two halves of the last dim, negating the second."""
+    """Swap the two halves of the last dim, negating the second."""
     x1, x2 = torch.chunk(x, 2, dim=-1)
     return torch.cat((-x2, x1), dim=-1)
 
@@ -72,9 +70,9 @@ def apply_rope_split_half(xq: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
 def split_half_rope_1d(head_dim: int, theta: float = 10000.0):
     """Builder for the split-half convention over a 1D position sequence.
 
-    Returns a callable ``(seq_len, device) -> (cos, sin)`` where the result is
-    ``[seq_len, 1, 1, head_dim]`` (the ``[cos, sin]`` pair is duplicated to fill
-    the full head dim). Frequencies follow ``theta ** (2i/head_dim)``.
+    Returns ``(seq_len, device) -> (cos, sin)``, each ``[seq_len, 1, 1, head_dim]``
+    (the ``[cos, sin]`` pair duplicated to fill the head dim), with frequencies
+    following ``theta ** (2i/head_dim)``.
     """
     inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
 
@@ -97,12 +95,10 @@ def split_half_rope_3d(
 ):
     """Builder for the split-half convention over a ``(T, H, W)`` video grid.
 
-    Returns a callable ``(shape, device) -> (cos, sin)`` where ``shape`` is the
-    raw latent ``(B, C, T, H, W)`` and the result is ``[T'*H'*W', 1, 1, head_dim]``
-    with ``T', H', W'`` the patchified grid dims (``T//patch_temporal``,
-    ``H//patch_spatial``, ``W//patch_spatial``). Frequencies are split across the
-    temporal (T) and spatial (H, W) axes and NTK-scaled
-    (``theta = 10000 * ratio``).
+    Returns ``(shape, device) -> (cos, sin)`` where ``shape`` is the raw latent
+    ``(B, C, T, H, W)`` and the result is ``[T'*H'*W', 1, 1, head_dim]`` over the
+    patchified grid. Frequencies are split across the temporal and spatial axes and
+    NTK-scaled (``theta = 10000 * ratio``).
     """
     dim_h = head_dim // 6 * 2
     dim_w = dim_h
@@ -140,11 +136,8 @@ def split_half_rope_3d(
 class RopeCache:
     """Caches computed rotary frequencies under simple string names.
 
-    Frequencies are produced by a model-supplied ``build`` callable (see
-    ``matrix_rope`` / ``split_half_rope_3d``). ``store`` overwrites any previous
-    value for a name, so the cache holds at most one entry per name and never
-    grows beyond the fixed set of names a caller uses. The cache owns no
-    learnable state and is not an ``nn.Module``.
+    Frequencies come from a model-supplied ``build`` callable. ``store`` overwrites
+    any previous value for a name, so the cache holds at most one entry per name.
     """
 
     def __init__(self, build):
@@ -154,8 +147,7 @@ class RopeCache:
     def store(self, name: str, *args, dtype: torch.dtype | None = None):
         """Compute frequencies for ``*args`` and cache them under ``name``.
 
-        ``dtype`` casts the result (e.g. to the activation dtype); a ``(cos, sin)``
-        tuple result is cast element-wise.
+        ``dtype`` casts the result; a ``(cos, sin)`` tuple is cast element-wise.
         """
         freqs = self._build(*args)
         if dtype is not None:
@@ -175,7 +167,7 @@ class RopeCache:
             ) from None
 
     def clear(self) -> None:
-        """Drop all cached entries (call before starting a fresh prompt)."""
+        """Drop all cached entries."""
         self._cache.clear()
 
 

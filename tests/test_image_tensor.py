@@ -1,8 +1,7 @@
 """PIL <-> tensor conversions, and the alpha boundaries they own.
 
 The engine carries a ``[C, H, W]`` fp32 tensor whose channel count is the VAE's, so
-these conversions are where an alpha is either kept or deliberately composited away
-— the difference between a cut-out and a black silhouette on a transparent PNG.
+these conversions are where an alpha is either kept or deliberately composited away.
 """
 from __future__ import annotations
 
@@ -33,19 +32,16 @@ def _rgba(rgba: list[list[tuple]]) -> Image.Image:
 # ------------------------------------------------------------------------ has_alpha
 
 
-@pytest.mark.parametrize(
-    "mode,expected",
-    [("RGB", False), ("L", False), ("RGBA", True), ("LA", True)],
-)
-def test_has_alpha_follows_the_mode(mode, expected):
-    assert has_alpha(Image.new(mode, (2, 2))) is expected
+def test_has_alpha_follows_the_mode():
+    assert has_alpha(Image.new("RGB", (2, 2))) is False
+    assert has_alpha(Image.new("L", (2, 2))) is False
+    assert has_alpha(Image.new("RGBA", (2, 2))) is True
+    assert has_alpha(Image.new("LA", (2, 2))) is True
 
-
-def test_has_alpha_needs_a_paletted_image_to_declare_transparency():
-    opaque = Image.new("P", (2, 2))
-    assert has_alpha(opaque) is False
-
-    transparent = opaque.copy()
+    # A paletted image only has alpha if it declares one.
+    paletted = Image.new("P", (2, 2))
+    assert has_alpha(paletted) is False
+    transparent = paletted.copy()
     transparent.info["transparency"] = 0
     assert has_alpha(transparent) is True
 
@@ -55,37 +51,26 @@ def test_has_alpha_needs_a_paletted_image_to_declare_transparency():
 
 def test_flatten_alpha_composites_onto_white_rather_than_dropping():
     """``convert("RGB")`` would keep the transparent pixel's own RGB (here: red)."""
-    img = _rgba([[(255, 0, 0, 0), (255, 0, 0, 255)]])
-
-    flat = flatten_alpha(img)
+    flat = flatten_alpha(_rgba([[(255, 0, 0, 0), (255, 0, 0, 255), (1, 2, 3, 255)]]))
 
     assert flat.mode == "RGB"
     # Fully transparent -> pure background; fully opaque -> the pixel itself.
     assert flat.getpixel((0, 0)) == ALPHA_BACKGROUND
     assert flat.getpixel((1, 0)) == (255, 0, 0)
-
-
-def test_flatten_alpha_of_an_opaque_image_is_just_a_reformat():
-    assert flatten_alpha(Image.new("RGB", (2, 2), (1, 2, 3))).getpixel((0, 0)) == (1, 2, 3)
+    assert flat.getpixel((2, 0)) == (1, 2, 3)  # an already opaque image is a reformat
 
 
 # ------------------------------------------------------------------------ load_image
 
 
-def test_load_image_keeps_transparency_and_normalises_the_format():
+def test_load_image_normalises_the_format_to_the_presence_of_alpha():
     buf = io.BytesIO()
     _rgba([[(0, 0, 255, 128)]]).save(buf, format="PNG")
-    buf.seek(0)
+    assert load_image(io.BytesIO(buf.getvalue())).mode == "RGBA"
 
-    assert load_image(buf).mode == "RGBA"
-
-
-def test_load_image_flattens_an_opaque_input_to_rgb():
     buf = io.BytesIO()
     Image.new("RGB", (1, 1), "gray").save(buf, format="PNG")
-    buf.seek(0)
-
-    assert load_image(buf).mode == "RGB"
+    assert load_image(io.BytesIO(buf.getvalue())).mode == "RGB"
 
 
 def test_load_image_resolves_a_transparent_palette_to_rgba(tmp_path):
@@ -94,26 +79,21 @@ def test_load_image_resolves_a_transparent_palette_to_rgba(tmp_path):
     img.info["transparency"] = 0
     img.save(path)
 
-    opened = load_image(path)
-    assert opened.mode == "RGBA"
-    assert opened.getpixel((0, 0))[3] == 0
+    assert load_image(path).getpixel((0, 0))[3] == 0
 
 
 # -------------------------------------------------------------------- pil_to_pixels
 
 
-def test_pil_to_pixels_defaults_to_rgb():
+def test_pil_to_pixels_maps_the_range_and_pads_alpha_on_demand():
     pixels = pil_to_pixels(Image.new("RGB", (2, 2), (255, 128, 0)))
     assert pixels.shape == (3, 2, 2)
     assert pixels.dtype == torch.float32
     # 255 -> +1, 0 -> -1, 128 lands just above zero (the range is [-1, 1], not [0, 1]).
     assert torch.allclose(pixels[:, 0, 0], torch.tensor([1.0, 0.0039216, -1.0]), atol=1e-6)
 
-
-def test_pil_to_pixels_pads_an_opaque_alpha_for_an_rgba_destination():
-    pixels = pil_to_pixels(Image.new("RGB", (2, 2), "black"), 4)
-    assert pixels.shape == (4, 2, 2)
-    assert torch.equal(pixels[3], torch.ones(2, 2))  # alpha 1.0 == opaque
+    # An opaque input entering an RGBA destination gets a fully opaque alpha.
+    assert torch.equal(pil_to_pixels(Image.new("RGB", (2, 2), "black"), 4)[3], torch.ones(2, 2))
 
 
 def test_pil_to_pixels_keeps_the_alpha_of_an_rgba_input():
@@ -124,7 +104,6 @@ def test_pil_to_pixels_keeps_the_alpha_of_an_rgba_input():
 def test_pil_to_pixels_composites_for_an_rgb_destination():
     """An RGBA input entering an RGB VAE must not reach it as raw RGB."""
     pixels = pil_to_pixels(_rgba([[(255, 0, 0, 0)]]), 3)
-    assert pixels.shape == (3, 1, 1)
     assert torch.allclose(pixels[:, 0, 0], torch.tensor([1.0, 1.0, 1.0]))  # white
 
 
@@ -145,9 +124,6 @@ def test_pil_to_pixels_rejects_a_channel_count_no_vae_uses():
 def test_pixels_to_pil_mirrors_the_channel_count():
     assert pixels_to_pil(torch.zeros(3, 2, 2)).mode == "RGB"
     assert pixels_to_pil(torch.zeros(4, 2, 2)).mode == "RGBA"
-
-
-def test_pixels_to_pil_rejects_a_channel_count_pil_cannot_name():
     with pytest.raises(ValueError, match="cannot build a PIL image"):
         pixels_to_pil(torch.zeros(5, 2, 2))
 
@@ -174,14 +150,11 @@ def test_opaque_pixels_do_not_grow_an_alpha_on_the_way_out():
 
 
 def test_long_edge_cap_keeps_the_dominant_dimension():
-    """Where ``resize_to_area`` fixes the area, this fixes the long side: a
-    panoramic reference keeps its pixels-per-unit-width."""
-    out = resize_to_long_edge(Image.new("RGB", (1600, 400)), 384)
-    assert out.size == (384, 96)
+    """Where ``resize_to_area`` fixes the area, this fixes the long side, and never
+    enlarges: growing an image adds vision tokens but no information.
+    """
+    assert resize_to_long_edge(Image.new("RGB", (1600, 400)), 384).size == (384, 96)
 
-
-def test_long_edge_cap_never_enlarges():
-    """Growing an image adds vision tokens but no information."""
     small = Image.new("RGB", (300, 300))
     assert resize_to_long_edge(small, 384) is small
     assert resize_to_long_edge(Image.new("RGB", (384, 20)), 384).size == (384, 20)

@@ -1,17 +1,10 @@
 """Standalone pixel-domain upscaler manager.
 
-Pixel upscaling operates purely in *pixel space* (post-decode / post-process)
-and needs no diffusion model at all. It is therefore NOT a model concern: the
-``upscaler_dir`` is server configuration (like host/port), and the loaded
-upscaler + per-name detected scales live here in one model-free component.
+Pixel upscaling operates purely in *pixel space* (post-decode / post-process) and
+needs no diffusion model, so ``upscaler_dir`` is server configuration (like
+host/port). Only the last-used upscaler is kept loaded (switched on change).
 
-This component is shared by the generation pipeline controller AND by a future
-standalone ``/upscale`` endpoint (which accepts an input image and runs only
-pixel upscaling). Only the last-used upscaler is kept loaded (switched on
-change).
-
-Not thread-safe: loading weights onto the device must be serialized by the
-caller (the pipeline controller holds an inference lock around ``apply``).
+Not thread-safe: loading weights onto the device must be serialized by the caller.
 """
 from __future__ import annotations
 
@@ -32,8 +25,7 @@ from thenoise.utils.model_dir import (
 
 logger = logging.getLogger(__name__)
 
-# White in the pipeline's ``[-1, 1]`` pixel range: the tensor twin of
-# ``image_tensor.ALPHA_BACKGROUND``.
+# White in the pipeline's ``[-1, 1]`` pixel range.
 _WHITE = 1.0
 
 
@@ -44,16 +36,12 @@ class PixelUpscalerManager:
         self.upscaler_dir = upscaler_dir
         self.device = device
         self._pixel_upscaler = None
-        self._pixel_upscaler_name: Optional[str] = None  # currently loaded name
-        self._pixel_upscaler_scales: Dict[str, int] = {}  # per-name detected scale
+        self._pixel_upscaler_name: Optional[str] = None
+        self._pixel_upscaler_scales: Dict[str, int] = {}
 
     # ------------------------------------------------------------- listing
     def list(self) -> list[str]:
-        """List available pixel-upscaler names relative to ``upscaler_dir``.
-
-        Names are relative paths with the ``.safetensors`` suffix stripped, so
-        they can be used directly as a request's ``pixel_upscaler`` value.
-        """
+        """Available pixel-upscaler names: relative paths, ``.safetensors`` stripped."""
         return list_safetensors(self.upscaler_dir)
 
     # ------------------------------------------------------------- validation
@@ -66,11 +54,7 @@ class PixelUpscalerManager:
         return resolve_in_dir(self.upscaler_dir, filename)
 
     def validate(self, name: str) -> str:
-        """Validate a pixel-upscaler name; return its canonical form.
-
-        Raises if no ``upscaler_dir`` is configured or the named model does not
-        exist in it.
-        """
+        """Validate a pixel-upscaler name; return its canonical form."""
         if not self.upscaler_dir:
             raise ValueError(
                 "no pixel upscaler configured; pass --upscaler-dir PATH "
@@ -86,12 +70,7 @@ class PixelUpscalerManager:
 
     # ------------------------------------------------------------- scale
     def scale(self, name: str) -> int:
-        """Detected scale of the requested pixel upscaler (0 if none), cached.
-
-        Reads only the safetensors header on first use per name; the value is
-        then reused. Tests may pre-populate ``_pixel_upscaler_scales`` to skip
-        file access.
-        """
+        """Detected scale of the requested pixel upscaler (0 if none), cached per name."""
         if not self.upscaler_dir or not name:
             return 0
         name = self._parse_name(name)
@@ -104,15 +83,14 @@ class PixelUpscalerManager:
 
     # ------------------------------------------------------------- switching
     def switch(self, name: str) -> None:
-        """Load the requested pixel upscaler, keeping only the last-used loaded.
+        """Load the requested pixel upscaler, unloading the previously loaded one.
 
-        Swaps (unloads) any previously loaded upscaler when the requested name
-        differs; repeated requests with the same name are no-ops. Must be called
-        under the caller's lock (it loads weights onto the device).
+        Repeated requests with the same name are no-ops. Must be called under the
+        caller's lock (it loads weights onto the device).
         """
         name = self._parse_name(name)
         if self._pixel_upscaler_name == name:
-            return  # no-op: same upscaler
+            return
         filepath = self._resolve_path(ensure_safetensors(name))
         logger.info("Loading pixel upscaler: %s", filepath)
         self._pixel_upscaler, scale = load_pixel_upscaler(
@@ -130,13 +108,9 @@ class PixelUpscalerManager:
     ) -> torch.Tensor:
         """Apply the pixel-domain upscaler by ``scale``x (if > 0).
 
-        Loads (or reuses) the requested pixel upscaler, keeping only the
-        last-used model loaded. The model operates on RGB in [0, 1] while the
-        pipeline's decoded pixels are in [-1, 1]; convert to [0, 1] before the
-        model and back afterwards so downstream postprocessing stays unchanged.
-
-        Real-ESRGAN is strictly 3-channel, so an RGBA input is composited onto white
-        for the model and its alpha resampled by the same factor and re-attached.
+        The model operates on RGB in [0, 1] while the pipeline's decoded pixels are
+        in [-1, 1]. It is a 3-channel model, so an RGBA input is composited onto
+        white and its alpha resampled by the same factor and re-attached.
         """
         if not scale or not name:
             return pixels

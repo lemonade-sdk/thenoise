@@ -14,10 +14,8 @@ def timestep_embedding(
 ) -> torch.Tensor:
     """Sinusoidal timestep features ``[cos, sin]``, computed in fp32.
 
-    ``t`` is the flow timestep in ``[0, 1]``; ``time_factor`` (default 1000)
-    scales it before the sinusoid. Leading dims are preserved, so ``(B,) ->
-    (B, dim)`` and ``(B, T) -> (B, T, dim)``. Odd ``dim`` is zero-padded to
-    ``dim``, and the result is cast to ``t``'s dtype.
+    ``t`` is the flow timestep in ``[0, 1]``, scaled by ``time_factor`` before the
+    sinusoid. Leading dims are preserved: ``(B,) -> (B, dim)``.
     """
     t_f = t.float() * time_factor
     half = dim // 2

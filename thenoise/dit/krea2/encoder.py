@@ -1,16 +1,12 @@
 """Krea 2 (K2) text encoder: Qwen3-VL-4B conditioner.
 
 Returns the stacked selected hidden states (b, seq, num_select_layers, dim) plus the
-attention mask; the layerwise fusion lives inside the DiT (TextFusionTransformer), so
-the raw stack is what gets cached during training.
+attention mask; the layerwise fusion lives inside the DiT.
 
-Loading follows musubi conventions (cf. qwen_image's load_qwen2_5_vl): the model config
-is vendored in ``thenoise.utils.qwen_configs`` so it is built without fetching
-config.json from the Hub, weights are loaded directly from a local safetensors file
-(ComfyUI-style ``model.``/``visual.`` keys are accepted as well as the official HF
-layout), and the model + tokenizer are loaded through ``thenoise.utils.text_encoder``.
-This lets K2 share the same Qwen3-VL-4B weights a user already has for ComfyUI,
-instead of requiring a separate transformers/Diffusers checkpoint.
+Loading follows musubi conventions: the model config is vendored in
+``thenoise.utils.qwen_configs``, and weights load directly from a local safetensors
+file in either the ComfyUI-style ``model.``/``visual.`` or the official HF key
+layout.
 """
 
 import logging
@@ -33,7 +29,7 @@ from thenoise.utils.text_encoder import (
 
 logger = logging.getLogger(__name__)
 
-# Only the tokenizer is still fetched by repo id (small, HF-cached after first use).
+# Repo id used when no local tokenizer directory is available.
 QWEN3_VL_4B_INSTRUCT_REPO_ID = "Qwen/Qwen3-VL-4B-Instruct"
 
 
@@ -54,9 +50,8 @@ def load_qwen3_vl_conditioner(
     tokenizer_dir: Optional[str] = None,
     tokenizer_repo: str = QWEN3_VL_4B_INSTRUCT_REPO_ID,
 ) -> "Qwen3VLConditioner":
-    """Load the Qwen3-VL-4B conditioner used by K2: weights from ``model_path`` (safetensors),
-    tokenizer from ``tokenizer_dir`` (a local directory) when given, else from the vendored
-    ``configs/`` directory (so no Hub access is needed), else from ``tokenizer_repo``."""
+    """Load the Qwen3-VL-4B conditioner: weights from ``model_path``, tokenizer from
+    ``tokenizer_dir``, else the vendored ``configs/`` directory, else ``tokenizer_repo``."""
     qwen = load_qwen3_vl_model(model_path, dtype=dtype, device=device)
     tokenizer_dir = tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR
     if not os.path.isdir(tokenizer_dir):

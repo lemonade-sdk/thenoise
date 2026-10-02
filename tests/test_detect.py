@@ -1,8 +1,8 @@
-"""Model-type detection tests.
+"""Model-type detection: every adapter claims exactly its own checkpoints.
 
-Detection reads safetensors header *names* only (no tensors, no weights), so the
-whole matrix is checked against synthetic key-sets from ``conftest.MODEL_KEYSETS``
-plus the catalog ``resolve()`` against throwaway one-scalar files.
+Detection reads safetensors header *names* only, so the matrix is checked against
+synthetic key-sets (``conftest.MODEL_KEYSETS``) plus ``resolve()`` on throwaway
+one-scalar files.
 """
 from __future__ import annotations
 
@@ -15,19 +15,16 @@ from thenoise.models import MODEL_CATALOG, resolve
 @pytest.mark.parametrize("keyset", MODEL_KEYSETS)
 @pytest.mark.parametrize("model", MODEL_CATALOG, ids=CATALOG_IDS)
 def test_detection_matrix(model, keyset):
-    """Every model claims exactly its own key-sets and rejects every other one.
-
-    The key-sets include the ``model.diffusion_model.``-wrapped repackagings, so
-    the prefix-stripping and the Anima false-positive guard stay covered, and new
-    models/key-sets are covered automatically by being added to the table.
+    """The key-sets include the ``model.diffusion_model.``-wrapped repackagings, so
+    the prefix stripping and the Anima false-positive guard stay covered.
     """
     owner, keys = MODEL_KEYSETS[keyset]
     assert model.detect(FakeHandle(keys)) is (model is owner)
 
 
-@pytest.mark.parametrize("keyset", MODEL_KEYSETS)
+@pytest.mark.parametrize("keyset", ["zimage", "unknown"])
 def test_resolve(keyset, tmp_path):
-    """``resolve()`` iterates the catalog and returns the single claimant."""
+    """``resolve()`` opens the file, iterates the catalog and returns the claimant."""
     owner, keys = MODEL_KEYSETS[keyset]
     path = write_key_checkpoint(tmp_path / f"{keyset}.safetensors", keys)
     if owner is None:

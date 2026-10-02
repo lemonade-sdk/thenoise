@@ -32,21 +32,11 @@ class AnimaModel(DiffusionModel):
         "steps": 8,
         "guidance_scale": 1,
     }
-    # Matches ComfyUI's Anima sampling_settings ``shift: 3.0`` (ModelSamplingDiscreteFlow).
     DEFAULT_FLOW_SHIFT = 3.0
 
     @staticmethod
     def detect(f) -> bool:
-        """True if this handle is the Anima DiT.
-
-        Anima (Cosmos-Predict2) is uniquely identified by its LLM adapter
-        (``llm_adapter.``) combined with adaln-modulated transformer blocks
-        (``adaln_modulation``). We deliberately do NOT match on generic wrapper
-        prefixes (``net.`` / ``model.diffusion_model.``) or generic attention
-        names (``cross_attn``/``self_attn``) — those are shared across many
-        model families and would falsely claim repackaged checkpoints of other
-        models. Keys are normalized, then matched on Anima's own signature.
-        """
+        """True if this handle is the Anima DiT: LLM adapter + adaln modulation."""
         keys = list(normalize_keys(f.keys()))
         has_llm_adapter = any("llm_adapter" in k for k in keys)
         has_adaln = any("adaln_modulation" in k for k in keys)
@@ -73,7 +63,6 @@ class AnimaModel(DiffusionModel):
         )
         self.t5_tokenizer = load_t5_tokenizer(None)
 
-        # Tokenize / encode strategies (called directly, not through the global registry).
         self.tokenize_strategy = AnimaTokenizeStrategy(
             qwen3_tokenizer=self.qwen3_tokenizer,
             t5_tokenizer=self.t5_tokenizer,
@@ -82,10 +71,8 @@ class AnimaModel(DiffusionModel):
         )
         self.encoding_strategy = AnimaTextEncodingStrategy()
 
-        # Qwen-Image VAE (single-frame decode).
         self.vae = load_qwen_vae(self.vae_path, device=self.device).to(self.dtype)
 
-        # Register swappable components with the memory manager.
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)
         self.memory.register("vae", self.vae)
@@ -97,7 +84,7 @@ class AnimaModel(DiffusionModel):
         self,
         args: EncodePromptArgs,
     ) -> Conditioning:
-        """Text-encoder only: RAW Qwen3/T5 embeddings (DiT fusion in ``fuse_text``)."""
+        """Raw Qwen3/T5 embeddings; the DiT-side fusion happens in ``fuse_text``."""
         dev = torch.device(self.device)
         cond = self._encode_raw(args.prompt, dev)
         null = (
@@ -108,11 +95,7 @@ class AnimaModel(DiffusionModel):
         return Conditioning(cond=cond, null=null)
 
     def _encode_raw(self, prompt: str, dev: torch.device):
-        """Tokenize -> Qwen3 encode -> raw LLM-adapter input bundle (text_encoder only).
-
-        Returns ``[prompt_embeds, qwen3_mask, t5_ids, t5_mask]``; the DiT
-        consumes it in ``fuse_text`` (which runs with the DiT resident).
-        """
+        """Tokenize -> Qwen3 encode -> ``[prompt_embeds, qwen3_mask, t5_ids, t5_mask]``."""
         tokens = self.tokenize_strategy.tokenize(prompt)
         return self.encoding_strategy.encode_tokens(
             self.tokenize_strategy, [self.text_encoder], tokens
@@ -153,8 +136,7 @@ class AnimaModel(DiffusionModel):
         params: SamplingParams,
     ) -> torch.Tensor:
         # The Anima DiT expects a frame axis: [B, C, H, W] -> [B, C, 1, H, W].
-        # Precompute the video RoPE (cos/sin) once per prompt; it depends only on
-        # the (T, H, W) shape and is reused across every denoise step.
+        # RoPE depends only on (T, H, W), so compute it once for the whole run.
         latents = latents.unsqueeze(2)
         self.dit.pos_embedder.clear()
         self.dit.pos_embedder.store("emb", latents.shape, latents.device, dtype=self.dtype)
@@ -186,21 +168,16 @@ class AnimaModel(DiffusionModel):
         return noise_pred
 
     def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:
-        # Drop the frame axis back to canonical 4D: [B, C, 1, H, W] -> [B, C, H, W].
+        # [B, C, 1, H, W] -> [B, C, H, W]
         return latents.squeeze(2)
 
     def resolve_size(self, width: int, height: int) -> tuple[int, int]:
-        # The latent grid is patchified by the DiT (patch_spatial=2) on top of the
-        # VAE's compression (8x), so pixel dims must be multiples of 8 * 2 = 16.
-        # Round up to the nearest multiple.
+        # Pixel dims must be a multiple of the VAE compression * DiT patch size.
         align = self.vae.spatial_compression * self.dit.patch_spatial
         return round_up(width, align), round_up(height, align)
 
     def percent_to_sigma(self, percent: float) -> float:
-        """Percent -> sigma.
-
-        Used by the ER-SDE solver to nudge the first sigma just below 1.
-        """
+        """Percent -> sigma under the flow shift (ER-SDE needs sigma_0 < 1)."""
         if percent <= 0.0:
             return 1.0
         if percent >= 1.0:
@@ -210,5 +187,4 @@ class AnimaModel(DiffusionModel):
         return (shift * t) / (1.0 + (shift - 1.0) * t)
 
     def _create_upscaler(self) -> LatentUpscaler:
-        """Qwen-Image VAE -> Wan21 z-score Sesqui upscaler."""
         return SesquiLSRUpscaler("wan21", device=self.device, dtype=self.dtype)

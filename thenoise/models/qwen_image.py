@@ -1,17 +1,15 @@
 """Qwen-Image adapter — dual-stream DiT + Qwen2.5-VL-7B text encoder + Qwen-Image VAE.
 
-All variants are edit-capable: the input image is both (1) encoded by Qwen2.5-VL as
-vision tokens into the text conditioning, and (2) VAE-encoded and concatenated into
-the DiT token sequence as a reference latent. Conditioning the reference tokens at
-timestep zero (the ``index_timestep_zero`` reference method) is a per-run choice
-resolved from the ``ref_method`` preference, whose automatic layer comes from the
-checkpoint's ``__index_timestep_zero__`` marker.
+All variants are edit-capable: the input image is both encoded by Qwen2.5-VL as vision
+tokens into the text conditioning, and VAE-encoded into a reference latent
+concatenated into the DiT token sequence. Conditioning those tokens at timestep zero
+(the ``index_timestep_zero`` reference method) is a per-run choice resolved from the
+``ref_method`` preference, whose automatic layer comes from the checkpoint's
+``__index_timestep_zero__`` marker.
 
-That marker is also what makes the reference-latent KV cache (ComfyUI's
-``FluxKVCache``) valid, so this adapter drives the shared ``thenoise.dit.kvcache``
-protocol exactly like the Flux Klein one: ``prepare_latent`` starts the run's
-caches and keeps the reference RoPE positions apart from the target's,
-``denoise_step`` feeds the reference tokens only while the cache is still filling.
+That marker is also what makes the reference K/V step-invariant, so the same run can
+freeze them: ``prepare_latent`` starts the caches and ``denoise_step`` drives the
+shared ``thenoise.dit.kvcache`` protocol.
 """
 from __future__ import annotations
 
@@ -55,21 +53,17 @@ class QwenImageModel(DiffusionModel):
         "sampler": "euler",
     }
 
-    # Instruction-based editing off the Qwen-Image-Edit recipe: the input image is
-    # concatenated into the token sequence as a reference latent. The KV cache
-    # freezes the reference K/V across steps (ComfyUI ``FluxKVCache``), valid only
-    # with ``ref_method="index_timestep_zero"`` (enforced by the pipeline).
+    # Instruction-based editing off the Qwen-Image-Edit recipe. The KV cache is valid
+    # only with ``ref_method="index_timestep_zero"``.
     CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": True}
 
     @staticmethod
     def detect(f) -> bool:
-        """True if this handle is a Qwen-Image DiT: the family's block layout, deep.
+        """True if this handle is a Qwen-Image DiT: the family block layout, deep.
 
-        The names are byte-identical in Mage-Flow — same block, same tensor names — so
-        depth is the separator: 60 blocks here, 12 there. Each detector states its own
-        half of that split (see ``thenoise.dit.mage_flow.keys``), so neither depends on
-        catalog order. Keys are normalized first so repackaged checkpoints resolve
-        identically.
+        Mage-Flow shares the tensor names, so depth is the separator: 60 blocks here.
+        Each detector states its own depth condition, so neither depends on catalog
+        order.
         """
         keys = list(normalize_keys(f.keys()))
         return is_qwen_image_family(keys) and dit_block_count(keys) > MAGE_LAYERS
@@ -169,12 +163,10 @@ class QwenImageModel(DiffusionModel):
         else:
             self._null_txt = None
 
-        # Precompute the RoPE frequencies once per prompt; they are independent of
-        # image/timestep and are reused across every denoise step. The image stream
-        # covers the concatenated base+ref tokens; the text stream uses a single
-        # index (``max_vid_index + j``) advanced across all three axes. Target and
-        # reference positions are stored apart so ``denoise_step`` can drop the
-        # references from the sequence once the KV cache has frozen their K/V.
+        # RoPE is independent of image/timestep: build it once per run. The image
+        # stream covers the concatenated base+ref tokens; target and reference
+        # positions are stored apart so ``denoise_step`` can drop the references once
+        # the KV cache has frozen their K/V.
         self.dit.pe_embedder.clear()
         img_pos = build_video_positions(self._img_shapes, device=dev)
         num_img_tokens = (
@@ -189,15 +181,11 @@ class QwenImageModel(DiffusionModel):
             null_pos = build_txt_positions(max_vid_index, null_len, device=dev)
             self.dit.pe_embedder.store("txt_uncond", null_pos, dtype=self.dtype)
 
-        # Timestep-zero conditioning (``ref_method="index_timestep_zero"``) zeroes
-        # the timestep on the reference tokens; the split point is the base image
-        # token count. Only meaningful with references present, so an ``index`` edit
-        # (or plain t2i) leaves it None -> single-row modulation.
+        # Split point of the timestep-zero reference tokens: the base image token
+        # count, or None for a single-row modulation.
         zero_cond_t = ref_method == "index_timestep_zero" and self._ref_tokens is not None
         self._timestep_zero_index = num_img_tokens if zero_cond_t else None
 
-        # Reference-latent KV cache: fresh per run, one cache per conditioning branch
-        # (see ``DiffusionModel.start_kv_caches``).
         self.start_kv_caches(
             params,
             has_reference=self._ref_tokens is not None,
@@ -207,10 +195,7 @@ class QwenImageModel(DiffusionModel):
         return x
 
     def schedule(self, params: SamplingParams) -> list[Step]:
-        # ``mu`` (the dynamic shift) is computed from the *packed* latent token
-        # count (H/16 * W/16), matching musubi-tuner's ``image_seq_len =
-        # latents.shape[1]`` after ``pack_latents``. Using the raw 8x-compressed
-        # grid (H/8 * W/8) inflates mu by 4x and denoises at the wrong timesteps.
+        # The dynamic shift is driven by the packed token count (H/16 * W/16).
         image_seq_len = (params.height // self._pixels_per_token) * (
             params.width // self._pixels_per_token
         )
@@ -225,14 +210,7 @@ class QwenImageModel(DiffusionModel):
         guidance_scale: float,
         i: int,
     ) -> torch.Tensor:
-        """One Qwen-Image DiT forward (+ CFG), returning the velocity.
-
-        With the KV cache the reference tokens reach the DiT only while the cache is
-        filling; on every later step they are dropped and each block keeps working on
-        its cache buffers, whose reference suffix is left untouched
-        (``QwenImageTransformer2DModel.forward`` decides fill vs read from
-        ``kv.filled``).
-        """
+        """One Qwen-Image DiT forward (+ CFG), returning the velocity."""
         dev = torch.device(self.device)
         t_full = torch.full((1,), float(t), dtype=latents.dtype, device=dev)
         pe_img = self.dit.pe_embedder["img"]
@@ -249,9 +227,7 @@ class QwenImageModel(DiffusionModel):
                     self.kv_cache("uncond"), pe_img, pe_ref,
                 )
                 v = neg + guidance_scale * (pos - neg)
-                # Re-normalize the CFG combination back to the conditional norm
-                # (Qwen-Image guidance trick), preventing the extrapolated
-                # prediction from blowing up / collapsing into a pattern.
+                # Renormalize the CFG combination back to the conditional norm.
                 cond_norm = torch.norm(pos, dim=-1, keepdim=True)
                 noise_norm = torch.norm(v, dim=-1, keepdim=True)
                 v = v * (cond_norm / noise_norm)
@@ -271,11 +247,8 @@ class QwenImageModel(DiffusionModel):
     ) -> torch.Tensor:
         """One DiT forward with the KV cache's fill/read semantics.
 
-        ``kv`` is ``None`` for the plain path. On the first forward of a fresh cache
-        (``not kv.filled``) the reference tokens are present (fill); on every later
-        step (``kv.filled``) they are dropped (read), leaving their frozen K/V in
-        every block's cache buffers. The reference positions (``pe_ref``) are only
-        needed while filling.
+        While the cache is empty the reference tokens are passed in (fill); once
+        ``kv.filled`` they are dropped and each block works from its cache (read).
         """
         ref_tokens = self._ref_tokens
         if kv is not None and kv.filled:
@@ -293,24 +266,17 @@ class QwenImageModel(DiffusionModel):
         )
 
     def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:
-        # Drop the run-scoped KV cache before the VAE decode (see ``end_kv_caches``).
         self.end_kv_caches()
-        # Unpack the DiT tokens back to the canonical 4D latent.
         return unpack_latents(
             latents, params.height // self.vae.spatial_compression, params.width // self.vae.spatial_compression
         )
 
     @property
     def _pixels_per_token(self) -> int:
-        """Pixels per DiT token: the VAE's compression times the DiT's 2x2 patchify.
-
-        The latent geometry is the VAE's (``z_dim`` / ``spatial_compression``); the
-        patchify on top of it is the DiT's own, so the two stay separate concerns.
-        """
         return self.vae.spatial_compression * self.dit.patch_size
 
     def resolve_size(self, width: int, height: int) -> tuple[int, int]:
-        # The latent grid is patchified in 2x2 blocks on an 8x-VAE-compressed latent.
+        # Pixel dims must be a multiple of the VAE compression * DiT patch size.
         align = self._pixels_per_token
         return round_up(width, align), round_up(height, align)
 
@@ -320,12 +286,7 @@ class QwenImageModel(DiffusionModel):
         return self.vae.encode_pixels_to_latents(pixels.unsqueeze(0))
 
     def pack_reference_latent(self, latents: torch.Tensor, method: str = "index", ref_index: int = 1):
-        """Canonical reference latent -> packed DiT tokens (native Qwen-Image approach).
-
-        ``index_timestep_zero`` packs identically to ``index`` (the difference is the
-        timestep-zero *modulation* of the reference tokens, applied via
-        ``timestep_zero_index``); anything else is rejected.
-        """
+        """Canonical reference latent -> packed DiT tokens."""
         if method not in ("index", "index_timestep_zero"):
             raise ValueError(
                 f"unsupported ref_latents_method {method!r}; expected 'index' or 'index_timestep_zero'"
@@ -334,7 +295,6 @@ class QwenImageModel(DiffusionModel):
         return pack_latents(latents.to(device=dev, dtype=self.dtype)), None
 
     def _create_upscaler(self) -> LatentUpscaler:
-        """Qwen-Image VAE -> Wan21 z-score Sesqui upscaler."""
         return SesquiLSRUpscaler("wan21", device=self.device, dtype=self.dtype)
 
 

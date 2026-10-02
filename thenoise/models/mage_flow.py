@@ -1,21 +1,13 @@
 """Mage-Flow adapter — 12-layer dual-stream DiT + Qwen3-VL-4B + Mage-VAE.
 
 Native-resolution flow model: the latent is the VAE's raw 128-channel output at 16x
-(one DiT token per latent cell, no packing), the schedule is a static shift, and sizes
-are only rounded up to the VAE's 16-pixel cell. Both released checkpoints are the same
+(one DiT token per latent cell, no packing), the schedule is a static shift, and
+sizes are rounded up to the VAE's 16-pixel cell. Both released checkpoints share the
 architecture, so both are edit-capable.
 
-The codec is the Mage-VAE, but the Flux.2 AE is accepted in its place — the latent is
-the same shape and the Mage space was anchored to Flux.2's — and which of the two was
-passed is read off the file (see :func:`thenoise.vae.load_mage_family_vae`).
-
-Defaults are the **Turbo** recipe, because that is what the download script ships and
-no checkpoint carries a marker saying which variant it is — the CLI/API stays the
-source of truth:
-
-    base     --steps 30 --guidance-scale 5
-    RL       --steps 20 --guidance-scale 5
-    turbo    (the default)
+The codec is the Mage-VAE; the Flux.2 AE is accepted in its place — the latent has
+the same shape and the Mage space was anchored to Flux.2's — and which of the two
+was passed is read off the file (see :func:`thenoise.vae.load_mage_family_vae`).
 """
 from __future__ import annotations
 
@@ -48,7 +40,7 @@ logger = logging.getLogger(__name__)
 class MageFlowModel(DiffusionModel):
     name = "mage_flow"
 
-    # The Turbo recipe; the module docstring has the other variants.
+    # Turbo recipe. Base: --steps 30 --guidance-scale 5; RL: --steps 20.
     DEFAULT_PREFS = {
         **DiffusionModel.DEFAULT_PREFS,
         "steps": 4,
@@ -56,8 +48,8 @@ class MageFlowModel(DiffusionModel):
         "sampler": "euler",
     }
 
-    # No KV cache: the single-row timestep embedding modulates the references at ``t``
-    # like everything else, so their K/V are not step-invariant.
+    # The single-row timestep embedding modulates the references at ``t``, so their
+    # K/V change every step.
     CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": False}
 
     @staticmethod
@@ -93,9 +85,7 @@ class MageFlowModel(DiffusionModel):
     def encode_prompt(self, args: EncodePromptArgs) -> Conditioning:
         """Prompt (and reference images) -> conditioning, via Qwen3-VL-4B.
 
-        The references are vision tokens of the same turn for the negative branch too,
-        so CFG compares "edit like this" against "don't" rather than image-conditioned
-        against unconditioned.
+        The negative branch sees the same reference vision tokens.
         """
         images = args.image or None
         cond, cond_mask = self.text_encoder(args.prompt, images)
@@ -125,10 +115,9 @@ class MageFlowModel(DiffusionModel):
     ) -> torch.Tensor:
         """Tokens + conditioning + positions, stashed once before the loop.
 
-        One RoPE build per run. The image entry is the target's positions followed by
-        the references' and stays that way every step. The text entry is a single
-        identity rotation: this model does not rotate its text tokens, and
-        ``apply_rope`` broadcasts the one matrix over the whole prompt.
+        One RoPE build per run: the image entry is the target's positions followed by
+        the references'. The text entry is a single identity rotation, broadcast over
+        the whole prompt.
         """
         dev = torch.device(self.device)
         x = latent_to_tokens(latents.to(device=dev, dtype=self.dtype))
@@ -159,8 +148,8 @@ class MageFlowModel(DiffusionModel):
         return x
 
     def schedule(self, params: SamplingParams) -> list[Step]:
-        # Static shift: the grid is the same at every resolution. ``Step.t`` is the
-        # shifted sigma, which is literally the timestep the DiT is fed.
+        # Static shift (resolution independent); Step.t is the shifted sigma the DiT
+        # is fed.
         ts = mage_sampling.get_schedule(params.steps)
         return [Step(t=ts[i], delta=ts[i] - ts[i + 1]) for i in range(params.steps)]
 
@@ -172,11 +161,7 @@ class MageFlowModel(DiffusionModel):
         guidance_scale: float,
         i: int,
     ) -> torch.Tensor:
-        """One DiT forward (+ plain CFG), returning the velocity of the target tokens.
-
-        The CFG combination is left unnormalised: upstream's per-token renorm defaults
-        to off.
-        """
+        """One DiT forward (+ unnormalised CFG), returning the target tokens' velocity."""
         dev = torch.device(self.device)
         t_full = torch.full((1,), float(t), dtype=latents.dtype, device=dev)
         img_pe = self.dit.pe_embedder["img"]
@@ -214,14 +199,12 @@ class MageFlowModel(DiffusionModel):
         )
 
     def resolve_size(self, width: int, height: int) -> tuple[int, int]:
-        """Round up to the pixel cell of one token: 512..2048 is a quality range, not a
-        constraint, so no bucket quantisation and no clamping."""
+        """Round up to the pixel cell of one token; any size is valid."""
         align = self._pixels_per_token
         return round_up(width, align), round_up(height, align)
 
     @property
     def _pixels_per_token(self) -> int:
-        """The VAE's compression times the DiT's patch size."""
         return self.vae.spatial_compression * self.dit.patch_size
 
     # ------------------------------------------------------------ editing
@@ -234,12 +217,7 @@ class MageFlowModel(DiffusionModel):
         method: str = "index",
         ref_index: int = 1,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Canonical reference latent -> (tokens, positions) at frame index ``ref_index``.
-
-        ``index_timestep_zero`` needs a second timestep row for the reference tokens
-        and this DiT's embedding has one row for everything, so the method is rejected
-        rather than silently run as ``index``.
-        """
+        """Canonical reference latent -> (tokens, positions) at frame index ``ref_index``."""
         if method != "index":
             raise ValueError(
                 f"unsupported ref_latents_method {method!r} for mage_flow; only 'index' "
@@ -260,7 +238,6 @@ class MageFlowModel(DiffusionModel):
 
     # -------------------------------------------------------------- upscaling
     def _create_upscaler(self) -> LatentUpscaler:
-        """Mage latent -> the trained Flux.2 Sesqui transcoder."""
         return SesquiLSRUpscaler("flux2", device=self.device, dtype=self.dtype)
 
 

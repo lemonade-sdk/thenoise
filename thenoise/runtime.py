@@ -1,11 +1,8 @@
 """Single-model runtime: loads exactly one DiffusionModel at a time.
 
-The runtime is deliberately thin: it detects the model class from the DiT
-checkpoint, holds the single resident instance, and swaps (unloads + GCs) on
-reload so only one set of weights is ever resident.
-
-The text encoder and VAE are assumed to match the detected model; a wrong type
-throws during load and we fail anyway.
+Detects the model class from the DiT checkpoint, holds the single resident
+instance, and swaps (unloads + GCs) on reload so only one set of weights is ever
+resident. The text encoder and VAE are assumed to match the detected model.
 """
 from __future__ import annotations
 
@@ -25,8 +22,7 @@ class Settings:
     """Runtime knobs, all passed on the CLI (bf16 is fixed for this engine).
 
     ``upscaler_dir`` is server configuration (like host/port): pixel-domain
-    upscaling is a pixel-space / postprocessing concern that needs no diffusion
-    model, so its directory is NOT a model-load parameter.
+    upscaling needs no diffusion model.
     """
     device: str = "cuda"      # ROCm torch aliases cuda -> hip
     offload_device: str = ""   # empty = auto-detect from safetensors size vs VRAM
@@ -39,9 +35,7 @@ class Settings:
 class ModelPaths:
     """Checkpoint paths supplied by the CLI.
 
-    ``lora_dir`` stays here because LoRAs mutate the DiT weights (a model
-    concern). Pixel-upscaler config is not model-bound, so ``upscaler_dir``
-    lives on ``Settings`` instead.
+    ``lora_dir`` is model-bound: LoRAs mutate the DiT weights.
     """
     dit_path: str
     vae_path: str
@@ -61,8 +55,7 @@ class Runtime:
         self._settings = settings
         self._model: Any = None
         self._model_name: Optional[str] = None
-        # Shared pixel-domain upscaler pool (model-free, server-level). Used by
-        # the pipeline controller and the standalone /upscale endpoint.
+        # Shared pixel-domain upscaler pool (model-free, server-level).
         self._pixel_upscalers = PixelUpscalerManager(
             upscaler_dir=settings.upscaler_dir, device=settings.device
         )
@@ -88,9 +81,6 @@ class Runtime:
 
         self._unload()  # swap: only one model resident at a time
         logger.info("Loading model '%s'", name)
-        # The load-time inference-mode boundary (see ``thenoise.inference``):
-        # covers module construction, parameter inits and requantization. Weights
-        # are frozen per component by ``MemoryManager.register``.
         with inference():
             self._model = cls(config=config)
         self._model_name = name
@@ -137,11 +127,7 @@ class Runtime:
         return [self._model_name] if self._model else []
 
     def model_capabilities(self) -> dict:
-        """The loaded model's capabilities (empty when none loaded).
-
-        Passed through verbatim from ``DiffusionModel.CAPABILITIES`` so a capability
-        added to the base dict reaches ``/health`` (and the UI) without a change here.
-        """
+        """The loaded model's capabilities (empty when none loaded)."""
         if self._model is None:
             return {}
         return dict(self._model.CAPABILITIES)

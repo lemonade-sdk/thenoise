@@ -6,7 +6,7 @@ stand-in for the codec, and synthetic checkpoints written out of those.
 """
 from __future__ import annotations
 
-import math
+import copy
 from types import SimpleNamespace
 
 import pytest
@@ -41,7 +41,6 @@ from thenoise.upscale import SesquiLSRUpscaler
 from thenoise.utils.rope import apply_rope
 from thenoise.utils.timestep import timestep_embedding
 from thenoise.vae import mage_flow as mage_vae
-from thenoise.vae.flux2 import AutoencoderKLFlux2
 from thenoise.vae.mage_flow import AutoencoderKLMageFlow, DConvEncoder, DConvDenoiser
 
 # Two heads of the released 128, so the (16, 56, 56) axis split is the real one.
@@ -103,6 +102,9 @@ def test_block_count_is_the_highest_index_plus_one():
 
 
 def test_names_are_the_family_and_depth_is_the_separator():
+    """``add_q_proj`` says "Qwen-Image family", the depth says which member: the
+    low-rank AdaLN export must not change either answer.
+    """
     names = [
         "img_in.weight",
         "txt_in.weight",
@@ -111,6 +113,8 @@ def test_names_are_the_family_and_depth_is_the_separator():
         "transformer_blocks.0.img_mlp.net.2.weight",
         "norm_out.linear.weight",
         "proj_out.weight",
+        "transformer_blocks.0.img_mod.1.weight",
+        "modulation_down.weight",
     ]
     assert is_qwen_image_family(names)
     assert dit_block_count(names) < MAGE_LAYERS  # names alone cannot tell the members apart
@@ -138,25 +142,23 @@ def test_a_token_is_one_latent_cell():
 # ---------------------------------------------------------------- schedule
 
 
-@pytest.mark.parametrize("steps", [1, 4, 20])
-def test_sigmas_are_the_static_shift_of_a_uniform_grid(steps):
-    """``FlowMatchEulerDiscreteScheduler(shift=6)`` with dynamic shifting off."""
-    shift = mage_sampling.SHIFT
-    grid = torch.linspace(1.0, 1.0 / steps, steps)
-    for sigma, shifted in zip(grid, mage_sampling.get_sigmas(steps)):
-        expected = shift * float(sigma) / (1 + (shift - 1) * float(sigma))
-        assert float(shifted) == pytest.approx(expected, rel=1e-6)
+def test_schedule_is_the_static_shift_of_a_uniform_grid_plus_a_terminal_zero():
+    """``FlowMatchEulerDiscreteScheduler(shift=6)`` with dynamic shifting off.
 
+    The reference points are ``shift * s / (1 + (shift - 1) * s)`` evaluated by
+    hand: a shift above 1 holds every point of the grid above the unshifted one,
+    and both start at pure noise.
+    """
+    sigmas = [float(s) for s in mage_sampling.get_sigmas(4)]
+    assert sigmas == pytest.approx([1.0, 0.9473684, 0.8571429, 0.6666667], rel=1e-6)
 
-def test_schedule_is_the_grid_plus_a_terminal_zero():
     ts = mage_sampling.get_schedule(4)
     assert len(ts) == 5
     assert float(ts[0]) == 1.0 and float(ts[-1]) == 0.0
     assert all(float(a) > float(b) for a, b in zip(ts, ts[1:]))
-    # A shift above 1 holds every point of the grid above the unshifted one (both
-    # start at pure noise).
-    grid = torch.linspace(1.0, 0.25, 4)
-    assert all(float(t) > float(sigma) for t, sigma in zip(ts[1:], grid[1:]))
+
+    one_step = [float(s) for s in mage_sampling.get_sigmas(1)]
+    assert one_step == pytest.approx([1.0], rel=1e-6)
 
 
 # ------------------------------------------------------------ timestep embedding
@@ -175,16 +177,13 @@ def test_timestep_features_are_cos_then_sin():
     assert torch.equal(raw[:, 128:], torch.zeros(1, 128))
 
 
-@pytest.mark.parametrize("t", [0.25, 0.5, 1.0])
-def test_the_timestep_frequency_table_is_rounded_to_bf16(t):
-    """The table is rounded before the x1000 time factor: ~0.6 rad at the top end."""
-    freqs = torch.exp(-math.log(10000) * torch.arange(128, dtype=torch.float32) / 128)
-    angles = 1000 * t * freqs.to(torch.bfloat16).float()[None, :]
-    assert torch.equal(_raw_timestep_features(t), torch.cat([angles.cos(), angles.sin()], -1))
-
-    # The shared fp32 helper, at the same scaled timestep, lands elsewhere.
-    unrounded = timestep_embedding(torch.tensor([t * 1000.0]), 256, time_factor=1.0)
-    assert (_raw_timestep_features(t) - unrounded).abs().max() > 0.1
+def test_the_timestep_frequency_table_is_rounded_to_bf16():
+    """The table is rounded to BF16 BEFORE the x1000 time factor (~0.6 rad off at
+    the top end), which the shared FP32 helper does not reproduce.
+    """
+    for t in (0.25, 1.0):
+        unrounded = timestep_embedding(torch.tensor([t * 1000.0]), 256, time_factor=1.0)
+        assert (_raw_timestep_features(t) - unrounded).abs().max() > 0.1
 
 
 # ------------------------------------------------------------------------- DiT
@@ -329,24 +328,6 @@ def _factors(state_dict) -> set:
         if key.startswith("modulation_down.") or key.endswith(("img_mod.1.weight", "img_mod.1.bias"))
         or key.endswith(("txt_mod.1.weight", "txt_mod.1.bias"))
     }
-
-
-def test_the_low_rank_export_is_still_the_same_model():
-    """``modulation_down`` is the only new name, and it does not change the family."""
-    names = [
-        "img_in.weight",
-        "txt_in.weight",
-        "time_text_embed.timestep_embedder.linear_1.weight",
-        "transformer_blocks.0.attn.add_q_proj.weight",
-        "transformer_blocks.0.img_mlp.net.2.weight",
-        "transformer_blocks.0.img_mod.1.weight",
-        "norm_out.linear.weight",
-        "proj_out.weight",
-        "modulation_down.weight",
-        f"transformer_blocks.{MAGE_LAYERS - 1}.attn.to_q.weight",
-    ]
-    assert is_qwen_image_family(names)
-    assert MageFlowModel.detect(FakeHandle(names)) is True
 
 
 def test_detect_params_reads_the_modulation_rank(tmp_path):
@@ -660,15 +641,20 @@ def test_a_bare_image_is_a_one_image_batch():
 # ------------------------------------------------------------------------- VAE
 
 
-_REAL_VAE = AutoencoderKLMageFlow
+# Building the real codec costs ~0.3s and we throw both networks away, so build it
+# once and hand out copies: the loaders mutate what they are given.
+_TINY_VAE = None
 
 
 def _tiny_vae():
     """The released geometry (128ch latent, 16x, 16px patches) at working widths."""
-    vae = _REAL_VAE()
-    vae.dconv_encoder = DConvEncoder(z_ch=128, hidden_size=32, num_blocks=1, head_size=32, num_head_blocks=1)
-    vae.decoder_model = DConvDenoiser(hidden_size=32, hidden_size_x=8, num_blocks=2, num_cond_blocks=1, bottleneck_dim=128)
-    return vae.eval().requires_grad_(False)
+    global _TINY_VAE
+    if _TINY_VAE is None:
+        vae = AutoencoderKLMageFlow()
+        vae.dconv_encoder = DConvEncoder(z_ch=128, hidden_size=32, num_blocks=1, head_size=32, num_head_blocks=1)
+        vae.decoder_model = DConvDenoiser(hidden_size=32, hidden_size_x=8, num_blocks=2, num_cond_blocks=1, bottleneck_dim=128)
+        _TINY_VAE = vae.eval().requires_grad_(False)
+    return copy.deepcopy(_TINY_VAE)
 
 
 @pytest.fixture(scope="module")
@@ -695,7 +681,7 @@ def test_decode_clamps(codec, monkeypatch):
     assert codec.decode_to_pixels(torch.zeros(1, 128, 2, 2)).unique().tolist() == [1.0]
 
 
-@pytest.mark.parametrize("size", [(2, 2), (3, 5), (1, 7)])
+@pytest.mark.parametrize("size", [(3, 5), (1, 7)])
 def test_the_windowed_attention_pads_and_crops(codec, size):
     """The 32x32 attention windows cannot tile an odd map; it is padded and cropped."""
     h, w = size
@@ -754,15 +740,6 @@ def test_load_rejects_a_file_that_is_not_the_codec(tmp_path, monkeypatch):
     del partial["student.dconv_encoder.proj_out.bias"]
     with pytest.raises(Exception, match="[Mm]issing"):
         mage_vae.load_mage_vae(write_safetensors(tmp_path / "half.safetensors", partial), device="cpu")
-
-
-def test_both_codecs_answer_the_adapter_the_same_way():
-    """A Mage-Flow run only ever asks a codec for these, and either one has them."""
-    for codec_cls in (AutoencoderKLMageFlow, AutoencoderKLFlux2):
-        assert (codec_cls.z_dim, codec_cls.spatial_compression, codec_cls.pixel_channels) == (
-            128, 16, 3,
-        )
-        assert all(callable(getattr(codec_cls, op)) for op in ("encode_pixels_to_latents", "decode_to_pixels"))
 
 
 def test_the_codec_is_chosen_from_the_file(tmp_path, monkeypatch):

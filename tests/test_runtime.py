@@ -33,15 +33,16 @@ def test_empty_runtime(catalog):
     assert runtime.pipeline is None
 
 
-def test_load_resolves_the_model_from_the_dit(catalog):
+def test_load_resolves_the_model_from_the_dit_and_passes_the_paths_through(catalog):
     constructed = catalog()
-    runtime = Runtime(Settings())
-    runtime.load(ModelPaths("dit", "vae", "te"))
+    runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
+    runtime.load(ModelPaths("dit", "vae", "te", lora_dir="/loras"))
 
     assert runtime.available() == ["fake"]
     assert runtime.model_name == "fake"
     config = constructed[0]["config"]
     assert (config.dit_path, config.vae_path, config.text_encoder_path) == ("dit", "vae", "te")
+    assert (config.device, config.offload_device, config.lora_dir) == ("cpu", "cpu", "/loras")
     assert runtime.pipeline is not None
 
 
@@ -65,15 +66,6 @@ def test_loading_swaps_the_single_resident_model(catalog):
     assert runtime.available() == ["fake"]
     assert len(constructed) == 2
     assert constructed[1]["config"].dit_path == "dit2"
-
-
-def test_load_passes_device_offload_device_and_lora_dir(catalog):
-    constructed = catalog()
-    runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
-    runtime.load(ModelPaths("dit", "vae", "te", lora_dir="/loras"))
-
-    config = constructed[0]["config"]
-    assert (config.device, config.offload_device, config.lora_dir) == ("cpu", "cpu", "/loras")
 
 
 def test_upscaler_dir_is_server_config(catalog, tmp_path):

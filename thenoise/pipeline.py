@@ -1,48 +1,16 @@
 """The generation pipeline controller.
 
 Owns the orchestration of generate/edit — encode -> denoise -> decode ->
-postprocess -> PIL — delegating each stage to the model's kernels
-(``thenoise.models.base.DiffusionModel``), the model's latent upscaler
-(``thenoise.upscale.base.LatentUpscaler``) and the pixel-domain upscaler
-(``thenoise.upscale.pixel.PixelUpscalerManager``). Also owns the inference lock,
-the inference-mode boundary around a whole request (``thenoise.inference``), the
-single-entry stage cache (with cascade invalidation), upscale planning, and
-cache-key construction.
+postprocess -> PIL — delegating each stage to the model's kernels, the model's
+latent upscaler and the pixel-domain upscaler. Also owns the inference lock, the
+inference-mode boundary around a whole request, the single-entry stage cache, the
+upscale plan and cache-key construction.
 
-Pipeline caching
-----------------
-Each stage is cached (single-entry, on-device tensors); keys are computed from
-*resolved* parameters and nested so a change cascades downstream automatically.
-
-  Stage          | Cache key depends on                    | Cached value
-  ---------------+-----------------------------------------------+-----------
-  Reference      | image (content hash; edit only)          | reference latent
-  Prompt         | prompt, negative_prompt, guidance_scale, lora_specs | Conditioning
-  Sampling       | prompt_key + size, steps/sigmas, seed, sampler, lora_specs | latents
-  Upscale+refine | (driven by decode cache hit below)      | —
-  VAE decode     | sampling_key + refined constants        | pixels (fp32)
-  Notch filter   | (not cached; runs right after decode)   | —
-  Pixel upscale  | (not cached)                            | —
-  Postprocess    | (not cached — cheap)                    | —
-
-The edit path adds the ``Reference`` stage upstream of ``Prompt``: the
-VAE-encoded input image is keyed by a content hash so re-editing the same image
-with a different prompt never re-encodes it.
-
-Upscaling
----------
-Two modes driven by ``upscale_factor`` (f in (0.0, 8.0]) and ``upscale_type``:
-``refined`` (default) runs the model's latent upscaler ``UPSCALE_SCALE``x plus a
-low-strength refine, adding a pixel-domain upscaler above factor 2; ``no-refiner``
-uses only the pixel-domain upscaler (no latent 2x), limited to its detected scale.
-Pixel upscalers are selected by name from ``upscaler_dir`` (CLI ``--upscaler-dir``);
-without one, only ``refined`` factors <= 2 are available.
-
-Every stage after the VAE carries the VAE's own pixel width
-(``DiffusionModel.pixel_channels``), so an RGBA model's matte rides the same fp32
-tensor through the notch filter, the postprocess kernels, the resize and the PNG
-writer. Only the boundaries that cannot carry one composite it onto white: an RGB
-VAE's encoder and the RGB-only pixel upscaler.
+Each stage is cached (single-entry, on-device tensors). Keys are built from
+*resolved* parameters and each embeds its upstream key, so a change cascades
+downstream automatically. On the edit path a ``reference`` stage sits upstream of
+``prompt``, keyed by image content hash, so re-editing the same image with a
+different prompt never re-encodes it.
 """
 from __future__ import annotations
 
@@ -79,8 +47,7 @@ from thenoise.utils.png import build_pnginfo
 logger = logging.getLogger(__name__)
 
 
-# Largest side used for the edit output size when neither width nor height is
-# given; the first reference image's aspect ratio is preserved.
+# Largest side for the edit output when neither width nor height is given.
 _EDIT_DEFAULT_SIZE = 1024
 
 
@@ -115,10 +82,9 @@ class _ResolvedRequest:
 def _normalize_sigmas(values: Sequence[float]) -> Tuple[float, ...]:
     """Validate a user sigma list, returning the full grid (terminal 0 included).
 
-    ComfyUI-style: the values decrease from 1.0 toward 0.0 and the trailing 0.0 is
-    implied, so ``len(grid) - 1`` is the step count. Strictly decreasing is what
-    keeps the ER-SDE solver's ``logit(sigma)`` and ``1/(1-sigma)`` finite (only the
-    first sigma may be 1.0, where ``percent_to_sigma`` nudges it).
+    The values decrease from 1.0 toward 0.0 and the trailing 0.0 is implied, so
+    ``len(grid) - 1`` is the step count. Strictly decreasing keeps the ER-SDE
+    solver's ``logit(sigma)`` and ``1/(1-sigma)`` finite.
     """
     if not values:
         raise ValueError("sigmas must not be empty")
@@ -145,7 +111,7 @@ def _sigma_steps(
 ) -> list[Step]:
     """Sigma grid (descending, ending on 0) -> one ``Step`` per grid gap.
 
-    Tensors in the model's own device/dtype because ``denoise_step`` consumes
+    Tensors are in the model's own device/dtype because ``denoise_step`` consumes
     ``Step.t`` the way it consumes its own ``schedule()`` output.
     """
     ts = torch.tensor(list(grid), device=device, dtype=dtype)
@@ -160,11 +126,9 @@ def _refine_schedule(
 ) -> list[Step]:
     """The refine's sub-schedule: ``steps`` Euler steps integrating ``sigma`` to 0.
 
-    Uniform in sigma, so the deltas sum to the starting sigma and the loop lands on
-    x0, and every step is still conditioned above 0 (only the integration reaches it).
-    Deliberately NOT the tail of the model's own schedule: a shifted grid leaves
-    whatever sigma the shift puts there at that index, so the same denoise value would 
-    not mean the same strength on every model.
+    Uniform in sigma: the deltas sum to the starting sigma, the loop lands on x0,
+    and every step stays conditioned above 0. A uniform grid also keeps a given
+    sigma the same strength on every model.
     """
     return _sigma_steps([sigma * (1 - i / steps) for i in range(steps + 1)], device, dtype)
 
@@ -184,11 +148,11 @@ class PipelineController:
 
     # ------------------------------------------------------------ listing
     def list_loras(self):
-        """List available LoRA names (delegates to the model)."""
+        """List available LoRA names."""
         return self.model.list_loras()
 
     def list_pixel_upscalers(self):
-        """List available pixel-upscaler names (delegates to the manager)."""
+        """List available pixel-upscaler names."""
         return self._pixel_upscalers.list()
 
     # ---------------------------------------------------------- pipeline cache
@@ -202,12 +166,9 @@ class PipelineController:
     ) -> Tuple:
         """Cache key for prompt conditioning.
 
-        Includes ``lora_specs`` so a change of LoRA invalidates any cached text
-        fusion (the fused text is computed from the LoRA-adjusted DiT weights).
-
-        The edit path appends ``ref_key`` (the image hash) so multimodal encoders
-        (e.g. Qwen Image Edit) whose conditioning depends on the input image
-        invalidate correctly.
+        Includes ``lora_specs`` because the fused text is computed from the
+        LoRA-adjusted DiT weights. The edit path appends ``ref_key`` so encoders
+        whose conditioning depends on the input image invalidate correctly.
         """
         base = (
             prompt,
@@ -228,9 +189,8 @@ class PipelineController:
         """Cache key for the encoded reference latent(s) (edit path).
 
         Hashes each image's normalized pixel bytes (RGBA when it carries
-        transparency, so two refs differing only in their alpha do not share a
-        cache entry) in order, plus the target size, since refs are
-        resize/center-cropped to the working resolution.
+        transparency) in order, plus the target size, since refs are resized and
+        center-cropped to the working resolution.
         """
         digests = tuple(
             hashlib.md5(load_image(img).tobytes()).hexdigest() for img in images
@@ -253,9 +213,8 @@ class PipelineController:
 
         Embeds the prompt key so any prompt/guidance/LoRA change cascades, and the
         custom ``sigmas`` grid so two grids of the same length never share cached
-        latents. The edit path also embeds ``ref_method`` (it changes the reference
-        packing, hence the denoise output) and ``kv_cache`` (the KV cache changes the
-        denoise output, so cached latents must not be shared across the two modes).
+        latents. The edit path also embeds ``ref_method`` and ``kv_cache``, both of
+        which change the denoise output.
         """
         base = (prompt_key, width, height, steps, seed, sampler, sigmas)
         if ref_method is None:
@@ -269,11 +228,8 @@ class PipelineController:
     ) -> Tuple:
         """Cache key for the VAE decode stage.
 
-        Embeds the sampling key so any upstream change cascades.
-        When ``refined`` is True the latent upscale-and-refine pipeline produces
-        different latents (at 2x), so the refined constants are added to the key.
-        The pixel-domain ESRGAN step is deliberately NOT cached (it is fast), so
-        it does not participate in the key.
+        Embeds the sampling key so any upstream change cascades. A refined run
+        produces different latents at 2x, so the refine constants join the key.
         """
         if not refined:
             return ("decode", sampling_key)
@@ -289,25 +245,16 @@ class PipelineController:
     def generate(self, request: GenerateRequest) -> Image.Image:
         """Text-to-image pipeline. Returns a single PIL image."""
         r = self._resolve_pipeline(request)
-        # The pipeline's inference-mode boundary: it covers every stage *and* the
-        # post-decode tail in ``_finalize`` (see ``thenoise.inference``).
         with inference():
             return self._finalize(self._run(request, r), request, r)
 
     def edit(self, request: GenerateRequest) -> Image.Image:
         """Reference-latent instruction editing. Returns a single PIL image.
 
-        Mirrors ``generate`` with two additions:
-
-        * a cached **reference** stage — the VAE-encoded input image, keyed by
-          content so re-editing the same image with a different prompt never
-          re-encodes it;
-        * image-aware prompt conditioning (``encode_prompt(..., image=...)``) so
-          multimodal encoders (Qwen Image Edit) can consume the image as vision
-          tokens in addition to the reference latent.
-
-        The prompt/sampling keys embed the reference key, so any image change
-        cascades downstream automatically.
+        Mirrors ``generate`` with a cached **reference** stage (the VAE-encoded
+        input image, keyed by content) and image-aware prompt conditioning
+        (``encode_prompt(..., image=...)``) so encoders can consume the image as
+        vision tokens in addition to the reference latent.
         """
         model = self.model
         if not model.capability("edit"):
@@ -316,10 +263,8 @@ class PipelineController:
         if not images:
             raise ValueError("edit requires an input image")
 
-        # Derive size from the FIRST image's aspect ratio unless width/height given.
-        # Without explicit width/height the first reference is resized to
-        # ``_EDIT_DEFAULT_SIZE`` (1024) on its largest side, aspect preserved.
-        # A local ``replace`` keeps the caller's request unmutated.
+        # Without explicit width/height the first reference sets the output
+        # aspect ratio, resized to ``_EDIT_DEFAULT_SIZE`` on its largest side.
         local = request
         if request.width is None and request.height is None:
             iw, ih = images[0].size
@@ -334,7 +279,6 @@ class PipelineController:
 
         r = self._resolve_pipeline(local)
         ref_key = self._cache_key_reference(images, r.width, r.height)
-        # Same inference-mode boundary as ``generate`` (see ``thenoise.inference``).
         with inference():
             return self._finalize(
                 self._run(local, r, ref_key=ref_key, ref_method=r.ref_method),
@@ -362,15 +306,12 @@ class PipelineController:
 
         Runs reference -> prompt -> sampling -> decode. ``ref_key``/``ref_method``
         are only set in the edit path; their presence selects the reference stage
-        and image-aware prompt conditioning. Cache keys are computed from
-        *resolved* parameters (``r``) so defaults are accounted for, and each
-        stage embeds the upstream key so a change cascades downstream.
+        and image-aware prompt conditioning.
         """
         model = self.model
         is_edit = ref_key is not None
 
-        # The KV cache is a reference-latent optimization: it requires an edit
-        # request (a reference latent) and a model that supports it.
+        # The KV cache is a reference-latent optimization: it needs an edit request.
         if r.kv_cache and not is_edit:
             raise ValueError("kv_cache requires an edit request (a reference image)")
         if r.kv_cache and is_edit and not model.capability("kv_cache"):
@@ -390,7 +331,6 @@ class PipelineController:
             memory = model.memory
 
             # Stage 0: reference (image) latent — deterministic per image (edit).
-            # Uses the always-resident VAE.
             ref_latents: Optional[list[torch.Tensor]] = None
             if is_edit:
                 if self._cache.reference_hit(ref_key):
@@ -398,16 +338,14 @@ class PipelineController:
                 else:
                     ref_latents = []
                     for img in self._edit_images(request):
-                        # ComfyUI-style: scale each ref to cover the working size
-                        # (center-crop if the aspect ratio differs).
+                        # Scale each ref to cover the working size, center-cropping
+                        # when the aspect ratio differs.
                         cover = resize_to_cover_center_crop(img, r.width, r.height)
-                        # Pixels at the VAE's own width: an RGB VAE gets the alpha
-                        # composited away.
                         pixels = pil_to_pixels(cover, model.pixel_channels)
                         ref_latents.append(model.encode_reference(pixels))  # [1,C,H,W]
                     self._cache.reference_store(ref_key, ref_latents)
 
-            # Stage 1: prompt conditioning — text encoder only (RAW).
+            # Stage 1: prompt conditioning — text encoder only.
             if self._cache.prompt_hit(prompt_key):
                 cond = self._cache.prompt_get()
             else:
@@ -432,7 +370,6 @@ class PipelineController:
 
             # Stage 2: sampling — the dit block. The DiT is resident here, so
             # LoRA switching (which may requantize) and text fusion run in it too.
-            # ``ref_latents``/``ref_method`` are only set in the edit path.
             if self._cache.sampling_hit(sampling_key):
                 latents = self._cache.sampling_get()
             else:
@@ -448,8 +385,7 @@ class PipelineController:
                 self._cache.sampling_store(sampling_key, latents)
 
             # Stage 3/4: upscale + decode (interleaved so cache hits skip upscale).
-            # The DiT is offloaded before the VAE decode so decode's peak (VAE +
-            # decode activations) does not also carry the DiT weights.
+            # The DiT is offloaded first, keeping the decode peak to VAE + activations.
             if self._cache.decode_hit(decode_key):
                 pixels = self._cache.decode_get()
             else:
@@ -458,11 +394,10 @@ class PipelineController:
                     latents = self._upscale_and_refine(latents, cond, params)
                 memory.offload("dit")
                 memory.ensure("vae")
-                pixels = model.decode(latents)  # fp32 GPU [C,H,W], C = vae.pixel_channels
+                pixels = model.decode(latents)  # fp32 GPU [C,H,W]
                 self._cache.decode_store(decode_key, pixels)
 
-            # Leave every swappable component offloaded at rest (the VAE stays
-            # resident; the text encoder was already offloaded after conditioning).
+            # Leave every swappable component offloaded at rest.
             memory.offload("dit")
             return pixels
 
@@ -477,10 +412,8 @@ class PipelineController:
         """Shared denoising pipeline over the model's ``schedule``.
 
         Builds the latent and schedule, then delegates the loop to the selected
-        solver sampler (``euler`` or ``er_sde``). Each sampler calls
-        ``denoise_step`` once per schedule step and runs integration in fp32.
-        ``ref_latents``/``ref_method`` are only set in the edit path. A ``sigmas``
-        grid replaces the model's own schedule verbatim (no shift applied).
+        solver. A ``sigmas`` grid replaces the model's own schedule verbatim (no
+        shift applied).
         """
         model = self.model
         solver = create_sampler(params.sampler, model)
@@ -507,9 +440,7 @@ class PipelineController:
         (cache keys must use the actual resolved values).
         """
         model = self.model
-        # Generation preferences, resolved in one place by the model's precedence:
-        # explicit request (API/CLI) > checkpoint marker > model default
-        # (``DiffusionModel.pref``).
+        # Precedence: explicit request > checkpoint marker > model default.
         width = model.pref("width", request.width)
         height = model.pref("height", request.height)
         steps = model.pref("steps", request.steps)
@@ -536,8 +467,7 @@ class PipelineController:
         if pixel_upscaler and self._pixel_upscalers.upscaler_dir:
             pixel_upscaler = self._pixel_upscalers.validate(pixel_upscaler)
         elif pixel_upscaler:
-            # No --upscaler-dir configured: ignore the requested pixel upscaler
-            # and fall back to a refined (latent-only) upscale rather than failing.
+            # No --upscaler-dir configured: fall back to a latent-only upscale.
             pixel_upscaler = None
         upscale_factor = request.upscale_factor
         if request.upscale and upscale_factor == 1.0:
@@ -557,10 +487,9 @@ class PipelineController:
         )
 
         # The KV cache freezes the reference K/V, which is only valid when those
-        # tokens are conditioned at timestep zero. When the cache is on but the
-        # reference method was left on auto, pick the method that makes it valid
-        # rather than failing; an explicit ``index`` stays explicit, and is rejected
-        # below rather than silently producing a degraded edit.
+        # tokens are conditioned at timestep zero. With the method left on auto,
+        # pick the one that makes it valid; an explicit ``index`` stays explicit and
+        # is rejected below.
         if kv_cache and request.ref_method is None:
             ref_method = "index_timestep_zero"
         if kv_cache and ref_method != "index_timestep_zero":
@@ -570,7 +499,7 @@ class PipelineController:
                 "conditioned at timestep zero"
             )
 
-        # seed=-1 is treated as "random" (same as None)
+        # seed=-1 means "random"
         seed = request.seed
         if seed is None or seed == -1:
             seed = random.randint(0, 2**32 - 1)
@@ -593,23 +522,22 @@ class PipelineController:
         """Decoded pixels -> final PIL image (shared tail of generate/edit).
 
         Notch filter -> pixel upscaler -> resize -> postprocess -> PIL -> crop ->
-        PNG metadata. Kept in one place so the two paths stay in lockstep.
+        PNG metadata.
         """
         model = self.model
 
-        # Qwen notch filter must run immediately after VAE decode (before any
-        # pixel-domain upscaling), so the 2px grid pattern is removed at its
-        # native resolution.
+        # The notch filter runs at the native decoded resolution, before any
+        # pixel-domain upscaling.
         if request.qwen_vae_enhance:
             pixels = nyquist_notch(pixels)
 
-        # Pixel-domain upscaler (fast, not cached) + GPU resize to target size.
+        # Pixel-domain upscaler + GPU resize to target size.
         pixels = self._pixel_upscalers.apply(
             r.pixel_upscaler, pixels, r.pixel_scale
         )
         pixels = resize_to_target(pixels, r.target_width, r.target_height)
 
-        # Stage 5: postprocess (cheap — not cached)
+        # Stage 5: postprocess
         pixels = self.postprocess(
             pixels,
             film_grain_strength=request.film_grain,
@@ -653,11 +581,9 @@ class PipelineController:
     ) -> tuple[float, str]:
         """Validate and return the effective (factor, type).
 
-        ``upscale_factor`` must be in (0.0, 8.0]. ``no-refiner`` mode has no
-        latent 2x multiplier so it is limited to the pixel-upscaler scale. A pixel
-        upscaler (selected by ``pixel_upscaler`` from ``upscaler_dir``) is
-        required for ``no-refiner`` and for ``refined`` factors above the latent
-        2x.
+        ``upscale_factor`` must be in (0.0, 8.0]. A pixel upscaler (selected by
+        ``pixel_upscaler`` from ``upscaler_dir``) is required for ``no-refiner``
+        and for ``refined`` factors above the latent 2x.
         """
         if upscale_type not in ("refined", "no-refiner"):
             raise ValueError(
@@ -683,8 +609,8 @@ class PipelineController:
                     "scripts/download.py --model esrgan)"
                 )
         else:
-            # Max factor depends on the detected model scale: refined gets the
-            # latent 2x multiplier, no-refiner does not.
+            # The max factor is the detected model scale, times the latent 2x for
+            # ``refined``.
             max_refined = model_scale * scale
             if upscale_type == "refined" and factor > max_refined:
                 raise ValueError(
@@ -706,10 +632,8 @@ class PipelineController:
     ) -> int:
         """Pixel-upscaler scale to apply for (factor, type, name), or 0 to skip.
 
-        ``refined`` gets a 2x from the latent path, so the pixel upscaler is only
-        needed when the factor exceeds that 2x. ``no-refiner`` has no latent
-        multiplier and always needs it for any upscale. Uses the detected scale
-        of the requested ``pixel_upscaler``.
+        ``refined`` already gets a 2x from the latent path, so the pixel upscaler
+        is only needed above that; ``no-refiner`` needs it for any upscale.
         """
         if not pixel_upscaler:
             return 0
@@ -729,18 +653,15 @@ class PipelineController:
     ) -> torch.Tensor:
         """Hand the DiT's latent to the model's latent upscaler, then refine it.
 
-        Everything latent-space is the upscaler's: it takes the canonical latent
-        the DiT produced and returns the canonical latent at ``UPSCALE_SCALE``
-        times the resolution, ready to feed back into the DiT. What is left here is
-        the short low-strength refine at that new size; its output is the canonical
-        latent that ``decode`` consumes.
+        The upscaler takes the canonical latent at the DiT's resolution and returns
+        the canonical latent at ``UPSCALE_SCALE`` times it; what is left here is the
+        short low-strength refine whose output feeds ``decode``.
         """
         model = self.model
         z_up = model.get_upscaler()(latents)
         scale = model.UPSCALE_SCALE
 
-        # One short low-strength refine denoise at the upscaled size. Only the size
-        # is forwarded: the refine brings its own sigma and step count (``_refine``).
+        # Only the size is forwarded: the refine brings its own sigma and steps.
         up_params = replace(
             params,
             height=scale * params.height,
@@ -761,17 +682,13 @@ class PipelineController:
         if steps <= 0 or sigma <= 0.0:
             return z
 
-        # ComfyUI CONST noise scaling: x = sigma*noise + (1-sigma)*z.
+        # Noise scaling: x = sigma*noise + (1-sigma)*z.
         generator = torch.Generator(device=model.device).manual_seed(params.seed)
         noise = torch.randn_like(z, generator=generator)
         noised = sigma * noise + (1.0 - sigma) * z
 
-        # NOTE: this refine pass runs WITHOUT the reference image. ``ref`` is not
-        # forwarded, so ``prepare_latent`` stashes ``_ref_tokens`` = None and the
-        # refine denoise is completely unconditioned on the edit reference.
-        # For FluxKlein this is a deliberate simplification — in practice the
-        # low-strength refine shows no visible ill effect — but keep it in mind if
-        # the refine quality is ever revisited.
+        # No ``ref`` is forwarded, so the refine runs unconditioned on the edit
+        # reference.
         refine_params = replace(params, steps=steps)
         x = model.prepare_latent(noised, cond, refine_params)
         solver = EulerSampler(model)

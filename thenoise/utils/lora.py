@@ -2,8 +2,7 @@
 
 Everything up to ``apply_lora_to_model`` is pure state-dict algebra: nothing here
 knows what kind of layer a LoRA lands on. A module takes one by exposing
-``apply_lora(factors) -> LoraMode`` (``thenoise.dit.quantized.QuantizedLinear``,
-the only such layer here); a LoRA naming anything else is reported unused.
+``apply_lora(factors) -> LoraMode``; a LoRA naming anything else is reported unused.
 """
 from __future__ import annotations
 
@@ -43,7 +42,7 @@ class LoraFactors(NamedTuple):
     """One target's whole LoRA as a single rank-summed factor pair.
 
     ``up`` carries every alpha and strength, so the weight delta is exactly
-    ``up @ down`` and a runtime branch is ``(x @ down.T) @ up.T``.
+    ``up @ down``.
     """
 
     down: torch.Tensor
@@ -73,10 +72,7 @@ _RENAMES = (
 
 
 def _normalize_lora_suffix(lora_sd: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-    """Rewrite every factor spelling to the canonical ``lora_A``/``lora_B`` one.
-
-    Alphas and already-canonical keys pass through unchanged.
-    """
+    """Rewrite every factor spelling to the canonical ``lora_A``/``lora_B`` one."""
     out: Dict[str, torch.Tensor] = {}
     for k, v in lora_sd.items():
         for old, new in _RENAMES:
@@ -94,12 +90,7 @@ def _match_lora_keys(
     model_weight_key: str,
     lora_weight_keys: set,
 ) -> Optional[Tuple[str, str, str]]:
-    """The (down, up, alpha) keys of the LoRA targeting a model weight, if any.
-
-    Tries the training tools' conventions in order: sd-scripts underscore-joined
-    (with and without the ``lora_unet_`` prefix), then the dotted
-    diffusers/ComfyUI forms.
-    """
+    """The (down, up, alpha) keys of the LoRA targeting a model weight, if any."""
     if not model_weight_key.endswith(".weight"):
         return None
 
@@ -121,7 +112,6 @@ def _match_lora_keys(
 
 #: Fusion specs for the sub-projection stackings used here: fused module name ->
 #: the sub-projections a LoRA trains it as, in the fused matrix's row order.
-#: Adapters list the ones their modules use in ``DiffusionModel.lora_fusions``.
 FUSE_QKV: Dict[str, Tuple[str, ...]] = {"qkv": ("to_q", "to_k", "to_v")}
 FUSE_GATE_UP: Dict[str, Tuple[str, ...]] = {"gate_up": ("gate_layer", "proj")}
 
@@ -130,7 +120,7 @@ _FACTOR_B = ".lora_B.weight"
 
 
 def _projection_scale(lora_sd: Dict[str, torch.Tensor], alpha_key: str, rank: int) -> float:
-    """ComfyUI's ``alpha / rank``, and exactly ``1.0`` when there is no alpha key."""
+    """``alpha / rank``, or ``1.0`` when there is no alpha key."""
     alpha = lora_sd.get(alpha_key)
     return 1.0 if alpha is None else float(alpha) / max(rank, 1)
 
@@ -142,16 +132,15 @@ def _fuse_stacked(
 ) -> Dict[str, torch.Tensor]:
     """Fuse per-sub-projection factors into one stacked-projection pair.
 
-    Several projections come trained separately (``to_q``/``to_k``/``to_v``,
-    ``gate_layer``/``proj``) but stored fused, their parts as row blocks:
-    ``A_fused = cat([A_part], dim=0)`` and ``B_fused = block_diag(*B_part)``. A
-    fused pair carries one rank, so each part's ``alpha / rank`` is folded into its
+    Several projections can be trained separately but stored fused, their parts as
+    row blocks: ``A_fused = cat([A_part], dim=0)`` and ``B_fused = block_diag(*B_part)``.
+    A fused pair carries one rank, so each part's ``alpha / rank`` is folded into its
     ``lora_A`` first (consuming its ``.alpha``), which makes the fused delta exactly
     the stack of the separate merges.
 
     Parts the LoRA skips get zero rows in ``B_fused``, which needs the parts to
-    share one output width; anything that cannot be laid out unambiguously is left
-    untouched and logged rather than written to the wrong rows.
+    share one output width; anything that cannot be laid out unambiguously is logged
+    and left untouched.
     """
     ends = tuple(f"{p}{_FACTOR_A}" for p in parts)
     prefixes = sorted({k[: -len(e)] for k in lora_sd for e in ends if k.endswith(e)})
@@ -253,8 +242,7 @@ def _fold(pairs: Sequence[Tuple[torch.Tensor, torch.Tensor, float]]) -> LoraFact
     """Fold ``(down, up, scale)`` triples into the one pair summing ``scale * up @ down``.
 
     The rank axis is the one the product sums over, so concatenating along it is
-    the exact sum of any number of LoRAs on a target. A lone unscaled pair is
-    passed through untouched.
+    the exact sum of any number of LoRAs on a target.
     """
     if len(pairs) == 1 and pairs[0][2] == 1.0:
         down, up, _ = pairs[0]
@@ -310,8 +298,7 @@ class LoRAApplyResult(TypedDict):
     """Undo state for ``apply_lora_to_model``: one ``_Undo`` per touched target.
 
     The rank-reduced factors of the BAKED targets are kept (recomputing their delta
-    on undo is far cheaper than caching full-sized ones); quantized targets only
-    need the checkpoint key they are reloaded from.
+    on undo is cheaper than caching full-sized ones).
     """
 
     dit_path: Optional[str]
@@ -330,9 +317,8 @@ def apply_lora_to_model(
 
     All the LoRAs hitting one target are folded into a single ``LoraFactors``, so a
     layer is handed one LoRA and answers with the ``LoraMode`` it used. ``key_map``
-    and ``fusions`` are the model's own naming corrections (see
-    ``_normalize_lora_sd``) and ``dit_path`` the checkpoint baked quantized layers
-    reload their originals from.
+    and ``fusions`` are the model's own naming corrections and ``dit_path`` the
+    checkpoint baked quantized layers reload their originals from.
     """
     base_model = _unwrap_compiled(model)
     lora_sds = [_normalize_lora_sd(sd, key_map, fusions) for sd in lora_sds]

@@ -7,12 +7,7 @@ import torch.nn.functional as F
 
 
 class RMSNorm(nn.Module):
-    """RMS normalization with a learnable scale ``weight``.
-
-    ``weight`` is ones-initialized, so the module starts as plain RMS
-    normalization; the variance is computed in fp32 and the normalized result is
-    cast back to the input dtype.
-    """
+    """RMS normalization with a learnable scale ``weight``, ones-initialized."""
 
     def __init__(self, dim: int, eps: float = 1e-5) -> None:
         super().__init__()

@@ -54,31 +54,24 @@ def _complete_bf16_state_dict(model):
 # --------------------------------------------------------------------------- replace_linears
 
 
-def test_replace_linears_swaps_nn_linear_instances():
+def test_replace_linears_swaps_linears_and_leaves_everything_else():
     model = _FakeQwen()
-    # Before the swap the linears are plain nn.Linear.
-    assert isinstance(model.model.layers[0].q_proj, nn.Linear)
     assert not isinstance(model.model.layers[0].q_proj, QuantizedLinear)
 
     replace_linears(model)
-    assert isinstance(model.model.layers[0].q_proj, QuantizedLinear)
-    assert model.model.layers[0].q_proj.in_features == 64
-    assert model.model.layers[0].q_proj.bias is None
+
+    swapped = model.model.layers[0].q_proj
+    assert isinstance(swapped, QuantizedLinear)
+    assert swapped.in_features == 64
+    assert swapped.bias is None  # a bias-free linear stays bias-free
+    bias = nn.Linear(8, 16, bias=True)
+    holder = nn.Module()
+    holder.proj = bias
+    replace_linears(holder)
+    assert isinstance(holder.proj, QuantizedLinear) and holder.proj.bias is not None
     # Non-linear leaves (embeddings / norms / buffers) are left alone.
     assert isinstance(model.model.embed_tokens, nn.Embedding)
     assert isinstance(model.model.norm, nn.LayerNorm)
-
-
-def test_replace_linears_preserves_bias():
-    class _HasBias(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.proj = nn.Linear(8, 16, bias=True)
-
-    m = _HasBias()
-    replace_linears(m)
-    assert isinstance(m.proj, QuantizedLinear)
-    assert m.proj.bias is not None
 
 
 # --------------------------------------------------------------------------- load_text_encoder_weights (quantized)
@@ -158,6 +151,18 @@ def test_load_text_encoder_weights_drops_tied_lm_head(tmp_path):
     load_text_encoder_weights(model, str(p), device="cpu", dtype=torch.bfloat16)
     assert model.model.layers[0].q_proj.weight.shape == (64, 64)
     assert not hasattr(model, "lm_head")
+
+
+def test_load_text_encoder_weights_drops_checkpoint_markers(tmp_path):
+    model = _build_model()
+    sd = _complete_bf16_state_dict(model)
+    sd["__index_timestep_zero__"] = torch.zeros(1)
+    sd["model.diffusion_model.__index_timestep_zero__"] = torch.zeros(1)
+    p = tmp_path / "te_marker.safetensors"
+    write_safetensors(p, sd)
+
+    load_text_encoder_weights(model, str(p), device="cpu", dtype=torch.bfloat16)
+    assert model.model.layers[0].q_proj.weight.shape == (64, 64)
 
 
 def test_load_text_encoder_weights_model_prefix_key_map(tmp_path):

@@ -1,9 +1,8 @@
-"""Standalone pixel upscaling controller.
+"""Standalone pixel upscaling controller for the ``/upscale`` endpoint and the
+``upscale`` CLI subcommand.
 
-Model-free analog of ``PipelineController`` for the ``/upscale`` endpoint and
-the ``upscale`` CLI subcommand. Owns the inference lock (serializes on-device
-upscaler loads), so callers -- like ``text2image`` -- hold no lock themselves.
-The manager stays unchanged; this controller is the caller that serializes.
+Owns the inference lock, so it serializes on-device upscaler loads and callers --
+like ``text2image`` -- hold no lock themselves.
 """
 from __future__ import annotations
 
@@ -29,12 +28,10 @@ class PixelUpscaleController:
 
         Validates the upscaler name and factor, applies the model at its detected
         native scale under the lock, then resizes to the requested factor (rounded
-        to integer output dimensions). An ``upscale_factor`` of ``0.0`` is a
-        sentinel meaning "use the model's detected native scale".
+        to integer output dimensions). An ``upscale_factor`` of ``0.0`` means "use
+        the model's detected native scale".
 
-        An input carrying transparency comes back carrying transparency (the
-        upscaler itself is RGB-only and handles the alpha, see
-        :meth:`PixelUpscalerManager.apply`).
+        Input transparency is preserved: the RGB-only upscaler handles the alpha.
         """
         name = self._pixel_upscalers.validate(pixel_upscaler)
         scale = self._pixel_upscalers.scale(name)
@@ -50,10 +47,8 @@ class PixelUpscaleController:
                 f"upscale_factor must be in [1, {scale}] for a {scale}x upscaler"
             )
 
-        # ``None`` = keep whatever the input carried.
-        # The inference-mode boundary for this entry point (see
-        # ``thenoise.inference``): the upscaler forward, the resize and the PIL
-        # conversion all run inside it.
+        # ``None`` = keep whatever the input carried. The upscaler forward, the
+        # resize and the PIL conversion all run inside the inference boundary.
         with inference():
             pixels = pil_to_pixels(image, None).to(self._pixel_upscalers.device)
             with self._lock:

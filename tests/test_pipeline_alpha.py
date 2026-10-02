@@ -1,9 +1,9 @@
 """Alpha-aware pipeline tests: the channels an RGBA model gets in and gives out.
 
 The pipeline carries the VAE's channel count from the input image to the PNG, so
-these tests cover the seams where that can leak: the reference (edit) encode, the
-reference cache key, and the decode -> PIL tail. They run over the weight-free
-``StubModel`` (CPU, fp32) with its ``pixel_channels`` overridden to 4.
+these cover the seams where it can leak: the reference (edit) encode, the reference
+cache key, and the decode -> PIL tail, on the weight-free ``StubModel`` with
+``pixel_channels`` overridden to 4.
 """
 from __future__ import annotations
 
@@ -91,20 +91,15 @@ def test_reference_cache_key_sees_the_alpha():
 
 
 def test_generate_returns_rgba_when_the_vae_decodes_four_channels():
-    """The alpha the VAE decoded is the alpha in the returned PIL image."""
-    image = _controller(_RGBAStubModel()).generate(_request(steps=1))
+    """The alpha the VAE decoded is the alpha in the returned PIL image — and the
+    RGB-only postprocessing (sharpening, grain) must leave the matte standing."""
+    controller = _controller(_RGBAStubModel())
+    image = controller.generate(_request(steps=1))
 
     assert image.mode == "RGBA"
     # The matte is the one the stub decode wrote (0.25 -> 159/255), not 255.
     assert image.getpixel((0, 0))[3] == pytest.approx(159, abs=1)
-
-
-def test_postprocessing_does_not_strip_the_alpha():
-    """Sharpening and grain work on RGB and must leave the matte standing."""
-    image = _controller(_RGBAStubModel()).generate(
-        _request(steps=1, sharpening=0.5, film_grain=2.0)
-    )
-    assert image.mode == "RGBA"
+    assert controller.generate(_request(steps=1, sharpening=0.5, film_grain=2.0)).mode == "RGBA"
 
 
 def test_pixel_upscale_of_an_rgba_generation_keeps_it_rgba(tmp_path, monkeypatch):

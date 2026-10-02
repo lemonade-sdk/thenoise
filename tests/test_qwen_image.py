@@ -1,12 +1,8 @@
-"""Qwen-Image adapter tests (no real weights / no GPU needed).
+"""Qwen-Image: token pack/unpack, the latent format, the reference-latent paths and
+the reference KV cache (a small end-to-end DiT forward plus the adapter's driving).
 
-Covers the flow schedule, the token pack/unpack helpers, the vendored
-tokenizer config directory, the Qwen-Image latent format, the reference-latent
-packing rejection, a small end-to-end DiT forward with the reference-latent KV
-cache (eager — see ``conftest``) and the adapter's fill/read driving of it.
-
-Detection and the per-model defaults live in the catalog-wide tables of
-``test_detect.py`` / ``test_catalog.py``.
+The flow schedule contract, detection and per-model defaults are catalog-wide
+(``test_schedules.py`` / ``test_detect.py`` / ``test_catalog.py``).
 """
 from __future__ import annotations
 
@@ -17,7 +13,6 @@ import torch
 
 from thenoise.dit.kvcache import KVCache
 from thenoise.dit.qwen_image import sampling as qwen_sampling
-from thenoise.dit.qwen_image import utils as qwen_utils
 from thenoise.dit.qwen_image.models import (
     QwenImageTransformer2DModel,
     build_txt_positions,
@@ -27,29 +22,11 @@ from thenoise.models.qwen_image import QwenImageModel
 from thenoise.models.config import SamplingParams
 from thenoise.utils.image_tensor import resize_to_area
 from thenoise.utils.latents import pack_latents, unpack_latents
-from thenoise.utils.math import calculate_shift
-from thenoise.utils.text_encoder import QWEN25_TOKENIZER_CONFIG_DIR
 from thenoise.upscale import make_wan21
 from thenoise.vae import AutoencoderKLQwenImage
 
 
 # ---------------------------------------------------------------- flow schedule
-
-
-def test_schedule_is_flow_grid_1_to_0():
-    ts = qwen_sampling.get_schedule(8, 4096)  # 1024x1024 -> 64x64 packed -> 4096 tokens
-    assert len(ts) == 9  # num_steps + 1
-    assert ts[0] == 1.0
-    assert ts[-1] == 0.0
-    # Strictly decreasing.
-    assert all(ts[i] > ts[i + 1] for i in range(len(ts) - 1))
-
-
-def test_schedule_depends_on_token_count():
-    ts_small = qwen_sampling.get_schedule(8, 256)
-    ts_large = qwen_sampling.get_schedule(8, 4096)
-    # A larger image token count gets a larger empirical shift (steeper early steps).
-    assert ts_small[1] < ts_large[1]
 
 
 def test_single_step_schedule_is_finite():
@@ -61,10 +38,6 @@ def test_single_step_schedule_is_finite():
     sigmas = qwen_sampling.get_sigmas(1, 256, qwen_sampling.compute_mu(256))
     assert torch.isfinite(sigmas).all()
     assert sigmas[0] == 1.0
-
-
-def test_calculate_shift_increases_with_token_count():
-    assert calculate_shift(256) < calculate_shift(4096)
 
 
 # ------------------------------------------------------------------ latents
@@ -100,27 +73,13 @@ def test_resize_to_area():
     assert out.width * out.height < big.width * big.height
     assert abs(out.width / out.height - 0.5) < 0.01
 
-# ------------------------------------------------------------- vendored config
-
-
-def test_vendored_tokenizer_config_dir_exists():
-    # The tokenizer config files are checked into the package so the tokenizer and
-    # processor load offline without fetching from the Hub (mirrors the anima/zimage
-    # ``configs/`` pattern).
-    from pathlib import Path
-
-    d = Path(QWEN25_TOKENIZER_CONFIG_DIR)
-    assert d.is_dir()
-    for required in ("tokenizer.json", "tokenizer_config.json"):
-        assert (d / required).is_file(), f"missing vendored tokenizer file {required}"
-
-
 # ---------------------------------------------------------------- latent format
 
 
 def test_qwen_upscale_format_is_wan21():
-    # Qwen-Image uses the shared Wan21 z-score latent format; the adaptor's mean/std
-    # must match the VAE's own normalization, in its ``_latents_*`` buffers.
+    """Qwen-Image uses the shared Wan21 z-score format, whose mean/std must match the
+    VAE's own normalization in its ``_latents_*`` buffers.
+    """
     adaptor = make_wan21()
     vae = AutoencoderKLQwenImage()
     assert torch.allclose(adaptor.mean.view(-1), vae._latents_mean.view(-1))
@@ -130,29 +89,22 @@ def test_qwen_upscale_format_is_wan21():
 # ----------------------------------------------------------------- reference
 
 
-def test_pack_reference_latent_rejects_unsupported_method():
-    """An unsupported ``ref_latents_method`` raises rather than being ignored."""
+def test_pack_reference_latent_accepts_both_index_methods_and_rejects_the_rest():
+    """``index_timestep_zero`` packs exactly like ``index`` (only the modulation
+    differs), and an edit checkpoint carrying that marker auto-resolves to it, so it
+    must be accepted. Anything else raises rather than being quietly ignored.
+    """
     model = QwenImageModel.__new__(QwenImageModel)  # no __init__ (no weights)
     model.device = "cpu"
     model.dtype = torch.float32
-    with pytest.raises(ValueError, match="unsupported ref_latents_method"):
-        model.pack_reference_latent(torch.randn(1, 16, 4, 4), method="crop")
-
-
-def test_pack_reference_latent_accepts_both_methods():
-    """``index_timestep_zero`` packs like ``index`` (only the modulation differs).
-
-    Both reference methods must be accepted: an edit checkpoint carrying the
-    ``__index_timestep_zero__`` marker now auto-resolves to it, so rejecting it
-    would break the automatic preference layer.
-    """
-    model = QwenImageModel.__new__(QwenImageModel)
-    model.device = "cpu"
-    model.dtype = torch.float32
     ref = torch.randn(1, 16, 4, 4)
-    index_tokens, _ = model.pack_reference_latent(ref, method="index")
-    zero_tokens, _ = model.pack_reference_latent(ref, method="index_timestep_zero")
-    assert torch.equal(index_tokens, zero_tokens)
+
+    assert torch.equal(
+        model.pack_reference_latent(ref, method="index")[0],
+        model.pack_reference_latent(ref, method="index_timestep_zero")[0],
+    )
+    with pytest.raises(ValueError, match="unsupported ref_latents_method"):
+        model.pack_reference_latent(ref, method="crop")
 
 
 # --------------------------------------------------------------- DiT forward

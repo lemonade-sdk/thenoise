@@ -2,18 +2,12 @@
 # ``flux2_models.AutoEncoder`` (itself a copy of the Black Forest Labs FLUX repo,
 # Apache-2.0).
 #
-# Both the decoder (still-image decode) and the encoder (image -> latent for
-# reference-latent editing) are kept: the ``encoder``/``decoder`` modules, the
-# ``quant_conv``/``post_quant_conv`` 1x1s, and the BatchNorm ``bn`` whose running
-# statistics normalize the packed latent.
-#
-# Flux.2 latents are *packed*: the AE packs a 32-channel latent 2x2 into 128 channels
-# (spatial compression 16 in packed space), then normalizes via BatchNorm. The DiT
-# denoises this normalized 128-channel packed latent, so the canonical latent here is
-# ``[B, 128, H//16, W//16]``. Decode un-normalizes (``z*sqrt(var) + mean``), unpacks
-# to ``[B, 32, H//8, W//8]``, runs the decoder, and clamps to [-1, 1]. Encode is the
-# inverse: pixels -> encoder -> quant_conv -> 32ch@8x, then patchifies to 128ch@16x
-# and normalizes via BatchNorm.
+# Flux.2 latents are *packed*: a 32-channel latent packed 2x2 into 128 channels
+# (16x spatial compression in packed space), normalized via BatchNorm. The DiT
+# denoises that normalized 128-channel packed latent, so the canonical latent here
+# is ``[B, 128, H//16, W//16]``. Decode un-normalizes (``z*sqrt(var) + mean``),
+# unpacks to ``[B, 32, H//8, W//8]``, runs the decoder, and clamps to [-1, 1];
+# encode is the inverse.
 
 # Copyright 2023 The HuggingFace Team. Licensed under the Apache-2.0 License.
 # Copyright 2024 Black Forest Labs. Flux is released under the Apache-2.0 License.
@@ -39,7 +33,7 @@ def swish(x: torch.Tensor) -> torch.Tensor:
 
 
 def _patchify(z: torch.Tensor) -> torch.Tensor:
-    """32ch -> 128ch via 2x2 spatial packing (inverse of ``_unpatchify``)."""
+    """32ch -> 128ch via 2x2 spatial packing."""
     B, C, H, W = z.shape
     return (
         z.float()
@@ -134,13 +128,7 @@ class _Downsample(nn.Module):
 
 
 class _Encoder(nn.Module):
-    """Flux.2 encoder: pixels -> 32ch raw latent (8x spatial down), then quant_conv.
-
-    Exact mirror of ``_Decoder`` (ch 128, ch_mult [1,2,4,4], 2 res-blocks per level,
-    mid attention only), with a ``quant_conv`` 1x1 reducing the 2*z_channels output
-    to ``z_channels``. Key naming matches the official ``flux2-vae.safetensors``
-    (``encoder.*``, including ``encoder.quant_conv.*``).
-    """
+    """Flux.2 encoder: pixels -> 32ch raw latent (8x spatial down), then quant_conv."""
 
     def __init__(
         self,
@@ -172,7 +160,7 @@ class _Encoder(nn.Module):
                 block_in = block_out
             down = nn.Module()
             down.block = block
-            down.attn = attn  # no attention in the down path (only mid), matches decoder
+            down.attn = attn  # attention only in the mid block
             if i_level != self.num_resolutions - 1:
                 down.downsample = _Downsample(block_in)
             self.down.append(down)
@@ -184,8 +172,7 @@ class _Encoder(nn.Module):
 
         self.norm_out = nn.GroupNorm(num_groups=32, num_channels=block_in, eps=1e-6, affine=True)
         self.conv_out = nn.Conv2d(block_in, 2 * z_channels, kernel_size=3, stride=1, padding=1)
-        # quant_conv keeps the 2*z_channels (mean+logvar) output; the gaussian
-        # mean is taken by the caller (``encode_pixels_to_latents``) in eval mode.
+        # The 2*z_channels (mean+logvar) output; the caller takes the gaussian mean.
         self.quant_conv = nn.Conv2d(2 * z_channels, 2 * z_channels, kernel_size=1)
 
     @property
@@ -288,13 +275,12 @@ class AutoencoderKLFlux2(nn.Module):
     """Flux.2 VAE (encoder + decoder), with musubi/Flux key naming.
 
     Accepts/produces the canonical packed latent ``[B, 128, H//16, W//16]``
-    (normalized). ``decode_to_pixels`` returns pixels in [-1, 1];
-    ``encode_pixels_to_latents`` takes pixels in [-1, 1].
+    (normalized); pixels are in [-1, 1] both ways.
     """
 
-    z_dim = 128  # packed latent channels (the canonical Flux.2 latent)
+    z_dim = 128  # packed latent channels
     spatial_compression = 16  # pixel / packed-latent ratio
-    pixel_channels = 3  # RGB both ways: no alpha to carry across the boundaries
+    pixel_channels = 3  # RGB
     bn_eps = 1e-4
 
     def __init__(self, channels: int = 128):
@@ -319,21 +305,14 @@ class AutoencoderKLFlux2(nn.Module):
     def normalize(self, z: torch.Tensor) -> torch.Tensor:
         """Raw packed latent -> normalized canonical latent (``(z - mean) / sqrt(var)``).
 
-        Only the BN's running stats are read (its ``forward`` never runs), so the
-        module's train/eval flag is irrelevant here — it is set once at load.
+        Only the BN's running stats are read; its ``forward`` never runs.
         """
         s = torch.sqrt(self.bn.running_var.view(1, -1, 1, 1) + self.bn_eps)
         m = self.bn.running_mean.view(1, -1, 1, 1)
         return (z.float() - m) / s
 
     def encode_pixels_to_latents(self, pixels: torch.Tensor) -> torch.Tensor:
-        """Encode pixels (``[B, C, H, W]`` in [-1, 1]) -> canonical packed latent.
-
-        Pixels -> encoder -> 2*z_channels (mean+logvar) -> gaussian mean ->
-        32ch@8x raw latent -> patchify to 128ch@16x -> BatchNorm normalize.
-        The inverse of ``decode_to_pixels`` (plus the eval-mode gaussian mean).
-        The input is cast to the encoder's dtype (the model runs in bf16).
-        """
+        """Encode pixels (``[B, C, H, W]`` in [-1, 1]) -> canonical packed latent."""
         z = self.encoder(pixels.to(device=self.device, dtype=self.encoder.dtype))  # [B, 2*z_channels, H//8, W//8]
         z = z.chunk(2, dim=1)[0]  # gaussian mean (eval mode) -> [B, z_channels, ...]
         z = _patchify(z)  # [B, 32, H//8, W//8] -> [B, 128, H//16, W//16]
@@ -352,12 +331,7 @@ def load_flux2_vae(
     device: Union[str, torch.device],
     dtype: Optional[torch.dtype] = None,
 ) -> AutoencoderKLFlux2:
-    """Load the Flux.2 VAE weights from ``vae_path`` (e.g. ae.safetensors).
-
-    Keeps the encoder (+ its ``quant_conv``), decoder (+ ``post_quant_conv``) and
-    BatchNorm keys; the official file's keys carry the matching ``encoder.`` /
-    ``decoder.`` / ``bn.`` prefixes directly.
-    """
+    """Load the Flux.2 VAE weights from ``vae_path``."""
     device = torch.device(device)
     logger.info("Loading Flux.2 VAE from %s", vae_path)
     state_dict = load_safetensors(vae_path, device=device)

@@ -1,7 +1,6 @@
 """Z-Image model loading utilities.
 
-The DiT is the S3-DiT transformer; the text encoder is a Qwen3-4B model whose hidden
-states feed the DiT's caption embedder.
+The text encoder is a Qwen3-4B whose hidden states feed the DiT's caption embedder.
 """
 from __future__ import annotations
 
@@ -57,8 +56,7 @@ def load_zimage_dit(
     with init_empty_weights():
         dit = ZImageTransformer2DModel(**cfg)
 
-    # Z-Image ships the fused attention layout already, so only the QK-norm rename
-    # ever applies; the shared map is a no-op for every other key.
+    # Z-Image ships the fused attention layout already; the map only renames QK norms.
     return load_dit(dit, dit_path, device=device, dtype=dtype, key_map=lumina_key_map)
 
 
@@ -70,18 +68,14 @@ def load_zimage_text_encoder(
 ) -> tuple:
     """Load the Z-Image Qwen3 text encoder + tokenizer.
 
-    ``path`` is a single safetensors file (e.g. ComfyUI's
-    ``text_encoders/qwen_3_4b.safetensors``) in the bare HF Qwen3 layout
-    (``model.layers.N.*``, ``model.embed_tokens.weight``, ``model.norm.weight``;
-    ``lm_head.weight`` tied to the embeddings). The model config is vendored, so no
-    ``config.json`` is needed next to the weights.
+    ``path`` is a single safetensors file in the bare HF Qwen3 layout
+    (``lm_head.weight`` tied to the embeddings). The model config is vendored.
 
-    The tokenizer is loaded from ``tokenizer_dir`` if given (a local directory), else
-    from the vendored ``configs/tokenizer/`` directory. Either must carry the Qwen
-    chat template used by the caption encoder.
+    The tokenizer comes from ``tokenizer_dir`` when given, else the vendored
+    ``configs/tokenizer/`` directory; either must carry the Qwen chat template.
 
-    Returns ``(text_encoder, tokenizer)`` where ``text_encoder`` is the bare Qwen3
-    model (LM head dropped) whose ``hidden_states`` feed the DiT's caption embedder.
+    Returns ``(text_encoder, tokenizer)``, the encoder being the bare Qwen3 model
+    (LM head dropped).
     """
     if not path.endswith(".safetensors"):
         raise ValueError(
@@ -100,6 +94,6 @@ def load_zimage_text_encoder(
     tokenizer = load_tokenizer(tokenizer_dir)
 
     qwen3.config.use_cache = False
-    model = qwen3.model  # bare Qwen3Model; hidden_states feed the caption embedder
+    model = qwen3.model
     logger.info(f"Loaded Z-Image text encoder. Parameters: {sum(p.numel() for p in model.parameters()):,}")
     return model, tokenizer

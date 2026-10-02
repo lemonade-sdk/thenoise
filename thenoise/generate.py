@@ -1,11 +1,7 @@
 """CLI generation: load one model, run one generation, save a single PNG.
 
-Thin wrappers over the same adapter ``generate()``/``edit()`` methods the HTTP API
-uses, so there is no logic drift between the two surfaces. The seed is resolved
-here (when not given) so it can be reported for reproducibility.
-
-``run_generate`` is text-to-image only; ``run_edit`` handles instruction-based
-editing through ``pipeline.edit`` with the input image(s).
+Thin wrappers over the same ``generate()``/``edit()`` paths the HTTP API uses. The
+seed is resolved here (when not given) so it can be reported for reproducibility.
 """
 from __future__ import annotations
 
@@ -23,7 +19,7 @@ _MAX_DIM = 4096
 
 
 def _check_dim(name: str, value) -> None:
-    """Reject an out-of-range dimension. 0 is not "auto" (omitting the flag is)."""
+    """Reject an out-of-range dimension; only an omitted flag means "auto"."""
     if value is not None and (value < 1 or value > _MAX_DIM):
         print(f"error: {name} must be between 1 and {_MAX_DIM} (got {value}).", file=sys.stderr)
         sys.exit(1)
@@ -89,8 +85,7 @@ def run_generate(args) -> None:
 
     image = runtime.pipeline.generate(request)
 
-    # If the user omitted the output extension, PIL cannot infer a format.
-    # Default to PNG so a bare --out like ``out`` (or ``dir/out``) still works.
+    # Without an output extension PIL cannot infer a format; default to PNG.
     out_path = ensure_png_extension(args.out)
 
     image.save(out_path, pnginfo=getattr(image, "_pnginfo", None))
@@ -98,8 +93,7 @@ def run_generate(args) -> None:
 
 
 def run_edit(args) -> None:
-    """One-shot instruction-based edit: load the model, edit one image, save a PNG.
-    """
+    """One-shot instruction-based edit: load the model, edit one image, save a PNG."""
     _check_dim("width", args.width)
     _check_dim("height", args.height)
 
@@ -130,7 +124,7 @@ def run_edit(args) -> None:
 
     from thenoise.utils.image_tensor import load_image
 
-    # ``--image`` is repeatable; first sets aspect/size, rest are refs. Opened
+    # ``--image`` is repeatable; the first one sets the output size. Opened
     # without flattening: an alpha is the model's call.
     request.image = [load_image(p) for p in args.image]
     image = runtime.pipeline.edit(request)

@@ -96,11 +96,7 @@ class DiagonalGaussianDistribution(object):
 
 
 class QwenImageRMS_norm(nn.Module):
-    r"""RMS normalization over the channel dim for a 2D image tensor ``[B, C, H, W]``.
-
-    ``F.normalize(x, dim=1) * dim**0.5`` equals ``x * rsqrt(mean(x^2))``, i.e. the
-    standard RMS norm. The per-channel ``gamma`` has shape ``(C, 1, 1)``.
-    """
+    r"""RMS normalization over the channel dim of ``[B, C, H, W]`` (``gamma``: ``(C, 1, 1)``)."""
 
     def __init__(self, dim: int) -> None:
         super().__init__()
@@ -112,23 +108,13 @@ class QwenImageRMS_norm(nn.Module):
 
 
 class QwenImageResample(nn.Module):
-    r"""
-    A 2D spatial resampling module (upsample or downsample) for single-frame images.
-
-    Args:
-        dim (int): The number of input/output channels.
-        mode (str): The resampling mode. Must be one of:
-            - 'upsample2d': 2D upsampling with nearest-exact interpolation and convolution.
-            - 'downsample2d': 2D downsampling with zero-padding and convolution.
-            - anything else: Identity (no resampling).
-    """
+    r"""2D spatial resampling: ``upsample2d``, ``downsample2d``, else identity."""
 
     def __init__(self, dim: int, mode: str) -> None:
         super().__init__()
         self.dim = dim
         self.mode = mode
 
-        # layers
         if mode == "upsample2d":
             self.resample = nn.Sequential(
                 nn.Upsample(scale_factor=2.0, mode="nearest-exact"),
@@ -144,14 +130,7 @@ class QwenImageResample(nn.Module):
 
 
 class QwenImageResidualBlock(nn.Module):
-    r"""
-    A custom residual block module.
-
-    Args:
-        in_dim (int): Number of input channels.
-        out_dim (int): Number of output channels.
-        non_linearity (str, optional): Type of non-linearity to use. Default is "silu".
-    """
+    r"""Residual block: norm/SiLU/conv twice, plus a 1x1 shortcut when the width changes."""
 
     def __init__(
         self,
@@ -163,9 +142,8 @@ class QwenImageResidualBlock(nn.Module):
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
-        self.nonlinearity = nn.SiLU()  # get_activation(non_linearity)
+        self.nonlinearity = nn.SiLU()
 
-        # layers
         self.norm1 = QwenImageRMS_norm(in_dim)
         self.conv1 = nn.Conv2d(in_dim, out_dim, 3, padding=1)
         self.norm2 = QwenImageRMS_norm(out_dim)
@@ -173,37 +151,27 @@ class QwenImageResidualBlock(nn.Module):
         self.conv_shortcut = nn.Conv2d(in_dim, out_dim, 1) if in_dim != out_dim else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Apply shortcut connection
         h = self.conv_shortcut(x)
 
-        # First normalization and activation
         x = self.norm1(x)
         x = self.nonlinearity(x)
         x = self.conv1(x)
 
-        # Second normalization and activation
         x = self.norm2(x)
         x = self.nonlinearity(x)
 
         x = self.conv2(x)
 
-        # Add residual connection
         return x + h
 
 
 class QwenImageAttentionBlock(nn.Module):
-    r"""
-    Causal self-attention with a single head.
-
-    Args:
-        dim (int): The number of channels in the input tensor.
-    """
+    r"""Single-head spatial self-attention."""
 
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
 
-        # layers
         self.norm = QwenImageRMS_norm(dim)
         self.to_qkv = nn.Conv2d(dim, dim * 3, 1)
         self.proj = nn.Conv2d(dim, dim, 1)
@@ -214,20 +182,14 @@ class QwenImageAttentionBlock(nn.Module):
 
         x = self.norm(x)
 
-        # compute query, key, value
         qkv = self.to_qkv(x)
         qkv = qkv.reshape(batch_size, 1, channels * 3, -1)
         qkv = qkv.permute(0, 1, 3, 2).contiguous()
         q, k, v = qkv.chunk(3, dim=-1)
 
-        # Manual single-head attention instead of ``F.scaled_dot_product_attention``.
-        #
-        # On ROCm 7.14+ the fused SDPA backends (flash and memory-efficient) produce
-        # localized broken-pixel artifacts in this VAE decoder (the math backend and
-        # this manual implementation are both clean).
-        # using with sdpa_kernel([SDPBackend.MATH]):
-        #                x = F.scaled_dot_product_attention(q, k, v)
-        # would work as well but seems to introduce a delay (at least on gfx1150).
+        # Manual single-head attention: on ROCm the fused SDPA backends (flash and
+        # memory-efficient) produce localized broken-pixel artifacts in this decoder.
+        # ``sdpa_kernel([SDPBackend.MATH])`` is clean too but adds latency on gfx1150.
         scale = channels ** 0.5  # SDPA default scale = 1/sqrt(head_dim)
         attn = (q @ k.transpose(-2, -1)) / scale
         attn = attn.softmax(dim=-1)
@@ -235,26 +197,18 @@ class QwenImageAttentionBlock(nn.Module):
 
         x = x.squeeze(1).permute(0, 2, 1).reshape(batch_size, channels, height, width)
 
-        # output projection
         x = self.proj(x)
 
         return x + identity
 
 
 class QwenImageMidBlock(nn.Module):
-    """
-    Middle block for QwenImageVAE encoder and decoder.
-
-    Args:
-        dim (int): Number of input/output channels.
-        non_linearity (str): Type of non-linearity to use.
-    """
+    """One residual block, then attention + residual block per layer."""
 
     def __init__(self, dim: int, non_linearity: str = "silu", num_layers: int = 1):
         super().__init__()
         self.dim = dim
 
-        # Create the components
         resnets = [QwenImageResidualBlock(dim, dim, non_linearity)]
         attentions = []
         for _ in range(num_layers):
@@ -264,10 +218,8 @@ class QwenImageMidBlock(nn.Module):
         self.resnets = nn.ModuleList(resnets)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # First residual block
         x = self.resnets[0](x)
 
-        # Process through attention and residual blocks
         for attn, resnet in zip(self.attentions, self.resnets[1:]):
             if attn is not None:
                 x = attn(x)
@@ -278,18 +230,7 @@ class QwenImageMidBlock(nn.Module):
 
 
 class QwenImageEncoder2d(nn.Module):
-    r"""
-    A 2D encoder module (single-frame / still-image).
-
-    Args:
-        dim (int): The base number of channels in the first layer.
-        z_dim (int): The dimensionality of the latent space.
-        dim_mult (list of int): Multipliers for the number of channels in each block.
-        num_res_blocks (int): Number of residual blocks in each block.
-        attn_scales (list of float): Scales at which to apply attention mechanisms.
-        input_channels (int): Number of input channels.
-        non_linearity (str): Type of non-linearity to use.
-    """
+    r"""2D encoder (single-frame / still-image)."""
 
     def __init__(
         self,
@@ -308,48 +249,38 @@ class QwenImageEncoder2d(nn.Module):
         self.dim_mult = dim_mult
         self.num_res_blocks = num_res_blocks
         self.attn_scales = attn_scales
-        self.nonlinearity = nn.SiLU()  # get_activation(non_linearity)
+        self.nonlinearity = nn.SiLU()
 
-        # dimensions
         dims = [dim * u for u in [1] + dim_mult]
         scale = 1.0
 
-        # init block
         self.conv_in = nn.Conv2d(input_channels, dims[0], 3, padding=1)
 
-        # downsample blocks
         self.down_blocks = nn.ModuleList([])
         for i, (in_dim, out_dim) in enumerate(zip(dims[:-1], dims[1:])):
-            # residual (+attention) blocks
             for _ in range(num_res_blocks):
                 self.down_blocks.append(QwenImageResidualBlock(in_dim, out_dim))
                 if scale in attn_scales:
                     self.down_blocks.append(QwenImageAttentionBlock(out_dim))
                 in_dim = out_dim
 
-            # downsample block
             if i != len(dim_mult) - 1:
                 self.down_blocks.append(QwenImageResample(out_dim, mode="downsample2d"))
                 scale /= 2.0
 
-        # middle blocks
         self.mid_block = QwenImageMidBlock(out_dim, non_linearity, num_layers=1)
 
-        # output blocks
         self.norm_out = QwenImageRMS_norm(out_dim)
         self.conv_out = nn.Conv2d(out_dim, z_dim, 3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv_in(x)
 
-        ## downsamples
         for layer in self.down_blocks:
             x = layer(x)
 
-        ## middle
         x = self.mid_block(x)
 
-        ## head
         x = self.norm_out(x)
         x = self.nonlinearity(x)
         x = self.conv_out(x)
@@ -357,16 +288,7 @@ class QwenImageEncoder2d(nn.Module):
 
 
 class QwenImageUpBlock(nn.Module):
-    """
-    A block that handles upsampling for the QwenImageVAE decoder.
-
-    Args:
-        in_dim (int): Input dimension
-        out_dim (int): Output dimension
-        num_res_blocks (int): Number of residual blocks
-        upsample_mode (str, optional): Mode for upsampling ('upsample2d' or None)
-        non_linearity (str): Type of non-linearity to use
-    """
+    """Residual stack followed by an optional upsample."""
 
     def __init__(
         self,
@@ -380,9 +302,7 @@ class QwenImageUpBlock(nn.Module):
         self.in_dim = in_dim
         self.out_dim = out_dim
 
-        # Create layers list
         resnets = []
-        # Add residual blocks and attention if needed
         current_dim = in_dim
         for _ in range(num_res_blocks + 1):
             resnets.append(QwenImageResidualBlock(current_dim, out_dim, non_linearity))
@@ -390,7 +310,6 @@ class QwenImageUpBlock(nn.Module):
 
         self.resnets = nn.ModuleList(resnets)
 
-        # Add upsampling layer if needed
         self.upsamplers = None
         if upsample_mode is not None:
             self.upsamplers = nn.ModuleList([QwenImageResample(out_dim, mode=upsample_mode)])
@@ -405,18 +324,7 @@ class QwenImageUpBlock(nn.Module):
 
 
 class QwenImageDecoder2d(nn.Module):
-    r"""
-    A 2D decoder module (single-frame / still-image).
-
-    Args:
-        dim (int): The base number of channels in the first layer.
-        z_dim (int): The dimensionality of the latent space.
-        dim_mult (list of int): Multipliers for the number of channels in each block.
-        num_res_blocks (int): Number of residual blocks in each block.
-        attn_scales (list of float): Scales at which to apply attention mechanisms.
-        output_channels (int): Number of output channels.
-        non_linearity (str): Type of non-linearity to use.
-    """
+    r"""2D decoder (single-frame / still-image)."""
 
     def __init__(
         self,
@@ -435,31 +343,24 @@ class QwenImageDecoder2d(nn.Module):
         self.dim_mult = dim_mult
         self.num_res_blocks = num_res_blocks
         self.attn_scales = attn_scales
-        self.nonlinearity = nn.SiLU()  # get_activation(non_linearity)
+        self.nonlinearity = nn.SiLU()
 
-        # dimensions
         dims = [dim * u for u in [dim_mult[-1]] + dim_mult[::-1]]
         scale = 1.0 / 2 ** (len(dim_mult) - 2)
 
-        # init block
         self.conv_in = nn.Conv2d(z_dim, dims[0], 3, padding=1)
 
-        # middle blocks
         self.mid_block = QwenImageMidBlock(dims[0], non_linearity, num_layers=1)
 
-        # upsample blocks
         self.up_blocks = nn.ModuleList([])
         for i, (in_dim, out_dim) in enumerate(zip(dims[:-1], dims[1:])):
-            # residual (+attention) blocks
             if i > 0:
                 in_dim = in_dim // 2
 
-            # Determine if we need upsampling
             upsample_mode = None
             if i != len(dim_mult) - 1:
                 upsample_mode = "upsample2d"
 
-            # Create and add the upsampling block
             up_block = QwenImageUpBlock(
                 in_dim=in_dim,
                 out_dim=out_dim,
@@ -469,34 +370,27 @@ class QwenImageDecoder2d(nn.Module):
             )
             self.up_blocks.append(up_block)
 
-            # Update scale for next iteration
             if upsample_mode is not None:
                 scale *= 2.0
 
-        # output blocks
         self.norm_out = QwenImageRMS_norm(out_dim)
         self.conv_out = nn.Conv2d(out_dim, output_channels, 3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        ## conv1
         x = self.conv_in(x)
 
-        ## middle
         x = self.mid_block(x)
 
-        ## upsamples
         for up_block in self.up_blocks:
             x = up_block(x)
 
-        ## head
         x = self.norm_out(x)
         x = self.nonlinearity(x)
         x = self.conv_out(x)
         return x
 
 
-#: The Qwen-Image VAE's latent normalisation: a per-channel z-score, unlike the
-#: scalar ``scale_factor`` of the Flux / Ming-Image family.
+#: The Qwen-Image VAE's latent normalisation: a per-channel z-score.
 QWEN_IMAGE_LATENTS_MEAN = [
     -0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508,
     0.4134, -0.0715, 0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921,
@@ -515,10 +409,10 @@ def _latent_normalisation(
     scale_factor: Optional[float],
     shift_factor: Optional[float],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``(mean, inv_std)`` of the affine ``model = (raw - mean) * inv_std`` this family ships.
+    """``(mean, inv_std)`` of the affine ``model = (raw - mean) * inv_std``.
 
-    Either the per-channel z-score (Qwen-Image) or the scalar (Ming-Image); passing
-    both is a bug, passing neither keeps the Qwen-Image z-score.
+    Either the per-channel z-score (default) or the scalar scale/shift variant;
+    passing both is a bug.
     """
     scalar = scale_factor is not None or shift_factor is not None
     if scalar:
@@ -542,13 +436,7 @@ def _latent_normalisation(
 
 
 class AutoencoderKLQwenImage(nn.Module):
-    r"""
-    A VAE model with KL loss for encoding images into latents and decoding latent
-    representations into pixels.
-
-    Only still-image (single-frame) inference is supported: video caching,
-    tiling, slicing and spatial chunking have been removed. The encoder is kept
-    for future image-to-image workflows.
+    r"""Single-frame (still-image) VAE with KL loss.
 
     Two shipped checkpoints share it and differ only in these knobs: Qwen-Image
     (RGB pixels, per-channel z-scored latent) and Ming-Image (RGBA, scalar scale).
@@ -572,8 +460,8 @@ class AutoencoderKLQwenImage(nn.Module):
         self.z_dim = z_dim
         self.input_channels = input_channels
 
-        # Hoisted buffers (built once; moved with the module via `.to(device)`). The
-        # z-score lands as (1, z_dim, 1, 1), the scalar as (1, 1, 1, 1) and broadcasts.
+        # Hoisted buffers, moved with the module via `.to(device)`. The z-score lands
+        # as (1, z_dim, 1, 1), the scalar as (1, 1, 1, 1) and broadcasts.
         mean, inv_std = _latent_normalisation(
             z_dim, latents_mean, latents_std, scale_factor, shift_factor
         )
@@ -600,21 +488,12 @@ class AutoencoderKLQwenImage(nn.Module):
 
     @property
     def pixel_channels(self) -> int:
-        """Pixel channels the VAE consumes/emits (3 = RGB, 4 = RGBA).
-
-        Part of the shared VAE interface (see ``AutoencoderKLWan22``): it decides
-        whether an incoming alpha reaches the model and how many channels the PNG
-        output carries.
-        """
+        """Pixel channels the VAE consumes/emits (3 = RGB, 4 = RGBA)."""
         return self.input_channels
 
     @property
     def spatial_compression(self) -> int:
-        """Spatial compression factor (2^num_downsampling_stages), e.g. 8x for this VAE.
-
-        Together with ``z_dim`` this defines the canonical latent the pipeline
-        carries: ``[B, z_dim, H / spatial_compression, W / spatial_compression]``.
-        """
+        """Spatial compression factor (2^num_downsampling_stages), e.g. 8x."""
         return 2 ** (len(self.encoder.dim_mult) - 1)
 
     def _encode(self, x: torch.Tensor):
@@ -624,17 +503,7 @@ class AutoencoderKLQwenImage(nn.Module):
     def encode(
         self, x: torch.Tensor, return_dict: bool = True
     ) -> Union[Dict[str, torch.Tensor], Tuple[DiagonalGaussianDistribution]]:
-        r"""
-        Encode a batch of single-frame images into latents.
-
-        Args:
-            x (`torch.Tensor`): Input batch of images, shape [B, C, H, W].
-            return_dict (`bool`, *optional*, defaults to `True`):
-                Whether to return a dictionary instead of a plain tuple.
-
-        Returns:
-            The latent representations of the encoded images.
-        """
+        r"""Encode a batch of single-frame images ``[B, C, H, W]`` into latents."""
         h = self._encode(x)
         posterior = DiagonalGaussianDistribution(h)
 
@@ -650,17 +519,7 @@ class AutoencoderKLQwenImage(nn.Module):
         return {"sample": out}
 
     def decode(self, z: torch.Tensor, return_dict: bool = True) -> Union[Dict[str, torch.Tensor], torch.Tensor]:
-        r"""
-        Decode a batch of single-frame latents into pixels.
-
-        Args:
-            z (`torch.Tensor`): Input batch of latent vectors, shape [B, C, H, W].
-            return_dict (`bool`, *optional*, defaults to `True`):
-                Whether to return a dictionary instead of a plain tuple.
-
-        Returns:
-            The decoded pixels in [-1, 1].
-        """
+        r"""Decode a batch of single-frame latents ``[B, C, H, W]`` into pixels."""
         decoded = self._decode(z)["sample"]
 
         if not return_dict:
@@ -677,20 +536,11 @@ class AutoencoderKLQwenImage(nn.Module):
         return image.clamp(-1.0, 1.0)
 
     def encode_pixels_to_latents(self, pixels: torch.Tensor) -> torch.Tensor:
-        """
-        Convert pixel values to latents and apply the VAE's latent normalisation.
-
-        Args:
-            pixels (torch.Tensor): Input pixels in [0, 1] range with shape [B, C, H, W].
-
-        Returns:
-            torch.Tensor: Normalized latents
-        """
+        """Pixels in [-1, 1] ``[B, C, H, W]`` -> normalized latents."""
         pixels = pixels.to(device=self.device, dtype=self.dtype)
 
-        # Encode to latent space
         posterior = self.encode(pixels, return_dict=False)[0]
-        latents = posterior.mode()  # Use mode instead of sampling for deterministic results
+        latents = posterior.mode()  # deterministic, no sampling
 
         latents_mean = self._latents_mean.to(latents.device, latents.dtype)
         latents_inv_std = self._latents_inv_std.to(latents.device, latents.dtype)
@@ -701,7 +551,7 @@ class AutoencoderKLQwenImage(nn.Module):
 
 # region utils
 
-# This region is not included in the original implementation. Added for musubi-tuner/sd-scripts.
+# Not part of the original implementation; added for musubi-tuner/sd-scripts.
 
 
 # Convert ComfyUI keys to standard keys if necessary
@@ -848,8 +698,8 @@ def convert_comfyui_state_dict(sd):
     return new_state_dict
 
 
-#: The architecture every checkpoint this module serves: four width stages over
-#: three downsampling stages (8x), a 16-channel latent, ``base_dim=96``.
+#: The architecture every checkpoint this module serves: three downsampling stages
+#: (8x), a 16-channel latent, ``base_dim=96``.
 _WAN21_FAMILY_ARCH = dict(
     base_dim=96,
     z_dim=16,
@@ -859,7 +709,7 @@ _WAN21_FAMILY_ARCH = dict(
 )
 
 #: Ming-Image's latent normalisation: a SCALAR scale, ``canonical = raw * 8.0064``
-#: (the vendor's ``scaling_factor``, ComfyUI's ``latent_formats.MingImage``), no shift.
+#: (the vendor's ``scaling_factor``), no shift.
 MING_IMAGE_SCALE_FACTOR = 8.0064
 MING_IMAGE_SHIFT_FACTOR = 0.0
 
@@ -877,9 +727,9 @@ def load_qwen_family_vae(
 ) -> AutoencoderKLQwenImage:
     """Load a Wan2.1-family (Qwen-Image layout) VAE as a single-frame model.
 
-    Every file this module serves has :data:`_WAN21_FAMILY_ARCH`; the loaders below pick
-    the latent normalisation and declare the pixel width their model needs, which the
-    file must confirm. The video weight layout is collapsed to 2D on the way in.
+    Every file this module serves has :data:`_WAN21_FAMILY_ARCH`; the loaders below
+    pick the latent normalisation and declare the pixel width their model needs,
+    which the file must confirm.
     """
     logger.info(f"Loading VAE from {vae_path}")
     state_dict = load_safetensors(vae_path, device=device, dtype=dtype)

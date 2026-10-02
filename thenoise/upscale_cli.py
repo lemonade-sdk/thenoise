@@ -1,8 +1,6 @@
 """CLI pixel upscaling: load a pixel upscaler, upscale one image, save a PNG.
 
-Model-free: needs no diffusion model (unlike ``generate``). Thin wrapper over the
-same ``PixelUpscaleController`` the HTTP API uses, so there is no logic drift
-between the two surfaces.
+Needs no diffusion model.
 """
 from __future__ import annotations
 
@@ -19,10 +17,9 @@ def run_upscale(args) -> None:
     from .runtime import Settings, Runtime
     from .utils.image_tensor import load_image
 
-    # ``--pixel-upscaler`` is a one-shot convenience: a full path to the model.
-    # Split it into ``upscaler_dir`` (server config) + name (sans suffix), the
-    # same form the ``serve``/API path uses. ``or "."`` keeps a bare filename
-    # (no directory) usable: it then resolves against the current directory.
+    # ``--pixel-upscaler`` is a one-shot full path; split it into
+    # ``upscaler_dir`` + name (sans suffix). ``or "."`` keeps a bare filename
+    # usable by resolving it against the current directory.
     upscaler_dir = os.path.dirname(args.pixel_upscaler) or "."
     name = os.path.basename(args.pixel_upscaler)
     if name.endswith(".safetensors"):

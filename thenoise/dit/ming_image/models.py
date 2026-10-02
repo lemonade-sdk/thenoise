@@ -1,8 +1,4 @@
-"""Ming-Image's S3-DiT — the Lumina core with zero-masked padding and two cond tensors.
-
-The config below is the vendor ``transformer/config.json`` as measured from the
-shipped 12 GB bf16 header; ``pad_mode`` defaults to ``zero_masked`` (no pad tokens).
-"""
+"""Ming-Image's S3-DiT — the Lumina core with zero-masked padding and two cond tensors."""
 from __future__ import annotations
 
 from thenoise.dit.lumina.models import LuminaTransformer2DModel

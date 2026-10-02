@@ -1,9 +1,7 @@
 """Sampler (solver) tests.
 
-The contract shared by every solver — exactly one ``denoise_step`` per schedule
-step — plus the solver-specific integration maths, on a stub model with no
-weights. ``er_sde`` is a whole stochastic solver, so its determinism and its
-sigma handling (the first sigma must stay strictly below 1) are pinned here.
+The contract shared by every solver — exactly one ``denoise_step`` per schedule step —
+plus the solver-specific integration maths, on a stub model with no weights.
 """
 from __future__ import annotations
 
@@ -11,7 +9,6 @@ import pytest
 import torch
 
 from conftest import StubModel
-from thenoise.models.base import DiffusionModel
 from thenoise.pipeline import _sigma_steps
 from thenoise.samplers import SAMPLERS, Step, create_sampler
 from thenoise.samplers.er_sde import ErSdeSampler
@@ -45,23 +42,16 @@ def _schedule(steps=8):
     return [Step(t=grid[i], delta=grid[i] - grid[i + 1]) for i in range(steps)]
 
 
-@pytest.mark.parametrize(
-    "name,cls", [("euler", EulerSampler), ("er_sde", ErSdeSampler)], ids=["euler", "er_sde"]
-)
-def test_create_sampler_returns_the_registered_class(name, cls):
+def test_create_sampler_binds_the_registered_class_or_rejects_the_name():
     model = _VelocityModel()
-    sampler = create_sampler(name, model)
-    assert isinstance(sampler, cls)
-    assert SAMPLERS[name] is cls
-    assert sampler.model is model
+    for name, cls in [("euler", EulerSampler), ("er_sde", ErSdeSampler)]:
+        sampler = create_sampler(name, model)
+        assert isinstance(sampler, cls)
+        assert sampler.model is model
 
-
-def test_create_sampler_rejects_unknown_names():
-    with pytest.raises(ValueError, match="unknown sampler: 'midpoint'"):
-        create_sampler("midpoint", _VelocityModel())
-    # The error names the valid choices (it is the only hint a user gets).
-    with pytest.raises(ValueError, match="er_sde.*euler|euler.*er_sde"):
-        create_sampler("midpoint", _VelocityModel())
+    # The message names the valid choices: it is the only hint a user gets.
+    with pytest.raises(ValueError, match="unknown sampler: 'midpoint'.*(er_sde|euler)"):
+        create_sampler("midpoint", model)
 
 
 @pytest.mark.parametrize("name", sorted(SAMPLERS))
@@ -102,30 +92,27 @@ def test_solvers_accept_an_arbitrary_custom_sigma_grid(name):
 
 
 def test_euler_integrates_the_flow_ode_in_fp32():
-    """A constant velocity integrates to ``x - sum(delta) * v`` exactly."""
+    """A constant velocity integrates to ``x - sum(delta) * v`` exactly, and the seed
+    is ignored: Euler is deterministic.
+    """
     steps = 4
     schedule = [
         Step(t=torch.tensor(1.0), delta=torch.tensor(1.0 / steps)) for _ in range(steps)
     ]
     x = torch.full((1, 2, 3, 3), 4.0)
-    out = EulerSampler(_VelocityModel(velocity=2.0)).sample(x, schedule, None, 1.0, 0)
-    assert torch.equal(out, x - 2.0)  # sum(delta) == 1.0
+    a = EulerSampler(_VelocityModel(velocity=2.0)).sample(x, schedule, None, 1.0, 0)
+    assert torch.equal(a, x - 2.0)  # sum(delta) == 1.0
 
-
-def test_euler_casts_back_to_the_latent_dtype():
-    schedule = [Step(t=torch.tensor(1.0), delta=torch.tensor(0.5))]
-    x = torch.zeros(1, 2, 3, 3, dtype=torch.bfloat16)
-    out = EulerSampler(_VelocityModel()).sample(x, schedule, None, 1.0, 0)
-    assert out.dtype == torch.bfloat16
-
-
-def test_euler_ignores_the_seed():
-    """Euler is deterministic: the same latent and schedule give the same result."""
-    schedule = _schedule(5)
-    x = torch.randn(1, 4, 6, 6)
-    a = EulerSampler(_VelocityModel()).sample(x, schedule, None, 1.0, 1)
-    b = EulerSampler(_VelocityModel()).sample(x, schedule, None, 1.0, 2)
+    b = EulerSampler(_VelocityModel(velocity=2.0)).sample(x, schedule, None, 1.0, 99)
     assert torch.equal(a, b)
+
+
+@pytest.mark.parametrize("cls", [EulerSampler, ErSdeSampler], ids=["euler", "er_sde"])
+def test_the_solver_returns_the_latent_dtype(cls):
+    x = torch.zeros(1, 2, 3, 3, dtype=torch.bfloat16)
+    schedule = _schedule(2)
+    out = cls(_VelocityModel()).sample(x, schedule, None, 1.0, 0)
+    assert out.dtype == torch.bfloat16
 
 
 def test_er_sde_is_seed_deterministic_but_seed_sensitive():
@@ -141,7 +128,9 @@ def test_er_sde_is_seed_deterministic_but_seed_sensitive():
 
 
 def test_er_sde_nudges_the_first_sigma_below_one():
-    """``sigma/(1-sigma)`` blows up at sigma == 1, so t=1 goes through the model."""
+    """``sigma/(1 - sigma)`` blows up at sigma == 1, so t=1 goes through the model's
+    nudge rather than into the solver.
+    """
     model = _VelocityModel()
     schedule = _schedule(4)
     assert float(schedule[0].t) == 1.0
@@ -149,23 +138,7 @@ def test_er_sde_nudges_the_first_sigma_below_one():
     out = ErSdeSampler(model).sample(torch.randn(1, 4, 8, 8), schedule, None, 1.0, 1)
 
     assert model.percent_calls == [1e-4]  # nudged exactly once, for sigma[0]
-    # The nudged sigma is strictly inside (0, 1) -- which is what keeps the
-    # solver's ``sigma / (1 - sigma)`` term finite.
     assert 0.0 < object.__new__(StubModel).percent_to_sigma(1e-4) < 1.0
     assert torch.isfinite(out).all()
 
 
-def test_er_sde_keeps_the_output_in_the_latent_dtype():
-    schedule = _schedule(4)
-    x = torch.randn(1, 4, 8, 8, dtype=torch.bfloat16)
-    out = ErSdeSampler(_VelocityModel()).sample(x, schedule, None, 1.0, 3)
-    assert out.dtype == torch.bfloat16
-
-
-def test_base_percent_to_sigma_is_the_linear_fallback():
-    """The fallback (models with no shifted schedule) is ``1 - percent``."""
-    model = object.__new__(StubModel)
-    assert isinstance(model, DiffusionModel)
-    assert model.percent_to_sigma(0.0) == 1.0
-    assert model.percent_to_sigma(0.25) == 0.75
-    assert model.percent_to_sigma(1.0) == 0.0

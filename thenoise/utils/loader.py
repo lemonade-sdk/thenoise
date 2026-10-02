@@ -1,8 +1,9 @@
 """Central quant-aware DiT loader.
 
-Every DiT adapter loads its weights through a single entry point, ``load_dit``,
-which automatically selects the correct quantization. Runtime-only state
-(``RUNTIME_STATE_SUFFIXES``) is dropped for every model."""
+Every DiT adapter loads its weights through ``load_dit``, which selects the
+quantization automatically. Checkpoint metadata (``RUNTIME_STATE_SUFFIXES``,
+``CHECKPOINT_MARKER_KEYS``) is dropped for every model.
+"""
 from __future__ import annotations
 
 import dataclasses
@@ -16,30 +17,35 @@ from comfy_kitchen.tensor import QuantizedTensor
 from comfy_kitchen.tensor.int8 import TensorWiseINT8Layout
 from comfy_kitchen.tensor.fp8 import TensorCoreFP8Layout
 
+from thenoise.utils.checkpoint import CHECKPOINT_MARKER_KEYS
 from thenoise.utils.safetensors import (
     MemoryEfficientSafeOpen,
     WRAP_PREFIXES,
     load_dit_safetensors,
     load_safetensors,
+    unwrap_key,
 )
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
 logger = logging.getLogger(__name__)
 
-# Suffix used by ComfyUI's quantized exporter for the weight scale.
+# ComfyUI's quantized exporter: per-weight scale, and a U8 JSON marker recording
+# the layer's quantization profile.
 _WEIGHT_SCALE_SUFFIX = ".weight_scale"
-# U8 JSON marker ComfyUI stores per quantized layer, recording its profile.
 _COMFY_QUANT_SUFFIX = ".comfy_quant"
 
-#: Runtime-only state a ComfyUI export serialises next to the real weights (the U8
-#: JSON blob of its attention helper). No module wants it, so a strict load must not.
 RUNTIME_STATE_SUFFIXES: tuple[str, ...] = (".comfy_attention.config",)
 
 
 def drop_runtime_state(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Copy without the keys that are not module state (see above)."""
+    """Copy without the keys that are not module state."""
     return {k: v for k, v in state_dict.items() if not k.endswith(RUNTIME_STATE_SUFFIXES)}
+
+
+def drop_checkpoint_markers(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Copy without the checkpoint-level markers."""
+    return {k: v for k, v in state_dict.items() if unwrap_key(k) not in CHECKPOINT_MARKER_KEYS}
 
 
 def _build_int8_qt(qweight: torch.Tensor, scale: torch.Tensor, marker: dict) -> QuantizedTensor:
@@ -58,8 +64,8 @@ def _build_int8_qt(qweight: torch.Tensor, scale: torch.Tensor, marker: dict) -> 
 def _build_fp8_qt(qweight: torch.Tensor, scale: torch.Tensor, marker: dict) -> QuantizedTensor:
     """Reconstruct a TensorCoreFP8Layout weight from stored FP8 + per-tensor scale.
 
-    The same layout covers E4M3 and E5M2 (the stored ``qweight`` dtype selects
-    the variant); ``marker`` is unused for FP8 here.
+    The same layout covers E4M3 and E5M2; the stored ``qweight`` dtype selects the
+    variant.
     """
     params = TensorCoreFP8Layout.Params(
         scale=scale,
@@ -69,8 +75,7 @@ def _build_fp8_qt(qweight: torch.Tensor, scale: torch.Tensor, marker: dict) -> Q
     return QuantizedTensor(qweight, "TensorCoreFP8Layout", params)
 
 
-# Storage dtype -> (safetensors header dtype, layout builder). Layouts are
-# registered here; ``_QUANT_DTYPES`` / ``_QUANT_HEADER_DTYPES`` derive from it.
+# Storage dtype -> (safetensors header dtype, layout builder).
 _QUANT_FORMATS = {torch.int8: ("I8", _build_int8_qt)}
 for _name, _header in (("float8_e4m3fn", "F8_E4M3"), ("float8_e5m2", "F8_E5M2")):
     if hasattr(torch, _name):
@@ -91,44 +96,25 @@ def load_text_encoder_weights(
     """Load a text-encoder checkpoint (single safetensors file), auto-selecting
     quantized vs BF16. No sharded-file support.
 
-    Quantized (INT8/FP8) checkpoints are detected via ``is_quantized_checkpoint``
-    and land via ``load_quantized_state_dict``: each low-bit ``.weight`` +
-    ``.weight_scale`` goes to its module's ``load_quantized`` (a
-    ``QuantizedLinear``, installed via ``thenoise.dit.quantized.replace_linears``),
-    and every other leaf parameter/buffer is cast to ``dtype``. BF16/plain
-    checkpoints land via ``load_state_dict(assign=True)`` after casting.
+    Each low-bit ``.weight`` + ``.weight_scale`` pair goes to its module's
+    ``load_quantized``; every other leaf parameter/buffer is cast to ``dtype``.
 
-    The whole ``lm_head.`` subtree (a quantized file stores a weight, a scale and a
-    marker) is dropped: encoders remove their ``lm_head`` module before calling, and
-    no LM head is ever run.
-
-    Args:
-        model: the (meta-constructed, QuantizedLinear-swapped) text encoder.
-        path: single-file safetensors checkpoint.
-        device: final device.
-        dtype: dtype for full-precision (BF16-path and non-quantized) params.
-        key_map: optional transform applied to checkpoint keys before loading (e.g.
-            Krea 2's ComfyUI ``language_model.``/``visual.`` -> ``model.``
-            layout).
-        drop_keys: optional tuple of key PREFIXES to drop before loading, on BOTH
-            paths. Text encoders carry things no module owns — a multimodal file
-            ships an image tower the text-to-image conditioner does not build, and
-            some store their tokenizer as a U8 payload tensor (Ming-Image's
-            ``tokenizer_json``). Dropping keeps the load strict.
-
-    Returns:
-        ``model`` (loaded in place, moved to ``device``).
+    The whole ``lm_head.`` subtree is dropped: encoders remove their ``lm_head``
+    module before calling, and no LM head is ever run. ``key_map`` normalizes the
+    checkpoint's key layout, and ``drop_keys`` drops key PREFIXES on BOTH paths — a
+    multimodal file ships an image tower the text-to-image conditioner does not
+    build, and some store their tokenizer as a U8 payload tensor; dropping keeps the
+    load strict.
     """
     device = torch.device(device)
 
     sd = load_safetensors(path, device=device, dtype=None)
     sd = {k: v for k, v in sd.items() if k != "lm_head" and not k.startswith("lm_head.")}
     sd = drop_runtime_state(sd)
+    sd = drop_checkpoint_markers(sd)
     if drop_keys:
         sd = {k: v for k, v in sd.items() if not k.startswith(drop_keys)}
     if key_map is not None:
-        # A text-encoder ``key_map`` normalizes layout on BOTH paths (unlike a DiT
-        # ``key_map``, which only renames on the quantized path).
         sd = {key_map(k): v for k, v in sd.items()}
 
     if is_quantized_checkpoint(path):
@@ -162,47 +148,27 @@ def load_dit(
     value_map: Optional[Callable[[str, torch.Tensor], tuple[str, torch.Tensor]]] = None,
     state_map: Optional[Callable[[dict], dict]] = None,
 ) -> torch.nn.Module:
-    """Load a DiT checkpoint into ``model``, selecting quantized vs BF16 automatically.
+    """Load a DiT checkpoint into ``model`` (constructed on meta), selecting
+    quantized vs BF16 automatically.
 
-    Runtime state (``RUNTIME_STATE_SUFFIXES``) is always dropped first, on both paths.
+    ``expected_missing`` lists substrings allowed to be absent from the checkpoint
+    (model-internal buffers); with it non-empty the load is non-strict and only
+    those are tolerated. ``key_map`` and ``value_map`` transform checkpoint keys and
+    values, in that order.
 
-    Args:
-        model: the (meta-constructed) DiT to populate.
-        path: safetensors checkpoint path.
-        device: final device for all parameters/buffers.
-        dtype: dtype for full-precision (BF16-path and non-quantized) params.
-        drop_keys: optional tuple of key prefixes to drop from the checkpoint
-            before loading (e.g. Krea2's unused ``last.down``/``last.up``).
-            Applied on BOTH the quantized and BF16 paths.
-        expected_missing: optional substrings allowed to be absent from the
-            checkpoint (model-internal buffers, e.g. Anima's RoPE buffers). If
-            non-empty the load is non-strict and only these are tolerated;
-            otherwise loading is strict.
-        key_map: optional transform applied to checkpoint keys.
-            Applied before ``value_map``.
-        value_map: optional ``(key, tensor) -> (new_key, new_tensor)`` transform
-            applied on weights at load time. Applied after ``key_map``.
-        state_map: optional whole-state-dict fold, applied after ``value_map``.
-            The per-tensor maps cannot express a transform where ONE parameter is
-            several checkpoint tensors (e.g. stacking ``to_q/to_k/to_v`` into a
-            fused ``qkv``), which is why this exists. Applied on BOTH the quantized
-            and BF16 paths, so a fold must keep every ``.weight_scale`` /``.comfy_quant``
-            sibling with the weight it belongs to. Caveat: it renames module paths,
-            and the LoRA-undo restore map is keyed on the checkpoint's own names, so
-            folding a QUANTIZED checkpoint leaves baked-LoRA undo of the folded
-            layers unable to find its raw keys (it raises rather than restoring
-            nothing). Folding is for full-precision legacy exports; the int8 exports
-            are already fused.
-
-    Returns:
-        ``model`` (loaded in place, moved to ``device``).
+    ``state_map`` is a whole-state-dict fold, for the case where ONE parameter is
+    several checkpoint tensors (e.g. stacking ``to_q/to_k/to_v`` into a fused
+    ``qkv``). A fold must keep every ``.weight_scale``/``.comfy_quant`` sibling with
+    the weight it belongs to. Caveat: it renames module paths while the LoRA-undo
+    restore map is keyed on the checkpoint's own names, so folding a QUANTIZED
+    checkpoint breaks baked-LoRA undo on the folded layers.
     """
     device = torch.device(device)
 
-    # Load once (stripping wrapper prefixes) and apply ``drop_keys``/``key_map``/
-    # ``value_map`` before branching, so both paths see the same prepared dict.
+    # Load once and prepare before branching so both paths see the same dict.
     sd = load_dit_safetensors(path, device=device, dtype=None)
     sd = drop_runtime_state(sd)
+    sd = drop_checkpoint_markers(sd)
     if drop_keys:
         sd = {k: v for k, v in sd.items() if not k.startswith(drop_keys)}
     if key_map is not None:
@@ -213,11 +179,10 @@ def load_dit(
         sd = state_map(sd)
 
     if is_quantized_checkpoint(path):
-        # The quantization profile (ConvRot / format) is baked into weights and scales
-        # at export; ``comfy_quant`` markers reconstruct the ``QuantizedTensor`` layout.
+        # The quantization profile is baked into the weights and scales at export;
+        # the ``comfy_quant`` markers reconstruct the ``QuantizedTensor`` layout.
         load_quantized_state_dict(model, sd, dtype=dtype)
-        # Record each quantized layer's raw checkpoint key so a later LoRA undo
-        # can reload the original weights from disk by key.
+        # Raw checkpoint key per quantized layer, for a later LoRA undo.
         model._quantized_restore_map = build_quantized_restore_map(path, key_map)
         logger.info("Loaded quantized checkpoint from %s", path)
     else:
@@ -225,8 +190,7 @@ def load_dit(
             sd = {k: v.to(dtype=dtype) for k, v in sd.items()}
         _load_bf16(model, sd, expected_missing, path)
 
-    # Move the whole model onto the device, including buffers (e.g. RoPE) not
-    # present in the checkpoint.
+    # Includes buffers (e.g. RoPE) not present in the checkpoint.
     model.to(device)
     return model
 
@@ -261,9 +225,8 @@ def _load_bf16(
 def is_quantized_checkpoint(dit_path: str) -> bool:
     """Return True if ``dit_path`` is a quantized (INT8 or FP8) checkpoint.
 
-    Detects the presence of any ``.weight_scale`` key in the safetensors header
-    (after stripping generic repackaging wrapper prefixes). Reads the header
-    only — no tensors are loaded.
+    Looks for any ``.weight_scale`` key in the safetensors header (after stripping
+    generic repackaging wrapper prefixes); reads the header only.
     """
     with MemoryEfficientSafeOpen(dit_path) as f:
         for key in f.keys():
@@ -279,12 +242,9 @@ def is_quantized_checkpoint(dit_path: str) -> bool:
 def _parse_comfy_quant(tensor: torch.Tensor) -> dict:
     """Decode a per-layer ``comfy_quant`` marker tensor into its JSON dict.
 
-    ComfyUI's exporter stores the marker as a small U8 tensor containing the
-    JSON payload, e.g. ``{"convrot": true, "convrot_groupsize": 256,
-    "per_row": true}`` for an INT8 layer (or ``{"convrot": false,
-    "per_row": true}`` when ``in_features`` was not divisible by the group size
-    and rotation was skipped), and ``{"format": "float8_e4m3fn",
-    "full_precision_matrix_mult": true}`` for an FP8 layer.
+    The marker is a small U8 tensor holding the JSON payload, e.g.
+    ``{"convrot": true, "convrot_groupsize": 256, "per_row": true}`` for INT8 or
+    ``{"format": "float8_e4m3fn", "full_precision_matrix_mult": true}`` for FP8.
     """
     try:
         data = json.loads(tensor.detach().cpu().numpy().tobytes().decode("utf-8"))
@@ -305,27 +265,22 @@ def load_quantized_state_dict(
 
     Quantized linear weights (a low-bit ``.weight`` paired with a
     ``.weight_scale``) land on modules that implement ``load_quantized``; every
-    other leaf parameter (kept in full precision — ``weight``/``bias``/embedding
-    tokens etc.) is replaced with the loaded tensor, cast to ``dtype`` when given
-    (quantized kernels emit BF16, so full-precision params must match).
+    other leaf parameter is replaced with the loaded tensor, cast to ``dtype`` when
+    given (quantized kernels emit BF16, so full-precision params must match).
 
-    The per-layer ``.comfy_quant`` JSON marker is decoded and carried into the
-    ``QuantizedTensor``, so each module rotates activations with the exact group
-    size it was quantized at, and only when the layer was actually ConvRot-
-    rotated (``convrot``).
+    The per-layer ``.comfy_quant`` JSON marker is carried into the
+    ``QuantizedTensor`` so each module rotates activations with the exact group size
+    it was quantized at, and only when the layer was actually ConvRot-rotated.
 
-    ``state_dict`` must already have generic wrapper prefixes stripped (see
-    ``thenoise.utils.safetensors.load_dit_safetensors``).
+    ``state_dict`` must already have generic wrapper prefixes stripped.
     """
-    # Collect scales first: a low-bit ``.weight`` needs its ``.weight_scale``, and
-    # dict order is not guaranteed to place the scale before the weight.
+    # A low-bit ``.weight`` needs its ``.weight_scale``, and dict order does not
+    # guarantee the scale comes first.
     scales: dict[str, torch.Tensor] = {}
     for key, tensor in state_dict.items():
         if key.endswith(_WEIGHT_SCALE_SUFFIX):
             scales[key[: -len(_WEIGHT_SCALE_SUFFIX)]] = tensor
 
-    # ``comfy_quant`` markers record each quantized layer's profile; decode them
-    # up front so weights can pick up their marker by path.
     markers: dict[str, dict] = {}
     for key, tensor in state_dict.items():
         if key.endswith(_COMFY_QUANT_SUFFIX):
@@ -344,14 +299,12 @@ def load_quantized_state_dict(
                 dtype,
             )
         elif isinstance(getattr(module, attr, None), torch.nn.Parameter):
-            # Replace the (meta, init-time) parameter, not ``param.data = ...``:
-            # set_data rejects meta params and dtype mismatches.
+            # ``set_data`` rejects meta params and dtype mismatches.
             if dtype is not None:
                 tensor = tensor.to(dtype=dtype)
             setattr(module, attr, torch.nn.Parameter(tensor))
         elif isinstance(getattr(module, attr, None), torch.Tensor):
-            # Non-leaf buffer (e.g. ``rotary_emb.inv_freq``): assign in place.
-            # ``setattr`` routes buffers to the module's buffer registry.
+            # Non-leaf buffer (e.g. ``rotary_emb.inv_freq``).
             if dtype is not None:
                 tensor = tensor.to(dtype=dtype)
             setattr(module, attr, tensor)
@@ -373,9 +326,8 @@ def _build_quantized_tensor(
     """Wrap a stored low-bit ``weight`` + ``scale`` into a ``QuantizedTensor``.
 
     Dispatches on the stored weight dtype to the registered layout builder (see
-    ``_QUANT_FORMATS``), which chooses the layout and reads the ``comfy_quant``
-    marker profile (e.g. ConvRot flag/group size for INT8). Quantized kernels
-    emit BF16, so ``orig_dtype`` is set to bf16.
+    ``_QUANT_FORMATS``), which reads the ``comfy_quant`` marker profile. Quantized
+    kernels emit BF16, so ``orig_dtype`` is bf16.
     """
     if scale is None:
         raise RuntimeError(f"quantized weight {key!r} is missing its {_WEIGHT_SCALE_SUFFIX}")
@@ -393,9 +345,9 @@ def _switch_to_quantized(
 ) -> None:
     """Put a quantized weight on ``module``: quantized if it can run one, else dequantized.
 
-    Only linears run a ``QuantizedTensor`` directly. A quantized **embedding** is the
-    one other thing a text-encoder export stores; a row gather cannot run on a
-    quantized table, so it is dequantized into the compute dtype.
+    A quantized **embedding** is the one other thing a text-encoder export stores; a
+    row gather cannot run on a quantized table, so it is dequantized into the compute
+    dtype.
     """
     if hasattr(module, "load_quantized"):
         module.load_quantized(qt)
@@ -426,13 +378,9 @@ def build_quantized_restore_map(
 ) -> dict[str, str]:
     """Map quantized module paths (post key-map) to their raw checkpoint weight keys.
 
-    Captured once at load time (when wrapper-prefix stripping and ``key_map``
-    are already resolved) so a later LoRA undo can reload the original quantized
-    weights from disk by raw key — no re-deriving the mapping logic. Only reads
-    the safetensors header; no tensors are materialized.
-
-    Returns ``{module_path: raw_weight_key}`` for every quantized linear weight
-    in the file (a low-bit ``.weight`` with a sibling ``.weight_scale``).
+    Captured once at load time (when wrapper-prefix stripping and ``key_map`` are
+    already resolved) so a later LoRA undo can reload the original quantized weights
+    from disk by raw key. Only reads the safetensors header.
     """
     restore: dict[str, str] = {}
     with MemoryEfficientSafeOpen(path) as f:
@@ -442,7 +390,7 @@ def build_quantized_restore_map(
             if not raw_key.endswith(".weight"):
                 continue
             if raw_key[: -len(".weight")] + _WEIGHT_SCALE_SUFFIX not in f.header:
-                continue  # not a quantized linear weight
+                continue
             stripped = raw_key
             for prefix in WRAP_PREFIXES:
                 if stripped.startswith(prefix):
@@ -462,10 +410,8 @@ def restore_quantized_layer(
 ) -> None:
     """Restore a quantized layer's weight from a checkpoint by raw key.
 
-    Reads only the exact tensors the layer needs (the low-bit ``weight`` and its
-    ``.weight_scale``) straight from the file by key, avoiding a full reload.
-    Rebuilds a ``QuantizedTensor`` in the layer's existing layout profile and
-    swaps it in. Used by LoRA undo to return baked LoRAs to the original weights.
+    Reads only the low-bit ``weight`` and its ``.weight_scale`` straight from the
+    file, and rebuilds a ``QuantizedTensor`` in the layer's existing layout profile.
     """
     with MemoryEfficientSafeOpen(path) as f:
         qdata = f.get_tensor(
@@ -494,4 +440,5 @@ __all__ = [
     "restore_quantized_layer",
     "RUNTIME_STATE_SUFFIXES",
     "drop_runtime_state",
+    "drop_checkpoint_markers",
 ]

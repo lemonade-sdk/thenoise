@@ -1,11 +1,9 @@
 """The inference-only policy: one mechanism, declared at the entry points only."""
 
-import pytest
 import torch
 from torch import nn
 from PIL import Image
 
-import thenoise
 import thenoise.models as model_catalog
 from conftest import StubLatentUpscaler, StubModel
 from thenoise.inference import freeze, inference, inference_lock
@@ -106,8 +104,8 @@ def test_generate_runs_every_stage_and_the_tail_in_inference_mode():
         "denoise_step": True,
         "decode": True,
     }
-    # The post-decode tail (notch filter, pixel upscaler, resize, postprocess,
-    # PIL) runs inside the same boundary.
+    # The post-decode tail (notch filter, pixel upscaler, resize, PIL) is inside
+    # the same boundary.
     assert controller.tail_states and all(not state for state in controller.tail_states)
 
 
@@ -135,7 +133,6 @@ def test_upscale_and_refine_run_in_inference_mode():
     _pipeline(model).generate(_request(upscale=True))
 
     assert model.grad_states["upscale"] is False
-    # The refine denoises on top of the upscaled latent.
     assert model.grad_states["denoise_step"] is False
 
 
@@ -205,27 +202,19 @@ class _Wrapper:
         self.model = _Net()
         self.tokenizer = object()
 
-
 def test_freeze_puts_the_module_in_eval_mode_with_frozen_weights():
+    """``freeze`` recurses into submodules, and accepts a plain wrapper embedder
+    (``Qwen3Embedder``-style) that is not an ``nn.Module`` itself.
+    """
     net = _Net()
-    assert net.training is True
-    assert net.proj.weight.requires_grad is True
+    assert net.training is True and net.proj.weight.requires_grad is True
 
-    returned = freeze(net)
-
-    assert returned is net
-    assert net.training is False
-    assert net.proj.weight.requires_grad is False
+    assert freeze(net) is net
+    assert net.training is False and net.proj.weight.requires_grad is False
     assert net.bn.training is False  # the recursion covers submodules
 
-
-def test_freeze_accepts_a_plain_wrapper():
-    """The memory manager also takes wrappers that are not ``nn.Module``s."""
     wrapper = _Wrapper()
-
-    returned = freeze(wrapper)
-
-    assert returned is wrapper
+    assert freeze(wrapper) is wrapper
     assert wrapper.model.training is False
     assert wrapper.model.proj.weight.requires_grad is False
 
@@ -236,15 +225,11 @@ def test_register_freezes_the_component():
     manager = MemoryManager("cpu", "cpu")
 
     manager.register("dit", net)
+    manager.register("vae", None)  # a missing component is not an error
 
     assert net.training is False
     assert net.proj.weight.requires_grad is False
-
-
-def test_register_tolerates_a_missing_component():
-    manager = MemoryManager("cpu", "cpu")
-    manager.register("vae", None)
-    assert manager.resident() == set()
+    assert manager.resident() == {"dit"}
 
 
 def test_inference_helper_disables_grad_and_nests():

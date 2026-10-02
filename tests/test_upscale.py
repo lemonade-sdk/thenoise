@@ -119,13 +119,10 @@ def test_resolve_invalid_type():
 
 
 # ------------------------------------------------------------- manager: validate/list
-def test_validate_pixel_upscaler_requires_dir_and_file():
-    m = _make_manager(upscaler_dir="")
+def test_validate_requires_a_configured_dir_and_strips_the_suffix(tmp_path):
     with pytest.raises(ValueError, match="no pixel upscaler configured"):
-        m.validate("x4")
+        _make_manager(upscaler_dir="").validate("x4")
 
-
-def test_validate_pixel_upscaler_strips_suffix(tmp_path):
     (tmp_path / "RealESRGAN_x4.safetensors").write_text("x")
     m = _make_manager(upscaler_dir=str(tmp_path))
     assert m.validate("RealESRGAN_x4.safetensors") == "RealESRGAN_x4"
@@ -223,7 +220,6 @@ def test_switch_pixel_upscaler_keeps_last_used(tmp_path, monkeypatch):
 
     calls = []
     fake_model = object()
-    from thenoise.upscale import load_pixel_upscaler as _real_load
     def _fake_load(path, device):
         calls.append(path)
         scale = 2 if "x2" in path else 4
@@ -312,7 +308,6 @@ def test_forward_tiled_pads_odd_dimensions():
     size crashes the reshape. ``forward_tiled`` must pad to a multiple of
     ``scale`` and crop back, for both scale 2 and 4.
     """
-    import torch
     import torch.nn.functional as F
     from thenoise.upscale.esrgan import RRDBNet
 

@@ -1,4 +1,4 @@
-"""Mage-VAE — a symmetric *one-step diffusion codec*, not a KL-VAE.
+"""Mage-VAE — a symmetric *one-step diffusion codec*.
 
 Ported from ComfyUI's ``comfy/ldm/mage_flow/vae.py`` (MIT), which is the microsoft/Mage
 codec. Only the ops change (``comfy.ops`` -> ``torch.nn``, ComfyUI's attention helper ->
@@ -8,18 +8,17 @@ Both directions are a single forward at ``t = 0``:
 
   * **encode** — ``DConvEncoder`` predicts the latent of an image in one step, with a
     *zero latent* fed in as ``z_t`` and the image as the conditioning. Its ``proj_out``
-    is 256-wide (mean + logvar); the mean is taken, so encode is deterministic.
+    is 256-wide (mean + logvar) and the mean is taken, so encode is deterministic.
   * **decode** — ``DConvDenoiser`` predicts the image in one step, with a *zero noise*
     image and the latent injected through ``CoDDecoder`` (``y_embedder.decoder``), plus
     a Nerf/DCT patch-position embedding on the pixel path.
 
 The latent is **128 channels at 16x**, used raw: no scaling, no shift, no BatchNorm, no
-2x2 packing. It lives in a Flux.2-*anchored* space (an auxiliary loss pulled it toward
-Flux.2-VAE latents during training), which is a statement about its statistics, not a
-transform to apply.
+2x2 packing.
 
-The export also ships that anchor Flux.2 encoder under ``pipeline.y_embedder.encoder.*``.
-Nothing in the decode path uses it, so ``load_mage_vae`` drops it.
+The export also ships a Flux.2 encoder — the codec whose latent space this one was
+anchored on during training — under ``pipeline.y_embedder.encoder.*``. Nothing in the
+decode path uses it, so ``load_mage_vae`` drops it.
 """
 from __future__ import annotations
 
@@ -313,9 +312,8 @@ class ResnetBlock(nn.Module):
 class AttnBlock(nn.Module):
     """Self-attention restricted to ``patch_size x patch_size`` windows.
 
-    The feature map is tiled, each tile attends over its own ``d*d`` positions, and the
-    tiles are pasted back. A map whose sides are not multiples of the window is
-    replicate-padded and cropped again.
+    A map whose sides are not multiples of the window is replicate-padded and
+    cropped again.
     """
 
     def __init__(self, in_channels: int, patch_size: int = 32):
@@ -503,7 +501,7 @@ class AutoencoderKLMageFlow(nn.Module):
 
     ``encode_pixels_to_latents`` takes pixels ``[B, C, H, W]`` in [-1, 1] and returns
     the canonical latent ``[B, 128, H/16, W/16]``; ``decode_to_pixels`` is its inverse
-    and clamps to [-1, 1]. Neither scales or shifts the latent.
+    and clamps to [-1, 1].
     """
 
     z_dim = 128
@@ -528,8 +526,7 @@ class AutoencoderKLMageFlow(nn.Module):
         x = pixels.to(device=self.device, dtype=self.dtype)
         b, _, H, W = x.shape
         ps = self.dconv_encoder.patch_size
-        # The one-step prediction is conditioned on a zero latent: there is no
-        # iterative refinement to seed.
+        # The one-step prediction is conditioned on a zero latent.
         z_t = torch.zeros(b, self.dconv_encoder.z_ch, H // ps, W // ps, device=x.device, dtype=x.dtype)
         t = torch.zeros(b, device=x.device, dtype=x.dtype)
         out = self.dconv_encoder.forward_pred(z_t, t, x)
@@ -555,9 +552,7 @@ def load_mage_vae(
     """Load the Mage-VAE, remapping the export's training names onto the module tree.
 
     The file is a training artifact: the encoder lives under ``student.dconv_encoder.*``
-    and the denoiser under ``pipeline.*``. ``pipeline.y_embedder.encoder.*`` — the
-    Flux.2 anchor encoder — has no module here and is dropped, which is what makes the
-    load strict.
+    and the denoiser under ``pipeline.*``.
     """
     device = torch.device(device)
     logger.info("Loading Mage-VAE from %s", vae_path)
@@ -568,7 +563,7 @@ def load_mage_vae(
         if key.startswith("student.dconv_encoder."):
             remapped[key[len("student.") :]] = tensor
         elif key.startswith("pipeline.y_embedder.encoder."):
-            continue  # the Flux.2 anchor encoder: not part of this codec
+            continue  # the anchor Flux.2 encoder
         elif key.startswith("pipeline."):
             remapped["decoder_model." + key[len("pipeline.") :]] = tensor
         else:
@@ -587,8 +582,7 @@ def load_mage_vae(
 
 
 #: The key prefixes of the two codecs a Mage-Flow run can be pointed at. Both latents
-#: are 128 channels at 16x, so nothing about a run says which one is in use — only the
-#: file does.
+#: are 128 channels at 16x, so only the file says which one is in use.
 _MAGE_PREFIXES = ("student.", "pipeline.")
 _FLUX2_PREFIXES = ("encoder.", "decoder.", "bn.")
 

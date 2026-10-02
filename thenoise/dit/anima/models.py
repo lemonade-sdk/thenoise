@@ -60,10 +60,7 @@ class GPT2FeedForward(nn.Module):
 
 # Attention module for DiT
 class Attention(nn.Module):
-    """Multi-head attention supporting both self-attention and cross-attention.
-
-    Uses QK-norm (RMSNorm on q/k) and optional RoPE (only for self-attention).
-    """
+    """Self- and cross-attention with QK-norm; RoPE applies to self-attention."""
 
     def __init__(
         self,
@@ -141,8 +138,6 @@ class Attention(nn.Module):
         rope_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> torch.Tensor:
         q, k, v = self.compute_qkv(x, context, rope_emb=rope_emb)
-        # The shared attention helper consumes [B, H, L, D] directly (SDPA's native
-        # layout) and returns [B, L, H*D].
         qkv = [q, k, v]
         del q, k, v
         result = attention.attention(qkv, attn_params=attn_params)
@@ -220,12 +215,7 @@ class LearnablePosEmbAxis(VideoPositionEmb):
 
 # Timestep Embedding
 class Timesteps(nn.Module):
-    """Sinusoidal timestep features.
-
-    Anima (Cosmos-Predict2) does *not* apply the 1000x time factor used by the
-    other DiT families; its timesteps arrive in ``[0, 1]`` and are embedded
-    directly, so the shared function is called with ``time_factor=1.0``.
-    """
+    """Sinusoidal timestep features; Anima's timesteps arrive in ``[0, 1]``."""
 
     def __init__(self, num_channels: int):
         super().__init__()
@@ -317,7 +307,7 @@ class PatchEmbed(nn.Module):
 
 # Final Layer
 class FinalLayer(nn.Module):
-    """Final layer with AdaLN modulation + unpatchify."""
+    """Final layer with AdaLN modulation."""
 
     def __init__(
         self,
@@ -384,10 +374,7 @@ class FinalLayer(nn.Module):
 
 # Transformer Block (DiT Block)
 class Block(nn.Module):
-    """Transformer block with self-attention + cross-attention + MLP, each modulated by AdaLN.
-
-    Each sublayer: x = x + gate * sublayer(norm(x) * (1 + scale) + shift)
-    """
+    """Self-attention + cross-attention + MLP, each modulated by AdaLN."""
 
     def __init__(
         self,
@@ -580,12 +567,9 @@ class Block(nn.Module):
         )
 
 
-# Main DiT Model: MiniTrainDIT (renamed to Anima)
+# Main DiT Model
 class Anima(nn.Module):
-    """Cosmos-Predict2 DiT model for image/video generation.
-
-    28 transformer blocks with AdaLN-LoRA modulation, 3D RoPE, and optional LLM Adapter.
-    """
+    """Cosmos-Predict2 DiT: AdaLN-LoRA modulation, 3D RoPE, optional LLM Adapter."""
 
     def __init__(
         self,
@@ -740,9 +724,7 @@ class Anima(nn.Module):
         x_B_C_T_H_W: torch.Tensor,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         if self.concat_padding_mask:
-            # Still images (T=1) always carry an all-zero padding mask. The x_embedder
-            # weights expect 17 input channels, but the extra channel is constant zero,
-            # so build it directly instead of resizing a zero tensor each forward.
+            # The padding-mask channel is constant zero; build it directly.
             x_B_C_T_H_W = torch.cat(
                 [
                     x_B_C_T_H_W,
@@ -909,7 +891,6 @@ class LLMAdapterTransformerBlock(nn.Module):
         position_embeddings_context=None,
     ):
         if self.has_self_attn:
-            # Self-attention: target_attention_mask is not expected to be all zeros
             normed = self.norm_self_attn(x)
             attn_out = self.self_attn(
                 normed,
@@ -937,10 +918,7 @@ class LLMAdapterTransformerBlock(nn.Module):
 
 
 class LLMAdapter(nn.Module):
-    """Bridge module: Qwen3 embeddings (source) → T5-compatible space (target).
-
-    Uses T5 token IDs as target input, embeds them, and cross-attends to Qwen3 hidden states.
-    """
+    """Bridge module: Qwen3 embeddings (source) → T5-compatible space (target)."""
 
     def __init__(
         self, source_dim, target_dim, model_dim, num_layers=6, num_heads=16, embed=None, self_attn=False, layer_norm=False

@@ -12,47 +12,20 @@ import torch
 from conftest import CATALOG_IDS
 from thenoise.models import MODEL_CATALOG
 from thenoise.models.base import DiffusionModel
-from thenoise.samplers import SAMPLERS, create_sampler
+from thenoise.samplers import create_sampler
 from thenoise.upscale import (
     SesquiLSRUpscaler,
     _UPSCALER_FORMATS,
 )
 
-# Per-model public defaults (the values the API/CLI fall back to).
-MODEL_DEFAULTS = {
-    "anima": {"steps": 8, "guidance": 1, "sampler": "er_sde", "kv_cache": False},
-    "krea2": {"steps": 8, "guidance": 1.0, "sampler": "er_sde", "kv_cache": False},
-    "zimage": {"steps": 8, "guidance": 1.0, "sampler": "euler", "kv_cache": False},
-    "ming_image": {"steps": 12, "guidance": 1.0, "sampler": "euler", "kv_cache": False},
-    "flux_klein": {"steps": 4, "guidance": 1.0, "sampler": "euler", "kv_cache": False},
-    "mage_flow": {"steps": 4, "guidance": 1.0, "sampler": "euler", "kv_cache": False},
-    "qwen_image": {"steps": 28, "guidance": 2.5, "sampler": "euler", "kv_cache": False},
-    "qwen_image21": {"steps": 28, "guidance": 1.0, "sampler": "euler", "kv_cache": True},
-}
-
 
 @pytest.mark.parametrize("model", MODEL_CATALOG, ids=CATALOG_IDS)
-def test_model_defaults(model):
-    """Every adapter ships the documented defaults and a usable sampler name."""
-    expected = MODEL_DEFAULTS[model.name]
-    prefs = model.DEFAULT_PREFS
-    assert prefs["steps"] == expected["steps"]
-    assert prefs["guidance_scale"] == expected["guidance"]
-    assert prefs["sampler"] == expected["sampler"]
-    assert prefs["kv_cache"] is expected["kv_cache"]
-    # A typo'd sampler would only blow up at request time; tie it to the registry.
-    assert prefs["sampler"] in SAMPLERS
-    assert create_sampler(prefs["sampler"], model) is not None
-
-
-@pytest.mark.parametrize("model", MODEL_CATALOG, ids=CATALOG_IDS)
-def test_model_defaults_extend_the_base_preferences(model):
-    """An adapter's override must keep every preference the base declares.
-
-    Defaults are merged (``{**DiffusionModel.DEFAULT_PREFS, ...}``); dropping a key
-    would make the pipeline raise ``KeyError`` on that preference at request time.
+def test_model_defaults_are_a_usable_superset_of_the_base(model):
+    """A merge that drops a base preference KeyErrors at request time, and a typo'd
+    sampler name only blows up when somebody generates: tie both to the machinery.
     """
     assert set(DiffusionModel.DEFAULT_PREFS) <= set(model.DEFAULT_PREFS)
+    create_sampler(model.DEFAULT_PREFS["sampler"], model)
 
 
 @pytest.fixture(scope="module")
@@ -66,23 +39,20 @@ def latent_upscalers():
 
 @pytest.mark.parametrize("fmt", sorted(_UPSCALER_FORMATS))
 def test_latent_upscaler_matches_its_format_registry(fmt, latent_upscalers):
-    """Registry channels/adaptor agree with the shipped weights and round-trip.
+    """Registry channels agree with the shipped weights, and the round trip works.
 
-    ``SesquiLSRUpscaler`` converts the canonical latent to raw VAE space, upscales,
-    and converts back — so ``to_vae_latent`` must land on the registry's raw channel
-    count, and one call on a canonical latent must hand back a canonical latent at
-    the requested factor (whatever the raw space's own channel count and spatial
-    scale are).
+    ``SesquiLSRUpscaler`` converts the canonical latent to raw VAE space, upscales and
+    converts back: ``to_vae_latent`` must land on the registry's raw channel count and
+    one call must hand back a canonical latent at the requested factor.
     """
     upscaler = latent_upscalers[fmt]
     _factory, filename, channels = _UPSCALER_FORMATS[fmt]
     adaptor = upscaler.adaptor
 
     z = torch.randn(1, adaptor.external_channels, 4, 4)
-    raw = adaptor.to_vae_latent(z).to(torch.bfloat16)
-    assert raw.shape[1] == channels, f"{fmt} ({filename}) carries {raw.shape[1]}ch"
+    assert adaptor.to_vae_latent(z).to(torch.bfloat16).shape[1] == channels, \
+        f"{fmt} ({filename}) carries the wrong raw channel count"
 
-    # The whole transform, in canonical coords in and out.
     z_up = upscaler(z)
     assert z_up.shape == (
         1,

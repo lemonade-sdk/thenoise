@@ -1,14 +1,9 @@
 """The SesquiLSR latent upscaler strategy.
 
-``SesquiLSRUpscaler`` is the ``LatentUpscaler`` implementation built on the
-vendored SesquiLSR network (``sesqui_net.SesquiLSRNet``). It is constructed from
-a *latent format name* and owns the whole latent-domain transform: it converts
-the canonical latent into the raw VAE space Sesqui was trained on, upscales it,
-and converts the result back, so callers never see the raw space or the adaptor.
-
-The format name selects the adaptor factory, the committed weight file and the
-raw channel count from ``_UPSCALER_FORMATS``. A format must be added there
-together with its weights before it can be used; unknown formats raise.
+``SesquiLSRUpscaler`` is the ``LatentUpscaler`` built on the vendored SesquiLSR
+network (``sesqui_net.SesquiLSRNet``). It is constructed from a *latent format
+name* and owns the whole latent-domain transform: canonical latent -> the raw VAE
+space Sesqui was trained on -> upscale -> canonical latent again.
 
 Usage:
     upscaler = SesquiLSRUpscaler("wan21", device="cuda", dtype=torch.bfloat16)
@@ -36,8 +31,7 @@ logger = logging.getLogger(__name__)
 
 # Latent format name -> (adaptor factory, weight filename, raw-VAE channel count).
 # A format must be added here together with its upscaler weights before it can
-# be selected. ``wan21`` (Qwen-Image VAE: Krea2/Anima/Qwen-Image) and ``flux``
-# (Flux VAE: Z-Image) weights are committed.
+# be selected.
 _UPSCALER_FORMATS = {
     "wan21": (make_wan21, "upscaler_Wan21.safetensors", 16),
     "flux":  (make_flux,  "upscaler_flux.safetensors", 16),
@@ -52,15 +46,7 @@ def _load_net(
     device: Union[str, torch.device],
     dtype: torch.dtype,
 ) -> tuple[SesquiLSRNet, LatentFormatAdaptor]:
-    """Load the Sesqui network + adaptor pair for ``format_name``.
-
-    The adaptor and weight file are selected from ``_UPSCALER_FORMATS`` by name;
-    the corresponding ``make_*`` factory is called internally. Formats without
-    committed weights raise ``ValueError`` (groundwork for future VAE support).
-
-    The state dict is shipped as bf16 to match the engine's bf16-only convention
-    (the upstream README notes half-precision has no quality effect).
-    """
+    """Load the Sesqui network + adaptor pair for ``format_name``."""
     entry = _UPSCALER_FORMATS.get(format_name)
     if entry is None:
         raise ValueError(
@@ -86,19 +72,11 @@ def _load_net(
 class SesquiLSRUpscaler(LatentUpscaler):
     """SesquiLSR latent upscale: canonical latent in, canonical latent out.
 
-    Loads the network and builds the format adaptor at construction time, so an
-    adapter that returns one of these has already paid the (small, ~6MB) weight
-    cost. The engine loads upscalers lazily — ``DiffusionModel.get_upscaler``
-    builds one on the first request that actually upscales — so a generation
-    that never upscales never touches them.
-
-    The state dict and the network run in the model's dtype; the adaptor's
-    mean/std/scale arithmetic runs in fp32 (the vendored adaptors upcast), which
-    is what keeps a bf16 latent from drifting through the normalization.
+    The network runs in the model's dtype; the adaptor's mean/std/scale arithmetic
+    runs in fp32 (the vendored adaptors upcast).
     """
 
-    # Fixed by the architecture: the reassembly head pixel-shuffles 2x. Not a knob
-    # — Sesqui upscales 2x or not at all.
+    # Fixed by the architecture: the reassembly head pixel-shuffles 2x.
     scale = 2
 
     def __init__(
@@ -114,15 +92,7 @@ class SesquiLSRUpscaler(LatentUpscaler):
         self.net, self.adaptor = _load_net(format_name, device=device, dtype=dtype)
 
     def __call__(self, latents: torch.Tensor) -> torch.Tensor:
-        """Upscale the canonical latent ``scale``x, staying in canonical space.
-
-        Sesqui operates on *raw* VAE latents, so the canonical latent goes
-        through ``to_vae_latent`` and the result back through
-        ``from_vae_latent``. The target is computed in canonical (external)
-        coordinates and converted by the adaptor, which is what handles formats
-        whose raw latent is a different spatial size than the pipeline's (the
-        patchified Flux.2 one).
-        """
+        """Upscale the canonical latent ``scale``x, staying in canonical space."""
         z = latents.to(device=self.device, dtype=self.dtype)
         scale = self.scale
 

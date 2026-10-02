@@ -2,28 +2,20 @@
 
 Ported from ComfyUI's ``comfy/ldm/qwen_image21/model.py`` (itself a port of the
 diffusers Qwen-Image 2.1 implementation, Apache-2.0) onto this engine's shared
-parts: ``QuantizedLinear``, the shared ``RMSNorm``/``QKNorm``, ``matrix_rope`` +
-``apply_rope`` and ``thenoise.dit.kvcache``. Weight names follow the released
-checkpoints so they load as-is (the only renames are the QK norms onto the shared
-``QKNorm`` layout — see ``thenoise.dit.qwen_image21.utils``). The reference fuses
-the QK-norm + RoPE and the AdaLN into ``comfy_kitchen`` kernels over a
-``(B, N, H, D)`` layout; here they are the shared PyTorch modules over the repo's
-``(B, H, N, D)`` attention layout.
+parts. Weight names follow the released checkpoints; the only renames are the QK
+norms onto the shared ``QKNorm`` layout (see ``thenoise.dit.qwen_image21.utils``).
 
-Three things set this architecture apart, and all three are visible in the sequence
-layout ``[text … references … target]``:
+The sequence layout is ``[text … references … target]``:
 
-* **The latent is the DiT input.** ``img_in`` maps the VAE's 64 channels straight to
-  the model width, so one token is one latent cell of the 16x-compressed grid — no
-  pack/patchify step anywhere.
-* **One modulation drives every block**, computed from two timestep rows: the
-  sampled ``t`` for the target tokens and ``t = 0`` for the text + reference prefix.
-  That prefix modulation is what makes its K/V cacheable.
-* **Attention is block-causal.** A text segment attends causally to what precedes it
-  and an image segment reads everything up to its own end, so no prefix token ever
-  sees the target. The cached prefix is therefore *exact* rather than the
-  approximation Flux.2 Klein / Qwen-Image accept with their bidirectional
-  references — and the target-only steps after the fill need no mask at all.
+* ``img_in`` maps the VAE's 64 channels straight to the model width — one token is
+  one latent cell, no pack/patchify step.
+* One modulation drives every block, computed from two timestep rows: the sampled
+  ``t`` for the target tokens and ``t = 0`` for the text + reference prefix. That
+  prefix modulation is what makes its K/V cacheable.
+* Attention is block-causal: a text segment attends causally to what precedes it and
+  an image segment reads everything up to its own end, so no prefix token ever sees
+  the target. The cached prefix is therefore exact, and the target-only steps after
+  the fill need no mask at all.
 """
 from __future__ import annotations
 
@@ -60,8 +52,7 @@ class QwenImage21Params:
     mlp_ratio: int = 3
     axes_dims_rope: tuple[int, ...] = (16, 56, 56)
     eps: float = 1e-6
-    #: ``img_mlp`` stores ``[gate; up]`` as one ``gate_up`` matrix in the released
-    #: checkpoints; the split form is the diffusers/original layout.
+    #: ``img_mlp`` stores ``[gate; up]`` as one ``gate_up`` matrix.
     fused_mlp: bool = True
 
 
@@ -69,10 +60,9 @@ class QwenImage21Params:
 class QwenImage21Sequence:
     """One conditioning branch's step-invariant sequence, built once per run.
 
-    Everything the denoise loop would otherwise redo lives here: the *projected*
-    prefix tokens, the RoPE table for the full sequence, the block-causal segments
-    of the fill pass, and the prefix/target split point. The target image tokens are
-    the only thing ``forward`` adds.
+    The *projected* prefix tokens, the RoPE table for the full sequence, the
+    block-causal segments of the fill pass, and the prefix/target split point. The
+    target image tokens are the only thing ``forward`` adds.
     """
 
     prefix: Optional[Tensor]
@@ -89,9 +79,8 @@ class AttentionPlan:
     """How the blocks attend on one forward (``bufs`` differs per block).
 
     ``fill`` / ``off`` run the block-causal segments (text segments carry a causal
-    mask, image segments need none); ``read`` drops the prefix from the sequence and
-    attends over the cached prefix plus this step's target tokens through the shared
-    :func:`attend`.
+    mask, image segments need none); ``read`` attends over the cached prefix plus
+    this step's target tokens.
     """
 
     mode: str
@@ -117,8 +106,6 @@ class AttentionPlan:
 
 
 class TimestepEmbedding(nn.Module):
-    """``linear_1 -> SiLU -> linear_2``, no biases (diffusers ``TimestepEmbedding``)."""
-
     def __init__(self, in_dim: int, dim: int) -> None:
         super().__init__()
         self.linear_1 = QuantizedLinear(in_dim, dim, bias=False)
@@ -158,7 +145,7 @@ class TextProjection(nn.Module):
 
 
 class SwiGLUFeedForward(nn.Module):
-    """SwiGLU MLP; ``fused`` keeps ``[gate; up]`` in one GEMM, as the checkpoints do."""
+    """SwiGLU MLP; ``fused`` keeps ``[gate; up]`` in one GEMM."""
 
     def __init__(self, dim: int, hidden_dim: int, fused: bool = True) -> None:
         super().__init__()
@@ -319,13 +306,11 @@ class QwenImage21Transformer2DModel(nn.Module):
     ) -> QwenImage21Sequence:
         """Project text + references + target into one causal sequence, ONCE per run.
 
-        ``context`` is the text-encoder embedding and ``image_slots`` the token index
-        at which each reference image's (removed) vision tokens sat in the prompt, so
-        the reference latents land where the language model saw the picture.
+        ``image_slots`` is the token index at which each reference image's (removed)
+        vision tokens sat in the prompt, so the reference latents land where the
+        language model saw the picture.
 
-        ``name`` keys the computed RoPE table in ``pe_embedder``, so the conditional
-        and unconditional branches keep their own entry — same convention as the
-        other adapters' ``"txt"`` / ``"txt_uncond"``.
+        ``name`` keys the computed RoPE table in ``pe_embedder``.
         """
         x = x.to(device=self.device)
         refs = [r.to(device=x.device) for r in (ref_latents or [])]
@@ -348,8 +333,7 @@ class QwenImage21Transformer2DModel(nn.Module):
             if n > 0:
                 parts.append(txt[:, cursor:end])
                 ids.append(broadcast_positions(n, 3, offset=pos, device=dev))
-                # bool SDPA mask, True = attend: row i (global index length + i) may
-                # read keys 0..length+i, i.e. causal over the accumulated sequence.
+                # Causal bool mask over the accumulated sequence (True = attend).
                 mask = torch.ones(n, length + n, dtype=torch.bool, device=dev).tril(length)
                 segments.append((length, length + n, mask[None, None]))
                 pos += n
@@ -401,12 +385,7 @@ class QwenImage21Transformer2DModel(nn.Module):
         seq: QwenImage21Sequence,
         kv: Optional[KVCache] = None,
     ) -> Tensor:
-        """One forward on the target latents ``[B, C, H, W]`` -> velocity, same shape.
-
-        Once the cache is filled the prefix leaves the sequence entirely
-        (``cache_mode`` says ``read``) and each block attends over
-        ``[cached prefix, this step's target]``.
-        """
+        """One forward on the target latents ``[B, C, H, W]`` -> velocity, same shape."""
         B, _, H, W = x.shape
         target = self.img_in(x.flatten(2).transpose(1, 2))
 
@@ -419,8 +398,7 @@ class QwenImage21Transformer2DModel(nn.Module):
         n_tokens = hidden.shape[1]
 
         # Two modulation rows: the sampled timestep for the target, t = 0 for the
-        # prefix. (The reference rounds ``t * 1000`` to the compute dtype; this engine
-        # feeds the flow timestep straight in.)
+        # prefix. (The reference rounds ``t * 1000`` to the compute dtype.)
         t = timesteps.reshape(-1)[:1].to(device=hidden.device, dtype=hidden.dtype)
         temb = self.time_text_embed(torch.cat([t, t * 0]))
         scale1, gate1, scale2, gate2 = self.modulation(temb).chunk(4, dim=-1)

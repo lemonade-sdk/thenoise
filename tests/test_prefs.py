@@ -1,10 +1,9 @@
-"""Generation-preference tests: checkpoint markers and the resolution precedence.
+"""Generation preferences: checkpoint markers and the resolution precedence.
 
 Preferences resolve as **request (API/CLI) > checkpoint marker > model default**
-(``DiffusionModel.pref``). The marker layer is deliberately model-independent:
-``thenoise.utils.checkpoint`` maps safetensors keys to preference values, so no
-adapter mentions a checkpoint key and a model that has no use for a preference is
-unaffected by a marker.
+(``DiffusionModel.pref``). The marker layer is model-independent: one registry in
+``thenoise.utils.checkpoint`` both implies preferences and drives the loader's
+dropping of those keys, so no adapter names a checkpoint key.
 """
 from __future__ import annotations
 
@@ -16,7 +15,8 @@ from conftest import EditingStubModel, StubModel, write_safetensors
 from thenoise.models.config import GenerateRequest
 from thenoise.pipeline import PipelineController
 from thenoise.upscale.pixel import PixelUpscalerManager
-from thenoise.utils.checkpoint import detect_checkpoint_prefs
+from thenoise.utils.checkpoint import CHECKPOINT_MARKERS, detect_checkpoint_prefs
+from thenoise.utils.loader import drop_checkpoint_markers
 
 ZERO_COND_KEY = "__index_timestep_zero__"
 
@@ -34,7 +34,9 @@ def _request(**kwargs) -> GenerateRequest:
 
 
 def test_marker_implies_a_preference(tmp_path):
-    """An edit checkpoint carrying ``__index_timestep_zero__`` implies the method."""
+    """An edit checkpoint carrying ``__index_timestep_zero__`` implies the method —
+    raw or repackaged under the generic wrapper prefix.
+    """
     plain = tmp_path / "plain.safetensors"
     write_safetensors(plain, {"img_in.weight": torch.zeros(1), "txt_in.weight": torch.zeros(1)})
     assert detect_checkpoint_prefs(str(plain)) == {}
@@ -43,9 +45,6 @@ def test_marker_implies_a_preference(tmp_path):
     write_safetensors(zero_cond, {ZERO_COND_KEY: torch.zeros(1)})
     assert detect_checkpoint_prefs(str(zero_cond)) == {"ref_method": "index_timestep_zero"}
 
-
-def test_marker_matching_is_wrapper_prefix_agnostic(tmp_path):
-    """A repackaged checkpoint marks the same thing (prefixes are stripped)."""
     wrapped = tmp_path / "wrapped.safetensors"
     write_safetensors(wrapped, {f"model.diffusion_model.{ZERO_COND_KEY}": torch.zeros(1)})
     assert detect_checkpoint_prefs(str(wrapped)) == {"ref_method": "index_timestep_zero"}
@@ -54,6 +53,20 @@ def test_marker_matching_is_wrapper_prefix_agnostic(tmp_path):
 def test_unreadable_checkpoint_yields_no_prefs(tmp_path):
     """Markers are an optional hint: an unreadable file must not fail the load."""
     assert detect_checkpoint_prefs(str(tmp_path / "missing.safetensors")) == {}
+
+
+@pytest.mark.parametrize("marker", CHECKPOINT_MARKERS, ids=lambda m: m.key)
+def test_a_registered_marker_is_also_dropped_from_weights(marker):
+    """One registry entry covers reading *and* dropping, so a marker can never leak
+    into a strict ``load_state_dict`` for any model, raw or repackaged.
+    """
+    kept = {"img_in.weight": torch.zeros(1)}
+    sd = {
+        marker.key: torch.zeros(1),
+        f"model.diffusion_model.{marker.key}": torch.zeros(1),
+        **kept,
+    }
+    assert drop_checkpoint_markers(sd) == kept
 
 
 # ---------------------------------------------------------------- precedence
@@ -68,8 +81,7 @@ def test_pref_falls_back_to_the_model_default():
 
 def test_pref_checkpoint_beats_default_and_request_beats_checkpoint():
     model = StubModel()
-    # An explicit request wins with nothing in the checkpoint to say otherwise:
-    # the official edit checkpoints are themselves unmarked, so a missing marker
+    # The official edit checkpoints are themselves unmarked, so a missing marker
     # must never veto a request.
     assert model.pref("ref_method", "index_timestep_zero") == "index_timestep_zero"
     assert model.pref("ref_method", None) == "index"  # auto -> default
@@ -126,13 +138,12 @@ class _KvCacheByDefaultModel(EditingStubModel):
 
 
 def test_a_model_defaulting_kv_cache_still_runs_a_plain_generation():
-    """The cache freezes *reference* K/V, so with no reference it must stay off."""
-    plain = _controller(_KvCacheByDefaultModel())._resolve_pipeline(_request())
-    assert plain.kv_cache is False
+    """The cache freezes *reference* K/V: off with no reference, on for an edit."""
+    controller = _controller(_KvCacheByDefaultModel())
 
-    edit = _controller(_KvCacheByDefaultModel())._resolve_pipeline(
-        _request(image=Image.new("RGB", (64, 64), "white"))
-    )
+    assert controller._resolve_pipeline(_request()).kv_cache is False
+
+    edit = controller._resolve_pipeline(_request(image=Image.new("RGB", (64, 64), "white")))
     assert edit.kv_cache is True
     assert edit.ref_method == "index_timestep_zero"
 

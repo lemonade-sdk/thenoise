@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 class Krea2Model(DiffusionModel):
     name = "krea2"
 
-    # Model-owned defaults (incl. advanced sampler params -- not exposed to API/CLI).
+    # Model-owned defaults, including the schedule shaping constants below.
     DEFAULT_PREFS = {
         **DiffusionModel.DEFAULT_PREFS,
         "steps": 8,
@@ -42,14 +42,7 @@ class Krea2Model(DiffusionModel):
 
     @staticmethod
     def detect(f) -> bool:
-        """True if this handle is the Krea2 (single-stream MMDiT) DiT.
-
-        Krea2's distinctive blocks are the text-fusion stream (``txtfusion.``)
-        and text-MLP stream (``txtmlp.``). Repackaged checkpoints (e.g. ComfyUI
-        exports) prefix every key with a generic wrapper such as
-        ``model.diffusion_model.``, so keys are normalized first and the match
-        is done on the architecture signature, not the raw prefix.
-        """
+        """True if this handle is the Krea2 DiT: ``txtfusion.`` + ``txtmlp.`` blocks."""
         keys = list(normalize_keys(f.keys()))
         has_txtfusion = any(k.startswith("txtfusion.") for k in keys)
         has_txtmlp = any(k.startswith("txtmlp.") for k in keys)
@@ -77,14 +70,11 @@ class Krea2Model(DiffusionModel):
             tokenizer_dir=krea2_utils.find_tokenizer_dir(config.text_encoder_path),
         )
 
-        # Qwen-Image VAE
         self.vae = load_qwen_vae(self.vae_path, device=self.device).to(self.dtype)
 
-        # VAE latent geometry (the VAE owns it): channels via ``vae.z_dim`` in
-        # ``init_latents``, compression here since the schedule needs it per token.
+        # Cached: the schedule needs the compression per token.
         self._compression = self.vae.spatial_compression
 
-        # Register swappable components with the memory manager.
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.encoder)
         self.memory.register("vae", self.vae)
@@ -96,7 +86,7 @@ class Krea2Model(DiffusionModel):
         self,
         args: EncodePromptArgs,
     ) -> Conditioning:
-        """Text-encoder only: RAW prompt embeddings (DiT fusion in ``fuse_text``)."""
+        """Raw prompt embeddings; the DiT-side fusion happens in ``fuse_text``."""
         cfg = args.guidance_scale > 1.0
         txt, txtmask, untxt, untxtmask = encode_prompts(
             self.encoder, [args.prompt], [args.negative_prompt], cfg=cfg
@@ -108,10 +98,8 @@ class Krea2Model(DiffusionModel):
     def fuse_text(self, cond: Conditioning) -> Conditioning:
         """DiT text fusion: raw embeddings -> cross-attention conditioning.
 
-        Runs ONCE here (inside the dit block, DiT resident) so it is cached and
-        reused across denoise steps. Fusion is independent of image/timestep, but
-        depends on the (LoRA-adjusted) DiT weights, so it runs after
-        ``switch_loras``.
+        Fusion depends on the (LoRA-adjusted) DiT weights, so it runs after
+        ``switch_loras``, and its result is reused across every denoise step.
         """
         dev = torch.device(self.device)
         txt_fused = self.dit.fuse_text(
@@ -152,15 +140,12 @@ class Krea2Model(DiffusionModel):
     ) -> torch.Tensor:
         """Patchify the canonical latent and build pos/mask for the DiT, ONCE.
 
-        ``prepare`` converts the latent to ``[B, seq, C*patch^2]`` image tokens
-        and derives the combined image+text position/mask tensors. Those (plus the
-        text embeddings, moved to device) are stashed on the instance so the
+        The resulting tokens, positions and masks are stashed on the instance so the
         per-step ``denoise_step`` stays a pure DiT forward. Safe under the lock.
         """
         dev = torch.device(self.device)
         patch = self.dit.config.patch
 
-        # Fresh prompt: drop any stale frequency entries from the previous one.
         self.dit.posemb.clear()
 
         txt = cond.cond.to(device=dev, dtype=self.dtype)
@@ -217,7 +202,7 @@ class Krea2Model(DiffusionModel):
         return v
 
     def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:
-        # Unpatchify back to the canonical 4D latent [B, C, H//8, W//8].
+        # Unpatchify to the canonical 4D latent [B, C, H//8, W//8].
         patch = self.dit.config.patch
         h_ = params.height // (self._compression * patch)
         w_ = params.width // (self._compression * patch)
@@ -231,16 +216,12 @@ class Krea2Model(DiffusionModel):
         )
 
     def resolve_size(self, width: int, height: int) -> tuple[int, int]:
-        # The latent grid is patchified in `patch`-sized blocks, so width/height
-        # must be multiples of compression * patch. Round up otherwise.
+        # Pixel dims must be a multiple of the VAE compression * DiT patch size.
         align = self._compression * self.dit.config.patch
         return round_up(width, align), round_up(height, align)
 
     def percent_to_sigma(self, percent: float) -> float:
-        """Percent -> sigma (ComfyUI ModelSamplingFlux, shift=mu=1.15).
-
-        Used by the ER-SDE solver to nudge the first sigma just below 1.
-        """
+        """Percent -> sigma under the flux shift (ER-SDE needs sigma_0 < 1)."""
         if percent <= 0.0:
             return 1.0
         if percent >= 1.0:
@@ -250,5 +231,4 @@ class Krea2Model(DiffusionModel):
         return math.exp(mu) / (math.exp(mu) + (1.0 / t - 1.0))
 
     def _create_upscaler(self) -> LatentUpscaler:
-        """Qwen-Image VAE -> Wan21 z-score Sesqui upscaler."""
         return SesquiLSRUpscaler("wan21", device=self.device, dtype=self.dtype)

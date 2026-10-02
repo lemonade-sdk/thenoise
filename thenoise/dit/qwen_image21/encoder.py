@@ -1,23 +1,17 @@
 """Qwen-Image 2.1 text encoder — Qwen3-VL-8B, vision tokens in, image slots out.
 
-Qwen-Image 2.1 is conditioned by a *full* Qwen3-VL-8B: the LM **and** its vision
-tower. An edit therefore feeds the reference image in twice, and both halves have to
-agree on where it sits: the language model sees it as vision tokens spliced into the
-prompt, and the DiT replaces exactly those positions with the reference VAE latent.
-
-So the encoder returns, per conditioning branch, the prompt embeddings with the
-system turn *and* the vision tokens removed, plus ``image_slots`` — the token index
-each removed image left behind, where
-:meth:`thenoise.dit.qwen_image21.models.QwenImage21Transformer2DModel.build_sequence`
-splices the latent back in.
+An edit feeds the reference image in twice and both halves have to agree on where it
+sits: the language model sees it as vision tokens spliced into the prompt, and the
+DiT replaces exactly those positions with the reference VAE latent. The encoder
+returns the prompt embeddings with the system turn *and* the vision tokens removed,
+plus ``image_slots`` — the token index each removed image left behind.
 
 Two details are load-bearing for matching the reference implementation:
 
-  * **The hidden state is the last layer's output BEFORE the final RMSNorm** (the
-    model is tuned on that; ``hidden_states[-1]`` is already normalised on current
-    transformers), so it is captured with a forward-pre-hook on the LM's final norm.
-  * **The system turn is dropped and the user turn starts the conditioning**: only
-    everything from the second chat-start marker onwards reaches the DiT.
+  * the hidden state is the last layer's output BEFORE the final RMSNorm (current
+    transformers' ``hidden_states[-1]`` is already normalised), captured with a
+    forward-pre-hook on the LM's final norm;
+  * conditioning starts at the second chat-start marker.
 """
 from __future__ import annotations
 
@@ -52,9 +46,8 @@ T2I_TEMPLATE = SYSTEM_PROMPT + IM_START + "user\n{}" + PROMPT_SUFFIX
 def prompt_template(prompt: str, num_images: int) -> str:
     """The chat-wrapped prompt, with one labelled vision block per reference.
 
-    The images lead the user turn as ``<image1>``, ``<image2>``, ... each followed by its
-    vision block. An empty prompt becomes a single space, so the user turn is never
-    empty (which would change the tokenisation of the markers around it).
+    An empty prompt becomes a single space: an empty user turn changes how the
+    surrounding markers tokenize.
     """
     if not prompt:
         prompt = " "
@@ -70,7 +63,7 @@ def keep_mask_and_slots(
 ) -> Tuple[Tensor, List[int]]:
     """Which prompt tokens condition the DiT, and where each image's slot lands.
 
-    Two kinds of token are removed, exactly as the reference does:
+    Two kinds of token are removed:
 
       * everything before the SECOND ``im_start`` — the system turn (the first is
         the user turn's, so with only one marker nothing is dropped); and
@@ -78,8 +71,7 @@ def keep_mask_and_slots(
         reference latent.
 
     A slot is the index the removed run *used* to start at, counted in the kept
-    tokens before it. Runs are identified by ``mm_token_type_ids`` (modality 1 =
-    image), which is what the processor itself uses to expand them.
+    tokens before it; runs come from ``mm_token_type_ids`` (modality 1 = image).
 
     ``input_ids``/``mm_token_type_ids`` are one sequence (no batch axis).
     """
@@ -103,11 +95,7 @@ def keep_mask_and_slots(
 
 
 class QwenImage21TextEncoder(nn.Module):
-    """Qwen3-VL-8B prompt encoder: ``(prompt, images) -> (embeddings, slots)``.
-
-    Registered with the memory manager as any other text encoder; the
-    tokenizer/processor are pure Python and stay put.
-    """
+    """Qwen3-VL-8B prompt encoder: ``(prompt, images) -> (embeddings, slots)``."""
 
     def __init__(self, qwen: nn.Module, tokenizer, processor) -> None:
         super().__init__()
@@ -158,7 +146,7 @@ class QwenImage21TextEncoder(nn.Module):
         model_inputs = {
             "input_ids": input_ids,
             "attention_mask": self._to_model(inputs["attention_mask"], torch.long),
-            # M-RoPE needs the per-token modality map; the model refuses to guess it.
+            # M-RoPE needs the per-token modality map
             "mm_token_type_ids": self._to_model(inputs["mm_token_type_ids"], torch.long),
             "use_cache": False,
         }

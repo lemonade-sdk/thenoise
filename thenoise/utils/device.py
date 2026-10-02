@@ -18,9 +18,7 @@ def clean_memory_on_device(device: Optional[Union[str, torch.device]]):
 def get_device_memory(device: Optional[Union[str, torch.device]]) -> Optional[int]:
     """Total device memory in bytes for a compute device, or ``None`` if unknown.
 
-    Only ``cuda`` (ROCm aliases ``cuda`` -> hip) is currently supported; other
-    device kinds (cpu, meta, mps, xpu) return ``None``. Used by the offload
-    auto-detection, which compares the expected resident weight bytes against this.
+    Only ``cuda`` is supported (ROCm aliases ``cuda`` -> hip).
     """
     if device is None:
         return None

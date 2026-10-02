@@ -1,5 +1,5 @@
-"""BailingMoeV2 — the Ling-2.0-mini MoE core of Ming-Image's conditioner, vendored from
-Ant Group's ``modeling_bailing_moe_v2.py`` and rewritten against this repo's primitives."""
+"""BailingMoeV2 — the Ling-2.0-mini MoE language core, ported from Ant Group's
+``modeling_bailing_moe_v2.py`` onto this repo's primitives."""
 from __future__ import annotations
 
 import dataclasses
@@ -16,7 +16,7 @@ from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.rope import apply_rope_split_half
 
 #: How the three position axes share the rotary frequencies. ``sum(sections)``
-#: must be ``rotary_dim / 2`` for the ``video_rope`` interleaving below.
+#: must be ``rotary_dim / 2``.
 MROPE_SECTION = (8, 12, 12)
 
 #: One ``(start, grid_h, grid_w)`` block marks a run of "image" tokens; ``grid_*``
@@ -26,7 +26,7 @@ Block = tuple[int, int, int]
 
 @dataclass
 class BailingMoeV2Config:
-    """The Ling-2.0-mini LLM as the released ``mllm/config.json`` measures it."""
+    """Ling-2.0-mini as the released ``mllm/config.json`` describes it."""
 
     vocab_size: int = 157184
     hidden_size: int = 2048
@@ -54,7 +54,7 @@ class BailingMoeV2Config:
 
 
 class BailingAttention(nn.Module):
-    """GQA attention with per-head QK-RMSNorm and partial ``video_rope``: the shared
+    """GQA attention with per-head QK-RMSNorm and partial ``video_rope``: the
     split-half helper rotates the first ``rotary_dim`` channels, leaving the rest."""
 
     def __init__(self, config: BailingMoeV2Config) -> None:
@@ -68,7 +68,7 @@ class BailingAttention(nn.Module):
             config.hidden_size, (self.num_heads + 2 * self.num_kv_heads) * self.head_dim, bias=False
         )
         self.dense = QuantizedLinear(self.num_heads * self.head_dim, config.hidden_size, bias=False)
-        # Two plain RMSNorms (not ``QKNorm``) to match the file's ``q_norm``/``k_norm``.
+        # Plain RMSNorms, matching the checkpoint's ``q_norm``/``k_norm``.
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
@@ -76,7 +76,7 @@ class BailingAttention(nn.Module):
         heads = self.num_heads + 2 * self.num_kv_heads
         qkv = self.query_key_value(x).unflatten(-1, (heads, self.head_dim)).transpose(1, 2)
         query, key, value = qkv.split((self.num_heads, self.num_kv_heads, self.num_kv_heads), dim=1)
-        # Norm first, then rotate: the order the reference (and the weights) used.
+        # Norm before rotating, as the weights were produced.
         query, key = self.q_norm(query), self.k_norm(key)
         cos, sin = freqs
         query = apply_rope_split_half(query, cos, sin)
@@ -107,8 +107,8 @@ class ExpertBank(nn.Module):
         self.num_experts = num_experts
         self.out_features = out_features
         self.in_features = in_features
-        # Not ``torch.empty``: the checkpoint overwrites every row, and a zero-filled
-        # bank would hide a routing bug. Bound as ``nn.Linear`` derives from kaiming.
+        # Bound like ``nn.Linear`` (kaiming-derived); the checkpoint overwrites
+        # every row.
         bound = in_features**-0.5
         self.weight = nn.Parameter(torch.empty(num_experts, out_features, in_features))
         nn.init.uniform_(self.weight, -bound, bound)
@@ -121,8 +121,8 @@ class ExpertBank(nn.Module):
         self._quantized = True
 
     def expert_weight(self, expert: int) -> torch.Tensor:
-        """One expert's ``[out, in]`` weight, still low-bit when the bank is; the view
-        is a slice of the buffers, not a copy (never index the 3-D ``QuantizedTensor``)."""
+        """One expert's ``[out, in]`` weight, still low-bit when the bank is. The view
+        is a slice of the buffers, never an index into the 3-D ``QuantizedTensor``."""
         weight = self.weight
         if not self._quantized:
             return weight[expert]
@@ -140,8 +140,8 @@ class ExpertBank(nn.Module):
 
 
 class Gate(nn.Module):
-    """Sigmoid router with expert bias and group-limited top-k (fp32 math); the bias
-    shifts only the *selection* score, not the returned normalized sigmoid weight."""
+    """Sigmoid router with expert bias and group-limited top-k (fp32 math). The bias
+    shifts only the *selection* score, never the returned sigmoid weight."""
 
     def __init__(self, config: BailingMoeV2Config) -> None:
         super().__init__()
@@ -181,8 +181,8 @@ def expert_dispatch(
     gate_up: ExpertBank,
     down: ExpertBank,
 ) -> torch.Tensor:
-    """Route ``x`` through the fused banks: sort by expert so each runs once on its own
-    tokens, one GEMM per expert, then scatter the sum back over each token's experts."""
+    """Route ``x`` through the fused banks: sort by expert so each runs one GEMM on
+    its own tokens, then scatter the sum back over each token's experts."""
 
     num_tokens, top_k = topk_idx.shape
     flat_idx = topk_idx.reshape(-1)
@@ -226,7 +226,7 @@ class Experts(nn.Module):
 
 class SparseMoeBlock(nn.Module):
     """Top-k experts + one shared expert, routed by a text and an image router;
-    ``image_mask`` picks which answer to use so the query tokens take different experts."""
+    ``image_mask`` picks which answer to use."""
 
     def __init__(self, config: BailingMoeV2Config) -> None:
         super().__init__()
@@ -286,8 +286,9 @@ def video_rope(
     theta: float,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``video_rope`` cos/sin for a text sequence carrying image blocks: the text counter
-    steps over each block, and image tokens share one temporal/height position along width."""
+    """``video_rope`` cos/sin for a text sequence carrying image blocks: the text
+    counter steps over each block; image tokens share temporal/height positions
+    along width."""
 
     pos = torch.arange(seq_len, dtype=torch.float32, device=device)
     for start, grid_h, grid_w in blocks:
