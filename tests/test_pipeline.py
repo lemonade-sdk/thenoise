@@ -1,9 +1,7 @@
-"""``PipelineController`` tests — the generate path, its cache, refine and finalize.
+"""``PipelineController`` tests: the generate path, its cache, refine and finalize.
 
-Every test drives the real controller over the weight-free ``StubModel`` (CPU,
-fp32): request resolution, the single-entry stage cache, the latent
-upscale-and-refine, the postprocess dispatch and the PNG metadata are all
-exercised end to end, with no weights and no device moves.
+Every test drives the real controller over the weight-free ``StubModel`` (CPU, fp32),
+with no weights and no device moves.
 """
 from __future__ import annotations
 
@@ -117,10 +115,7 @@ def test_resolve_randomizes_negative_and_missing_seed(seed):
     assert all(isinstance(s, int) and 0 <= s < 2**32 for s in seen)
     assert len(seen) > 1  # "random" really is random, not a fixed sentinel
 
-
-def test_resolve_explicit_seed_is_passed_through():
-    r = _controller()._resolve_pipeline(_request(seed=42, prompt="p"))
-    assert r.seed == 42
+    assert _controller()._resolve_pipeline(_request(seed=42)).seed == 42
 
 
 # ------------------------------------------------------------------ generate path
@@ -631,18 +626,15 @@ def test_pnginfo_json_block_covers_every_field():
     }
 
 
-def test_pnginfo_parameters_plain_prompt_only():
-    """No negative, no upscale, no LoRA: prompt line + the key/value tail."""
-    text = _parameters()
-    lines = text.splitlines()
+def test_pnginfo_parameters_layout():
+    """A1111-compatible: prompt line, optional negative line, then the tail line."""
+    lines = _parameters().splitlines()
     assert lines[0] == "a fox"
-    assert "Negative prompt:" not in text
+    assert "Negative prompt:" not in lines
     assert lines[-1] == (
         "Model: flux_klein, Steps: 4, Sampler: euler, Cfg scale: 1.0, Seed: 7"
     )
 
-
-def test_pnginfo_parameters_includes_negative_prompt_line():
     lines = _parameters(negative_prompt="blurry, text").splitlines()
     assert lines[:2] == ["a fox", "Negative prompt: blurry, text"]
 
@@ -661,18 +653,16 @@ def test_pnginfo_parameters_upscale_pair_is_all_or_nothing():
     assert "Upscale factor" not in flag and "Upscale type" not in flag
 
 
-def test_pnginfo_parameters_joins_loras_and_pixel_upscaler():
-    text = _parameters(lora_specs=["style:0.8", "pose:1.0"], pixel_upscaler="x4")
+def test_pnginfo_parameters_joins_loras_upscaler_and_sigmas():
+    """The tail line is parsed as comma-separated pairs, so sigmas use ``/``."""
+    text = _parameters(
+        lora_specs=["style:0.8", "pose:1.0"], pixel_upscaler="x4", sigmas=[1.0, 0.5, 0.125]
+    )
     assert "LoRA: style:0.8; pose:1.0" in text
     assert "Pixel upscaler: x4" in text
-
-
-def test_pnginfo_parameters_renders_sigmas_without_extra_commas():
-    """The tail line is parsed as comma-separated pairs: sigmas use ``/``."""
-    text = _parameters(sigmas=[1.0, 0.5, 0.125])
     assert text.splitlines()[-1] == (
         "Model: flux_klein, Steps: 4, Sampler: euler, Cfg scale: 1.0, Seed: 7, "
-        "Sigmas: 1/0.5/0.125"
+        "LoRA: style:0.8; pose:1.0, Pixel upscaler: x4, Sigmas: 1/0.5/0.125"
     )
 
 
@@ -694,7 +684,6 @@ def test_build_upscale_pnginfo_carries_over_and_replaces():
     }
 
 
-
 def test_kv_cache_requires_an_edit_request():
     """``kv_cache`` is a reference-latent optimization: it needs a reference image."""
     controller = _controller()
@@ -706,9 +695,8 @@ def test_kv_cache_requires_a_model_that_supports_it():
     """The KV cache is per-adapter: the pipeline refuses instead of ignoring it.
 
     ``EditingStubModel`` edits (so it has a reference latent to freeze) but never
-    wired ``thenoise.dit.kvcache`` into its blocks, which is exactly what
-    wired ``thenoise.dit.kvcache`` into its blocks, which is exactly what the
-    ``kv_cache`` capability advertises.
+    wired ``thenoise.dit.kvcache`` into its blocks, which is what the ``kv_cache``
+    capability advertises.
     """
     from PIL import Image
 

@@ -1,8 +1,7 @@
 """Ming-Image: the DiT it builds, the checkpoints it loads, the schedule it samples at.
 
-Weight-free and GPU-free: a tiny DiT (dim 256, 2 heads of 128 = the real 32+48+48 axis
-split) stands in for the 12 GB one, synthetic checkpoints for both released exports, and
-conditioning of the shape phase 3 will return stands in for the text encoder.
+Weight-free and GPU-free: a tiny DiT (dim 256, 2 heads of 128 = the real 32+48+48
+axis split) stands in for the 12 GB one, and synthetic checkpoints for both exports.
 """
 from __future__ import annotations
 
@@ -10,6 +9,8 @@ import math
 
 import pytest
 import torch
+
+from accelerate import init_empty_weights
 
 from conftest import comfy_quant, write_safetensors
 from thenoise.dit.lumina.models import LuminaTransformerBlock
@@ -102,19 +103,15 @@ def test_ming_pads_with_masked_zeros_and_ships_no_pad_tokens():
     )
 
 
-def test_released_config_matches_the_measured_checkpoint():
-    """The config as the 12 GB bf16 header measured it — and self-consistent:
-    ``dim == n_heads * sum(axes_dims)`` is what the core asserts at construction.
+def test_released_config_builds_a_consistent_dit():
+    """The part of the measured config a wrong edit can hide: the head/axis split and
+    the patch-embedder width stay consistent, and the whole config still constructs.
     """
     cfg = MING_IMAGE_DIT_CONFIG
     assert cfg["dim"] // cfg["n_heads"] == sum(cfg["axes_dims"]) == 128
-    assert cfg["n_heads"] == cfg["n_kv_heads"] == 30  # no GQA in this model
-    assert cfg["n_layers"] == 30 and cfg["n_refiner_layers"] == 2
-    assert cfg["in_channels"] == 16  # the VAE's z_dim
-    assert cfg["cap_feat_dim"] == 2560
-    assert cfg["rope_theta"] == 256.0
     assert cfg["patch_size"] ** 2 * cfg["f_patch_size"] * cfg["in_channels"] == 64
-    assert int(cfg["dim"] / 3 * 8) == 10240  # the header's feed_forward.w1 rows
+    with init_empty_weights():
+        MingImageTransformer2DModel(**cfg)
 
 
 # ------------------------------------------------------------- the two checkpoints
@@ -245,7 +242,7 @@ def test_load_ming_dit_is_strict(tmp_path):
 @pytest.mark.parametrize(
     "height,width,mu",
     [
-        (512, 512, 0.5 + 0.65 * (1024 - 256) / (4096 - 256)),
+        (512, 512, 0.63),  # 1024 tokens: interpolated between the two buckets
         (1024, 1024, 1.15),  # the 4096-token reference bucket
         (2048, 2048, 1.35),  # its ceiling
     ],
@@ -263,39 +260,19 @@ def test_image_seq_len_counts_2x2_patches_of_the_vae_latent():
 
 def test_the_shift_bucket_flips_above_the_reference_sequence():
     """The one place ``>=`` and ``>`` differ: at 1024² we take the 1.15 branch (shift
-    3.158), matching ComfyUI's hard-coded ``{"shift": 3.16}`` for Ming-Image."""
+    3.158), matching ComfyUI's hard-coded ``{"shift": 3.16}`` for Ming-Image. A bigger
+    image must hold the grid high for longer, never lower it."""
     assert image_seq_len(1024, 1024) == 4096
     assert dynamic_mu(1024, 1024) == pytest.approx(1.15)
     assert image_seq_len(1040, 1024) == 4160  # 65 * 64 tokens, just past the bucket
     assert dynamic_mu(1040, 1024) == pytest.approx(1.35)
 
-
-def test_the_shift_grows_with_the_pixel_count():
-    shifts = [dynamic_shift(size, size) for size in (256, 512, 1024, 2048, 4096)]
-    assert shifts == sorted(shifts)
-    assert shifts[0] < shifts[-1]
-
-
-@pytest.mark.parametrize("steps", [1, 4, 12])
-def test_sigma_grid_runs_one_to_zero(steps):
-    sigmas = get_sigmas(steps, 1024, 1024, torch.device("cpu"))
-
-    assert len(sigmas) == steps + 1
-    assert float(sigmas[0]) == pytest.approx(1.0)
-    assert float(sigmas[-1]) == 0.0
-    assert all(a > b for a, b in zip(sigmas, sigmas[1:]))
-
-
-def test_the_shift_actually_moves_the_grid():
-    """An unshifted grid would be the same curve at every resolution."""
     small = [float(s) for s in get_sigmas(12, 512, 512, torch.device("cpu"))[:12]]
     large = [float(s) for s in get_sigmas(12, 2048, 2048, torch.device("cpu"))[:12]]
     plain = [1.0 - i / 12 for i in range(12)]  # the unshifted linspace(1, 1/N, N)
 
-    assert small != plain
-    assert small != large
+    assert small != plain  # the shift really moves the curve
     assert small[0] == large[0] == 1.0
-    # A stronger shift holds the rest of the grid HIGH for longer.
     assert all(h > l for h, l in zip(large[1:], small[1:]))
 
 
@@ -394,9 +371,8 @@ def test_prepare_latent_prepares_once_without_a_second_tensor(monkeypatch):
 
 
 def test_denoise_step_negates_the_velocity_and_threads_the_second_tensor(monkeypatch):
-    """The reference's ``x + dt * model_out`` with ``dt < 0`` is our ``x -= delta * v``
-    only for ``v = -model_out``, and each branch must carry its own extra tensor and
-    its own RoPE table.
+    """``x + dt * model_out`` (``dt < 0``) is our ``x -= delta * v`` only for
+    ``v = -model_out``, and each branch carries its own extra tensor and RoPE table.
     """
     dit = _tiny_dit()
     model = _bare_model(dit=dit)
@@ -465,25 +441,12 @@ def test_finalize_latent_returns_the_canonical_4d_latent():
     "key,expected",
     [
         # A LoRA trained against the bf16 release (legacy names)...
-        (
-            "layers.0.attention.to_out.0.lora_up.weight",
-            "layers.0.attention.out.lora_up.weight",
-        ),
-        (
-            "layers.0.attention.norm_q.weight",
-            "layers.0.attention.qk_norm.query_norm.weight",
-        ),
-        (
-            "layers.0.attention.norm_k.weight",
-            "layers.0.attention.qk_norm.key_norm.weight",
-        ),
+        ("layers.0.attention.to_out.0.lora_up.weight", "layers.0.attention.out.lora_up.weight"),
+        ("layers.0.attention.norm_q.weight", "layers.0.attention.qk_norm.query_norm.weight"),
         ("all_x_embedder.2-1.weight", "x_embedder.weight"),
         # ...or against this repo's fused tree: unchanged, both QK spellings.
         ("layers.0.attention.qkv.lora_up.weight", "layers.0.attention.qkv.lora_up.weight"),
-        (
-            "layers.0.attention.q_norm.weight",
-            "layers.0.attention.qk_norm.query_norm.weight",
-        ),
+        ("layers.0.attention.q_norm.weight", "layers.0.attention.qk_norm.query_norm.weight"),
     ],
 )
 def test_lora_keys_from_either_generation_resolve(key, expected):

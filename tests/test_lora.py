@@ -1,9 +1,7 @@
 """LoRA loading, naming, fusing, folding, applying and undoing.
 
-All of it is pure, tiny and CPU-only — and it is the code whose failure mode is
-"the LoRA silently does nothing", i.e. invisible to the user. Covers the
-spec/path helpers on the adapter, the naming-convention resolution, the stacked
-projections and ``DiffusionModel.switch_loras``.
+Pure, tiny, CPU-only — the code whose failure mode is "the LoRA silently does
+nothing", invisible to the user.
 """
 from __future__ import annotations
 
@@ -97,8 +95,6 @@ def test_resolve_lora_path_requires_a_lora_dir():
 
 
 def test_list_loras_returns_sorted_short_names_recursive(tmp_path):
-    import tempfile
-
     model = object.__new__(StubModel)
 
     for rel in [
@@ -158,29 +154,20 @@ def test_normalize_lora_suffix(raw, canonical):
 
 
 def test_normalize_lora_suffix_collapses_a_whole_peft_state_dict():
-    """The PEFT form of a factor pair ends up matchable as one target."""
+    """The two PEFT factors and their alpha end up matchable as one target."""
     out = _normalize_lora_suffix(
         {
             "blocks.0.attn.to_q.lora_A.default.weight": torch.ones(1),
             "blocks.0.attn.to_q.lora_B.default.weight": torch.ones(1),
+            "blocks.0.attn.to_q.alpha": torch.ones(1),
         }
     )
     assert set(out) == {
         "blocks.0.attn.to_q.lora_A.weight",
         "blocks.0.attn.to_q.lora_B.weight",
+        "blocks.0.attn.to_q.alpha",
     }
     assert _match_lora_keys("blocks.0.attn.to_q.weight", set(out)) is not None
-
-
-def test_normalize_lora_suffix_rewrites_a_whole_state_dict():
-    out = _normalize_lora_suffix(
-        {
-            "x.lora_down.weight": torch.ones(1),
-            "x.lora_up.weight": torch.ones(1),
-            "x.alpha": torch.ones(1),
-        }
-    )
-    assert set(out) == {"x.lora_A.weight", "x.lora_B.weight", "x.alpha"}
 
 
 # ---------------------------------------------------------- naming conventions
@@ -252,7 +239,15 @@ def _qkv_lora(
     return keys
 
 
-def test_fuse_qkv_builds_the_qkv_pair():
+def test_fuse_qkv_builds_a_pair_whose_delta_is_the_stack_of_the_projections():
+    """The fused rank-3r delta must equal the three separate merges stacked up.
+
+    That equality is the whole reason the fusion is correct — it pins the row
+    order, the block-diagonal layout of B (q must not leak into the k/v rows) and
+    the zero fill, without spelling out the matrices: the three separate LoRAs,
+    each applied with ``r/r == 1``, are reproduced by one application on the
+    fused projection.
+    """
     sd = _qkv_lora()
     fused = _fuse(sd, FUSE_QKV)
 
@@ -264,36 +259,12 @@ def test_fuse_qkv_builds_the_qkv_pair():
     assert a.shape == (6, 4)
     assert b.shape == (18, 6)
 
-    for i, which in enumerate("qkv"):
-        assert torch.equal(a[2 * i : 2 * i + 2], sd[f"blocks.0.attn.to_{which}.lora_A.weight"])
-        assert torch.equal(
-            b[6 * i : 6 * i + 6, 2 * i : 2 * i + 2],
-            sd[f"blocks.0.attn.to_{which}.lora_B.weight"],
-        )
-        # Off-diagonal blocks are exactly zero (q must not leak into k/v rows).
-        for j in range(3):
-            if j != i:
-                assert torch.equal(b[6 * i : 6 * i + 6, 2 * j : 2 * j + 2], torch.zeros(6, 2))
-
-
-def test_fuse_qkv_fused_delta_equals_the_stack_of_projection_deltas():
-    """The fused rank-3r delta is the stack of the three separate merges.
-
-    That equality is the whole reason the fusion is correct: the three separate
-    LoRAs, each applied with ``r/r == 1``, are reproduced by one application on
-    the fused projection.
-    """
-    sd = _qkv_lora()
-    fused = _fuse(sd, FUSE_QKV)
     per_projection = [
         _delta(sd[f"blocks.0.attn.to_{w}.lora_A.weight"],
                sd[f"blocks.0.attn.to_{w}.lora_B.weight"])
         for w in "qkv"
     ]
-    fused_delta = _delta(
-        fused["blocks.0.attn.qkv.lora_A.weight"],
-        fused["blocks.0.attn.qkv.lora_B.weight"],
-    )
+    fused_delta = _delta(a, b)
     assert torch.allclose(fused_delta, torch.cat(per_projection, dim=0), rtol=1e-6)
 
 
@@ -417,43 +388,23 @@ def _gate_up_lora(
     return keys
 
 
-def test_fuse_gate_up_builds_the_gate_up_pair():
+def test_fuse_gate_up_builds_a_pair_whose_delta_is_the_stack_of_the_halves():
+    """Same contract as qkv, on the ``[gate; up]`` SwiGLU layout."""
     sd = _gate_up_lora()
     fused = _fuse(sd, FUSE_GATE_UP)
 
     assert not any("gate_layer" in k or ".proj." in k for k in fused)
     a = fused["blocks.0.img_mlp.gate_up.lora_A.weight"]
     b = fused["blocks.0.img_mlp.gate_up.lora_B.weight"]
-    # The fused matrix is [gate; up], so A is the rank stack and B the block
-    # diagonal at each half's row offset.
-    assert a.shape == (4, 4)
-    assert b.shape == (12, 4)
-    for i, which in enumerate(("gate_layer", "proj")):
-        assert torch.equal(a[2 * i : 2 * i + 2], sd[f"blocks.0.img_mlp.{which}.lora_A.weight"])
-        assert torch.equal(
-            b[6 * i : 6 * i + 6, 2 * i : 2 * i + 2],
-            sd[f"blocks.0.img_mlp.{which}.lora_B.weight"],
-        )
-        for j in range(2):
-            if j != i:
-                assert torch.equal(b[6 * i : 6 * i + 6, 2 * j : 2 * j + 2], torch.zeros(6, 2))
-
-
-def test_fuse_gate_up_fused_delta_is_the_stack_of_the_two_merges():
-    """Applying the fused pair once == applying gate and up on their own halves."""
-    sd = _gate_up_lora()
-    fused = _fuse(sd, FUSE_GATE_UP)
+    assert a.shape == (4, 4)   # the rank stack
+    assert b.shape == (12, 4)  # block diagonal at each half's row offset
 
     per_part = [
         _delta(sd[f"blocks.0.img_mlp.{which}.lora_A.weight"],
                sd[f"blocks.0.img_mlp.{which}.lora_B.weight"])
         for which in ("gate_layer", "proj")
     ]
-    fused_delta = _delta(
-        fused["blocks.0.img_mlp.gate_up.lora_A.weight"],
-        fused["blocks.0.img_mlp.gate_up.lora_B.weight"],
-    )
-    assert torch.allclose(fused_delta, torch.cat(per_part, dim=0), rtol=1e-6)
+    assert torch.allclose(_delta(a, b), torch.cat(per_part, dim=0), rtol=1e-6)
 
 
 def test_fuse_gate_up_folds_each_part_alpha():
@@ -694,21 +645,14 @@ def switch_model(tmp_path, monkeypatch):
     return model, events
 
 
-def test_switch_loras_is_a_noop_for_the_same_spec(switch_model):
+def test_switch_loras_reuses_the_same_spec_and_undoes_before_reapplying(switch_model):
     model, events = switch_model
     dit = _TinyNet()
 
     model.switch_loras(["style.safetensors:1.0"], dit)
-    assert [e[0] for e in events] == ["apply"]
     model.switch_loras(["style.safetensors:1.0"], dit)
-    assert [e[0] for e in events] == ["apply"]  # not re-applied
+    assert [e[0] for e in events] == ["apply"]  # unchanged spec: not re-applied
 
-
-def test_switch_loras_undoes_the_previous_spec_first(switch_model):
-    model, events = switch_model
-    dit = _TinyNet()
-
-    model.switch_loras(["style.safetensors:1.0"], dit)
     model.switch_loras(["pose.safetensors:1.0"], dit)
     assert [e[0] for e in events] == ["apply", "undo", "apply"]
 
@@ -760,7 +704,7 @@ def test_switch_loras_honours_the_model_key_map(tmp_path):
     assert torch.equal(dit.single_blocks[0].linear1.weight, base)
 
 
-def test_switch_loras_without_a_lora_dir_does_not_apply(tmp_path):
+def test_switch_loras_without_a_lora_dir_does_not_apply():
     model = StubModel(lora_dir=None)
     dit = _TinyNet()
     original = dit.proj.weight.clone()

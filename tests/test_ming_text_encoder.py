@@ -31,7 +31,6 @@ from thenoise.text_encoders.ming_image import (
     MingConnectorConfig,
     MingImageConditioner,
     MingTokenizerError,
-    QUERY_TOKENS,
     T2I_PROMPT_TEMPLATE,
     TEXT_ENCODER_DROP_KEYS,
     build_prompt,

@@ -41,20 +41,14 @@ def test_class_level_geometry():
     assert (AutoencoderKLFlux2.z_dim, AutoencoderKLFlux2.spatial_compression) == (128, 16)
 
 
-def test_qwen_geometry_follows_the_encoder_depth():
-    """The shared Qwen-Image VAE derives compression from its downsampling stages."""
-    vae = AutoencoderKLQwenImage(base_dim=4)  # tiny random init: no weights needed
-    assert vae.z_dim == 16
-    assert vae.spatial_compression == 8  # len(dim_mult) - 1 == 3 stages
-
-
 @pytest.mark.parametrize(
     "dim_mult,compression",
     [([1, 2], 2), ([1, 2, 4], 4), ([1, 2, 4, 4], 8), ([1, 2, 4, 4, 4], 16)],
 )
 def test_qwen_compression_follows_the_downsampling_stages(dim_mult, compression):
     """One halving per stage past the first: ``2 ** (len(dim_mult) - 1)``."""
-    vae = AutoencoderKLQwenImage(base_dim=4, dim_mult=dim_mult)
+    vae = AutoencoderKLQwenImage(base_dim=4, dim_mult=dim_mult)  # tiny random init
+    assert vae.z_dim == 16
     assert vae.spatial_compression == compression
 
 
@@ -203,22 +197,12 @@ def test_mixed_normalisations_are_an_error():
         )
 
 
-@pytest.mark.parametrize(
-    "factory,vae",
-    [
-        (
-            make_wan21,
-            lambda: AutoencoderKLQwenImage(base_dim=4),
-        ),
-    ],
-    ids=["wan21"],
-)
-def test_the_upscaler_adaptor_means_what_the_vae_means(factory, vae):
+def test_the_upscaler_adaptor_means_what_the_vae_means():
     """Sesqui works on RAW latents, so its adaptor must be the VAE's own transform:
     if the two disagree an upscale silently rescales the latent, reading as a
     washed-out picture rather than an error.
     """
-    adaptor, vae = factory(), vae()
+    adaptor, vae = make_wan21(), AutoencoderKLQwenImage(base_dim=4)
     z = torch.randn(1, 16, 2, 2)
     mean, inv_std = vae._latents_mean, vae._latents_inv_std
 

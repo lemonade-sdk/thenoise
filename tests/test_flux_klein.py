@@ -1,11 +1,8 @@
-"""Flux.2 (Flux Klein) adapter tests (no real weights / no GPU needed).
+"""Flux.2 (Flux Klein): token/position pack-unpack, a small end-to-end DiT forward
+(eager — see ``conftest``), the reference-token packing and the reference KV cache.
 
-Covers the flow schedule, the token-position pack/unpack helpers, a small
-end-to-end DiT forward (eager — see ``conftest``), the Flux.2 VAE shapes, the
-reference-token packing and the Flux2 latent-upscaler round-trip.
-
-Detection and the per-model defaults live in the catalog-wide tables of
-``test_detect.py`` / ``test_catalog.py``.
+The schedule contract, detection, defaults and the latent-format registration are
+catalog-wide (``test_schedules.py`` / ``test_detect.py`` / ``test_catalog.py``).
 """
 from __future__ import annotations
 
@@ -13,28 +10,31 @@ import pytest
 import torch
 
 from thenoise.dit.flux2.models import Flux2, Flux2Params
-from thenoise.dit.flux2.sampling import get_schedule, prc_img, prc_txt, scatter_ids
+from thenoise.dit.flux2.sampling import prc_img, prc_txt, scatter_ids
 from thenoise.dit.kvcache import KVCache
 from thenoise.models import FluxKleinModel
+
+
+def _tiny_params() -> Flux2Params:
+    """The smallest config the Flux2 accepts (1 block each, 2 heads of 8)."""
+    return Flux2Params(
+        in_channels=8,
+        context_in_dim=24,
+        hidden_size=16,
+        num_heads=2,
+        depth=1,
+        depth_single_blocks=1,
+        axes_dim=[2, 2, 2, 2],
+        mlp_ratio=1.5,
+        use_guidance_embed=False,
+    )
 
 
 @pytest.fixture
 def tiny_flux2():
     """A random-init Flux2 with the smallest sensible config."""
     torch.manual_seed(0)
-    return Flux2(
-        Flux2Params(
-            in_channels=8,
-            context_in_dim=24,
-            hidden_size=16,
-            num_heads=2,
-            depth=1,
-            depth_single_blocks=1,
-            axes_dim=[2, 2, 2, 2],
-            mlp_ratio=1.5,
-            use_guidance_embed=False,
-        )
-    ).eval().requires_grad_(False)
+    return Flux2(_tiny_params()).eval().requires_grad_(False)
 
 
 def _tiny_inputs(tiny_flux2, seq=4):
@@ -55,22 +55,6 @@ def _tiny_inputs(tiny_flux2, seq=4):
     }
 
 
-def test_schedule_is_flow_grid_1_to_0():
-    ts = get_schedule(8, 4096)  # 1024x1024 -> 64x64 packed -> 4096 tokens
-    assert len(ts) == 9  # num_steps + 1
-    assert ts[0] == 1.0
-    assert ts[-1] == 0.0
-    # Strictly decreasing.
-    assert all(ts[i] > ts[i + 1] for i in range(len(ts) - 1))
-
-
-def test_schedule_depends_on_token_count():
-    ts_small = get_schedule(8, 256)
-    ts_large = get_schedule(8, 4096)
-    # Larger image token counts get a larger empirical shift (steeper early steps).
-    assert ts_small[1] < ts_large[1]
-
-
 def test_prc_img_and_scatter_roundtrip():
     torch.manual_seed(0)
     latent = torch.randn(1, 8, 4, 4)
@@ -84,42 +68,33 @@ def test_prc_img_and_scatter_roundtrip():
 
 
 def test_prc_txt_ids_shape():
-    txt = torch.randn(1, 512, 24)
-    _, ids = prc_txt(txt)
-    assert ids.shape == (1, 512, 4)
+    assert prc_txt(torch.randn(1, 512, 24))[1].shape == (1, 512, 4)
 
 
-def test_flux2_forward_small_model(tiny_flux2):
-    """End-to-end Flux2 forward with a tiny config (no weights, random init)."""
-    out = tiny_flux2(**_tiny_inputs(tiny_flux2))
-    assert out.shape == (1, 4, 8)
-    # A flow-velocity output must be finite.
-    assert torch.isfinite(out).all()
+def test_flux2_forward_slices_the_reference_tokens_off_the_output(tiny_flux2):
+    """End-to-end forward (no weights, random init) over the tiny config.
 
-
-def test_flux2_forward_with_reference_tokens(tiny_flux2):
-    """Flux2 forward consumes ref tokens and slices them off the output."""
+    The reference tokens are concatenated into the image stream and sliced back off,
+    so the output is exactly the target tokens — and a reference-conditioned pass
+    must differ, otherwise the conditioning is silently ignored.
+    """
     torch.manual_seed(0)
     inputs = _tiny_inputs(tiny_flux2)
-    ref_tokens = torch.randn(1, 6, 8)
+    with torch.no_grad():
+        base = tiny_flux2(**inputs)
+    assert base.shape == (1, 4, 8)  # a flow velocity, and finite
+    assert torch.isfinite(base).all()
+
     ref_ids = torch.full((1, 6, 4), FluxKleinModel.REF_INDEX, dtype=torch.long)
     # pe_x must cover the concatenated image stream (base tokens + refs).
-    img_ids = torch.cat([torch.zeros(1, 4, 4, dtype=torch.long), ref_ids], dim=1)
-    tiny_flux2.pe_embedder.store("img", img_ids)
+    tiny_flux2.pe_embedder.store("img", torch.cat([torch.zeros(1, 4, 4, dtype=torch.long), ref_ids], dim=1))
     inputs["pe_x"] = tiny_flux2.pe_embedder["img"]
 
     with torch.no_grad():
-        out = tiny_flux2(**inputs, ref_tokens=ref_tokens)
-    # The reference tokens are concatenated in and sliced back off, so the
-    # output is exactly the image tokens (seq), not seq + ref tokens.
-    assert out.shape == (1, 4, 8)
-    assert torch.isfinite(out).all()
-
-    # The differential: a reference-conditioned pass must differ from the
-    # un-conditioned one (otherwise conditioning is silently ignored).
-    with torch.no_grad():
-        base = tiny_flux2(**_tiny_inputs(tiny_flux2))
-    assert not torch.allclose(out, base)
+        edit = tiny_flux2(**inputs, ref_tokens=torch.randn(1, 6, 8))
+    assert edit.shape == base.shape
+    assert torch.isfinite(edit).all()
+    assert not torch.allclose(edit, base)
 
 
 def test_flux2_vae_decode_shape(flux2_vae):
@@ -138,24 +113,14 @@ def test_flux2_vae_encode_shape(flux2_vae):
     assert latents.dtype == torch.float32
 
 
-def test_flux2_reference_ids_use_the_ref_index_t_coord():
-    """Reference packing puts ``REF_INDEX`` on the t-axis, not the still-image 0."""
-    ref = torch.randn(1, 8, 4, 4)
-    _, ids = prc_img(ref, t_coord=torch.tensor([FluxKleinModel.REF_INDEX]))
+@pytest.mark.parametrize("t_coord", [FluxKleinModel.REF_INDEX, 2 * FluxKleinModel.REF_INDEX])
+def test_reference_ids_go_on_their_own_t_axis(t_coord):
+    """Reference packing puts the index on the t-axis, not the still-image 0;
+    multi-ref packing uses successive ones (10, 20, ...) per ComfyUI.
+    """
+    _, ids = prc_img(torch.randn(1, 8, 4, 4), t_coord=torch.tensor([t_coord]))
     assert ids.shape == (1, 16, 4)
-    assert torch.all(ids[0, :, 0] == FluxKleinModel.REF_INDEX)
-
-
-def test_multi_ref_packing_assigns_successive_indices():
-    """Multi-ref packing uses successive t-axes (10, 20, ...) per ComfyUI."""
-    ref = torch.randn(1, 8, 4, 4)
-    index = FluxKleinModel.REF_INDEX
-    _, ids1 = prc_img(ref, t_coord=torch.tensor([index]))
-    _, ids2 = prc_img(ref, t_coord=torch.tensor([2 * index]))
-    assert torch.all(ids1[0, :, 0] == index)
-    assert torch.all(ids2[0, :, 0] == 2 * index)
-    # Concatenated along the token dimension keeps both refs distinct.
-    assert torch.cat([ids1, ids2], dim=1).shape == (1, 32, 4)
+    assert torch.all(ids[0, :, 0] == t_coord)
 
 
 def test_pack_reference_latent_rejects_unsupported_method():
@@ -180,17 +145,6 @@ def test_resize_to_cover_center_crop_keeps_target_size():
     # Already at target size: returned unchanged.
     img = Image.new("RGB", (64, 64), "green")
     assert resize_to_cover_center_crop(img, 64, 64) is img
-
-
-def test_flux2_upscaler_loads_and_runs():
-    from thenoise.upscale import SesquiLSRUpscaler
-
-    upscaler = SesquiLSRUpscaler("flux2", device="cpu", dtype=torch.bfloat16)
-    # Canonical Flux Klein latent [B, 128, H//16, W//16] in and out at 2x. The raw
-    # 32ch latent is spatially 2x the canonical one, so the adaptor's spatial scale
-    # has to be applied to the network's target for this to come back 2x, not 4x.
-    z = torch.randn(1, 128, 8, 8)
-    assert upscaler(z).shape == (1, 128, 16, 16)
 
 
 def _tiny_edit_inputs(model, seq=4, refseq=6, txtlen=8):
@@ -268,8 +222,8 @@ def test_zero_cond_t_changes_the_edit_output_but_not_t2i(tiny_flux2):
 
 
 def test_zero_cond_t_keeps_refs_step_independent(tiny_flux2):
-    """With ``zero_cond_t`` the reference K/V are step-invariant: the cache drift
-    over a multi-step run is far smaller than with plain ``index`` modulation."""
+    """The cache's premise, measured: over a short run the cached trajectory drifts
+    far less with the references conditioned at t=0 than following the timestep."""
     torch.manual_seed(0)
     m = tiny_flux2
     inp = _tiny_edit_inputs(m)
@@ -301,27 +255,23 @@ def test_zero_cond_t_keeps_refs_step_independent(tiny_flux2):
 
 def test_kv_cache_freed_in_finalize():
     """``finalize_latent`` drops the run-scoped KV cache (no stale cache across runs)."""
+    from thenoise.models.config import SamplingParams
+
     model = FluxKleinModel.__new__(FluxKleinModel)
     model._kv_caches = {"cond": KVCache("cond"), "uncond": KVCache("uncond")}
     model._img_ids = torch.zeros(1, 4, 4, dtype=torch.long)
-    latents = torch.randn(1, 4, 8)
-    from thenoise.models.config import SamplingParams
     params = SamplingParams(height=64, width=64, steps=4, seed=0, guidance_scale=1.0, sampler="euler")
-    model.finalize_latent(latents, params)
+    model.finalize_latent(torch.randn(1, 4, 8), params)
     assert model._kv_caches is None
     assert model.kv_cache("cond") is None  # the DiT's plain path from here on
 
 
-def test_kv_cache_multi_ref_caches_the_sum():
-    """Two references are concatenated; the cached slice is their combined length."""
+def test_kv_cache_multi_ref_caches_the_sum(tiny_flux2):
+    """Two references are one stream: the cached slice is their combined length."""
     torch.manual_seed(0)
-    m = Flux2(Flux2Params(in_channels=8, context_in_dim=24, hidden_size=16, num_heads=2,
-                          depth=1, depth_single_blocks=1, axes_dim=[2, 2, 2, 2],
-                          mlp_ratio=1.5, use_guidance_embed=False)).eval().requires_grad_(False)
+    m = tiny_flux2
     inp = _tiny_edit_inputs(m, seq=4, refseq=3, txtlen=8)
-    ref1 = torch.randn(1, 3, 8)
-    ref2 = torch.randn(1, 5, 8)
-    ref_all = torch.cat([ref1, ref2], dim=1)
+    ref_all = torch.randn(1, 8, 8)
     m.pe_embedder.store("ref", torch.zeros(1, 8, 4, dtype=torch.long))
     with torch.no_grad():
         full = m(inp["x"], inp["pe_x"], inp["t"], inp["ctx"], inp["pe_txt"],
@@ -342,9 +292,7 @@ def test_adapter_denoise_step_kv_fill_then_read():
     model = FluxKleinModel.__new__(FluxKleinModel)
     model.device = "cpu"
     model.dtype = torch.float32
-    model.dit = Flux2(Flux2Params(in_channels=8, context_in_dim=24, hidden_size=16, num_heads=2,
-                                  depth=1, depth_single_blocks=1, axes_dim=[2, 2, 2, 2],
-                                  mlp_ratio=1.5, use_guidance_embed=False)).eval().requires_grad_(False)
+    model.dit = Flux2(_tiny_params()).eval().requires_grad_(False)
     model.dit.pe_embedder.clear()
     model.dit.pe_embedder.store("img", torch.zeros(1, 4, 4, dtype=torch.long))
     model.dit.pe_embedder.store("ref", torch.full((1, 6, 4), FluxKleinModel.REF_INDEX, dtype=torch.long))

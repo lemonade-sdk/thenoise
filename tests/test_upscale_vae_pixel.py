@@ -15,7 +15,6 @@ import pytest
 import torch
 
 from thenoise.upscale import LatentUpscaler, VAEPixelUpscaler
-from thenoise.upscale import vae_pixel as vae_pixel_mod
 
 
 class FakeVAE:
@@ -135,24 +134,18 @@ def test_the_bicubic_overshoot_is_clamped_before_encoding():
     assert pixels.max() <= 1.0 and pixels.min() >= -1.0
 
 
-def test_every_pixel_channel_round_trips_including_the_alpha():
-    """The resize is channel-agnostic: an RGBA VAE keeps its alpha through it.
+@pytest.mark.parametrize("channels", [3, 4])
+def test_every_pixel_channel_round_trips_including_the_alpha(channels):
+    """The resize is channel-agnostic: an RGBA VAE keeps its alpha through it and an
+    RGB one is not padded to four on the way back in.
 
-    Dropping to RGB here would be the pixel-domain upscaler's compromise, not this
-    one's — the VAE on the other end of the encode wants all its channels back.
+    Dropping to RGB would be the pixel-domain upscaler's compromise, not this one's
+    — the VAE on the other end of the encode wants all its channels back.
     """
-    vae = FakeVAE(pixel_channels=4)
+    vae = FakeVAE(pixel_channels=channels)
     _upscaler(vae)(torch.zeros(1, vae.z_dim, 4, 4))
 
-    assert vae.encoded_pixels.shape[1] == 4
-
-
-def test_the_rgb_vae_path_is_unchanged():
-    """A 3-channel VAE is not padded to four on the way back in."""
-    vae = FakeVAE(pixel_channels=3)
-    _upscaler(vae)(torch.zeros(1, vae.z_dim, 4, 4))
-
-    assert vae.encoded_pixels.shape[1] == 3
+    assert vae.encoded_pixels.shape[1] == channels
 
 
 def test_the_vaes_own_dtype_and_device_are_used_for_its_calls():

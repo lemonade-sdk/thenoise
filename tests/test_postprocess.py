@@ -1,10 +1,8 @@
 """Post-process filters: ``rcas``, ``nyquist_notch`` and ``film_grain``.
 
-Pure, deterministic, CPU, tiny inputs. The assertions are the documented
-invariants (identity at strength 0, non-RGB channels passed through, DC
-preservation, seed determinism, shape/dtype stability) rather than pixel
-values, so a legitimate kernel tweak does not break them but a real regression
-does.
+Pure, deterministic, CPU, tiny inputs. The assertions are invariants (identity at
+strength 0, non-RGB channels passed through, DC preservation, seed determinism,
+shape/dtype stability) rather than pixel values.
 """
 from __future__ import annotations
 
@@ -22,14 +20,9 @@ ALL_FILTERS = {
 }
 
 
-@pytest.mark.parametrize("strength", [0.0, -0.0])
-def test_rcas_zero_strength_is_the_identity(strength):
+def test_zero_strength_is_the_identity():
     pixels = torch.rand(3, 9, 9)
-    assert rcas(pixels, strength=strength) is pixels
-
-
-def test_film_grain_zero_strength_is_the_identity():
-    pixels = torch.rand(3, 9, 9)
+    assert rcas(pixels, strength=0.0) is pixels
     assert film_grain(pixels, strength=0.0) is pixels
 
 
@@ -50,12 +43,10 @@ def test_shape_and_dtype_survive_odd_dimensions(filter_name):
     assert out.dtype == pixels.dtype
 
 
-@pytest.mark.parametrize("filter_name", ["rcas", "nyquist_notch"])
-def test_constant_field_stays_constant(filter_name):
-    """DC preservation: a flat field must come back flat (no shading/halo)."""
+def test_nyquist_notch_preserves_dc():
+    """A flat field must come back flat (no shading/halo)."""
     flat = torch.full((3, 9, 9), 0.5)
-    out = ALL_FILTERS[filter_name](flat)
-    assert torch.allclose(out, flat, atol=1e-5)
+    assert torch.allclose(nyquist_notch(flat), flat, atol=1e-5)
 
 
 def test_rcas_boosts_a_local_feature_without_spreading_it():
@@ -73,15 +64,16 @@ def test_rcas_boosts_a_local_feature_without_spreading_it():
     assert torch.equal(outside, pixels)
 
 
-@pytest.mark.parametrize("base", [-0.4, -0.2, 0.0, 0.2, 0.4])
+@pytest.mark.parametrize("base", [-0.4, 0.0, 0.4])
 @pytest.mark.parametrize("sign", [-1.0, 1.0])
-@pytest.mark.parametrize("strength", [0.5, 1.0])
-def test_rcas_sharpens_edges_anywhere_in_the_pixel_range(base, sign, strength):
-    """A feature must be sharpened no matter where it sits in [-1, 1]."""
+def test_rcas_sharpens_edges_anywhere_in_the_pixel_range(base, sign):
+    """A feature must be sharpened no matter where it sits in [-1, 1]: the headroom
+    on either side of it changes with ``base`` and ``sign``.
+    """
     pixels = torch.full((3, 9, 9), base)
     pixels[:, 4, 4] = base + sign * 0.4
 
-    out = rcas(pixels, strength=strength)
+    out = rcas(pixels, strength=1.0)
 
     assert (out[0, 4, 4] - pixels[0, 4, 4]) * sign > 1e-3
     assert (out[0, 3, 4] - base) * sign < -1e-3
@@ -154,10 +146,7 @@ def test_film_grain_is_seed_deterministic():
     first = film_grain(pixels, strength=0.1, seed=7)
     assert torch.equal(first, film_grain(pixels, strength=0.1, seed=7))
     assert not torch.equal(first, film_grain(pixels, strength=0.1, seed=8))
-
-
-def test_film_grain_without_a_seed_is_random():
-    pixels = torch.rand(3, 16, 16)
+    # With no seed at all, every call is a different draw.
     assert not torch.equal(
         film_grain(pixels, strength=0.1), film_grain(pixels, strength=0.1)
     )

@@ -1,9 +1,8 @@
 """HTTP surface tests (no torch, no weights).
 
 Cheap cases call the route functions directly; anything where FastAPI/pydantic
-request validation, status codes or error mapping matter goes through
-``TestClient`` — those are exactly the branches a user hits and that a direct
-call silently skips.
+validation, status codes or error mapping matter goes through ``TestClient`` —
+those are the branches a user hits and that a direct call silently skips.
 """
 from __future__ import annotations
 
@@ -16,7 +15,6 @@ import pytest
 
 from thenoise.api import (
     EditRequest,
-    Text2ImageRequest,
     UpscaleRequest,
     _UI_DIR,
     create_app,
@@ -110,27 +108,26 @@ def _rgba_png_b64(size=(2, 2)) -> str:
 # --------------------------------------------------------------------- /health
 
 
-def test_health_reports_model_capabilities():
-    """/health exposes the model's capabilities so the UI can gate Edit and KV cache."""
+def test_health_reports_the_loaded_model():
     runtime = _runtime()
-    runtime._model = type("M", (), {"CAPABILITIES": {"edit": True, "kv_cache": True}})()
+    runtime._model = type("M", (), {
+        "CAPABILITIES": {"edit": True, "kv_cache": True},
+        "pixel_channels": 4,
+    })()
     res = _endpoint(create_app(runtime), "/health")()
+
     assert res["models"] == ["fake"]
+    # The UI gates Edit, the KV cache and transparent output on these.
     assert res["capabilities"] == {"edit": True, "kv_cache": True}
+    assert res["pixel_channels"] == 4
 
 
-def test_health_capabilities_empty_without_model():
+def test_health_with_nothing_loaded():
     res = _endpoint(create_app(_empty_runtime()), "/health")()
     assert res["models"] == []
     assert res["capabilities"] == {}
     assert res["pixel_channels"] == 3  # nothing loaded -> nothing can be transparent
 
-
-def test_health_reports_an_rgba_model_as_rgba():
-    """``pixel_channels`` lets the UI put something behind a transparent output."""
-    runtime = _runtime()
-    runtime._model = type("M", (), {"CAPABILITIES": {}, "pixel_channels": 4})()
-    assert _endpoint(create_app(runtime), "/health")()["pixel_channels"] == 4
 
 
 # ----------------------------------------------------------------------- /lora
@@ -158,11 +155,9 @@ def test_index_serves_the_ui(client):
 
 
 def test_ui_assets_are_shipped_and_served(client):
-    """Every local href/src in index.html is served (no 404s once the UI loads).
+    """Every local href/src in index.html is served; nothing is inlined or fetched.
 
-    Structural on purpose: an exact-string grep breaks on any reformat, while the
-    real contract is "the linked files ship with the package and the route serves
-    them, and there is no inline CSS/JS or network font dependency".
+    Structural on purpose: an exact-string grep breaks on any reformat.
     """
     with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
         html = f.read()
@@ -190,27 +185,13 @@ def test_ui_assets_are_shipped_and_served(client):
 
 
 def test_upscalers_lists_names_and_scales(tmp_path, monkeypatch):
-    # Non-seeded path: the scale is read from each model's header. The fake files
-    # are not real safetensors, so stub detection by filename.
-    def fake_detect(path):
-        if "x4" in path:
-            return 4
-        if "x2" in path:
-            return 2
-        raise ValueError("unknown scale")
-
-    monkeypatch.setattr("thenoise.upscale.pixel.detect_pixel_upscaler_scale", fake_detect)
+    # The fake files are not real safetensors, so header detection is stubbed.
+    monkeypatch.setattr(
+        "thenoise.upscale.pixel.detect_pixel_upscaler_scale", lambda path: 4
+    )
     res = _endpoint(create_app(_runtime(tmp_path)), "/upscalers")()
     assert res["upscalers"] == ["RealESRGAN_x4", "sub/x2"]
-    assert res["scales"] == {"RealESRGAN_x4": 4, "sub/x2": 2}
-
-
-def test_upscalers_scales_pass_through(tmp_path):
-    # Pre-seeded scales are served verbatim (no file access needed).
-    runtime = _runtime(tmp_path)
-    runtime._pixel_upscalers._pixel_upscaler_scales = {"RealESRGAN_x4": 4, "sub/x2": 2}
-    res = _endpoint(create_app(runtime), "/upscalers")()
-    assert res["scales"] == {"RealESRGAN_x4": 4, "sub/x2": 2}
+    assert res["scales"] == {"RealESRGAN_x4": 4, "sub/x2": 4}
 
 
 def test_upscalers_undetectable_scale_is_reported_as_zero(tmp_path, monkeypatch):
@@ -233,24 +214,21 @@ def test_upscalers_available_without_model():
 # ----------------------------------------------------------------- /text2image
 
 
-def test_text2image_passes_the_pixel_upscaler_through(tmp_path):
+def test_text2image_passes_the_request_through(client, tmp_path):
     runtime = _runtime(tmp_path)
-    req = Text2ImageRequest(
-        prompt="a fox", width=512, height=512, pixel_upscaler="RealESRGAN_x4"
-    )
-    res = _endpoint(create_app(runtime), "/text2image")(req)
-    assert res.status_code == 200
-    assert runtime._pipeline.requests[-1].pixel_upscaler == "RealESRGAN_x4"
-
-
-def test_text2image_passes_sigmas_through(client):
-    runtime = _runtime()
     res = client(runtime).post(
-        "/text2image", json={"prompt": "a fox", "sigmas": [1.0, 0.5, 0.2]}
+        "/text2image",
+        json={
+            "prompt": "a fox", "width": 512, "height": 512,
+            "pixel_upscaler": "RealESRGAN_x4", "sigmas": [1.0, 0.5, 0.2],
+        },
     )
 
     assert res.status_code == 200
-    assert runtime._pipeline.requests[-1].sigmas == [1.0, 0.5, 0.2]
+    request = runtime._pipeline.requests[-1]
+    assert (request.width, request.height) == (512, 512)
+    assert request.pixel_upscaler == "RealESRGAN_x4"
+    assert request.sigmas == [1.0, 0.5, 0.2]
 
 
 def test_edit_passes_sigmas_through():

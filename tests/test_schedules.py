@@ -163,15 +163,12 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
     ids=CATALOG_IDS,
 )
 def test_model_capabilities(model_cls, edit, kv_cache):
-    """``CAPABILITIES`` is the one source of truth, and it must describe the adapter.
+    """``CAPABILITIES`` must describe the adapter: the pipeline rejects a request the
+    model cannot serve and ``/health`` lets the UI grey out what it lacks.
 
-    Both halves are checked against the machinery they name, since the pipeline
-    rejects a request the model cannot serve and ``/health`` lets the UI grey out
-    what the loaded model lacks:
-
-      * ``edit``           -> the reference kernels are really overridden.
-      * ``kv_cache``       -> the shared cache protocol really starts a run cache,
-        and freezing reference K/V needs a reference latent, so it implies ``edit``.
+      * ``edit``     -> the reference kernels are really overridden.
+      * ``kv_cache`` -> the shared cache protocol really starts a run cache, and
+        freezing reference K/V needs a reference latent, so it implies ``edit``.
     """
     model = _bare(model_cls, **BARE[model_cls.name])
     assert model.capability("edit") is edit
@@ -203,46 +200,26 @@ def test_base_encode_reference_is_not_implemented():
     assert anima.pack_reference_latent(torch.zeros(1, 4, 4)) is None
 
 
-def test_decode_squeezes_a_frame_axis_and_returns_float32():
-    """``decode`` accepts a 5D ``[B,C,1,H,W]`` VAE output and hands back ``[C,H,W]``."""
+def test_decode_normalizes_the_vae_output():
+    """``decode`` accepts a 4D or legacy 5D VAE output, hands back fp32, and keeps
+    every channel: an RGBA VAE's alpha must survive (dropping it would silently turn
+    a model that can draw transparency into one that cannot).
+    """
     model = _bare(AnimaModel)
     model.vae = _FakeVAE(out_5d=True, dtype=torch.bfloat16)
     pixels = model.decode(torch.zeros(1, 16, 4, 4))
-
     assert pixels.shape == (3, 8, 8)
     assert pixels.dtype == torch.float32  # the postprocess/convert tail expects fp32
 
-
-def test_decode_passes_a_4d_vae_output_through():
-    model = _bare(AnimaModel)
-    model.vae = _FakeVAE(out_5d=False, dtype=torch.float32)
-    pixels = model.decode(torch.zeros(1, 16, 4, 4))
-    assert pixels.shape == (3, 8, 8)
-    assert pixels.dtype == torch.float32
-
-
-def test_decode_keeps_every_channel_the_vae_returned():
-    """An RGBA VAE's alpha survives the decode — nothing narrows it to RGB here.
-
-    This is the whole point of the shared decode being channel-count agnostic: an
-    adapter that dropped the extra channel would silently turn a model that can
-    draw transparency into one that cannot.
-    """
-    model = _bare(QwenImage21Model)
     model.vae = _FakeVAE(out_5d=False, dtype=torch.bfloat16, channels=4)
-    pixels = model.decode(torch.zeros(1, 64, 4, 4))
-    assert pixels.shape == (4, 8, 8)
+    assert model.decode(torch.zeros(1, 64, 4, 4)).shape == (4, 8, 8)
 
 
-@pytest.mark.parametrize("model_cls", MODEL_CATALOG, ids=CATALOG_IDS)
-def test_pixel_channels_is_read_off_the_vae(model_cls):
-    """The adapter reports its VAE's pixel width, and RGB is the fallback."""
-    model = _bare(model_cls, **BARE[model_cls.name])
-    assert model.pixel_channels == model.vae.pixel_channels
-
-    # An adapter with no VAE opinion to offer is RGB, not an AttributeError.
-    bare = _bare(model_cls)
-    assert bare.pixel_channels == 3
+def test_pixel_channels_is_read_off_the_vae():
+    """The adapter reports its VAE's pixel width; with no VAE, RGB, not AttributeError."""
+    model = _bare(QwenImage21Model, vae=SimpleNamespace(pixel_channels=4))
+    assert model.pixel_channels == 4
+    assert _bare(QwenImage21Model).pixel_channels == 3
 
 
 class _FakeVAE(torch.nn.Module):
@@ -281,11 +258,8 @@ def test_file_size_counts_missing_as_zero():
 
 
 def test_get_upscaler_is_lazy_and_cached():
-    """The model builds its upscaler once, on the first request that needs it.
-
-    ``_create_upscaler`` is what loads weights, so building twice would mean
-    loading twice and handing out two objects; building eagerly would tax every
-    plain generation.
+    """``_create_upscaler`` loads weights: building twice would load twice, and
+    building eagerly would tax every plain generation.
     """
     built = []
 

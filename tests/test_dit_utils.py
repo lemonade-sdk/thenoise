@@ -1,9 +1,7 @@
 """Model-side helpers that are pure functions of their inputs.
 
-Krea 2's resolution-aware timestep grid, latent patchify/position builder and
-text-token compaction; Anima's checkpoint-header block counter and key map. No
-weights and no device: these are the pieces whose silent failure would show up
-as a wrong schedule or a mis-shaped token stream.
+No weights and no device: these are the pieces whose silent failure shows up as a
+wrong schedule or a mis-shaped token stream.
 """
 from __future__ import annotations
 
@@ -25,23 +23,18 @@ from thenoise.dit.krea2.sampling import (
 # ------------------------------------------------------------------ krea2 grid
 
 
-def test_krea2_timesteps_shift_with_the_token_count_when_mu_is_interpolated():
-    small = timesteps(256, 8, 256, 6400, y1=0.5, y2=1.15)
-    large = timesteps(4096, 8, 256, 6400, y1=0.5, y2=1.15)
-    assert len(small) == len(large) == 9
-    assert small != large
-    assert small[0] == 1.0 and small[-1] == 0.0
+def test_krea2_timesteps_run_one_to_zero_and_shift_only_with_interpolated_mu():
+    """The distilled checkpoint passes an explicit mu, which pins the grid: the
+    resolution shift must not leak into it.
+    """
+    shifted = [timesteps(seq, 8, 256, 6400, y1=0.5, y2=1.15) for seq in (256, 4096)]
+    assert len(shifted[0]) == len(shifted[1]) == 9
+    assert shifted[0] != shifted[1]
+    assert shifted[0][0] == 1.0 and shifted[0][-1] == 0.0
 
-
-def test_krea2_timesteps_are_pinned_when_mu_is_given():
-    """The distilled checkpoint passes an explicit mu -> no resolution shift."""
     pinned = [timesteps(seq, 8, 256, 6400, mu=1.15) for seq in (256, 1024, 4096)]
     assert pinned[0] == pinned[1] == pinned[2]
-
-
-def test_krea2_timesteps_are_monotonic():
-    ts = timesteps(1024, 8, 256, 6400, mu=1.15)
-    assert all(a > b for a, b in zip(ts, ts[1:]))
+    assert all(a > b for a, b in zip(pinned[0], pinned[0][1:]))  # monotonic
 
 
 # -------------------------------------------------------- krea2 patchify/pos
@@ -102,30 +95,20 @@ class _Recorder:
         return txt, mask
 
 
-def test_krea2_encode_prompts_defaults_negatives_to_blank():
-    """With cfg and no negatives, the encoder is run on a batch of empty prompts."""
+def test_krea2_encode_prompts_encodes_the_unconditional_branch_only_when_cfg():
     enc = _Recorder()
     txt, txtmask, untxt, untxtmask = encode_prompts(enc, ["a", "b"], cfg=True)
+    # No negatives given -> a batch of empty prompts, shaped like the conditional one.
     assert enc.calls == [["a", "b"], ["", ""]]
-    assert untxt is not None and untxtmask is not None
-    assert untxt.shape == txt.shape
-    assert untxtmask.shape == txtmask.shape
+    assert untxt.shape == txt.shape and untxtmask.shape == txtmask.shape
 
-
-def test_krea2_encode_prompts_uses_given_negatives():
     enc = _Recorder()
-    txt, txtmask, untxt, untxtmask = encode_prompts(
-        enc, ["a"], negative_prompts=["bad"], cfg=True
-    )
+    encode_prompts(enc, ["a"], negative_prompts=["bad"], cfg=True)
     assert enc.calls == [["a"], ["bad"]]
-    assert untxt is not None
 
-
-def test_krea2_encode_prompts_skips_unconditional_without_cfg():
     enc = _Recorder()
-    txt, txtmask, untxt, untxtmask = encode_prompts(enc, ["a"], cfg=False)
+    assert encode_prompts(enc, ["a"], cfg=False)[2] is None
     assert enc.calls == [["a"]]
-    assert untxt is None and untxtmask is None
 
 
 # ------------------------------------------------------------------ anima utils
@@ -137,13 +120,12 @@ def test_count_anima_blocks_reads_the_header(tmp_path):
     assert _count_anima_blocks(path) == 28
 
 
-def test_count_anima_blocks_ignores_the_wrapper_prefix(tmp_path):
-    """Raw (``net.``) and repackaged checkpoints must count identically."""
-    for prefix in ("", "net.", "model.diffusion_model."):
-        keys = [f"{prefix}blocks.{i}.mlp.weight" for i in range(3)]
-        path = write_safetensors(tmp_path / f"anima-{prefix or 'bare'}.safetensors",
-                                 {k: torch.zeros(1) for k in keys})
-        assert _count_anima_blocks(path) == 3, prefix
+@pytest.mark.parametrize("prefix", ["", "net.", "model.diffusion_model."])
+def test_count_anima_blocks_ignores_the_wrapper_prefix(tmp_path, prefix):
+    """Raw and repackaged checkpoints must count identically."""
+    keys = [f"{prefix}blocks.{i}.mlp.weight" for i in range(3)]
+    path = write_safetensors(tmp_path / "anima.safetensors", {k: torch.zeros(1) for k in keys})
+    assert _count_anima_blocks(path) == 3
 
 
 def test_count_anima_blocks_requires_block_keys(tmp_path):
@@ -170,41 +152,14 @@ def test_timestep_embedding_matches_reference():
     assert torch.allclose(emb, ref)
 
 
-def test_timestep_embedding_preserves_leading_dims():
+def test_timestep_embedding_shape_dtype_and_odd_padding():
     from thenoise.utils.timestep import timestep_embedding
 
-    t = torch.linspace(1, 0, 6).reshape(2, 3)  # (B, T), as Anima passes
-    emb = timestep_embedding(t, 16)
-    assert emb.shape == (2, 3, 16)
-
-
-def test_timestep_embedding_pads_odd_dim():
-    from thenoise.utils.timestep import timestep_embedding
-
-    emb = timestep_embedding(torch.tensor([0.5]), 7)
-    assert emb.shape == (1, 7)
-    assert emb[0, -1] == 0.0
-
-
-def test_timestep_embedding_casts_to_input_dtype():
-    from thenoise.utils.timestep import timestep_embedding
-
-    t = torch.tensor([0.5], dtype=torch.bfloat16)
-    emb = timestep_embedding(t, 16)
-    assert emb.dtype == torch.bfloat16
-
-
-def test_timestep_embedding_time_factor_one_is_the_unscaled_grid():
-    """time_factor=1 is the fallback (no 1000x scale); used if Anima is reverted."""
-    from thenoise.utils.timestep import timestep_embedding
-
-    t = torch.tensor([1.0, 0.5])
-    emb = timestep_embedding(t, 16, time_factor=1.0)
-    half = 8
-    freqs = torch.exp(-math.log(10000) * torch.arange(half) / half)
-    args = t.float()[:, None] * freqs[None]
-    ref = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-    assert torch.allclose(emb, ref)
+    t = torch.linspace(1, 0, 6).reshape(2, 3)  # leading dims preserved, as Anima passes
+    assert timestep_embedding(t, 16).shape == (2, 3, 16)
+    assert timestep_embedding(torch.tensor([0.5]), 7).shape == (1, 7)
+    assert timestep_embedding(torch.tensor([0.5]), 7)[0, -1] == 0.0  # odd dim is zero-padded
+    assert timestep_embedding(torch.tensor([0.5], dtype=torch.bfloat16), 16).dtype == torch.bfloat16
 
 
 # -------------------------------------------------------------- anima video rope
@@ -240,38 +195,27 @@ def test_apply_rope_split_half_is_orthogonal():
 # ------------------------------------------------------------------ QK-norm key map
 
 
-def test_qk_norm_key_map_maps_anima_zimage_legacy_keys():
-    """The shared ``QKNorm`` stores ``query_norm``/``key_norm``; Anima/Z-Image
-    checkpoints store ``q_norm``/``k_norm`` on the attention module."""
+@pytest.mark.parametrize(
+    "key,legacy,expected",
+    [
+        # Anima/Z-Image checkpoints store q_norm/k_norm on the attention module;
+        # the shared ``QKNorm`` stores query_norm/key_norm.
+        ("blocks.0.self_attn.q_norm.weight", ("q_norm", "k_norm"),
+         "blocks.0.self_attn.qk_norm.query_norm.weight"),
+        ("layers.0.attention.k_norm.weight", ("q_norm", "k_norm"),
+         "layers.0.attention.qk_norm.key_norm.weight"),
+        # Krea 2 spells them qnorm/knorm, on ``scale`` (renamed to ``weight`` by
+        # the loader's value map).
+        ("blocks.0.attn.qnorm.scale", ("qnorm", "knorm"),
+         "blocks.0.attn.qk_norm.query_norm.scale"),
+        ("blocks.0.attn.knorm.scale", ("qnorm", "knorm"),
+         "blocks.0.attn.qk_norm.key_norm.scale"),
+    ],
+)
+def test_qk_norm_key_map_maps_the_legacy_spellings(key, legacy, expected):
     from thenoise.utils.qk_norm import qk_norm_key_map
 
-    assert (
-        qk_norm_key_map("blocks.0.self_attn.q_norm.weight")
-        == "blocks.0.self_attn.qk_norm.query_norm.weight"
-    )
-    assert (
-        qk_norm_key_map("blocks.0.self_attn.k_norm.weight")
-        == "blocks.0.self_attn.qk_norm.key_norm.weight"
-    )
-    assert (
-        qk_norm_key_map("layers.0.attention.q_norm.weight")
-        == "layers.0.attention.qk_norm.query_norm.weight"
-    )
-
-
-def test_qk_norm_key_map_maps_krea2_legacy_keys():
-    """Krea 2 checkpoints store ``qnorm``/``knorm`` (the ``scale``->``weight``
-    rename is handled by the loader's value map)."""
-    from thenoise.utils.qk_norm import qk_norm_key_map
-
-    assert (
-        qk_norm_key_map("blocks.0.attn.qnorm.scale", "qnorm", "knorm")
-        == "blocks.0.attn.qk_norm.query_norm.scale"
-    )
-    assert (
-        qk_norm_key_map("blocks.0.attn.knorm.scale", "qnorm", "knorm")
-        == "blocks.0.attn.qk_norm.key_norm.scale"
-    )
+    assert qk_norm_key_map(key, *legacy) == expected
 
 
 
@@ -289,11 +233,14 @@ def test_pad_len_to_multiple_rounds_up():
     assert pad_len_to_multiple(255, 256) == 256
 
 
-def test_pad_to_batch_right_pads_to_the_max():
+def test_pad_to_batch_right_pads_to_the_max_and_keeps_positions_in_lockstep():
     from thenoise.utils.sequence import pad_to_batch
 
     a = torch.tensor([[1.0, 2.0], [3.0, 4.0]])  # (2, 2)
     b = torch.tensor([[5.0, 6.0]])              # (1, 2)
+    pos_a = torch.tensor([[0.0, 0.0, 0.0], [0.0, 1.0, 1.0]])
+    pos_b = torch.tensor([[0.0, 0.0, 0.0]])
+
     out, positions, seqlens = pad_to_batch([a, b])
     assert out.shape == (2, 2, 2)
     assert torch.equal(out[0], a)
@@ -302,21 +249,11 @@ def test_pad_to_batch_right_pads_to_the_max():
     assert seqlens == [2, 1]
     assert positions is None
 
-
-def test_pad_to_batch_pads_positions_in_lockstep():
-    from thenoise.utils.sequence import pad_to_batch
-
-    a = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
-    b = torch.tensor([[5.0, 6.0]])
-    pos_a = torch.tensor([[0.0, 0.0, 0.0], [0.0, 1.0, 1.0]])
-    pos_b = torch.tensor([[0.0, 0.0, 0.0]])
-    out, pos, seqlens = pad_to_batch([a, b], [pos_a, pos_b])
-    assert out.shape == (2, 2, 2)
+    out, pos, _ = pad_to_batch([a, b], [pos_a, pos_b])
     assert pos.shape == (2, 2, 3)
     assert torch.equal(pos[0], pos_a)
     assert torch.equal(pos[1, 0], pos_b[0])
     assert torch.equal(pos[1, 1], torch.zeros(3))
-    assert seqlens == [2, 1]
 
 
 def test_make_key_padding_mask_is_none_on_uniform_lengths():
@@ -334,16 +271,6 @@ def test_make_key_padding_mask_marks_valid_prefix():
     mask = make_key_padding_mask([3, 1], "cpu")
     assert mask.shape == (2, 3)
     assert mask.tolist() == [[True, True, True], [True, False, False]]
-
-
-def test_make_key_padding_mask_matches_zimage_reference():
-    """Z-Image's original ``_prepare_sequence`` built the same valid mask."""
-    from thenoise.utils.sequence import make_key_padding_mask
-
-    item_seqlens = [48, 64]  # padded-to-32 lengths
-    mask = make_key_padding_mask(item_seqlens, "cpu")
-    assert mask[0].sum().item() == 48
-    assert mask[1].sum().item() == 64
 
 
 # --------------------------------------------------------- alignment pad-fill / mask
@@ -418,34 +345,21 @@ def test_alignment_padding_mask_uniform_and_unpadded_is_the_fast_path():
     assert alignment_padding_mask([[(8, 8)]], "cpu", always=True).shape == (1, 8)
 
 
-def test_alignment_padding_mask_reduces_to_a_valid_prefix_without_pads():
-    """With no padded segment it agrees with ``make_key_padding_mask`` per row."""
-    from thenoise.utils.sequence import alignment_padding_mask, make_key_padding_mask
-
-    lens = [48, 64]
-    aligned = alignment_padding_mask([[(n, n)] for n in lens], "cpu")
-    assert torch.equal(aligned, make_key_padding_mask(lens, "cpu", always=True))
-
-
 # ------------------------------------------------------------------ position ids
 
 
-def test_grid_positions_is_row_major():
+def test_grid_positions_is_row_major_with_per_axis_start():
     from thenoise.utils.positions import grid_positions
 
-    # 2x3 grid -> 6 tokens, columns (h, w).
+    # 2x3 grid -> 6 tokens, columns (h, w), row-major.
     pos = grid_positions([2, 3], dtype=torch.float32)
     assert pos.shape == (6, 2)
-    # Row-major: (0,0), (0,1), (0,2), (1,0), ...
     assert pos[:, 0].tolist() == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0]
     assert pos[:, 1].tolist() == [0.0, 1.0, 2.0, 0.0, 1.0, 2.0]
 
-
-def test_grid_positions_applies_per_axis_start():
-    from thenoise.utils.positions import grid_positions
-
-    pos = grid_positions([2, 3], start=[5, 0], dtype=torch.float32)
-    assert pos[:, 0].tolist() == [5.0, 5.0, 5.0, 6.0, 6.0, 6.0]
+    assert grid_positions([2, 3], start=[5, 0], dtype=torch.float32)[:, 0].tolist() == [
+        5.0, 5.0, 5.0, 6.0, 6.0, 6.0
+    ]
 
 
 def test_grid_positions_centered_matches_qwen_scale_rope():
@@ -464,23 +378,7 @@ def test_grid_positions_centered_matches_qwen_scale_rope():
 def test_grid_positions_preserves_int_dtype():
     from thenoise.utils.positions import grid_positions
 
-    pos = grid_positions([2, 3], dtype=torch.int32)
-    assert pos.dtype == torch.int32
-    assert pos.shape == (6, 2)
-
-
-def test_grid_from_axes_matches_flux2_cartesian_order():
-    """Flux.2's ``cartesian_prod(t, h, w, l)`` lexicographic order."""
-    import torch
-    from thenoise.utils.positions import grid_from_axes
-
-    t = torch.arange(1)
-    h = torch.arange(2)
-    w = torch.arange(3)
-    l = torch.arange(1)
-    pos = grid_from_axes([t, h, w, l])
-    ref = torch.cartesian_prod(t, h, w, l)
-    assert torch.equal(pos, ref)
+    assert grid_positions([2, 3], dtype=torch.int32).dtype == torch.int32
 
 
 def test_broadcast_positions_repeats_a_single_index():

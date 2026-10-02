@@ -1,17 +1,16 @@
 """Latent-domain upscaler strategies (weight-free).
 
-The pipeline drives ``LatentUpscaler`` through a mock (see ``conftest``), so what
-the strategies themselves promise — the target they hand their network, the
-canonical space they return, and the dtype they keep — is asserted here, with the
-network faked and no weights loaded. The real committed weights per latent format
-are exercised in ``test_catalog.py`` / ``test_zimage.py`` / ``test_flux_klein.py``.
+The pipeline drives ``LatentUpscaler`` through a mock (see ``conftest``), so what the
+strategies themselves promise — the target they hand their network, the canonical
+space they return, the dtype they keep — is asserted here with the network faked.
+The committed weights per latent format are exercised in ``test_catalog.py``.
 """
 from __future__ import annotations
 
 import pytest
 import torch
 
-from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
+from thenoise.upscale import SesquiLSRUpscaler
 from thenoise.upscale import sesqui as sesqui_mod
 from thenoise.upscale.inference_adaptors import LatentFormatAdaptor, make_flux2, make_wan21
 
@@ -100,16 +99,13 @@ def test_upscale_returns_a_canonical_latent(fake_net):
 
 
 def test_scale_is_intrinsic_to_the_algorithm(fake_net):
-    """Sesqui is 2x by construction, so nobody can configure it out of step.
-
-    The reassembly head pixel-shuffles 2x, which is why the factor is a property of
-    the strategy and not a request: ``DiffusionModel.UPSCALE_SCALE`` mirrors it.
+    """The reassembly head pixel-shuffles 2x, so the factor is a property of the
+    strategy and not a request (``DiffusionModel.UPSCALE_SCALE`` mirrors it).
     """
     fake_net(LatentFormatAdaptor(external_channels=16))
-    upscaler = _upscaler()
 
     assert SesquiLSRUpscaler.scale == 2
-    assert upscaler(torch.ones(1, 16, 4, 4)).shape == (1, 16, 8, 8)
+    assert _upscaler()(torch.ones(1, 16, 4, 4)).shape == (1, 16, 8, 8)
 
 
 def test_upscale_runs_and_returns_in_its_own_dtype(fake_net):
@@ -120,12 +116,6 @@ def test_upscale_runs_and_returns_in_its_own_dtype(fake_net):
 
     assert net.raw_dtypes == [torch.bfloat16]
     assert z_up.dtype == torch.bfloat16
-
-
-def test_upscaler_is_a_latent_upscaler(fake_net):
-    """The pipeline's only handle on the strategy is the interface."""
-    fake_net(make_wan21())
-    assert isinstance(_upscaler(), LatentUpscaler)
 
 
 def test_unknown_format_is_rejected_at_construction():
