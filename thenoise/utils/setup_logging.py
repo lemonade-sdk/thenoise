@@ -1,4 +1,4 @@
-"""Shared logging setup (pruned from sd-scripts library/utils.py)."""
+"""Shared logging setup, based on sd-scripts' ``library/utils.py``."""
 from __future__ import annotations
 
 import logging
@@ -6,7 +6,7 @@ import sys
 
 
 def setup_logging(args=None, log_level=None, reset=False):
-    """Configure the root logger (mirrors sd-scripts' setup_logging)."""
+    """Configure the root logger; a no-op once one is configured unless ``reset``."""
     if logging.root.handlers:
         if reset:
             for handler in logging.root.handlers[:]:

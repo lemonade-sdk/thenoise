@@ -1,16 +1,12 @@
-"""Shared token position-id builders for the RoPE input side.
+"""Token position-id builders for the RoPE input side.
 
-The DiT models each build a ``[num_tokens, n_axes]`` coordinate tensor that feeds
-``matrix_rope`` (via ``RopeCache``). The grid math is identical across models —
-row-major ``meshgrid("ij")`` over per-axis ``arange`` — and the only differences
-are the two conventions that are easy to get subtly wrong:
+Models build a ``[num_tokens, n_axes]`` coordinate tensor feeding the matrix RoPE
+builders: a row-major ``meshgrid("ij")`` over per-axis ``arange``, plus two
+conventions that are easy to get subtly wrong — a per-axis ``start`` offset, and a
+per-axis centered offset ``r - ceil(size / 2)``.
 
-  * a per-axis ``start`` offset (Z-Image's image grid begins at ``cap_len + 1``),
-  * a per-axis centered offset ``r - ceil(size / 2)`` (Qwen-Image's h/w axes).
-
-``grid_from_axes`` is the primitive (used when an axis has custom values, e.g.
-Flux.2's video ``t`` coordinate); ``grid_positions`` is the convenience wrapper
-that builds the axes from sizes/start/centered.
+``grid_from_axes`` is the primitive (for axes with custom values); ``grid_positions``
+builds the axes from sizes/start/centered.
 """
 from __future__ import annotations
 
@@ -37,10 +33,9 @@ def grid_positions(
 ) -> Tensor:
     """``[prod(sizes), len(sizes)]`` row-major grid of per-axis coordinates.
 
-    ``start[i]`` shifts axis ``i`` to ``[start[i], start[i] + sizes[i])``.
-    ``centered[i]`` applies the ``r - ceil(sizes[i] / 2)`` convention (Qwen-Image
-    uses it on the h/w axes only). ``dtype`` is preserved so callers keep their
-    exact coordinate type (Z-Image uses ``int32``, others ``float32``).
+    ``start[i]`` shifts axis ``i`` to ``[start[i], start[i] + sizes[i])`` and
+    ``centered[i]`` applies the ``r - ceil(sizes[i] / 2)`` convention. ``dtype`` is
+    preserved so callers keep their exact coordinate type.
     """
     axes = []
     for i, size in enumerate(sizes):
@@ -60,11 +55,7 @@ def broadcast_positions(
     dtype=torch.float32,
     device=None,
 ) -> Tensor:
-    """``[seq_len, n_axes]`` with every axis equal to ``offset + arange(seq_len)``.
-
-    Qwen-Image's text stream uses a single advancing index broadcast across all
-    three axes (``pos_freqs[max_vid_index + j]``).
-    """
+    """``[seq_len, n_axes]`` with every axis equal to ``offset + arange(seq_len)``."""
     k = torch.arange(offset, offset + seq_len, dtype=dtype, device=device)
     return k[:, None].expand(seq_len, n_axes)
 

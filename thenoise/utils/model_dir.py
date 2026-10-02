@@ -1,10 +1,4 @@
-"""Shared helpers for model files living in a directory.
-
-Both LoRAs and pixel upscalers are selected by name from a configured base
-directory. The name-parsing, path-resolution, and directory-listing logic is
-identical, so it lives here and is called by the model with the relevant base
-path (``lora_dir`` or ``upscaler_dir``).
-"""
+"""Name parsing, path resolution and listing for model files in a base directory."""
 from __future__ import annotations
 
 
@@ -40,11 +34,8 @@ def resolve_in_dir(base_dir: str, filename: str) -> str:
 
 
 def list_safetensors(base_dir: str) -> list[str]:
-    """Recursively list ``.safetensors`` names relative to ``base_dir``.
-
-    Names are relative paths with the ``.safetensors`` suffix stripped (e.g.
-    ``"12345_something"`` or ``"sub/style"``). Returns ``[]`` when ``base_dir``
-    is empty.
+    """Recursively list ``.safetensors`` names relative to ``base_dir``, with the
+    suffix stripped (``"sub/style"``). Returns ``[]`` when ``base_dir`` is empty.
     """
     if not base_dir:
         return []

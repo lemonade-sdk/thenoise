@@ -1,17 +1,10 @@
 """Shared text-encoder / tokenizer loading for the DiT adapters.
 
-Every adapter loads its text encoder and tokenizer through this module, so a new
-encoder only needs a config (see ``thenoise.utils.qwen_configs``) plus a load
-function here. The vendored tokenizer data lives under ``configs/``:
-
-* ``qwen25_tokenizer`` -- the single Qwen BPE tokenizer shared by all Qwen
-  variants. The vocab, merges, normalizer, pre/post-processor and decoder are
-  byte-identical across variants; only a few ``tokenizer_config.json`` fields
-  differ, applied here as overrides.
-* ``t5``             -- T5 tokenizer (LLM-adapter target tokens)
-
-The model configs themselves are vendored in ``thenoise.utils.qwen_configs`` so
-the encoders are built without fetching ``config.json`` from the Hub.
+The vendored tokenizer data lives under ``configs/``: ``qwen25_tokenizer``, the
+single Qwen BPE tokenizer shared by all Qwen variants (the vocab, merges,
+normalizer, pre/post-processor and decoder are byte-identical across variants; only
+a few ``tokenizer_config.json`` fields differ and are applied as overrides), and
+``t5`` for the LLM-adapter target tokens.
 
 The module also carries the chat-template pieces the conditioners share: the
 system-prompt/suffix pair and :func:`compute_drop_idx`.
@@ -53,9 +46,8 @@ _CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs"
 QWEN25_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "qwen25_tokenizer")
 T5_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "t5")
 
-# The shared ``qwen25_tokenizer`` config is the Qwen3 (Flux Klein / Z-Image) one.
-# Only these ``tokenizer_config.json`` fields differ across the other Qwen variants
-# (the vocab/merges are byte-identical), so they are applied as post-load overrides.
+# The shared ``qwen25_tokenizer`` config is the Qwen3 one; the fields that differ
+# per variant are applied as post-load overrides.
 QWEN3_06B_TOKENIZER_OVERRIDES = {"eos_token": "<|endoftext|>"}
 
 # The VL token names a multimodal processor looks up on its tokenizer. The shared
@@ -71,8 +63,7 @@ QWEN2_5_VL_TOKENIZER_OVERRIDES: dict = {}
 
 #: The chat and vision marker spellings shared by every multimodal conditioner here.
 #: A processor looks the vision ones up by name on its tokenizer; ``VISION_BLOCK`` is
-#: one reference image as the language model sees it, expanded to the patch tokens by
-#: the processor.
+#: one reference image as the language model sees it.
 IM_START = "<|im_start|>"
 IM_END = "<|im_end|>"
 VISION_START = "<|vision_start|>"
@@ -80,9 +71,8 @@ VISION_END = "<|vision_end|>"
 IMAGE_PAD = "<|image_pad|>"
 VISION_BLOCK = VISION_START + IMAGE_PAD + VISION_END
 
-#: Shared Qwen image-description prompt template (text-to-image path): a system
-#: prompt instructing the model to describe
-#: the image, the closing ``user`` header, and the number of tokens that prefix
+#: Shared Qwen image-description prompt template (text-to-image path): the system
+#: prompt, the closing ``user`` header, and the number of tokens that prefix
 #: occupies (the user content begins at ``QWEN_VL_DROP_IDX``).
 QWEN_VL_SYSTEM_PROMPT = (
     "<|im_start|>system\n"
@@ -104,12 +94,11 @@ def compute_drop_idx(
     input_ids: torch.Tensor, im_start_id: int = QWEN_CHAT_START_ID
 ) -> int:
     """Index where the user message content begins (after the ``user`` header).
-    The user turn is the SECOND chat-start marker (the first opens the system turn) and
-    its content starts three tokens later, at ``index + 3``. Counted from the token ids
-    because the prefix length depends on how the system prompt tokenizes. Returns 0
-    (drop nothing) when there is no second marker.
 
-    ``input_ids`` is a single sequence with no batch axis (``input_ids[0]``).
+    The user turn is the SECOND chat-start marker (the first opens the system turn)
+    and its content starts three tokens later. Counted from the token ids because the
+    prefix length depends on how the system prompt tokenizes. Returns 0 (drop
+    nothing) when there is no second marker. ``input_ids`` has no batch axis.
     """
     ids = input_ids.tolist()
     count = 0
@@ -124,11 +113,9 @@ def compute_drop_idx(
 def find_tokenizer_dir(text_encoder_path: str, max_depth: int = 3) -> Optional[str]:
     """Locate a local ``tokenizer/`` directory near a text encoder file.
 
-    The downloader drops the tokenizer under the output root (``<out>/tokenizer/``)
-    while the text encoder lands under ``<out>/split_files/text_encoders/``. Searches
-    ``max_depth`` parent directories of the text encoder for a ``tokenizer/`` dir so
-    the tokenizer is loaded offline when present. Returns ``None`` to fall back to the
-    vendored ``configs/`` directory.
+    The downloader drops the tokenizer under the output root while the text encoder
+    lands under ``<out>/split_files/text_encoders/``, so it searches ``max_depth``
+    parent directories. Returns ``None`` to fall back to the vendored ``configs/``.
     """
     base = os.path.dirname(os.path.abspath(text_encoder_path))
     for _ in range(max_depth):
@@ -151,11 +138,9 @@ def load_tokenizer(
 ):
     """Load a tokenizer from a local directory via HF ``AutoTokenizer``.
 
-    ``tokenizer_dir`` must contain ``tokenizer.json`` (and optionally a
-    ``tokenizer_config.json``); ``vocab.json``/``merges.txt`` are not required as
-    they are embedded in ``tokenizer.json``. ``overrides`` is an optional dict of
-    ``tokenizer_config.json`` fields applied after loading, used to specialize the
-    shared ``qwen25_tokenizer`` for the per-adapter Qwen variants.
+    ``tokenizer_dir`` must contain ``tokenizer.json`` (``vocab.json``/``merges.txt``
+    are embedded in it). ``overrides`` are ``tokenizer_config.json`` fields applied
+    after loading.
     """
     kwargs = {}
     if max_length is not None:
@@ -178,10 +163,9 @@ def load_qwen3_model(
 ) -> Qwen3ForCausalLM:
     """Build a Qwen3 (0.6B/4B/8B) text encoder from a vendored config and load weights.
 
-    The model is built on meta (via ``init_empty_weights``), its ``lm_head``
-    dropped (tied/absent in the checkpoints), linears swapped for quantized ones,
-    then populated by the shared loader. Returns the eval'd ``Qwen3ForCausalLM``
-    (use ``.model`` for the bare model whose hidden states feed a DiT).
+    The model is built on meta (via ``init_empty_weights``), its ``lm_head`` dropped
+    (tied/absent in the checkpoints), linears swapped for quantized ones, then
+    populated by the shared loader.
     """
     qwen3_config = Qwen3Config(**config)
     with init_empty_weights():
@@ -204,7 +188,7 @@ def load_qwen3_text_encoder(
     """Load a Qwen3-0.6B text encoder + tokenizer (single safetensors file).
 
     Returns ``(model, tokenizer)`` where ``model`` is the bare ``Qwen3Model``
-    (LM head dropped) whose hidden states feed a downstream adapter.
+    (LM head dropped).
     """
     qwen3 = load_qwen3_model(path, config=QWEN3_0_6B_CONFIG, dtype=dtype, device=device)
     qwen3.config.use_cache = False
@@ -222,8 +206,7 @@ def load_qwen3_vl_model(
     """Build a Qwen3-VL text encoder (4B by default) and load a local safetensors into it.
 
     Accepts the official HF layout and ComfyUI's ``model.``/``visual.`` keys.
-    ``config`` is one of the vendored ``QWEN3_VL_*_CONFIG`` dicts, which selects the
-    variant.
+    ``config`` is one of the vendored ``QWEN3_VL_*_CONFIG`` dicts.
     """
     config = Qwen3VLConfig.from_dict(config or QWEN3_VL_4B_INSTRUCT_CONFIG)
     with init_empty_weights():
@@ -273,11 +256,7 @@ def load_qwen3_tokenizer(
     *,
     overrides: Optional[dict] = None,
 ):
-    """Load a Qwen3 tokenizer and ensure a pad token.
-
-    ``tokenizer_dir`` defaults to the shared ``qwen25_tokenizer`` vendored config;
-    pass an external directory to load a tokenizer from there instead.
-    """
+    """Load a Qwen3 tokenizer and ensure a pad token."""
     tokenizer = load_tokenizer(tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR, overrides=overrides)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -328,11 +307,7 @@ def load_qwen2_5_vl_processor(tokenizer):
 
 
 def load_t5_tokenizer(t5_tokenizer_path: Optional[str] = None):
-    """Load the T5 tokenizer used for LLM-adapter target tokens.
-
-    ``t5_tokenizer_path`` is an optional local directory; else the vendored
-    ``configs/t5/`` is used.
-    """
+    """Load the T5 tokenizer used for LLM-adapter target tokens."""
     if t5_tokenizer_path is not None:
         return T5TokenizerFast.from_pretrained(t5_tokenizer_path, local_files_only=True)
     return T5TokenizerFast(
@@ -345,9 +320,8 @@ def load_t5_tokenizer(t5_tokenizer_path: Optional[str] = None):
 
 
 def _convert_comfyui_qwen3vl_state_dict(key: str) -> str:
-    """Map a ComfyUI-style (bare ``model.`` / ``visual.``) Qwen3-VL state dict key onto the HF
-    ``Qwen3VLForConditionalGeneration`` layout. Official HF checkpoints already use the
-    ``model.language_model.`` / ``model.visual.`` layout and pass through unchanged.
+    """Map a ComfyUI-style (bare ``model.`` / ``visual.``) Qwen3-VL key onto the HF
+    ``Qwen3VLForConditionalGeneration`` layout. Official HF checkpoints pass through.
     """
     if key.startswith("model.language_model.") or key.startswith("model.visual."):
         return key
@@ -362,8 +336,8 @@ def _convert_comfyui_qwen3vl_state_dict(key: str) -> str:
 
 def _convert_qwen2_5_vl_keys(key: str) -> str:
     """Normalize the raw Qwen2.5-VL layout (``model.``/``visual.``) to the
-    ``Qwen2_5_VLForConditionalGeneration`` layout (``model.language_model.`` /
-    ``model.visual.``)."""
+    ``Qwen2_5_VLForConditionalGeneration`` layout.
+    """
     if key.startswith("model."):
         return key.replace("model.", "model.language_model.", 1)
     if key.startswith("visual."):

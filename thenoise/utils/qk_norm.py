@@ -1,9 +1,7 @@
-"""Shared QK-norm used by the DiT attention blocks.
+"""QK-norm used by the DiT attention blocks.
 
-QK-norm applies RMSNorm to the query and key head tensors before attention.
-The value tensor never participates, so it is left to the caller. ``eps`` is a
-constructor parameter because the models differ: Flux.2 / Anima use ``1e-6``,
-Krea 2 / Z-Image use ``1e-5``.
+RMSNorm on the query and key head tensors before attention; the value tensor never
+participates. ``eps`` is a constructor parameter because the models differ.
 """
 from __future__ import annotations
 
@@ -16,8 +14,8 @@ from thenoise.utils.rms_norm import RMSNorm
 class QKNorm(nn.Module):
     """RMSNorm on query and key heads; value is untouched.
 
-    ``q`` and ``k`` are ``[B, H, L, D]`` (or any layout whose last dim is the head
-    dim, since RMSNorm is per-token). The two norms share no weights.
+    ``q`` and ``k`` are ``[B, H, L, D]``, or any layout whose last dim is the head
+    dim. The two norms share no weights.
     """
 
     def __init__(self, dim: int, eps: float = 1e-5) -> None:
@@ -36,10 +34,9 @@ class QKNorm(nn.Module):
 def qk_norm_key_map(key: str, q_legacy: str = "q_norm", k_legacy: str = "k_norm") -> str:
     """Map a checkpoint's legacy QK-norm keys onto the shared ``QKNorm`` layout.
 
-    The shared module names its two norms ``query_norm``/``key_norm``, but the
-    checkpoints store them under the model's original attribute names: Anima and
-    Z-Image use ``q_norm``/``k_norm``, Krea 2 uses ``qnorm``/``knorm``. Pass those
-    legacy names so ``load_dit``'s ``key_map`` can bridge the two.
+    The shared module names its two norms ``query_norm``/``key_norm``; checkpoints
+    store them under the model's original attribute names, which are passed in as
+    ``q_legacy``/``k_legacy`` so ``load_dit``'s ``key_map`` can bridge the two.
     """
     key = key.replace(f".{q_legacy}.", ".qk_norm.query_norm.")
     key = key.replace(f".{k_legacy}.", ".qk_norm.key_norm.")

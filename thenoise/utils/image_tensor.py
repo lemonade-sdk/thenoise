@@ -1,16 +1,11 @@
-"""Shared PIL <-> tensor conversions for the pipeline and standalone upscaling.
-
-``PipelineController`` and ``PixelUpscaleController`` both operate on GPU fp32
-tensors in ``[-1, 1]`` with shape ``[C, H, W]`` and need the same PIL conversion +
-resize helpers.
+"""PIL <-> tensor conversions on ``[C, H, W]`` fp32 pixels in ``[-1, 1]``.
 
 The channel count of that tensor is the *VAE's* (``DiffusionModel.pixel_channels``),
-so these are the two places where it gets decided: on the way in
-(:func:`pil_to_pixels`, told how many channels the destination wants) and on the
-way out (:func:`pixels_to_pil`, which mirrors what it was handed). Wherever a stage
-cannot carry an alpha, :func:`flatten_alpha` *composites* it onto
-:data:`ALPHA_BACKGROUND` rather than dropping it: PIL's ``convert("RGB")`` keeps the
-RGB of the transparent pixels, which is black at best and garbage at worst.
+so it gets decided on the way in (:func:`pil_to_pixels`, told how many channels the
+destination wants) and on the way out (:func:`pixels_to_pil`, which mirrors what it
+was handed). Wherever a stage cannot carry an alpha, :func:`flatten_alpha`
+*composites* it onto :data:`ALPHA_BACKGROUND`: PIL's ``convert("RGB")`` keeps the RGB
+of the transparent pixels, which is garbage.
 """
 from __future__ import annotations
 
@@ -26,12 +21,12 @@ from PIL import Image
 # Matches the opaque padding value an RGBA VAE pads RGB inputs with.
 ALPHA_BACKGROUND: Tuple[int, int, int] = (255, 255, 255)
 
-# PIL modes that carry a real transparency channel. ``P`` is handled separately:
-# a paletted image is transparent only when its header declares one.
+# PIL modes that carry a real transparency channel. ``P`` is transparent only when
+# its header declares one.
 _ALPHA_MODES = ("RGBA", "LA")
 
-# PIL mode per channel count of the ``[C, H, W]`` convention (out), and the
-# channel counts a destination can ask for (in: no VAE is single-channel).
+# PIL mode per channel count of the ``[C, H, W]`` convention (out), and the channel
+# counts a destination can ask for (in).
 _MODES = {1: "L", 2: "LA", 3: "RGB", 4: "RGBA"}
 _PIXEL_CHANNELS = (3, 4)
 
@@ -60,9 +55,9 @@ def flatten_alpha(
 def load_image(source: Union[str, "os.PathLike", Image.Image]) -> Image.Image:
     """Open an input image keeping its alpha when it has one.
 
-    Normalises to RGB or RGBA (never ``P``/``L``/16-bit) so the question "does this
-    carry transparency?" stays answerable downstream, where the destination's
-    channel count is known.
+    Normalises to RGB or RGBA (never ``P``/``L``/16-bit) so "does this carry
+    transparency?" stays answerable downstream, where the destination's channel
+    count is known.
     """
     image = source if isinstance(source, Image.Image) else Image.open(source)
     image.load()  # resolve the lazy decode (and P-mode transparency) now
@@ -75,7 +70,7 @@ def pil_to_pixels(image: Image.Image, channels: Optional[int] = 3) -> torch.Tens
     ``channels`` is the pixel width of the destination: an image without
     transparency entering an RGBA destination gets an opaque alpha, one *with*
     transparency entering an RGB destination is composited onto white. ``None``
-    means "as it came in", for a stage that only has to lose nothing.
+    means "as it came in".
     """
     if channels is None:
         channels = 4 if has_alpha(image) else 3
@@ -122,10 +117,7 @@ def center_crop(image: Image.Image, width: int, height: int) -> Image.Image:
 def resize_to_cover_center_crop(
     image: Image.Image, width: int, height: int
 ) -> Image.Image:
-    """ComfyUI-style ref resize: scale to cover ``(width, height)``, center-crop.
-
-    Images matching the target aspect ratio are only resized; ComfyUI does not pad.
-    """
+    """Scale to cover ``(width, height)``, then center-crop (no padding)."""
     if (image.width, image.height) == (width, height):
         return image
     scale = max(width / image.width, height / image.height)
@@ -138,9 +130,9 @@ def resize_to_cover_center_crop(
 def resize_to_area(image: Image.Image, area: int = 384 * 384) -> Image.Image:
     """Scale a PIL image to ``area`` (area-based, aspect-preserving).
 
-    Vision encoders tokenize each patch (e.g. 14x14 for Qwen2.5-VL) into image
-    tokens; full-resolution edit images would inject thousands of tokens, drowning
-    out a short instruction and overflowing the RoPE buffer.
+    Vision encoders tokenize each patch into image tokens; a full-resolution edit
+    image would inject thousands of them, drowning out a short instruction and
+    overflowing the RoPE buffer.
     """
     w, h = image.size
     scale = (area / (w * h)) ** 0.5
@@ -154,9 +146,8 @@ def resize_to_area(image: Image.Image, area: int = 384 * 384) -> Image.Image:
 def resize_to_long_edge(image: Image.Image, long_edge: int) -> Image.Image:
     """Cap a PIL image's longest side at ``long_edge``, aspect preserved, never enlarged.
 
-    Where :func:`resize_to_area` fixes the area, this fixes the dominant dimension, so
-    an elongated image keeps its pixels-per-unit-width. Growing one would add tokens
-    but no information, so an image already under the cap is returned untouched.
+    Unlike :func:`resize_to_area` this fixes the dominant dimension, so an elongated
+    image keeps its pixels-per-unit-width.
     """
     w, h = image.size
     scale = long_edge / max(w, h)

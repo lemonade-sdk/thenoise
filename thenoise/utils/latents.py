@@ -1,9 +1,7 @@
-"""Shared latent (de)packing helpers used by the DiT adapters.
+"""2x2 latent (de)packing helpers used by the DiT adapters.
 
-Qwen-Image packs a canonical ``[B, C, H, W]`` latent into the flattened
-``[B, H//2*W//2, C*4]`` layout the transformer consumes (2x2 spatial merge).
-The same packing/unpacking applies to any model using a 2x2 latent patch, so it
-lives here rather than under a single adapter.
+A canonical ``[B, C, H, W]`` latent packs into the flattened
+``[B, H//2*W//2, C*4]`` layout the transformer consumes.
 """
 from __future__ import annotations
 

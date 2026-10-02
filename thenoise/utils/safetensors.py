@@ -14,81 +14,37 @@ import logging
 logger = logging.getLogger(__name__)
 
 class MemoryEfficientSafeOpen:
-    """Memory-efficient reader for safetensors files.
-
-    This class provides a memory-efficient way to read tensors from safetensors files
-    by using memory mapping for large tensors and avoiding unnecessary copies.
-    """
+    """Reader for safetensors files that memory-maps large tensors."""
 
     def __init__(self, filename, use_numpy_memmap=True):
-        """Initialize the SafeTensor reader.
-
-        Args:
-            filename (str): Path to the safetensors file to read.
-            use_numpy_memmap (bool): If True, use numpy memory mapping for large
-                tensors (avoiding an intermediate CPU buffer); if False, use
-                standard file read instead.
-        """
         self.filename = filename
         self.file = open(filename, "rb")
         self.header, self.header_size = self._read_header()
         self.use_numpy_memmap = use_numpy_memmap
 
     def __enter__(self):
-        """Enter context manager."""
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Exit context manager and close file."""
         self.file.close()
 
     def keys(self):
-        """Get all tensor keys in the file.
-
-        Returns:
-            list: List of tensor names (excludes metadata).
-        """
+        """All tensor names in the file (excludes metadata)."""
         return [k for k in self.header.keys() if k != "__metadata__"]
 
     def metadata(self) -> Dict[str, str]:
-        """Get metadata from the file.
-
-        Returns:
-            Dict[str, str]: Metadata dictionary.
-        """
         return self.header.get("__metadata__", {})
 
     def _read_header(self):
-        """Read and parse the header from the safetensors file.
-
-        Returns:
-            tuple: (header_dict, header_size) containing parsed header and its size.
-        """
-        # Read header size (8 bytes, little-endian unsigned long long)
         header_size = struct.unpack("<Q", self.file.read(8))[0]
-        # Read and decode header JSON
         header_json = self.file.read(header_size).decode("utf-8")
         return json.loads(header_json), header_size
 
     def get_tensor(self, key: str, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None):
-        """Load a tensor from the file with memory-efficient strategies.
+        """Load a single tensor.
 
-        **Note:**
-        If device is 'cuda' , the transfer to GPU is done efficiently using pinned memory and non-blocking transfer.
-        So you must ensure that the transfer is completed before using the tensor.
-
-        If the tensor is large (>10MB) and the target device is CUDA, memory mapping with numpy.memmap is used to avoid intermediate copies.
-
-        Args:
-            key (str): Name of the tensor to load.
-            device (Optional[torch.device]): Target device for the tensor.
-            dtype (Optional[torch.dtype]): Target dtype for the tensor.
-
-        Returns:
-            torch.Tensor: The loaded tensor.
-
-        Raises:
-            KeyError: If the tensor key is not found in the file.
+        **Note:** for a CUDA target the transfer is non-blocking, so the caller must
+        synchronize before using the tensor.
         """
         if key not in self.header:
             raise KeyError(f"Tensor '{key}' not found in the file")
@@ -100,62 +56,39 @@ class MemoryEfficientSafeOpen:
         original_dtype = self._get_torch_dtype(metadata["dtype"])
         target_dtype = dtype if dtype is not None else original_dtype
 
-        # Handle empty tensors
         if num_bytes == 0:
             return torch.empty(metadata["shape"], dtype=target_dtype, device=device)
 
-        # Determine if we should use pinned memory for GPU transfer
         non_blocking = device is not None and device.type == "cuda"
 
-        # Calculate absolute file offset
-        tensor_offset = self.header_size + 8 + offset_start  # adjust offset by header size
+        tensor_offset = self.header_size + 8 + offset_start
 
-        # Memory mapping strategy for large tensors to GPU
-        # Use memmap for large tensors to avoid intermediate copies.
-        # If device is cpu, tensor is not copied to gpu, so using memmap locks the file, which is not desired.
-        # So we only use memmap if device is not cpu.
-        # If use_numpy_memmap is False, skip numpy memory mapping to load with standard file read.
+        # Memmap only for non-CPU targets: a CPU tensor would keep the file locked
+        # for no benefit, and only large tensors make the mapping worth it.
         if self.use_numpy_memmap and num_bytes > 10 * 1024 * 1024 and device is not None and device.type != "cpu":
-            # Create memory map for zero-copy reading
             mm = np.memmap(self.filename, mode="c", dtype=np.uint8, offset=tensor_offset, shape=(num_bytes,))
             byte_tensor = torch.from_numpy(mm)  # zero copy
             del mm
 
-            # Deserialize tensor (view and reshape)
-            cpu_tensor = self._deserialize_tensor(byte_tensor, metadata)  # view and reshape
+            cpu_tensor = self._deserialize_tensor(byte_tensor, metadata)
             del byte_tensor
 
-            # Transfer to target device and dtype
             gpu_tensor = cpu_tensor.to(device=device, dtype=target_dtype, non_blocking=non_blocking)
             del cpu_tensor
             return gpu_tensor
 
-        # Standard file reading strategy for smaller tensors or CPU target
-        # seek to the specified position
         self.file.seek(tensor_offset)
-
-        # read directly into a numpy array by numpy.fromfile without intermediate copy
         numpy_array = np.fromfile(self.file, dtype=np.uint8, count=num_bytes)
         byte_tensor = torch.from_numpy(numpy_array)
         del numpy_array
 
-        # deserialize (view and reshape)
         deserialized_tensor = self._deserialize_tensor(byte_tensor, metadata)
         del byte_tensor
 
-        # cast to target dtype and move to device
         return deserialized_tensor.to(device=device, dtype=target_dtype, non_blocking=non_blocking)
 
     def _deserialize_tensor(self, byte_tensor: torch.Tensor, metadata: Dict):
-        """Deserialize byte tensor to the correct shape and dtype.
-
-        Args:
-            byte_tensor (torch.Tensor): Raw byte tensor from file.
-            metadata (Dict): Tensor metadata containing dtype and shape info.
-
-        Returns:
-            torch.Tensor: Deserialized tensor with correct shape and dtype.
-        """
+        """View the raw bytes as the tensor's dtype/shape."""
         dtype = self._get_torch_dtype(metadata["dtype"])
         shape = metadata["shape"]
 
@@ -163,15 +96,6 @@ class MemoryEfficientSafeOpen:
 
     @staticmethod
     def _get_torch_dtype(dtype_str):
-        """Convert string dtype to PyTorch dtype.
-
-        Args:
-            dtype_str (str): String representation of the dtype.
-
-        Returns:
-            torch.dtype: Corresponding PyTorch dtype.
-        """
-        # Standard dtype mappings
         dtype_map = {
             "F64": torch.float64,
             "F32": torch.float32,
@@ -184,29 +108,20 @@ class MemoryEfficientSafeOpen:
             "U8": torch.uint8,
             "BOOL": torch.bool,
         }
-        # Add float8 types if available in PyTorch version
         if hasattr(torch, "float8_e5m2"):
             dtype_map["F8_E5M2"] = torch.float8_e5m2
         if hasattr(torch, "float8_e4m3fn"):
             dtype_map["F8_E4M3"] = torch.float8_e4m3fn
         return dtype_map.get(dtype_str)
 
-# Generic wrapper prefixes that repackagings (e.g. ComfyUI's "diffusion_model"
-# export) prepend to *every* tensor name. Seen so far: ``net.`` (Anima base) and
-# ``model.diffusion_model.`` (Anima aesthetics, Krea2 ComfyUI export). Shared by
-# detection (``normalize_keys``) and loading (``strip_wrap_prefixes``) so raw and
-# repackaged checkpoints resolve AND load identically.
+# Wrapper prefixes that repackagings prepend to *every* tensor name, e.g.
+# ``net.`` and ``model.diffusion_model.``. Shared by key detection and loading so
+# raw and repackaged checkpoints resolve AND load identically.
 WRAP_PREFIXES = ("model.diffusion_model.", "net.")
 
 
 def unwrap_key(key: str) -> str:
-    """Return a tensor name with any generic wrapper prefix stripped.
-
-    Repackaged checkpoints prefix every tensor name with a shared wrapper such as
-    ``model.diffusion_model.`` (ComfyUI) or ``net.``. Stripping it lets detection,
-    marker matching and ``load_state_dict`` all see the model's *own* key paths, so
-    raw and repackaged checkpoints resolve identically.
-    """
+    """Return a tensor name with any generic wrapper prefix stripped."""
     for prefix in WRAP_PREFIXES:
         if key.startswith(prefix):
             return key[len(prefix):]
@@ -214,22 +129,15 @@ def unwrap_key(key: str) -> str:
 
 
 def strip_wrap_prefixes(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """Return a new state dict with generic wrapper prefixes stripped from keys.
-
-    Repackaged checkpoints prefix every tensor name with a shared wrapper such as
-    ``model.diffusion_model.``. Strip it before ``load_state_dict`` so the model's
-    own key paths are restored (the loader expects bare ``txtfusion.``/``blocks.``
-    etc., not the wrapped forms).
-    """
+    """Return a new state dict with generic wrapper prefixes stripped from keys."""
     return {unwrap_key(key): value for key, value in state_dict.items()}
 
 
 def checkpoint_keys(path: str) -> set[str]:
     """The tensor names in the safetensors header of ``path``, wrapper-normalized.
 
-    Reads the header only (no tensor data), so it is cheap enough to run at model
-    load time. Used to see checkpoint-level markers that are *not* weights — see
-    ``thenoise.utils.checkpoint``.
+    Reads the header only (no tensor data), so it is cheap enough to run at load
+    time.
     """
     with MemoryEfficientSafeOpen(path) as f:
         return {unwrap_key(k) for k in f.keys()}
@@ -241,12 +149,8 @@ def load_dit_safetensors(
     dtype: Optional[torch.dtype] = None,
     drop_keys: Optional[tuple[str, ...]] = None,
 ) -> dict[str, torch.Tensor]:
-    """Load a DiT checkpoint state dict.
-
-    Single entry point for DiT weight loading. Strips generic repackaging wrapper
-    prefixes (``model.diffusion_model.`` / ``net.``) so raw and repackaged
-    checkpoints load identically, and optionally drops leftover keys (e.g. Krea2's
-    unused ``last.down.*``/``last.up.*``) via ``drop_keys``.
+    """Load a DiT checkpoint state dict, stripping generic repackaging wrapper
+    prefixes so raw and repackaged checkpoints load identically.
     """
     sd = load_safetensors(path, device=device, dtype=dtype)
     sd = strip_wrap_prefixes(sd)
@@ -260,11 +164,7 @@ def load_safetensors(
     device: Union[str, torch.device],
     dtype: Optional[torch.dtype] = None,
 ) -> dict[str, torch.Tensor]:
-    """Load a safetensors file into a state dict using the memory-efficient reader.
-
-    All tensors are read via ``MemoryEfficientSafeOpen`` (``np.fromfile``, with
-    numpy memory mapping for large tensors bound for a non-CPU device).
-    """
+    """Load a safetensors file into a state dict using the memory-efficient reader."""
     state_dict = {}
     device = torch.device(device) if device is not None else None
     with MemoryEfficientSafeOpen(path) as f:
@@ -279,9 +179,8 @@ UPSCALE_WEIGHT_DIR = Path(__file__).resolve().parent.parent / "upscale" / "weigh
 def upscale_weight_path(filename: str) -> Path:
     """Path to a latent-upscaler weight file vendored into the package.
 
-    Raises rather than handing back a nonexistent path: the only way to get here
-    is a package installed without its package-data, and a ``FileNotFoundError``
-    naming the directory says exactly that.
+    Raises rather than handing back a nonexistent path, which can only mean the
+    package was installed without its package-data.
     """
     path = UPSCALE_WEIGHT_DIR / filename
     if not path.is_file():
