@@ -8,18 +8,17 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-# Maximum (negative) lobe magnitude.
 _LOBE_MAX = -0.1875
 
 _EPS = 1e-6
 
 
 def rcas(pixels: torch.Tensor, *, strength: float = 0.5) -> torch.Tensor:
-    """Sharpen ``[C, H, W]`` pixels with RCAS.
+    """Sharpen ``[C, H, W]`` pixels in ``[-1, 1]`` with RCAS.
 
-    The local min/max across the 5-tap cross *and* across colour channels gives a
-    per-pixel ``lobe``: stronger in low-contrast regions, weaker at high-contrast
-    edges. Typical ``strength`` is 0.3 to 0.8.
+    The local min/max of the 5-tap cross gives a per-pixel ``lobe``: stronger in
+    low-contrast regions, weaker at high-contrast edges, where it goes to 0 to
+    keep the output from clipping. Typical ``strength`` is 0.3 to 0.8.
     """
     c, h, w = pixels.shape
     rgb = pixels[:3 if c >= 3 else c]
@@ -35,17 +34,19 @@ def rcas(pixels: torch.Tensor, *, strength: float = 0.5) -> torch.Tensor:
     e = p[:, 1:h + 1, 2:w + 2]
     center = rgb
 
-    mn = _min(n, s, w_, e, center)
-    mx = _max(n, s, w_, e, center)
+    mn = _min(n, s, w_, e)
+    mx = _max(n, s, w_, e)
 
-    hit_min = -mn / (mx * 4.0 + _EPS)
-    hit_max = -(1.0 - mx) / (4.0 * (1.0 - mn) + _EPS)
+    lo = (mn + 1.0) * 0.5
+    hi = (mx + 1.0) * 0.5
+    mid = (center + 1.0) * 0.5
 
-    lobe = torch.max(hit_min, hit_max)
-    lobe = lobe.min(dim=0, keepdim=True).values
+    hit_min = torch.minimum(lo, mid) / (hi * 4.0).clamp(min=_EPS)
+    hit_max = (1.0 - torch.maximum(hi, mid)) / ((lo * 4.0 - 4.0).clamp(max=-_EPS))
 
-    lobe = lobe * strength
-    lobe = lobe.clamp(_LOBE_MAX, 0.0)
+    lobe = torch.max(-hit_min, hit_max).max(dim=0, keepdim=True).values
+
+    lobe = (lobe * strength).clamp(_LOBE_MAX, 0.0)
 
     norm = (lobe * 4.0 + 1.0).reciprocal()
     neighbors = (n + s + w_ + e) * lobe + center
