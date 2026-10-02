@@ -563,6 +563,31 @@ def test_load_dit_drop_keys_applies_on_both_paths(tmp_path, quantized):
     assert model.plain.weight.dtype == torch.bfloat16
 
 
+@pytest.mark.parametrize("quantized", [False, True], ids=["bf16", "int8"])
+@pytest.mark.parametrize(
+    "prefix", ["", "model.diffusion_model."], ids=["raw-keys", "wrapped-keys"]
+)
+def test_load_dit_drops_checkpoint_markers_for_every_model(tmp_path, quantized, prefix):
+    """Checkpoint metadata is dropped centrally, so no model has to name it.
+
+    ``TinyDiT`` knows nothing about ``__index_timestep_zero__`` and no ``drop_keys``
+    is passed, yet the strict load survives: markers are registry knowledge
+    (``thenoise.utils.checkpoint``), read off the header and stripped here. Without
+    the central drop the BF16 path fails on an unexpected key and the quantized
+    path on an unrecognized one.
+    """
+    marker = "__index_timestep_zero__"
+    tensors = (int8_tensors if quantized else bf16_tensors)(
+        prefix=prefix, extra={f"{prefix}{marker}": torch.zeros(1)}
+    )
+    path = write_safetensors(tmp_path / "dit.safetensors", tensors)
+
+    model = load_dit(TinyDiT(), path, device="cpu", dtype=torch.bfloat16)
+    assert model.q._quantized is quantized
+    assert model.plain.weight.dtype == torch.bfloat16
+    assert not hasattr(model, marker)
+
+
 class _ScaleNorm(torch.nn.Module):
     def __init__(self, dim):
         super().__init__()

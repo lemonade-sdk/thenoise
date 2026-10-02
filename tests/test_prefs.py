@@ -4,7 +4,8 @@ Preferences resolve as **request (API/CLI) > checkpoint marker > model default**
 (``DiffusionModel.pref``). The marker layer is deliberately model-independent:
 ``thenoise.utils.checkpoint`` maps safetensors keys to preference values, so no
 adapter mentions a checkpoint key and a model that has no use for a preference is
-unaffected by a marker.
+unaffected by a marker. The same registry drives dropping: the loader strips marker
+keys for every model, so no adapter has to tolerate one either.
 """
 from __future__ import annotations
 
@@ -16,7 +17,8 @@ from conftest import EditingStubModel, StubModel, write_safetensors
 from thenoise.models.config import GenerateRequest
 from thenoise.pipeline import PipelineController
 from thenoise.upscale.pixel import PixelUpscalerManager
-from thenoise.utils.checkpoint import detect_checkpoint_prefs
+from thenoise.utils.checkpoint import CHECKPOINT_MARKERS, detect_checkpoint_prefs
+from thenoise.utils.loader import drop_checkpoint_markers
 
 ZERO_COND_KEY = "__index_timestep_zero__"
 
@@ -54,6 +56,23 @@ def test_marker_matching_is_wrapper_prefix_agnostic(tmp_path):
 def test_unreadable_checkpoint_yields_no_prefs(tmp_path):
     """Markers are an optional hint: an unreadable file must not fail the load."""
     assert detect_checkpoint_prefs(str(tmp_path / "missing.safetensors")) == {}
+
+
+@pytest.mark.parametrize("marker", CHECKPOINT_MARKERS, ids=lambda m: m.key)
+def test_a_registered_marker_is_also_dropped_from_weights(marker):
+    """One registry entry covers reading *and* dropping — no model names the key.
+
+    The loader strips everything the registry reads (see
+    ``thenoise.utils.loader.drop_checkpoint_markers``), so a marker can never leak
+    into a strict ``load_state_dict``, for any model, raw or repackaged.
+    """
+    kept = {"img_in.weight": torch.zeros(1)}
+    sd = {
+        marker.key: torch.zeros(1),
+        f"model.diffusion_model.{marker.key}": torch.zeros(1),
+        **kept,
+    }
+    assert drop_checkpoint_markers(sd) == kept
 
 
 # ---------------------------------------------------------------- precedence

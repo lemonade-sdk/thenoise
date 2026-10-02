@@ -487,7 +487,7 @@ def load_qwen_image_dit(
     """Load the Qwen-Image DiT via the central quant-aware loader."""
     with init_empty_weights():
         model = create_model(num_layers=num_layers)
-    load_dit(model, dit_path, device=device, dtype=dtype, drop_keys=("__index_timestep_zero__",))
+    load_dit(model, dit_path, device=device, dtype=dtype)
     logger.info("Loaded Qwen-Image DiT from %s", dit_path)
     return model
 

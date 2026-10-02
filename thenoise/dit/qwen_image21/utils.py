@@ -123,9 +123,6 @@ def load_qwen_image21_dit(
         dit_path,
         device=device,
         dtype=dtype,
-        # The reference writes the timestep-zero marker; this model has no other
-        # reference method, so it is metadata rather than a weight.
-        drop_keys=("__index_timestep_zero__",),
         key_map=_key_map,
         value_map=_value_map,
     )

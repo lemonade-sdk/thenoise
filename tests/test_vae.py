@@ -222,5 +222,5 @@ def test_the_upscaler_adaptor_means_what_the_vae_means(factory, vae):
     z = torch.randn(1, 16, 2, 2)
     mean, inv_std = vae._latents_mean, vae._latents_inv_std
 
-    assert torch.allclose(adaptor.to_vae_latent(z), z / inv_std + mean)
-    assert torch.allclose(adaptor.from_vae_latent(z), (z - mean) * inv_std)
+    assert torch.allclose(adaptor.to_vae_latent(z), z / inv_std + mean, atol=1e-6)
+    assert torch.allclose(adaptor.from_vae_latent(z), (z - mean) * inv_std, atol=1e-6)

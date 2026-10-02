@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, FrozenSet, Tuple
 
 from thenoise.utils.safetensors import checkpoint_keys
 
@@ -38,11 +38,11 @@ class Marker:
     key: str
 
 
-# The registry. One line per marker; earlier entries win if several markers feed
-# the same preference.
 CHECKPOINT_MARKERS: Tuple[Marker, ...] = (
     Marker("ref_method", "index_timestep_zero", "__index_timestep_zero__"),
 )
+
+CHECKPOINT_MARKER_KEYS: FrozenSet[str] = frozenset(m.key for m in CHECKPOINT_MARKERS)
 
 
 def detect_checkpoint_prefs(dit_path: str) -> Dict[str, Any]:
@@ -74,4 +74,4 @@ def detect_checkpoint_prefs(dit_path: str) -> Dict[str, Any]:
     return prefs
 
 
-__all__ = ["Marker", "CHECKPOINT_MARKERS", "detect_checkpoint_prefs"]
+__all__ = ["Marker", "CHECKPOINT_MARKERS", "CHECKPOINT_MARKER_KEYS", "detect_checkpoint_prefs"]

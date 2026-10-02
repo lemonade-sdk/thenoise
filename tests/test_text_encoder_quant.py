@@ -160,6 +160,18 @@ def test_load_text_encoder_weights_drops_tied_lm_head(tmp_path):
     assert not hasattr(model, "lm_head")
 
 
+def test_load_text_encoder_weights_drops_checkpoint_markers(tmp_path):
+    model = _build_model()
+    sd = _complete_bf16_state_dict(model)
+    sd["__index_timestep_zero__"] = torch.zeros(1)
+    sd["model.diffusion_model.__index_timestep_zero__"] = torch.zeros(1)
+    p = tmp_path / "te_marker.safetensors"
+    write_safetensors(p, sd)
+
+    load_text_encoder_weights(model, str(p), device="cpu", dtype=torch.bfloat16)
+    assert model.model.layers[0].q_proj.weight.shape == (64, 64)
+
+
 def test_load_text_encoder_weights_model_prefix_key_map(tmp_path):
     # The bare-model layout (like Anima) needs the ``model.`` prefix stripped, passed
     # as a key_map applied on both paths.
