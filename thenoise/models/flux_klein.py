@@ -2,21 +2,11 @@
 
 Flux Klein is a flow-matching MMDiT operating on the Flux.2 *packed* 128-channel
 latent ``[B, 128, H//16, W//16]`` (the Flux.2 VAE packs a 32ch latent 2x2 and
-normalizes it via BatchNorm). The canonical latent format here is therefore the
-normalized packed 128ch latent, and both the DiT and the VAE operate on it
-directly (the adapter packs/unpacks around the denoise loop only).
+normalizes it via BatchNorm). That is the canonical latent here: both the DiT and
+the VAE take it directly and the adapter packs/unpacks only around the denoise loop.
 
-The Klein DiT variant (4B / 9B) is read from the checkpoint's ``img_in`` width and
-selects the matching Qwen3 text encoder (4B / 8B). Distilled vs base behavior is
-driven by ``guidance_scale``: distilled models default to guidance 1.0 (single
-forward, no CFG); base models pass a guidance > 1.0 to enable CFG (two forwards).
-
-The reference-latent KV cache (ComfyUI's ``FluxKVCache``) is wired through the
-shared ``thenoise.dit.kvcache`` machinery: ``prepare_latent`` starts the run's
-caches, ``denoise_step`` hands the DiT the reference tokens while they are still
-being filled and drops them once each block has frozen their K/V.
-
-The default schedule is Euler (the Flux.2 flow ODE); ER-SDE is also usable.
+The Klein variant (4B / 9B) is read from the checkpoint's ``img_in`` width and
+selects the matching Qwen3 text encoder (4B / 8B).
 """
 from __future__ import annotations
 
@@ -47,9 +37,7 @@ logger = logging.getLogger(__name__)
 class FluxKleinModel(DiffusionModel):
     name = "flux_klein"
 
-    # Distilled defaults (the common inference use): 4 NFEs, CFG off (guidance 1.0),
-    # Flux.2's flow-matching Euler schedule. Base models should pass
-    # --steps 50 --guidance-scale 4.
+    # Distilled defaults; base models: --steps 50 --guidance-scale 4.
     DEFAULT_PREFS = {
         **DiffusionModel.DEFAULT_PREFS,
         "steps": 4,
@@ -57,26 +45,16 @@ class FluxKleinModel(DiffusionModel):
         "sampler": "euler",
     }
 
-    # Reference-latent editing: Flux2 Klein supports the ComfyUI "index" method
-    # with ``ref_index_scale = 10`` (the t-axis offset for the reference latent).
-    # The KV cache freezes the reference K/V across steps (ComfyUI ``FluxKVCache``),
-    # valid only with ``ref_method="index_timestep_zero"`` (enforced by the pipeline).
+    # Reference-latent editing by "index"; the KV cache is valid only with
+    # ``ref_method="index_timestep_zero"``.
     CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": True}
+    # Per-reference t-axis offset.
     REF_INDEX = 10
 
-    # Flux.2's attention is one fused ``attn.qkv`` projection.
     lora_fusions = FUSE_QKV
 
     def _lora_key_map(self, key: str) -> str:
-        """Map ComfyUI Flux.2 LoRA names to this repo's Flux.2 schema.
-
-        ComfyUI names the double/single stream blocks ``transformer_blocks`` /
-        ``single_transformer_blocks``, the fused single-stream projection
-        ``attn.to_qkv_mlp_proj`` and the double-stream attention ``attn`` (with
-        ``to_out.0``); the repo uses ``double_blocks``/``single_blocks``,
-        ``linear1`` and ``img_attn``/``proj``. Applied after the generic
-        q/k/v fusion in ``thenoise.utils.lora``.
-        """
+        """Map ComfyUI Flux.2 LoRA names to this repo's Flux.2 schema."""
         key = key.replace(".attn.to_qkv_mlp_proj", ".linear1")
         key = key.replace("single_transformer_blocks", "single_blocks")
         key = key.replace(".attn.", ".img_attn.")
@@ -86,14 +64,7 @@ class FluxKleinModel(DiffusionModel):
 
     @staticmethod
     def detect(f) -> bool:
-        """True if this handle is a Flux.2 (Flux Klein) DiT.
-
-        Flux.2's distinctive signature is the pair of separate double-stream
-        modulations (``double_stream_modulation_img.`` / ``_txt.``) plus the
-        single-stream modulation — unique to the Flux.2 family. Keys are normalized
-        first so repackaged checkpoints (``model.diffusion_model.`` / ``net.``)
-        resolve identically.
-        """
+        """True if this handle is a Flux.2 DiT: its double/single stream modulations."""
         keys = list(normalize_keys(f.keys()))
         has_img = any(k.startswith("double_stream_modulation_img.") for k in keys)
         has_txt = any(k.startswith("double_stream_modulation_txt.") for k in keys)
@@ -103,12 +74,7 @@ class FluxKleinModel(DiffusionModel):
     def __init__(self, *, config: ModelConfig):
         super().__init__(config=config)
 
-        # Determine the Klein variant (4B / 9B) from the DiT checkpoint; this also
-        # selects the matching Qwen3 text encoder (4B / 8B). The timestep-zero
-        # reference conditioning is NOT a weight-level property here: it is chosen
-        # per run from the resolved ``ref_method`` preference (``prepare_latent``),
-        # whose automatic layer comes from the checkpoint markers the base class
-        # already read (``self.checkpoint_prefs``).
+        # Klein variant (4B / 9B) from the DiT checkpoint; selects the Qwen3 size.
         self.params: Flux2Params = detect_klein_params(config.dit_path)
         self.is_8b = self.params.context_in_dim == 12288
         logger.info("Loading Flux Klein DiT (%s) from %s", self.variant_label, config.dit_path)
@@ -123,10 +89,8 @@ class FluxKleinModel(DiffusionModel):
             tokenizer_dir=find_tokenizer_dir(config.text_encoder_path),
         )
 
-        # Flux.2 VAE (encoder + decoder).
         self.vae = load_flux2_vae(self.vae_path, device=self.device, dtype=self.dtype)
 
-        # Register swappable components with the memory manager.
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)
         self.memory.register("vae", self.vae)
@@ -146,11 +110,9 @@ class FluxKleinModel(DiffusionModel):
         self,
         args: EncodePromptArgs,
     ) -> Conditioning:
-        """Encode the edit instruction (text-only for Flux2 Klein).
+        """Encode the prompt (and the negative, under CFG).
 
-        ``args.image`` is accepted for the shared edit pipeline but unused here —
-        the input image is fed to the DiT purely as a reference latent, never into the
-        text encoder (unlike Qwen Image Edit).
+        The edit image reaches the DiT as a reference latent.
         """
         cond = self.text_encoder(args.prompt)  # [1, 512, ctx_dim]
         null = None
@@ -179,14 +141,13 @@ class FluxKleinModel(DiffusionModel):
         """Pack the canonical latent into DiT tokens and stash conditioning, ONCE.
 
         ``prc_img`` converts ``[B, 128, H//16, W//16]`` -> ``[B, seq, 128]`` tokens
-        plus ``[B, seq, 4]`` position ids. The text embeddings and their (fixed)
-        position ids are stashed so the per-step ``denoise_step`` stays a pure DiT
-        forward. Safe under the lock.
+        plus ``[B, seq, 4]`` position ids. The text embeddings and their position ids
+        are stashed too so the per-step ``denoise_step`` stays a pure DiT forward.
+        Safe under the lock.
 
-        In the edit path (``ref`` given) the reference latent is packed the same
-        way and stashed as ``_ref_tokens`` for ``denoise_step``. ``ref_method``
-        decides whether those tokens are conditioned at timestep zero
-        (``index_timestep_zero`` -> ``zero_cond_t`` in the DiT forward).
+        In the edit path the references are packed the same way and concatenated into
+        ``_ref_tokens``; ``ref_method`` decides whether those tokens are conditioned
+        at timestep zero (``index_timestep_zero`` -> ``zero_cond_t``).
         """
         dev = torch.device(self.device)
         self._zero_cond_t = ref_method == "index_timestep_zero"
@@ -203,11 +164,9 @@ class FluxKleinModel(DiffusionModel):
             self._un_txt = un_txt_ids = None
 
         if ref is not None:
-            # Pack each ref with a successive t-axis index (REF_INDEX, 2x, ...)
-            # per ComfyUI, then concat all ref tokens+ids into one stream. The
-            # target image ids are kept separate from the reference ids so the KV
-            # cache can drop the refs from the sequence (read mode) while still
-            # knowing their positions (fill mode).
+            # Each ref gets a successive t-axis index; the target's image ids stay
+            # apart from the reference ids so the KV cache can drop the reference
+            # tokens from the sequence while still knowing their positions.
             ref_tokens, ref_ids = [], []
             for i, ref_latent in enumerate(ref):
                 t, ids = self.pack_reference_latent(ref_latent, ref_method, ref_index=i + 1)
@@ -228,8 +187,6 @@ class FluxKleinModel(DiffusionModel):
         if un_txt_ids is not None:
             self.dit.pe_embedder.store("txt_uncond", un_txt_ids, dtype=self.dtype)
 
-        # Reference-latent KV cache (ComfyUI ``FluxKVCache``): fresh per run, one
-        # cache per conditioning branch (see ``DiffusionModel.start_kv_caches``).
         self.start_kv_caches(
             params,
             has_reference=self._ref_tokens is not None,
@@ -243,9 +200,7 @@ class FluxKleinModel(DiffusionModel):
             params.height // self.vae.spatial_compression
         )
         ts = get_schedule(params.steps, image_seq_len)
-        # Step.t is the flow timestep (1 -> 0); delta = t_i - t_{i+1}. The shared
-        # Euler loop integrates ``x -= delta * velocity``, matching the Flux.2
-        # update ``x += (t_{i+1} - t_i) * v`` when velocity = model output.
+        # Step.t is the flow timestep (1 -> 0); delta = t_i - t_{i+1}.
         return [Step(t=ts[i], delta=ts[i] - ts[i + 1]) for i in range(params.steps)]
 
     def denoise_step(
@@ -256,16 +211,10 @@ class FluxKleinModel(DiffusionModel):
         guidance_scale: float,
         i: int,
     ) -> torch.Tensor:
-        """One Flux.2 DiT forward (+ CFG), returning the velocity (model output).
+        """One Flux.2 DiT forward (+ CFG), returning the raw output as velocity.
 
-        The Flux.2 flow ODE integrates ``x += (t_prev - t_curr) * v``, which is
-        exactly the shared Euler update ``x -= delta * v`` when ``v`` is the model's
-        raw output (no negation, unlike Z-Image).
-
-        With the KV cache the reference tokens are present only while the cache is
-        filling; on every later step they are dropped and each block keeps working
-        on its cache buffers, whose reference suffix is left untouched
-        (``Flux2.forward`` decides fill vs read from ``kv.filled``).
+        The Flux.2 flow ODE integrates ``x += (t_prev - t_curr) * v``, which is the
+        shared Euler update ``x -= delta * v`` when ``v`` is the model's raw output.
         """
         dev = torch.device(self.device)
         t_full = torch.full((len(latents),), float(t), dtype=latents.dtype, device=dev)
@@ -294,10 +243,8 @@ class FluxKleinModel(DiffusionModel):
     ) -> torch.Tensor:
         """One DiT forward with the KV cache's fill/read semantics.
 
-        ``kv`` is ``None`` for the plain path. On the first forward of a fresh
-        cache (``not kv.filled``) the reference tokens are present (fill); on every
-        later step (``kv.filled``) they are dropped (read). The reference positions
-        (``pe_ref``) are only needed while filling.
+        While the cache is empty the reference tokens are passed in (fill); once
+        ``kv.filled`` they are dropped and each block works from its cache (read).
         """
         ref_tokens = self._ref_tokens
         if kv is not None and kv.filled:
@@ -316,10 +263,7 @@ class FluxKleinModel(DiffusionModel):
 
     # ------------------------------------------------------------ editing
     def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
-        """Encode input pixels (``[C,H,W]`` in [-1, 1]) -> canonical reference latent.
-
-        Returns the Flux.2 packed latent ``[1, 128, H//16, W//16]`` (normalized).
-        """
+        """Input pixels (``[C,H,W]`` in [-1, 1]) -> packed latent ``[1, 128, H//16, W//16]``."""
         return self.vae.encode_pixels_to_latents(pixels.unsqueeze(0))
 
     def pack_reference_latent(
@@ -328,12 +272,11 @@ class FluxKleinModel(DiffusionModel):
         method: str = "index",
         ref_index: int = 1,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Canonical reference latent -> (tokens, ids), t-axis = REF_INDEX*ref_index.
+        """Canonical reference latent -> (tokens, ids) at t-axis ``REF_INDEX * ref_index``.
 
-        ``ref_index`` is the 1-based position (ComfyUI ``ref_index_scale``): the
-        first ref uses 10, the second 20, etc. ``index_timestep_zero`` packs
-        identically to ``index`` (only the *modulation* differs, handled by
-        ``zero_cond_t``); anything else is rejected rather than silently ignored.
+        ``ref_index`` is the 1-based position, so the refs land on 10, 20, ...
+        ``index_timestep_zero`` packs identically to ``index``: only the modulation
+        differs, via ``zero_cond_t``.
         """
         if method not in ("index", "index_timestep_zero"):
             raise ValueError(
@@ -348,26 +291,20 @@ class FluxKleinModel(DiffusionModel):
 
     def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:
         """Unpack the DiT tokens back to the canonical packed latent."""
-        # Drop the run-scoped KV cache before the VAE decode (see ``end_kv_caches``).
         self.end_kv_caches()
         x = torch.cat(scatter_ids(latents, self._img_ids)).squeeze(2)  # [B, 128, H//16, W//16]
         return x
 
     def resolve_size(self, width: int, height: int) -> tuple[int, int]:
-        # The packed latent is H//16 x W//16, so pixel dims must be multiples of 16.
+        # The packed latent already is the DiT's grid: one 16x16 pixel cell per token.
         align = self.vae.spatial_compression
         return round_up(width, align), round_up(height, align)
 
     def _create_upscaler(self) -> LatentUpscaler:
-        """Flux.2 VAE -> 128ch patched + BN-normalized Sesqui upscaler."""
         return SesquiLSRUpscaler("flux2", device=self.device, dtype=self.dtype)
 
     def percent_to_sigma(self, percent: float) -> float:
-        """Percent -> sigma (used by the ER-SDE solver to nudge sigma_0 below 1).
-
-        The shifted schedule's first timestep lands exactly on 1.0, where the ER-SDE
-        solver's ``sigma/(1-sigma)`` blows up; nudge it to just below 1.
-        """
+        """Percent -> sigma (ER-SDE needs sigma_0 < 1)."""
         return 1.0 - percent
 
 

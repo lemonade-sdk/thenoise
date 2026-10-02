@@ -1,14 +1,9 @@
 """Configuration dataclasses that wrap related generation fields.
 
-These exist so that adding a new option never changes a method signature — new
-fields are added to the relevant struct instead. There are three groups:
-
-* ``ModelConfig``   — static load-time config for a ``DiffusionModel``.
-* ``GenerateRequest`` — the complete user-facing generation request (the
-  API/CLI surface).
-* ``SamplingParams`` — the denoise-stage geometry + knobs passed to the model
-  kernels (``init_latents``, ``prepare_latent``, ``schedule``,
-  ``finalize_latent``) and to the controller's denoise/refine helpers.
+Grouping fields into structs means adding an option never changes a method
+signature: ``ModelConfig`` is the load-time config, ``EncodePromptArgs`` the text
+encoder's input, ``GenerateRequest`` the user-facing request and ``SamplingParams``
+the denoise-stage geometry.
 """
 from __future__ import annotations
 
@@ -22,12 +17,7 @@ if TYPE_CHECKING:  # pragma: no cover - only for annotations
 
 @dataclass
 class ModelConfig:
-    """Static load-time configuration for a model.
-
-    Deliberately model-bound: every field is needed to load the model's own
-    weights. Pixel-upscaler configuration is NOT a model concern and lives on
-    the server settings instead (it operates in pixel space, needs no model).
-    """
+    """Static load-time configuration for a model."""
 
     dit_path: str
     vae_path: str
@@ -35,18 +25,15 @@ class ModelConfig:
     device: str = "cuda"
     offload_device: str = ""  # empty = auto-detect from safetensors size vs VRAM
     dtype: torch.dtype = torch.bfloat16
-    lora_dir: Optional[str] = None  # LoRAs mutate the DiT weights -> model concern
+    lora_dir: Optional[str] = None
 
 
 @dataclass
 class EncodePromptArgs:
     """Arguments for ``encode_prompt``, bundled into one struct.
 
-    A single structure (instead of passing each parameter separately) so adding a
-    new knob — e.g. a future ``negative_prompt`` variant or an image — never
-    changes the method signature. ``image`` is only set in the edit path
-    (models with the ``edit`` capability); multimodal encoders feed it as vision tokens in
-    addition to any reference latent.
+    ``image`` is only set in the edit path; multimodal encoders feed it as vision
+    tokens in addition to any reference latent.
     """
 
     prompt: str
@@ -59,11 +46,7 @@ class EncodePromptArgs:
 
 @dataclass
 class GenerateRequest:
-    """The complete user-facing generation request.
-
-    Mirrors the fields exposed by the HTTP API and CLI. Add new options here
-    rather than to ``PipelineController.generate``'s signature.
-    """
+    """The complete user-facing generation request, mirroring the HTTP API and CLI."""
 
     prompt: str
     negative_prompt: str = ""
@@ -83,8 +66,7 @@ class GenerateRequest:
     lora_specs: Optional[List[str]] = None
     pixel_upscaler: Optional[str] = None
     image: Optional[Union[Image.Image, List[Image.Image]]] = None
-    # Reference-latent KV cache (edit only); None = auto (see
-    # ``DiffusionModel.pref``: checkpoint marker, then model default).
+    # Reference-latent KV cache (edit only); None = auto.
     kv_cache: Optional[bool] = None
     # Reference conditioning method for editing (edit only); None = auto.
     ref_method: Optional[str] = None
@@ -92,12 +74,7 @@ class GenerateRequest:
 
 @dataclass(frozen=True)
 class SamplingParams:
-    """Denoise-stage geometry + knobs passed to the model kernels.
-
-    ``seed`` is only consumed by ``init_latents``; the other kernels ignore the
-    fields they do not need. Kept in one frozen struct so the kernel signatures
-    stay stable as options are added.
-    """
+    """Denoise-stage geometry + knobs passed to the model kernels."""
 
     height: int
     width: int

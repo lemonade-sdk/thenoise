@@ -1,8 +1,8 @@
 """Z-Image (S3-DiT) adapter — supports the distilled Z-Image-Turbo checkpoint.
 
-Turbo is an 8-NFE flow model with guidance disabled (CFG off). It shares the
-canonical 4D latent format ([B, 16, H//8, W//8]) with the other models but uses
-the Flux VAE (decoder) and a Qwen3 caption encoder instead of the Qwen-Image VAE.
+Turbo is an 8-NFE flow model with guidance disabled. The latent is the canonical 4D
+format ([B, 16, H//8, W//8]); the VAE is Flux's (decoder) and the caption encoder is
+Qwen3.
 """
 from __future__ import annotations
 
@@ -35,9 +35,7 @@ logger = logging.getLogger(__name__)
 class ZImageModel(DiffusionModel):
     name = "zimage"
 
-    # Distilled Turbo defaults: 8 NFEs, no CFG (guidance 1 = "off", ComfyUI's
-    # convention). Z-Image's flow-matching Euler schedule is exactly the shared
-    # euler sampler.
+    # Distilled Turbo defaults (guidance 1 = CFG off).
     DEFAULT_PREFS = {
         **DiffusionModel.DEFAULT_PREFS,
         "steps": 8,
@@ -47,20 +45,17 @@ class ZImageModel(DiffusionModel):
 
     MAX_SEQUENCE_LENGTH = 512
 
-    # Z-Image's attention is one fused ``attn.qkv`` projection.
     lora_fusions = FUSE_QKV
 
     def _lora_key_map(self, key: str) -> str:
-        """Diffusers-layout LoRAs name the output projection ``to_out.0``;
-        the Z-Image model names it ``out``."""
+        """Diffusers LoRAs name the output projection ``to_out.0``; the model names it
+        ``out``."""
         return key.replace(".to_out.0", ".out")
 
     @staticmethod
     def detect(f) -> bool:
-        """True if this handle is the Z-Image S3-DiT: the family signature (keys
-        normalized first, so repackaged files resolve identically) plus the learned
-        padding it ships, which its Ming-Image sibling lacks.
-        """
+        """True if this handle is the Z-Image S3-DiT: the family signature plus its
+        learned padding."""
         keys = list(normalize_keys(f.keys()))
         return is_s3dit(keys) and has_learned_pad_tokens(keys)
 
@@ -85,7 +80,6 @@ class ZImageModel(DiffusionModel):
         # Flux VAE (decoder-only).
         self.vae = load_flux_vae(self.vae_path, device=self.device, dtype=self.dtype)
 
-        # Register swappable components with the memory manager.
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)
         self.memory.register("vae", self.vae)
@@ -104,10 +98,9 @@ class ZImageModel(DiffusionModel):
         return Conditioning(cond=cond, null=null)
 
     def _encode_prompt(self, prompt: str) -> torch.Tensor:
-        """Apply the Qwen chat template, tokenize, and return the caption embeddings.
+        """Chat template -> tokenize -> caption embeddings ``[1, n_valid, cap_feat_dim]``.
 
-        Mirrors the Z-Image pipeline: uses ``hidden_states[-2]`` and keeps only the
-        valid (non-padded) tokens. Returns ``[1, n_valid, cap_feat_dim]``.
+        Takes ``hidden_states[-2]`` and keeps only the non-padded tokens.
         """
         dev = torch.device(self.device)
         messages = [{"role": "user", "content": prompt}]
@@ -131,9 +124,7 @@ class ZImageModel(DiffusionModel):
 
     def init_latents(self, params: SamplingParams) -> torch.Tensor:
         dev = torch.device(self.device)
-        # The DiT consumes the raw VAE latent (it patchifies internally), so its
-        # ``in_channels`` must match the VAE's ``z_dim``; the latent itself is the
-        # VAE's, so that is what sizes the noise.
+        # The DiT patchifies internally, so the noise is the raw VAE latent.
         shape = (
             1, self.vae.z_dim,
             params.height // self.vae.spatial_compression,
@@ -158,10 +149,8 @@ class ZImageModel(DiffusionModel):
     def schedule(self, params: SamplingParams) -> list[Step]:
         dev = torch.device(self.device)
         sigmas = zimage_sampling.get_sigmas(params.steps, dev)
-        # Step.t carries the *sigma* grid (1 -> 1/steps -> 0). Both solvers consume
-        # it as sigma: the Euler loop integrates ``x -= delta * v`` (delta = sigma_i -
-        # sigma_{i+1}) and ER-SDE reconstructs its sigmas from Step.t. The model's
-        # actual timestep ``t = 1 - sigma`` is derived in ``denoise_step``.
+        # Step.t carries the sigma grid (1 -> 0); the model timestep t = 1 - sigma is
+        # derived in ``denoise_step``.
         return [
             Step(t=sigmas[i], delta=sigmas[i] - sigmas[i + 1])
             for i in range(params.steps)
@@ -181,15 +170,12 @@ class ZImageModel(DiffusionModel):
         # ``t`` is sigma (see ``schedule``); the DiT's model timestep is ``1 - sigma``.
         t_full = torch.full((1,), 1.0 - float(t), device=dev, dtype=latents.dtype)
 
-        # The scheduler integrates ``x + dt * noise_pred`` with ``noise_pred =
-        # -model_out``; our shared euler loop is ``x -= delta * v``, so the
-        # velocity v must be the NEGATED DiT output.
+        # The reference integrates ``-model_out``, so the velocity is the negated
+        # DiT output.
         pos = self.dit(x_list, t_full, cap)[0].unsqueeze(0)  # [1, C, 1, H, W]
         v_pos = -pos
         if guidance_scale > 1.0 and cond.null is not None:
             neg = self.dit(x_list, t_full, [cond.null[0]], rope_key="_neg")[0].unsqueeze(0)
-            # CFG over velocities: v = v_uncond + g * (v_pos - v_uncond),
-            # where v_pos = -pos (conditional) and v_uncond = -neg.
             v_uncond = -neg
             v = v_uncond + guidance_scale * (v_pos - v_uncond)
         else:
@@ -197,23 +183,17 @@ class ZImageModel(DiffusionModel):
         return v
 
     def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:
-        # Drop the F axis back to canonical 4D: [B, C, 1, H, W] -> [B, C, H, W].
+        # [B, C, 1, H, W] -> [B, C, H, W]
         return latents.squeeze(2)
 
     def resolve_size(self, width: int, height: int) -> tuple[int, int]:
-        # The latent grid is patchified in 2x2 blocks on an 8x-VAE-compressed latent
-        # (Flux VAE), so pixel dims must be multiples of 8 * 2 = 16. Round up.
+        # Pixel dims must be a multiple of the VAE compression * DiT patch size.
         align = self.vae.spatial_compression * self.dit.patch_size
         return round_up(width, align), round_up(height, align)
 
     def _create_upscaler(self) -> LatentUpscaler:
-        """Flux VAE -> affine shift/scale Sesqui upscaler."""
         return SesquiLSRUpscaler("flux", device=self.device, dtype=self.dtype)
 
     def percent_to_sigma(self, percent: float) -> float:
-        """Percent -> sigma (used by the ER-SDE solver to nudge sigma_0 below 1).
-
-        The shifted schedule's first sigma lands exactly on 1.0, where the ER-SDE
-        solver's ``sigma/(1-sigma)`` blows up; nudge it to just below 1.
-        """
+        """Percent -> sigma (ER-SDE needs sigma_0 < 1)."""
         return 1.0 - percent

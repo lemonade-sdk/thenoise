@@ -30,11 +30,7 @@ MODEL_CATALOG: List[Type[DiffusionModel]] = [
 
 
 def resolve(dit_path: str) -> Type[DiffusionModel]:
-    """Determine the model class from a DiT checkpoint.
-
-    Opens the safetensors header ONCE and passes the handle to each registered
-    class's ``detect()`` until one matches.
-    """
+    """Determine the model class from a DiT checkpoint."""
     from safetensors import safe_open
 
     with safe_open(dit_path, framework="pt") as f:
