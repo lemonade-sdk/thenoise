@@ -34,13 +34,13 @@ IMAGE_TOKEN = 157158  # <image>
 IMAGE_PATCH_TOKEN = 157157  # <imagePatch>: the row the query tokens replace
 IMAGE_END_TOKEN = 157159  # </image>
 
-#: ``img_gen_scales`` is ``[16]``, so the learnable block is 16² = 256 tokens, a
-#: ``1 x 256`` grid (``image_grid_thw = [1, 2, 2 * 256]`` after the 2×2 fold).
+#: ``img_gen_scales`` is ``[16]``, so the learnable block is 16² = 256 tokens in a
+#: ``1 x 256`` grid.
 QUERY_TOKENS = 256
 QUERY_BLOCK_GRID: Tuple[int, int] = (1, QUERY_TOKENS)
 
-#: The vendor generator's own chat template: its default Chinese system turn, the
-#: ``detailed thinking off`` switch it always sends, and the query block appended.
+#: The released generator's chat template: system turn, thinking switch, user
+#: prompt and the appended query block.
 T2I_PROMPT_TEMPLATE = (
     "<role>SYSTEM</role>你是一个友好的AI助手。\n\n"
     "detailed thinking off<|role_end|>"
@@ -49,17 +49,17 @@ T2I_PROMPT_TEMPLATE = (
     "<image><imagePatch></image>"
 )
 
-#: ``mlp/config.json``'s ``selected_hidden_states_layers``; index ``k`` below the
-#: layer count is the INPUT of layer ``k``, and the last entry is the post-final-norm
-#: state the thinker appends.
+#: ``mlp/config.json``'s ``selected_hidden_states_layers``; an index below the
+#: layer count is the INPUT of that layer, the last entry is the post-final-norm
+#: state.
 SELECTED_LAYERS: Tuple[int, ...] = (5, 12, 20)
 
 #: ``mlp/config.json``: ``diffusion_c_input_dim`` / ``diffusion_inner_dim``.
 CAP_FEAT_DIM = 2560
 DIRECT_DIM = 3840
 
-#: What the released file carries that this module tree does not build: the image
-#: tower (edit path), the LM head (never run), and the tokenizer payload.
+#: Keys the released file carries with no counterpart in this module tree: the
+#: image tower (edit path), the LM head, and the tokenizer payload.
 TEXT_ENCODER_DROP_KEYS = (
     "vision.",
     "linear_proj.",
@@ -77,7 +77,7 @@ class MingTokenizerError(RuntimeError):
 
 @dataclass
 class MingConnectorConfig:
-    """The connector as ``connector/config.json`` and the 1.31 B of weights measure it."""
+    """The connector as its ``connector/config.json`` describes it."""
 
     hidden_size: int = 1536
     intermediate_size: int = 8960
@@ -90,8 +90,8 @@ class MingConnectorConfig:
 
 
 class ConnectorAttention(nn.Module):
-    """GQA attention with separate, BIASED q/k/v (Qwen2) and NO causal mask — the
-    connector reads its query tokens as one bidirectional set, not as a sequence."""
+    """GQA attention with separate, BIASED q/k/v and no causal mask: the connector
+    reads its query tokens as one bidirectional set."""
 
     def __init__(self, config: MingConnectorConfig) -> None:
         super().__init__()
@@ -108,22 +108,21 @@ class ConnectorAttention(nn.Module):
         query = self.q_proj(x).unflatten(-1, (self.num_heads, self.head_dim)).transpose(1, 2)
         key = self.k_proj(x).unflatten(-1, (self.num_kv_heads, self.head_dim)).transpose(1, 2)
         value = self.v_proj(x).unflatten(-1, (self.num_kv_heads, self.head_dim)).transpose(1, 2)
-        # Full-head split-half RoPE: no partial factor here, unlike the thinker.
+        # Full-head split-half RoPE.
         query = apply_rope_split_half(query, *freqs)
         key = apply_rope_split_half(key, *freqs)
-        # The missing mask IS the bidirectionality: every query reads every key.
+        # No mask: every query reads every key.
         return self.o_proj(attention([query, key, value], attn_params=AttentionParams(None)))
 
 
 class ConnectorDecoderLayer(nn.Module):
-    """Pre-norm Qwen2 block, named exactly as the checkpoint spells it."""
+    """Pre-norm transformer block, named as the checkpoint spells it."""
 
     def __init__(self, config: MingConnectorConfig) -> None:
         super().__init__()
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.self_attn = ConnectorAttention(config)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        # The connector's feed-forward is the thinker's SwiGLU at other widths.
         self.mlp = MLP(config.hidden_size, config.intermediate_size)
 
     def forward(self, x: torch.Tensor, freqs: Tuple[torch.Tensor, torch.Tensor]) -> torch.Tensor:
@@ -132,8 +131,8 @@ class ConnectorDecoderLayer(nn.Module):
 
 
 class MingConnector(nn.Module):
-    """``connector.layers.*`` + ``connector.norm``: 28 bidirectional blocks, then RMSNorm;
-    the trailing norm belongs here because the reference reads the post-norm state."""
+    """``connector.layers.*`` + ``connector.norm``: 28 bidirectional blocks, then
+    RMSNorm — the connector reads the post-norm state."""
 
     def __init__(self, config: Optional[MingConnectorConfig] = None) -> None:
         super().__init__()
@@ -185,12 +184,11 @@ class MingImageConditioner(nn.Module):
 
         layers = tuple(selected_layers)
         # Every entry but the last names a layer INPUT; the last must be the layer
-        # count itself (the post-final-norm state index 20 stands for).
+        # count itself, the index of the post-final-norm state.
         if not layers or layers[-1] != self.thinker.config.num_hidden_layers:
             raise ValueError(
                 f"selected_layers {layers} must end at the thinker's layer count "
-                f"({self.thinker.config.num_hidden_layers}): that is the "
-                "post-final-norm state the reference's last index captures"
+                f"({self.thinker.config.num_hidden_layers}), the post-final-norm state"
             )
         self.selected_layers = layers
         self.capture_pre_layers = tuple(k for k in layers if k < layers[-1])
@@ -202,8 +200,8 @@ class MingImageConditioner(nn.Module):
             )
         self.num_queries = num_queries
         self.query_grid = tuple(query_grid)
-        # Drawn like the embedding rows these stand in for: the checkpoint overwrites
-        # them, and uninitialised ``torch.empty`` is garbage bf16 rounds into.
+        # Drawn like the embedding rows they stand in for; the checkpoint
+        # overwrites them.
         self.query_tokens = nn.Parameter(torch.randn(num_queries, hidden))
 
         self.proj_in = QuantizedLinear(hidden, connector_hidden, bias=True)
@@ -219,8 +217,8 @@ class MingImageConditioner(nn.Module):
         return self.query_tokens.device
 
     def query_block(self, embeddings: torch.Tensor, query_index: int) -> torch.Tensor:
-        """Splice the learnable rows OVER the ``<imagePatch>`` embedding (the token
-        under ``q`` is REPLACED, not shifted), giving ``[prompt][query][</image>]``."""
+        """Splice the learnable rows OVER the ``<imagePatch>`` embedding, replacing
+        that token, giving ``[prompt][query][</image>]``."""
         if embeddings.shape[0] != 1:
             raise ValueError(
                 f"the Ming-Image conditioner encodes one prompt at a time, got "
@@ -267,8 +265,7 @@ class MingImageConditioner(nn.Module):
         block = hidden[:, q : q + self.num_queries]
         cap_feats = self.proj_out(self.connector(self.proj_in(block)))
 
-        # ``:q-1`` is the prompt span with ``<image>`` excluded (the vendor's ``labels
-        # < 0`` mask, i.e. exactly "the tokens the user sent").
+        # ``:q-1`` is the prompt span without ``<image>``: the tokens the user sent.
         direct = torch.cat([state[:, : q - 1] for state in captured], dim=-1)
         return cap_feats, self.proj_directvlm(direct)
 
@@ -288,20 +285,20 @@ def build_prompt_ids(tokenizer: Tokenizer, prompt: str) -> List[int]:
 
 
 def check_query_block(ids: Sequence[int]) -> int:
-    """The index of the ``<imagePatch>`` token, asserted against its own delimiters so
-    a broken template or a split token fails loudly instead of drawing a wrong picture."""
+    """The index of the ``<imagePatch>`` token, asserted against its own delimiters
+    so a broken template or a split token fails loudly."""
     hits = [i for i, token in enumerate(ids) if token == IMAGE_PATCH_TOKEN]
     if len(hits) != 1:
         raise ValueError(f"expected exactly one <imagePatch> token, found {len(hits)}")
     q = hits[0]
-    # Bounds-guarded rather than indexed: a marker at either end is a broken template.
+    # Bounds-guarded: a marker at either end is a broken template.
     before = ids[q - 1] if q >= 1 else None
     after = ids[q + 1] if q + 1 < len(ids) else None
     if before != IMAGE_TOKEN or after != IMAGE_END_TOKEN:
         raise ValueError(
             f"<imagePatch> at {q} is not surrounded by <image>/</image> "
-            f"(found {before}/{after}); "
-            "the prompt template and the tokenizer disagree about the query block"
+            f"(found {before}/{after}); the prompt template and the tokenizer "
+            "disagree about the query block"
         )
     return q
 
@@ -325,7 +322,7 @@ def load_ming_tokenizer(path: str, *, tokenizer_dir: Optional[str] = None) -> To
 
 
 def _read_tokenizer_json(path: str) -> Optional[bytes]:
-    """The ``tokenizer_json`` payload as bytes: header read plus one slice."""
+    """The ``tokenizer_json`` payload as bytes."""
     with MemoryEfficientSafeOpen(path) as f:
         if "tokenizer_json" not in f.keys():
             return None

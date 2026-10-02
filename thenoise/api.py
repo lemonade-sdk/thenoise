@@ -1,12 +1,11 @@
-"""Focused HTTP API. A single generic /text2image endpoint serves whichever model
-the runtime currently holds (the runtime loads exactly one model at a time).
+"""Focused HTTP API.
 
-Synchronous request/response: each generate() call blocks until the image is ready.
-A per-model inference lock serializes concurrent requests.
+A single generic /text2image endpoint serves whichever model the runtime currently
+holds. Requests are synchronous: ``generate()`` blocks until the image is ready,
+and the inference lock serializes concurrent requests.
 
-The request carries only the shared, model-agnostic parameters. Per-model defaults
-(including the "advanced" sampler params) are owned by the model class and are NOT
-exposed here.
+The request carries only the shared, model-agnostic parameters; per-model defaults
+live on the model class.
 """
 from __future__ import annotations
 
@@ -88,7 +87,7 @@ class UpscaleRequest(BaseModel):
 class EditRequest(Text2ImageRequest):
     """Instruction-based editing: image(s) + prompt -> edited image.
 
-    ``image`` accepts one or more base64-encoded images (OpenAI-style).
+    ``image`` accepts one or more base64-encoded images.
     """
 
     image: Union[str, List[str]]
@@ -101,7 +100,6 @@ class EditRequest(Text2ImageRequest):
         # Keep an alpha if the input has one; only the model knows whether it wants it.
         images = [load_image(io.BytesIO(base64.b64decode(b))) for b in b64_list]
         req: GenerateRequest = self.to_request()
-        # OpenAI-style: ``image`` is one or more images; store single or list.
         req.image = images[0] if len(images) == 1 else images
         return req
 
@@ -151,10 +149,8 @@ def create_app(runtime) -> FastAPI:
     def upscalers():
         """List available pixel upscaler names + their detected native scales.
 
-        Pixel upscalers are a pixel-space / server concern and need no diffusion
-        model, so this works even when no model is loaded. ``scales`` maps each
-        name to its detected native scale (2 or 4); unknown/undetectable entries
-        are 0.
+        Works with no model loaded. ``scales`` maps each name to its detected
+        native scale (2 or 4); undetectable entries are 0.
         """
         names = runtime.pixel_upscalers.list()
         scales = {}
@@ -200,7 +196,7 @@ def create_app(runtime) -> FastAPI:
             image = pipeline.edit(req.to_edit_request())
         except ValueError as e:  # model doesn't support editing / bad request
             return Response(status_code=400, content=str(e))
-        except Exception as e:  # surface edit errors cleanly
+        except Exception as e:
             logger.exception("edit failed")
             return Response(status_code=500, content=f"edit failed: {e}")
 
@@ -219,8 +215,7 @@ def create_app(runtime) -> FastAPI:
     def upscale(req: UpscaleRequest):
         """Upscale an input image by ``upscale_factor``x with a named pixel upscaler.
 
-        Pixel upscaling is a pixel-space / server concern and needs no diffusion
-        model, so this works even when no model is loaded.
+        Works with no model loaded.
         """
         try:
             image = runtime.upscaler.upscale(
@@ -230,7 +225,7 @@ def create_app(runtime) -> FastAPI:
             )
         except ValueError as e:
             return Response(status_code=400, content=str(e))
-        except Exception as e:  # surface upscale errors cleanly
+        except Exception as e:
             logger.exception("upscale failed")
             return Response(status_code=500, content=f"upscale failed: {e}")
 

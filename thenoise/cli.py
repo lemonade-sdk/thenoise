@@ -1,15 +1,9 @@
 """Command-line interface for thenoise.
 
-Four subcommands:
-  * ``serve``    run the FastAPI HTTP server with a single loaded model
-  * ``generate`` run one generation and save the PNG
-  * ``edit``     edit an image from an instruction (image + prompt -> edited image)
-  * ``upscale``  pixel-upscale an image (no diffusion model needed)
-
-Model checkpoints are supplied to ``serve``/``generate``/``edit`` (``--dit`` /
-``--vae`` / ``--text-encoder``), and the model type is detected automatically from
-the ``--dit`` checkpoint. ``upscale`` needs no diffusion model. All options are
-passed on the command line (there is no config file).
+Subcommands: ``serve`` (HTTP server), ``generate``, ``edit`` and ``upscale``.
+Model checkpoints are passed to ``serve``/``generate``/``edit`` as ``--dit`` /
+``--vae`` / ``--text-encoder``, and the model type is detected from the ``--dit``
+checkpoint. Every option is on the command line (there is no config file).
 """
 from __future__ import annotations
 
@@ -31,10 +25,8 @@ def _add_model_paths(p: argparse.ArgumentParser, required: bool = True) -> None:
 def _add_upscaler_args(p: argparse.ArgumentParser) -> None:
     """Add the pixel-upscaler flags for a subcommand.
 
-    ``serve`` exposes ``--upscaler-dir`` (a directory, selected per-request via
-    the ``pixel_upscaler`` API field). ``generate`` instead takes a one-shot
-    ``--pixel-upscaler`` full path, which is split internally into
-    ``upscaler_dir`` + ``pixel_upscaler`` before being passed down the chain.
+    ``serve`` takes ``--upscaler-dir``, with the upscaler selected per request via
+    the ``pixel_upscaler`` API field.
     """
     p.add_argument("--upscaler-dir", default="", metavar="PATH",
                    help="directory containing pixel upscaler .safetensors files "
@@ -43,8 +35,7 @@ def _add_upscaler_args(p: argparse.ArgumentParser) -> None:
 
 
 def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png") -> None:
-    """Add the generation options shared by ``generate`` and ``edit``.
-    """
+    """Add the generation options shared by ``generate`` and ``edit``."""
     p.add_argument("--pixel-upscaler", default="", metavar="PATH",
                    help="full path to the pixel upscaler model (.safetensors) "
                         "to use for this one-shot generation (e.g. a Real-ESRGAN "

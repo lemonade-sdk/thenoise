@@ -13,8 +13,8 @@ def _serve(args) -> None:
 
     runtime = Runtime(settings)
 
-    # Model paths are optional. Load the model only when all three checkpoints
-    # are supplied; otherwise serve model-free (only upscale is available).
+    # Load the model only when all three checkpoints are supplied; otherwise
+    # serve model-free (upscale only).
     model_paths = [args.dit, args.vae, args.text_encoder]
     if any(model_paths):
         if not all(model_paths):
