@@ -1,22 +1,12 @@
 """Reusable quantized linear projection.
 
-``QuantizedLinear`` is a drop-in replacement for ``nn.Linear``. A layer runs
-either BF16 (default; ``weight`` is an ``nn.Parameter``) or a quantized scheme,
-in which case ``weight`` becomes a ``comfy_kitchen.tensor.QuantizedTensor``
-buffer. The module is fully layout-agnostic: ``forward`` calls ``F.linear``, and
-the ``QuantizedTensor``'s ``__torch_dispatch__`` routes the GEMM to the right
-kernel for its layout (INT8+ConvRot, FP8, NVFP4, MXFP8, ...). Quantized layers
-emit the activation dtype, so everything downstream is dtype-agnostic and the
-rest of the model needs no changes.
+``QuantizedLinear`` is a drop-in replacement for ``nn.Linear``. A layer runs either
+BF16 (``weight`` is an ``nn.Parameter``) or a quantized scheme, in which case
+``weight`` is a ``comfy_kitchen.tensor.QuantizedTensor`` buffer — it cannot be a
+Parameter, since PyTorch forbids gradients on integer tensors.
 
-Quantized weights live inside a ``QuantizedTensor`` buffer (not an
-``nn.Parameter``) because PyTorch forbids gradients on integer tensors — and a
-``QuantizedTensor`` subclass cannot be a Parameter at all. Loaders should use
-``thenoise.utils.loader.load_quantized_state_dict`` to populate the model from a
-ComfyUI-style checkpoint.
-
-The module is also a LoRA target: ``apply_lora`` picks the one way this layer can
-carry a given LoRA (see ``thenoise.utils.lora.LoraFactors``).
+The module is layout-agnostic: ``forward`` calls ``F.linear`` and the tensor's
+``__torch_dispatch__`` routes the GEMM to the right kernel for its layout.
 """
 from __future__ import annotations
 
@@ -36,15 +26,12 @@ from thenoise.utils.lora import LoraFactors, LoraMode
 class QuantizedLinear(nn.Module):
     """Linear projection that runs BF16 (default) or a quantized scheme.
 
-    A LoRA is added to the BF16 weight, requantized into the low-bit weight, or —
-    when its delta is finer than this layer's requantization step, where a bake
-    would land noise instead of the LoRA — kept as a low-rank branch on top of the
-    quantized GEMM.
+    A LoRA is baked into the weight, or kept as a low-rank branch on top of the
+    quantized GEMM when its delta is finer than this layer's requantization step.
     """
 
     #: Below this delta-RMS / ``quant_step()`` ratio a bake would not survive.
-    #: Calibrated against real INT8+ConvRot checkpoints: every LoRA reported
-    #: broken lands at 0.01-0.06, every one reported fine at 0.08 and up.
+    #: Calibrated against real INT8+ConvRot checkpoints.
     LORA_BAKE_MIN_RATIO = 0.1
 
     def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
@@ -59,9 +46,8 @@ class QuantizedLinear(nn.Module):
             self.register_parameter("bias", None)
         self._reset_parameters()
         self._quantized = False
-        # Runtime LoRA branch. Non-persistent buffers so they follow the module
-        # across devices and dtype casts but never reach a state_dict; the None
-        # slots keep ``forward`` a plain attribute check instead of a ``getattr``.
+        # Runtime LoRA branch: non-persistent buffers, so they follow the module
+        # across devices and dtype casts but never reach a state_dict.
         self.register_buffer("_lora_down", None, persistent=False)
         self.register_buffer("_lora_up", None, persistent=False)
 
@@ -75,11 +61,10 @@ class QuantizedLinear(nn.Module):
     def load_quantized(self, qt: QuantizedTensor) -> None:
         """Switch this layer to a pre-quantized weight of any layout.
 
-        Frees the BF16 ``weight`` parameter and registers ``qt`` as the ``weight``
-        buffer (it carries the layout profile: scale, ConvRot flag/group size,
-        original dtype/shape).
+        Frees the BF16 ``weight`` parameter and registers ``qt``, which carries its
+        own layout profile, as the ``weight`` buffer.
         """
-        del self.weight  # free the BF16 weights
+        del self.weight
         self.register_buffer("weight", qt)
         self._quantized = True
 
@@ -89,10 +74,8 @@ class QuantizedLinear(nn.Module):
         """This layer's requantization step per output row, or None if unknown.
 
         The int8 exporter stores ``scale = absmax / 127`` per row (ConvRot rotates
-        within groups but still scales per row, and an orthogonal rotation keeps
-        norms), so the stored scale *is* the step; a per-tensor scale broadcasts.
-        Every other layout scales relative to each weight rather than to the row
-        absmax, so None means "no step estimate" rather than a wrong one.
+        within groups and an orthogonal rotation keeps norms), so the stored scale
+        *is* the step; a per-tensor scale broadcasts.
         """
         qt = self.weight
         if not isinstance(qt, QuantizedTensor) or qt.layout_cls is not TensorWiseINT8Layout:
@@ -108,12 +91,11 @@ class QuantizedLinear(nn.Module):
         """How wide a LoRA is against this layer's step: ``rms(delta) / step``.
 
         Row ``j`` of ``up @ down`` has squared norm ``up_j (down @ down.T) up_j.T``,
-        so all row norms cost two ``[out, r] x [r, r]`` products instead of building
-        the ``[out, in]`` delta. Only the rows the delta actually touches are
-        counted: a fused ``qkv``/``gate_up`` receives a partial delta, and counting
-        the untouched rows would understate it and route a healthy layer to runtime.
+        so the row norms cost two ``[out, r] x [r, r]`` products instead of building
+        the ``[out, in]`` delta. Only rows the delta actually touches are counted: a
+        fused ``qkv``/``gate_up`` receives a partial delta.
 
-        NaN (a zero delta) means no opinion, which reads as "bake".
+        NaN (a zero delta) reads as "bake".
         """
         down = factors.down.to(torch.float32)
         up = factors.up.to(torch.float32)
@@ -127,9 +109,8 @@ class QuantizedLinear(nn.Module):
     def apply_lora(self, factors: LoraFactors) -> LoraMode:
         """Carry a LoRA the best way this layer can, and report which way that was.
 
-        Baking is free at every step, so it stays the default: only a delta finer
-        than ``quant_step()`` — which requantization would round away while
-        re-rounding the rest of the row — goes to the runtime branch.
+        Baking is free at every step, so it stays the default; only a delta finer
+        than ``quant_step()`` goes to the runtime branch.
         """
         self.clear_runtime_lora()  # a leftover branch would stack on top of a bake
         if not self._quantized:
@@ -147,8 +128,7 @@ class QuantizedLinear(nn.Module):
         """Bake a ``[out, in]`` delta into the quantized weight (any layout).
 
         Dequantizes, adds, and requantizes with this layer's preserved layout
-        profile (``requantize_from_float`` keeps the ConvRot flag, group size and
-        scale granularity), so the runtime forward stays a single quantized GEMM.
+        profile, so the runtime forward stays a single quantized GEMM.
         """
         if self._lora_down is not None:
             raise RuntimeError(
@@ -161,9 +141,8 @@ class QuantizedLinear(nn.Module):
     def set_runtime_lora(self, down: torch.Tensor, up: torch.Tensor) -> None:
         """Keep a LoRA as a low-rank add-on to the quantized GEMM.
 
-        ``forward`` adds ``(x @ down.T) @ up.T``, so the stored weight keeps its own
-        quantization grid. Costs two rank-sized GEMMs per step and
-        ``r * (in + out)`` of memory, and leaves the weight bit-identical.
+        Costs two rank-sized GEMMs per step and ``r * (in + out)`` of memory, and
+        leaves the weight bit-identical.
         """
         self._lora_down = down.detach().to(self.weight.device, self.weight.dtype)
         self._lora_up = up.detach().to(self.weight.device, self.weight.dtype)
@@ -174,11 +153,7 @@ class QuantizedLinear(nn.Module):
         self._lora_up = None
 
     def undo_lora(self, dit_path: Optional[str], raw_key: Optional[str]) -> None:
-        """Undo a baked LoRA by reloading this layer's originals from the checkpoint.
-
-        Cheaper and exact, where re-deriving the originals would compound another
-        dequantize/requantize error.
-        """
+        """Undo a baked LoRA by reloading this layer's originals from the checkpoint."""
         if not dit_path or not raw_key:
             raise RuntimeError(
                 "cannot undo a baked quantized LoRA: no dit_path and raw checkpoint "
@@ -191,8 +166,7 @@ class QuantizedLinear(nn.Module):
         self.weight.copy_(qt)
 
     def _lora_branch(self, x: torch.Tensor) -> torch.Tensor:
-        """The runtime branch alone: ``F.linear`` twice, so it shares the GEMM path
-        and Inductor epilogue fusion with the layer's own projection."""
+        """The runtime branch alone; ``F.linear`` keeps it on the layer's GEMM path."""
         x = x.to(self._lora_down.dtype)
         return F.linear(F.linear(x, self._lora_down), self._lora_up)
 

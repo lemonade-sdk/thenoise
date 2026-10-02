@@ -1,9 +1,7 @@
 """Mage-Flow — the 12-layer member of the Qwen-Image dual-stream family.
 
-The DiT (which reuses the Qwen-Image transformer block), its Qwen3-VL-4B
-conditioner, its resolution-independent static-shift schedule, and the checkpoint
-name helpers that tell it apart from its 60-layer sibling. The codec it denoises —
-a one-step diffusion VAE, not a KL-VAE — lives in :mod:`thenoise.vae.mage_flow`.
+The codec it denoises — a one-step diffusion VAE — lives in
+:mod:`thenoise.vae.mage_flow`.
 """
 from .models import (
     MageFlowParams,

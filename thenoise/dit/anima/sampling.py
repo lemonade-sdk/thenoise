@@ -1,8 +1,6 @@
 """Anima flow-matching sampler helpers.
 
-Only the sampling functions are used by the engine. The rotary-position-embedding
-and adaptive-guidance helpers from the original (HunyuanImage-2.1-derived) module
-are not used by the Anima inference path and are dropped.
+Ported from the HunyuanImage-2.1-derived module.
 """
 from __future__ import annotations
 
@@ -12,16 +10,7 @@ import torch
 
 
 def get_timesteps_sigmas(sampling_steps: int, shift: float, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Generate timesteps and sigmas for diffusion sampling.
-
-    Args:
-        sampling_steps: Number of sampling steps.
-        shift: Sigma shift parameter for schedule modification.
-        device: Target device for tensors.
-
-    Returns:
-        Tuple of (timesteps, sigmas) tensors.
-    """
+    """Timesteps and sigmas of a shifted flow-matching schedule."""
     sigmas = torch.linspace(1, 0, sampling_steps + 1)
     sigmas = (shift * sigmas) / (1 + (shift - 1) * sigmas)
     sigmas = sigmas.to(torch.float32)

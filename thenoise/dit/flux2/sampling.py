@@ -1,16 +1,10 @@
 """Flux.2 (Flux Klein) sampling helpers.
 
-The schedule is the official Flux.2 flow-matching schedule: ``linspace(1, 0,
-steps+1)`` pushed through a generalized time/SNR shift whose ``mu`` is computed
-empirically from the image-token count. Each schedule step is an Euler step of the
-flow ODE, so the default solver is Euler.
-
-Also carries the token-position helpers used to pack the 4D latent into the
-DiT's 1D token sequence and back:
-
-  * ``prc_img``  ``[B, C, H, W]`` -> ``[B, seq, C]`` tokens + ``[B, seq, 4]`` ids
-  * ``prc_txt``  ``[B, L, Ctx]`` text -> unchanged + ``[B, L, 4]`` ids
-  * ``scatter_ids`` reconstructs ``[B, C, 1, H, W]`` from tokens + ids
+The official Flux.2 flow-matching schedule: ``linspace(1, 0, steps+1)`` pushed
+through a generalized time/SNR shift whose ``mu`` is computed empirically from the
+image-token count. Every step is an Euler step of the flow ODE. Also carries the
+token-position helpers that pack the 4D latent into the DiT's 1D token sequence and
+back.
 """
 
 from __future__ import annotations
@@ -46,11 +40,10 @@ def compute_empirical_mu(image_seq_len: int, num_steps: int) -> float:
 
 
 def get_schedule(num_steps: int, image_seq_len: int, flow_shift: float | None = None) -> list[float]:
-    """Flux.2 timestep grid ``(num_steps + 1)`` values from 1 -> 0.
+    """Flux.2 timestep grid: ``(num_steps + 1)`` floats from 1 -> 0.
 
-    Returns a list of floats (the last is 0.0). The ``i``-th Euler step integrates
-    ``x += (t[i+1] - t[i]) * velocity``, so the adapter's ``denoise_step`` returns
-    the model velocity directly (no negation).
+    The ``i``-th Euler step integrates ``x += (t[i+1] - t[i]) * velocity``, so the
+    adapter's ``denoise_step`` returns the model velocity directly.
     """
     mu = compute_empirical_mu(image_seq_len, num_steps)
     timesteps = torch.linspace(1, 0, num_steps + 1)
@@ -113,11 +106,7 @@ def _compress_time(t_ids: torch.Tensor) -> torch.Tensor:
 
 
 def scatter_ids(x: torch.Tensor, x_ids: torch.Tensor) -> list[torch.Tensor]:
-    """Reconstruct ``[1, C, T, H, W]`` tensors from ``[B, seq, C]`` tokens + ids.
-
-    Uses the position ids to scatter each token back into its grid slot. Returns a
-    list of one tensor per batch element (T == 1 for a still image).
-    """
+    """Reconstruct ``[1, C, T, H, W]`` per batch element from tokens + position ids."""
     x_list = []
     for data, pos in zip(x, x_ids):
         _, ch = data.shape

@@ -1,17 +1,14 @@
 """Checkpoint-name helpers for the Qwen-Image family: the block layout its members
 share, and the depth that separates them.
 
-Qwen-Image and Mage-Flow are the same dual-stream block with identical tensor names,
-and detection only ever sees names, so each detector is a positive predicate on the
-family plus its own depth window — no cross-model coupling, no catalog order.
-
-``keys`` arguments are expected wrapper-prefix free (``thenoise.models.base.normalize_keys``).
+Detection only ever sees names, so each detector is a predicate on the family plus
+its own depth window. ``keys`` arguments are expected wrapper-prefix free.
 """
 from __future__ import annotations
 
 from typing import Iterable
 
-#: Layer count of the released Mage-Flow DiTs, against Qwen-Image's 60.
+#: Layer count of the released Mage-Flow DiTs.
 MAGE_LAYERS = 12
 
 #: Module prefixes every member of the family carries. ``add_q_proj`` is what rules out

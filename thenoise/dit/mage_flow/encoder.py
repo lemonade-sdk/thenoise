@@ -1,21 +1,18 @@
 """Mage-Flow text encoder — Qwen3-VL-4B, conditioned on the *normed* last hidden state.
 
 The LM (vision tower included) turns ``prompt`` + optional reference images into the
-``[1, L, 2560]`` conditioning the DiT's ``txt_in`` eats. Three things are Mage's own:
+``[1, L, 2560]`` conditioning the DiT's ``txt_in`` eats. Mage's own choices:
 
-  * it conditions on ``.last_hidden_state``, i.e. WITH the final RMSNorm applied
-    (ComfyUI's ``layer_norm_hidden_state = True``);
-  * only the template prefix is dropped (the system turn and the ``user`` header, via
-    the shared :func:`compute_drop_idx`) — the reference images' *vision tokens stay in
-    the conditioning*, so an edit's reference reaches the DiT as both text-stream and
-    latent tokens;
+  * conditioning on ``.last_hidden_state``, i.e. with the final RMSNorm applied;
+  * only the template prefix is dropped (via the shared :func:`compute_drop_idx`),
+    so the reference images' *vision tokens stay in the conditioning* — an edit's
+    reference reaches the DiT as both text-stream and latent tokens;
   * the edit template leads the user turn with one ``Image N: <vision>`` block per
     reference, and neither template appends a thinking block.
 
-Reference images are downsized for the *conditioning* path only (long edge capped at
+Reference images are downsized for the conditioning path only (long edge capped at
 :data:`VL_COND_LONG_EDGE`): a full-resolution edit image would inject thousands of
-vision tokens and drown the instruction. The VAE reference latent is encoded separately,
-at full working resolution.
+vision tokens and drown the instruction.
 """
 from __future__ import annotations
 
@@ -48,7 +45,7 @@ from thenoise.utils.text_encoder import (
 
 logger = logging.getLogger(__name__)
 
-#: Long-edge cap of the image fed to the vision tower (upstream's ``vl_cond_long_edge``).
+#: Long-edge cap of the image fed to the vision tower.
 VL_COND_LONG_EDGE = 384
 
 #: The edit system prompt: the Qwen-Image-Edit image-instruction prompt.
@@ -114,8 +111,7 @@ class MageFlowTextEncoder(nn.Module):
         """Encode one prompt -> ``(embeds [1, L, hidden], mask [1, L])``.
 
         ``images`` are PIL images in prompt order (single image or list), capped to
-        :data:`VL_COND_LONG_EDGE` here. The mask is all-ones — one sequence is never
-        padded — and exists to report the conditioning length.
+        :data:`VL_COND_LONG_EDGE` here. The mask reports the conditioning length.
         """
         images = _as_image_list(images)
         condition_images = [resize_to_long_edge(img, VL_COND_LONG_EDGE) for img in images]

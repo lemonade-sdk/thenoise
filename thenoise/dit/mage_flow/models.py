@@ -1,24 +1,21 @@
 """Mage-Flow DiT — the 12-layer member of the Qwen-Image dual-stream family.
 
-The block is Qwen-Image's and is reused verbatim
-(:class:`thenoise.dit.qwen_image.models.QwenImageTransformerBlock`); only ``eps``
-differs (1e-6, for the block LayerNorms and the attention QK RMSNorms). Three things
-around the block make this model:
+It reuses :class:`thenoise.dit.qwen_image.models.QwenImageTransformerBlock` at
+``eps`` 1e-6, and adds:
 
-  * **patch 1** — one token per latent cell, the raw 128-channel VAE latent with no
-    2x2 packing (see :func:`latent_to_tokens`);
+  * **patch 1** — one token per latent cell of the raw 128-channel VAE latent
+    (see :func:`latent_to_tokens`);
   * **unrotated text** — the text stream sits at position 0, where RoPE is the
-    identity, so one matrix is stored for it instead of a per-token table;
+    identity, so one matrix is stored for it;
   * **a bf16-rounded timestep table** — see :class:`MageTimestepProjEmbeddings`.
 
 The timestep embedding has a single row, so reference tokens are modulated at ``t``
-like the target ones and their K/V cannot be cached: no ``kv``, no
-``timestep_zero_index``, no per-token modulation mask.
+like the target ones and their K/V cannot be cached.
 
-A second export format is also loaded here: the **low-rank modulation** variant
-(``modulation_rank`` in :class:`MageFlowParams`). Same trunk, but the per-block AdaLN
-heads are fed a shared, rank-wide projection of the timestep embedding instead of the
-full-width one, and those factors are FP32 — see :class:`thenoise.utils.fp32_linear.Fp32Linear`.
+The **low-rank modulation** export variant (``modulation_rank`` in
+:class:`MageFlowParams`) feeds the per-block AdaLN heads a shared, rank-wide FP32
+projection of the timestep embedding — see
+:class:`thenoise.utils.fp32_linear.Fp32Linear`.
 """
 from __future__ import annotations
 
@@ -49,8 +46,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-#: Layer-norm / RMS-norm epsilon of the reference implementation (Qwen-Image runs the
-#: same block at 1e-5).
+#: Layer-norm / RMS-norm epsilon of the reference implementation.
 _EPS = 1e-6
 
 
@@ -65,10 +61,9 @@ class MageFlowParams:
     head_dim: int = 128
     context_dim: int = 2560
     axes_dims: Tuple[int, int, int] = (16, 56, 56)
-    #: Latent cells per token. 1 = the raw latent pixel is the token (no 2x2 packing).
+    #: Latent cells per token.
     patch_size: int = 1
-    #: Width of the shared modulation vector, or ``None`` for the dense heads the block
-    #: ships with. Read off ``modulation_down.weight`` (see ``utils.detect_params``).
+    #: Width of the shared modulation vector, or ``None`` for the dense heads.
     modulation_rank: Optional[int] = None
 
     @property
@@ -77,11 +72,7 @@ class MageFlowParams:
 
 
 def latent_to_tokens(latents: torch.Tensor) -> torch.Tensor:
-    """Canonical latent ``[B, C, H, W]`` -> tokens ``[B, H*W, C]``.
-
-    A Mage token IS a latent pixel, so unlike ``pack_latents`` there is no 2x2 merge:
-    the token width stays ``C``.
-    """
+    """Canonical latent ``[B, C, H, W]`` -> tokens ``[B, H*W, C]``, one per latent cell."""
     batch, channels, height, width = latents.shape
     return latents.movedim(1, -1).reshape(batch, height * width, channels)
 
@@ -95,10 +86,9 @@ def tokens_to_latent(tokens: torch.Tensor, height: int, width: int) -> torch.Ten
 class MageTimestepProjEmbeddings(nn.Module):
     """Timestep embedding whose frequency table is rounded to the timestep dtype.
 
-    The shared ``timestep_embedding`` keeps ``exp(-log(10000) * i / half)`` in fp32.
-    This model rounds it to bf16 first, and the rounding is audible: amplified by the
-    x1000 time factor it is worth close to a radian at the top of the table. So it is
-    reproduced literally — round the table, then multiply — rather than approximated.
+    The rounding is audible: amplified by the x1000 time factor it is worth close to
+    a radian at the top of the table. So it is reproduced literally — round the
+    table, then multiply.
     """
 
     def __init__(self, embedding_dim: int):
@@ -124,9 +114,8 @@ class MageLowRankBlock(QwenImageTransformerBlock):
     """Qwen-Image block driven by the shared low-rank modulation vector.
 
     ``img_mod``/``txt_mod`` keep their ``Sequential`` slotting — the checkpoint calls
-    them ``img_mod.1`` — but slot 0 becomes ``Identity`` (the SiLU moves out to the
-    shared down-projection) and slot 1 takes the rank-wide FP32 vector and hands back
-    trunk-dtype modulation parameters.
+    them ``img_mod.1`` — with slot 0 ``Identity`` (the SiLU moves to the shared
+    down-projection) and slot 1 an FP32 rank-wide projection.
     """
 
     def __init__(
@@ -182,10 +171,9 @@ class MageFlowTransformer2DModel(nn.Module):
         self.img_in = QuantizedLinear(params.in_channels, self.inner_dim)
         self.txt_in = QuantizedLinear(params.context_dim, self.inner_dim)
 
-        # The low-rank export replaces the dense heads' input: one shared FP32
-        # down-projection of ``silu(temb)`` feeds every block's heads. The factors are
-        # calibrated in FP32 and the export carries them that way, hence ``Fp32Linear``
-        # rather than the trunk's dtype.
+        # The low-rank export feeds every block's heads from one shared FP32
+        # down-projection of ``silu(temb)``; the factors are calibrated in FP32,
+        # hence ``Fp32Linear``.
         rank = params.modulation_rank
         self.modulation_down = None if rank is None else Fp32Linear(self.inner_dim, rank)
         self.transformer_blocks = nn.ModuleList(
@@ -208,12 +196,8 @@ class MageFlowTransformer2DModel(nn.Module):
     ) -> torch.Tensor:
         """One DiT forward, returning the velocity of the *target* tokens only.
 
-        ``hidden_states`` are the target latent tokens and ``ref_tokens`` the edit's
-        references, packed the same way and carrying their own positions inside
-        ``img_pe``. Both stay in the sequence for every step.
-
-        Returns ``[B, num_target_tokens, out_channels]`` — still tokens; see
-        :func:`tokens_to_latent` for the canonical latent.
+        ``ref_tokens`` are packed like the target tokens and carry their positions
+        inside ``img_pe``; both stay in the sequence for every step.
         """
         num_img_tokens = hidden_states.shape[1]
         if ref_tokens is not None:
@@ -223,9 +207,9 @@ class MageFlowTransformer2DModel(nn.Module):
         encoder_hidden_states = self.txt_in(self.txt_norm(encoder_hidden_states))
         temb = self.time_text_embed(timestep, hidden_states)
 
-        # ``norm_out`` is modulated by the full-width ``temb`` in both exports; only the
-        # blocks can be driven by the rank-wide vector, and the SiLU the dense heads
-        # apply internally is what this projection consumes.
+        # ``norm_out`` is modulated by the full-width ``temb``; only the blocks can be
+        # driven by the rank-wide vector, which consumes the SiLU the dense heads
+        # apply internally.
         block_temb = temb if self.modulation_down is None else self.modulation_down(F.silu(temb).float())
 
         for block in self.transformer_blocks:
@@ -251,13 +235,11 @@ def load_mage_flow_dit(
 ) -> MageFlowTransformer2DModel:
     """Build the DiT on meta from the checkpoint's own geometry, then load its weights.
 
-    The released exports need no key remapping: the names are the module names, and
-    ``load_dit`` reconstructs the quantized layout from the ``.weight_scale`` siblings.
+    The released exports need no key remapping; ``load_dit`` reconstructs the
+    quantized layout from the ``.weight_scale`` siblings.
 
-    A low-rank export loads with ``dtype=None`` — it is a full-precision file and the
-    bulk cast would round the FP32 modulation factors through the trunk dtype. Every
-    parameter is assigned straight from the file instead, which is already BF16 where
-    the trunk is BF16.
+    A low-rank export loads with ``dtype=None``: it is a full-precision file and a
+    bulk cast would round the FP32 modulation factors.
     """
     with init_empty_weights():
         model = MageFlowTransformer2DModel(params, compute_dtype=dtype)

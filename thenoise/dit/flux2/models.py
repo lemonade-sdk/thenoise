@@ -1,17 +1,9 @@
 """Flux.2 (Flux Klein) DiT architecture — single/double-stream MMDiT.
 
 Ported from kohya-ss/musubi-tuner's ``flux2_models`` (itself a copy of the Black
-Forest Labs FLUX repo, Apache-2.0). Only the still-image text-to-image path is
-kept: no gradient checkpointing, no block swapping, no training hooks. Weight key
+Forest Labs FLUX repo, Apache-2.0). Still-image text-to-image path only; weight key
 names are unchanged so the official ``flux2-klein-*.safetensors`` checkpoints load
-as-is. Attention uses this engine's shared SDPA helper
-(``thenoise.utils.attention``), which handles the ``[B, L, H, D]`` layout.
-
-Flux Klein is the Flux.2 family: a packed 128-channel latent (the Flux.2 VAE packs
-32ch -> 128ch via a 2x2 patchify), a 4-axis RoPE, and Qwen3 text conditioning. The
-Klein variants (4B / 9B) share the architecture but differ in width/depth and
-context width; they are selected at load time from the checkpoint's ``img_in``
-width.
+as-is.
 """
 
 # Copyright 2023 The HuggingFace Team. Licensed under the Apache-2.0 License.
@@ -40,10 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 def slice_reference_output(out: torch.Tensor, num_img_tokens: int) -> torch.Tensor:
-    """Drop the trailing reference tokens from a DiT output.
-
-    Reference tokens are concatenated *after* the image tokens.
-    """
+    """Drop the trailing reference tokens from a DiT output."""
     return out[:, :num_img_tokens]
 
 
@@ -87,11 +76,8 @@ def attention(qkv_list: list[Tensor], pe: Tensor, bufs: KVBuffers | None) -> Ten
     """Apply RoPE, then attend through the run's K/V buffers (``kvcache.attend``).
 
     Output is token-major ``[B, L, H*D]``. ``bufs`` are this block's run-long K/V
-    buffers, allocated once at its full sequence length
-    ``[B, H, L_text + L_img + L_ref, D]`` (``None`` = no cache, the plain
-    text-to-image path); the RoPE-fused K/V is refreshed into their leading prefix
-    and the whole buffer is attended, so the cached reference suffix survives without
-    a ``cat``.
+    buffers, allocated once at their full sequence length
+    ``[B, H, L_text + L_img + L_ref, D]`` (``None`` = no cache).
     """
     q, k, v = qkv_list
     q, k = apply_rope(q, k, pe)
@@ -353,13 +339,9 @@ class Flux2(nn.Module):
             guidance_emb = timestep_embedding(guidance, 256)
             vec = vec + self.guidance_in(guidance_emb)
 
-        # ``zero_cond_t`` (reference tokens trained at timestep zero — the
-        # ``index_timestep_zero`` reference method) modulates the reference slice
-        # with vec(0): duplicate the conditioning rows ``[t, 0]`` and split per
-        # token slice. The reference K/V then becomes step-independent — the basis
-        # of the KV cache. Text and (dropped-at-the-end) target tokens always use
-        # the t row. It is a per-forward choice, made by the adapter from the
-        # resolved ``ref_method`` preference, not baked into the architecture.
+        # ``zero_cond_t`` modulates the reference slice with vec(0): duplicate the
+        # conditioning rows ``[t, 0]`` and split them per token. The reference K/V
+        # then becomes step-independent — the basis of the KV cache.
         zero = zero_cond_t and ref_len > 0
         if zero:
             vec_zero = self.time_in(timestep_embedding(timesteps * 0, 256))
@@ -377,10 +359,8 @@ class Flux2(nn.Module):
         def split_mod(mod, total_len: int) -> tuple[Tensor, Tensor, Tensor]:
             """Per-token modulation for a stream of ``total_len`` tokens.
 
-            ``mod`` is a ``(shift, scale, gate)`` tuple; the first
-            ``total_len - ref_len`` tokens (text/target) use the t row, the
-            trailing ``ref_len`` reference tokens use the 0 row. Without
-            ``zero_cond_t`` every row is the t row (``[B, 1, D]`` broadcasts).
+            The first ``total_len - ref_len`` tokens use the t row, the trailing
+            ``ref_len`` reference tokens the 0 row.
             """
             if not zero:
                 return tuple(m[0:1] for m in mod)
@@ -393,17 +373,15 @@ class Flux2(nn.Module):
                 out.append(row)
             return tuple(out)
 
-        # Double stream: image tokens (target + refs) use per-token modulation;
-        # the text stream always uses the t row (it has no reference slice).
+        # Double stream: image tokens (target + refs) use per-token modulation; the
+        # text stream always uses the t row.
         img_mod = (split_mod(double_block_mod_img[0], num_img_tokens + ref_len),
                    split_mod(double_block_mod_img[1], num_img_tokens + ref_len))
         txt_mod = tuple(tuple(x[0:1] for x in m) for m in double_block_mod_txt)
 
-        # Reference-latent editing (Flux2 Klein): append the reference tokens to the
-        # image stream (in packed-latent space). ``pe_x`` is the *target-only*
-        # positions; ``ref_pe`` carries the reference positions and is only
-        # concatenated when the reference tokens are present. ``None`` (plain t2i)
-        # is a no-op.
+        # Append the reference tokens to the image stream. ``pe_x`` holds the
+        # *target-only* positions; ``ref_pe`` is concatenated only when references
+        # are present.
         if ref_tokens is not None:
             x = torch.cat([x, ref_tokens], dim=1)
             if ref_pe is not None:
@@ -412,17 +390,10 @@ class Flux2(nn.Module):
         img = self.img_in(x)
         txt = self.txt_in(ctx)
 
-        # KV cache mode: ``fill`` runs the whole sequence on the first step, so what
-        # it writes into the cache buffers is exact; ``read`` drops the references
-        # from the sequence and keeps the cached suffix from then on. ``off`` is the
-        # plain path. Decided once, before the loop, so a mid-loop fill can never
-        # flip the mode under the loop's feet.
         mode = cache_mode(kv, ref_tokens is not None)
 
         # ``kv_len`` is what a block attends on this step: text + target + references
         # while filling, and the references are gone (``ref_len`` == 0) once cached.
-        # The buffers are allocated at the fill length and keep that capacity for the
-        # whole run, so ``read`` only checks there is room for the target prefix.
         kv_len = num_txt_tokens + num_img_tokens + ref_len
         kv_shape = (img.shape[0], self.num_heads, kv_len, self.hidden_size // self.num_heads)
 

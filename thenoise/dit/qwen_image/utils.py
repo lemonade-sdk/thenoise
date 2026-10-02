@@ -1,10 +1,8 @@
-"""Qwen-Image prompt-embedding helpers and latents.
+"""Qwen-Image prompt-embedding helpers.
 
-Ported from kohya-ss/musubi-tuner's ``qwen_image/qwen_image_utils.py``.
-The text encoder (a ``Qwen2_5_VLForConditionalGeneration`` 7B) and its tokenizer
-are loaded through ``thenoise.utils.text_encoder``; this module only encodes the
-prompt (alone for text-to-image, or with an input image for edits) into the DiT
-conditioning, and packs/unpacks the latent layout.
+Ported from kohya-ss/musubi-tuner's ``qwen_image/qwen_image_utils.py``. Encodes the
+prompt (alone for text-to-image, with an input image for edits) into the DiT
+conditioning.
 """
 from __future__ import annotations
 

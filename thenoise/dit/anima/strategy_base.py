@@ -1,4 +1,4 @@
-# base class for platform strategies. this file defines the interface for strategies
+# Base classes for the tokenization / text-encoding strategies
 
 import os
 import re
@@ -54,7 +54,7 @@ class TokenizeStrategy:
             local_tokenizer_path = os.path.join(tokenizer_cache_dir, model_id.replace("/", "_"))
             if os.path.exists(local_tokenizer_path):
                 logger.info(f"load tokenizer from cache: {local_tokenizer_path}")
-                tokenizer = model_class.from_pretrained(local_tokenizer_path)  # same for v1 and v2
+                tokenizer = model_class.from_pretrained(local_tokenizer_path)
 
         if tokenizer is None:
             tokenizer = model_class.from_pretrained(model_id, subfolder=subfolder)
@@ -82,38 +82,10 @@ class TokenizeStrategy:
         """
 
         def parse_prompt_attention(text):
-            r"""
-            Parses a string with attention tokens and returns a list of pairs: text and its associated weight.
-            Accepted tokens are:
-            (abc) - increases attention to abc by a multiplier of 1.1
-            (abc:3.12) - increases attention to abc by a multiplier of 3.12
-            [abc] - decreases attention to abc by a multiplier of 1.1
-            \( - literal character '('
-            \[ - literal character '['
-            \) - literal character ')'
-            \] - literal character ']'
-            \\ - literal character '\'
-            anything else - just text
-            >>> parse_prompt_attention('normal text')
-            [['normal text', 1.0]]
-            >>> parse_prompt_attention('an (important) word')
-            [['an ', 1.0], ['important', 1.1], [' word', 1.0]]
-            >>> parse_prompt_attention('(unbalanced')
-            [['unbalanced', 1.1]]
-            >>> parse_prompt_attention('\(literal\]')
-            [['(literal]', 1.0]]
-            >>> parse_prompt_attention('(unnecessary)(parens)')
-            [['unnecessaryparens', 1.1]]
-            >>> parse_prompt_attention('a (((house:1.3)) [on] a (hill:0.5), sun, (((sky))).')
-            [['a ', 1.0],
-            ['house', 1.5730000000000004],
-            [' ', 1.1],
-            ['on', 1.0],
-            [' a ', 1.1],
-            ['hill', 0.55],
-            [', sun, ', 1.1],
-            ['sky', 1.4641000000000006],
-            ['.', 1.1]]
+            r"""Split text with attention tokens into (text, weight) pairs.
+
+            (abc) raises the weight by 1.1, (abc:3.12) sets a 3.12 multiplier, [abc]
+            lowers it by 1.1; a backslash escapes a literal bracket.
             """
 
             res = []
@@ -167,11 +139,7 @@ class TokenizeStrategy:
             return res
 
         def get_prompts_with_weights(text: str, max_length: int):
-            r"""
-            Tokenize a list of prompts and return its tokens with weights of each token. max_length does not include starting and ending token.
-
-            No padding, starting or ending token is included.
-            """
+            r"""Tokenize ``text`` with per-token weights; no padding or boundary tokens."""
             truncated = False
 
             texts_and_weights = parse_prompt_attention(text)
@@ -183,7 +151,7 @@ class TokenizeStrategy:
                 tokens += token
                 # copy the weight by length of token
                 weights += [weight] * len(token)
-                # stop if the text is too long (longer than truncation limit)
+                # stop once past the truncation limit
                 if len(tokens) > max_length:
                     truncated = True
                     break
@@ -197,9 +165,7 @@ class TokenizeStrategy:
             return tokens, weights
 
         def pad_tokens_and_weights(tokens, weights, max_length, bos, eos, pad):
-            r"""
-            Pad the tokens (with starting and ending tokens) and weights (with 1.0) to max_length.
-            """
+            r"""Pad tokens with bos/eos/pad and weights with 1.0 up to ``max_length``."""
             tokens = [bos] + tokens + [eos] + [pad] * (max_length - 2 - len(tokens))
             weights = [1.0] + weights + [1.0] * (max_length - 1 - len(weights))
             return tokens, weights
@@ -216,10 +182,7 @@ class TokenizeStrategy:
     def _get_input_ids(
         self, tokenizer: CLIPTokenizer, text: str, max_length: Optional[int] = None, weighted: bool = False
     ) -> torch.Tensor:
-        """
-        for SD1.5/2.0/SDXL
-        TODO support batch input
-        """
+        """For the SD1.5/2.0/SDXL tokenizers (single prompt input)."""
         if max_length is None:
             max_length = tokenizer.model_max_length - 2
 
@@ -233,7 +196,8 @@ class TokenizeStrategy:
             iids_list = []
             if tokenizer.pad_token_id == tokenizer.eos_token_id:
                 # v1
-                # Over 77 tokens, the tokenizer emits "<BOS> ... <EOS> <EOS> <EOS>" totaling ~227; convert to "<BOS>...<EOS>" triples.
+                # Over 77 tokens the tokenizer emits "<BOS> ... <EOS> <EOS> <EOS>"
+                # (~227); convert to "<BOS>...<EOS>" triples.
                 for i in range(1, max_length - tokenizer.model_max_length + 2, tokenizer.model_max_length - 2):  # (1, 152, 75)
                     ids_chunk = (
                         input_ids[0].unsqueeze(0),
@@ -244,7 +208,8 @@ class TokenizeStrategy:
                     iids_list.append(ids_chunk)
             else:
                 # v2 or SDXL
-                # Over 77 tokens, the tokenizer emits "<BOS> .... <EOS> <PAD> <PAD>..." totaling ~227; convert to "<BOS>...<EOS> <PAD> <PAD> ..." triples.
+                # Over 77 tokens the tokenizer emits "<BOS> .... <EOS> <PAD> <PAD>..."
+                # (~227); convert to "<BOS>...<EOS> <PAD> <PAD> ..." triples.
                 for i in range(1, max_length - tokenizer.model_max_length + 2, tokenizer.model_max_length - 2):
                     ids_chunk = (
                         input_ids[0].unsqueeze(0),  # BOS
@@ -253,11 +218,10 @@ class TokenizeStrategy:
                     )  # PAD or EOS
                     ids_chunk = torch.cat(ids_chunk)
 
-                    # If the tail is <EOS> <PAD> or <PAD> <PAD>, leave it.
-                    # If the tail is x <PAD/EOS>, set the last token to <EOS> (no change if it is already <EOS>).
+                    # Tail x <PAD/EOS> -> the last token becomes <EOS>.
                     if ids_chunk[-2] != tokenizer.eos_token_id and ids_chunk[-2] != tokenizer.pad_token_id:
                         ids_chunk[-1] = tokenizer.eos_token_id
-                    # If the head is <BOS> <PAD> ..., change to <BOS> <EOS> <PAD> ...
+                    # Head <BOS> <PAD> ... -> becomes <BOS> <EOS> <PAD> ...
                     if ids_chunk[1] == tokenizer.pad_token_id:
                         ids_chunk[1] = tokenizer.eos_token_id
 
@@ -294,22 +258,13 @@ class TextEncodingStrategy:
     def encode_tokens(
         self, tokenize_strategy: TokenizeStrategy, models: List[Any], tokens: List[torch.Tensor]
     ) -> List[torch.Tensor]:
-        """
-        Encode tokens into embeddings and outputs.
-        :param tokens: list of token tensors for each TextModel
-        :return: list of output embeddings for each architecture
-        """
+        """Encode tokens into embeddings, one output tensor per architecture."""
         raise NotImplementedError
 
     def encode_tokens_with_weights(
         self, tokenize_strategy: TokenizeStrategy, models: List[Any], tokens: List[torch.Tensor], weights: List[torch.Tensor]
     ) -> List[torch.Tensor]:
-        """
-        Encode tokens into embeddings and outputs.
-        :param tokens: list of token tensors for each TextModel
-        :param weights: list of weight tensors for each TextModel
-        :return: list of output embeddings for each architecture
-        """
+        """Weighted variant of :meth:`encode_tokens`."""
         raise NotImplementedError
 
 

@@ -1,17 +1,8 @@
 """Qwen-Image DiT — dual-stream transformer (parallel image + text joint attention).
 
 Ported from kohya-ss/musubi-tuner's ``qwen_image/qwen_image_model.py`` (itself
-Diffusers ``QwenImageTransformer2DModel``), trimmed to inference-only. RoPE uses 3D
-image frequencies; timestep-zero reference conditioning (the ``index_timestep_zero``
-reference method, flagged by the ``__index_timestep_zero__`` checkpoint marker) zeroes
-the timestep on the reference tokens. Weights load via ``load_dit`` (BF16 and
-int8_convrot checkpoints).
-
-Editing appends reference tokens after the image tokens, which makes their K/V
-freezable across denoise steps (the ``index_timestep_zero`` / ``zero_cond_t``
-trick): ``forward`` therefore also takes ``ref_tokens``/``ref_pe`` plus a
-``thenoise.dit.kvcache.KVCache`` and runs the fill/read protocol on exactly the
-token layout the cache needs — see ``Attention.forward``.
+Diffusers ``QwenImageTransformer2DModel``), trimmed to inference-only. Weights load
+via ``load_dit`` (BF16 and int8_convrot checkpoints).
 """
 from __future__ import annotations
 
@@ -41,8 +32,7 @@ def build_video_positions(img_shapes, device):
     """Build ``[1, total_tokens, 3]`` (t,h,w) positions for the image+ref stream.
 
     ``img_shapes`` are ``(frame, height, width)``. The h/w axes use the centered
-    (``scale_rope``) convention ``pos = r - ceil(size / 2)``; the ``i``-th shape's
-    t-axis spans ``[i, i + frame)``. Tokens are ordered ``(f, h, w)`` row-major.
+    convention ``pos = r - ceil(size / 2)``; shape ``i`` spans t in ``[i, i + frame)``.
     """
     parts = []
     for i, (frame, height, width) in enumerate(img_shapes):
@@ -61,8 +51,7 @@ def build_video_positions(img_shapes, device):
 def build_txt_positions(max_vid_index, txt_len, device):
     """Build ``[1, txt_len, 3]`` positions for the text stream.
 
-    Text uses a single index ``max_vid_index + j`` advanced across all three axes
-    (all coords equal), matching the original ``pos_freqs[max_vid_index + j]``.
+    Text advances a single index ``max_vid_index + j`` across all three axes.
     """
     return broadcast_positions(
         txt_len, 3, offset=max_vid_index, dtype=torch.float32, device=device
@@ -121,7 +110,7 @@ class FeedForward(nn.Module):
         super().__init__()
         inner_dim = int(dim * mult)
         dim_out = dim_out if dim_out is not None else dim
-        # Dropout is a no-op (p=0) but must stay so ``net.1``/``net.2`` align with the checkpoint.
+        # Dropout stays (p=0) so ``net.1``/``net.2`` line up with the checkpoint keys.
         self.net = nn.ModuleList(
             [
                 GELU(dim, inner_dim, approximate="tanh", bias=bias),
@@ -195,8 +184,6 @@ class Attention(nn.Module):
         txt_query = self.norm_added_q(txt_query)
         txt_key = self.norm_added_k(txt_key)
 
-        # Everything downstream works in [B, H, L, D]: RoPE through the shared
-        # 2x2-matrix ``apply_rope`` and the joint attention through ``attend``.
         img_query = img_query.transpose(1, 2)
         img_key = img_key.transpose(1, 2)
         img_value = img_value.transpose(1, 2)
@@ -207,13 +194,9 @@ class Attention(nn.Module):
         img_query, img_key = apply_rope(img_query, img_key, img_pe)
         txt_query, txt_key = apply_rope(txt_query, txt_key, txt_pe)
 
-        # Joint sequence order is text first, then image (whose trailing slice is
-        # the reference tokens). Attention is permutation invariant over keys and
-        # values, so this ordering is free — and it is what the KV cache needs:
-        # every step rewrites the leading *text + target* prefix of its buffers and
-        # the reference K/V stay frozen in the tail (``kvcache.attend``). With the
-        # image stream first the references would sit *between* the target and the
-        # text keys, which no prefix write can express.
+        # Joint sequence order is text first, then image (its trailing slice being
+        # the reference tokens): every step rewrites the leading text + target prefix
+        # of its K/V buffers while the references stay frozen in the tail.
         txt_len = txt_query.shape[2]
         joint_query = torch.cat([txt_query, img_query], dim=2)
         joint_key = torch.cat([txt_key, img_key], dim=2)
@@ -251,13 +234,11 @@ class QwenImageTransformerBlock(nn.Module):
     def _modulate(self, x, mod_params, token_mask: Optional[torch.Tensor] = None):
         """AdaLN modulation of ``x``; ``token_mask`` picks the per-token modulation row.
 
-        With timestep-zero reference conditioning ``mod_params`` carries one row per
-        batch *and* per conditioning row (``[t; 0]``), and ``token_mask`` is the
-        ``[1, L, 1]`` leading-prefix mask of the target tokens: ``True`` takes the t
-        row, the trailing reference tokens the t=0 row. A mask rather than an
-        ``expand`` + ``cat`` of the two row groups because a concatenation whose
-        split point is the (dynamic) token count is exactly what Inductor cannot
-        tile inside a compiled block.
+        ``mod_params`` carries the ``[t; 0]`` conditioning rows and ``token_mask`` is
+        the ``[1, L, 1]`` leading-prefix mask of the target tokens: ``True`` takes the
+        t row, the trailing reference tokens the t=0 row. A mask rather than an
+        ``expand`` + ``cat`` of the two row groups: a concatenation whose split point
+        is the (dynamic) token count is what Inductor cannot tile in a compiled block.
         """
         shift, scale, gate = mod_params.chunk(3, dim=-1)
         if token_mask is None:
@@ -281,9 +262,7 @@ class QwenImageTransformerBlock(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         img_mod_params = self.img_mod(temb)
         if token_mask is not None:
-            # ``temb`` carries both the t row and the t=0 row (the reference tokens
-            # are conditioned at timestep zero); the text stream has no reference
-            # slice, so it uses the t row only.
+            # ``temb`` carries the t and t=0 rows; the text stream uses the t row.
             temb = torch.chunk(temb, 2, dim=0)[0]
         txt_mod_params = self.txt_mod(temb)
 
@@ -376,19 +355,10 @@ class QwenImageTransformer2DModel(nn.Module):
     ) -> torch.Tensor:
         """One DiT forward, returning the velocity of the *target* tokens only.
 
-        ``ref_tokens`` are the reference (edit) latents, already packed into image
-        tokens; they are appended after the target tokens, ``ref_pe`` carrying their
-        positions. ``timestep_zero_index`` is the single source of truth for
-        timestep-zero reference conditioning (the ``index_timestep_zero`` reference
-        method): the target-token count at which the image stream switches from the t
-        row to the t=0 row. With it, ``temb`` carries both rows ``[t, 0]``; ``None``
-        (plain t2i, or an ``index`` edit) keeps the single-row modulation.
-
-        ``kv`` is the run's reference-latent KV cache (``thenoise.dit.kvcache``). The
-        mode is decided once, before the blocks: the first forward of a fresh cache
-        runs the full sequence and fills the buffers (so what it writes is exact),
-        every later one is called with ``ref_tokens=None`` and reads the cached
-        reference suffix back out of them.
+        ``ref_tokens`` are the reference (edit) latents, packed into image tokens and
+        appended after the target ones, with their positions inside ``ref_pe``.
+        ``timestep_zero_index`` is the target-token count at which the image stream
+        switches from the t row to the t=0 row; with it, ``temb`` carries both rows.
         """
         num_img_tokens = hidden_states.shape[1]
         ref_len = 0 if ref_tokens is None else ref_tokens.shape[1]
@@ -403,8 +373,7 @@ class QwenImageTransformer2DModel(nn.Module):
         timestep = timestep.to(hidden_states.dtype)
 
         # Timestep-zero conditioning only applies while reference tokens are in the
-        # sequence: once they are cached away there is nothing left to condition at
-        # t=0 and the target tokens keep using the t row, exactly as before.
+        # sequence.
         zero_cond_t = timestep_zero_index is not None and ref_len > 0
         if zero_cond_t:
             timestep = torch.cat([timestep, timestep * 0], dim=0)
@@ -424,10 +393,8 @@ class QwenImageTransformer2DModel(nn.Module):
             )[None, :, None]
             mark_token_axis(token_mask)
 
-        # A block attends over text + target + references while filling, and the
-        # references are simply absent from the sequence once cached. The buffers are
-        # allocated at the fill length and keep that capacity for the whole run, so
-        # ``read`` only checks there is room for the shorter prefix.
+        # A block attends over text + target + references while filling; the
+        # references are simply absent from the sequence once cached.
         kv_len = encoder_hidden_states.shape[1] + hidden_states.shape[1]
         kv_shape = (hidden_states.shape[0], self.num_heads, kv_len, self.head_dim)
 
@@ -451,8 +418,7 @@ class QwenImageTransformer2DModel(nn.Module):
         if zero_cond_t:
             temb = temb.chunk(2, dim=0)[0]
         if ref_len:
-            # The reference tokens are appended after the target ones, so drop them
-            # before the output head (they carry no prediction).
+            # The reference tokens carry no prediction: drop them before the head.
             hidden_states = hidden_states[:, :num_img_tokens]
 
         hidden_states = self.norm_out(hidden_states, temb)

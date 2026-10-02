@@ -1,10 +1,8 @@
 """Qwen-Image 2.1 DiT loading: architecture from the header, weights via ``load_dit``.
 
-Two reconciliations happen at load time, both so the model can be built out of the
-repo's shared modules instead of checkpoint-shaped ones: the attention QK norms
-(``attn.norm_q`` / ``attn.norm_k``) land on the shared ``QKNorm`` layout, and
-``txt_in.text_norm`` — a *zero-centred* RMSNorm whose stored weight is ``scale - 1``
-— has the 1 added back so the plain ``RMSNorm`` runs it.
+At load time the attention QK norms (``attn.norm_q`` / ``attn.norm_k``) are mapped
+onto the shared ``QKNorm`` layout, and ``txt_in.text_norm`` — a *zero-centred*
+RMSNorm — has the 1 added back so the plain ``RMSNorm`` runs it.
 """
 from __future__ import annotations
 
@@ -32,12 +30,7 @@ _SIGNATURE_KEYS = (
 
 
 def is_qwen_image21_key(keys) -> bool:
-    """True if these tensor names are a Qwen-Image 2.1 DiT.
-
-    The shared ``modulation`` plus the zero-centred ``txt_in.text_norm`` are unique
-    to this architecture. Names are unwrapped, so a repackaged checkpoint matches
-    identically.
-    """
+    """True if these (unwrapped) tensor names are a Qwen-Image 2.1 DiT."""
     names = {unwrap_key(k) for k in keys}
     return all(k in names for k in _SIGNATURE_KEYS)
 
@@ -65,9 +58,7 @@ def detect_params(dit_path: str) -> QwenImage21Params:
         if k.startswith("transformer_blocks.") and k.split(".")[1].isdigit()
     )
 
-    # The released checkpoints fuse SwiGLU's gate and up projections into one
-    # ``gate_up`` matrix; a split (diffusers-style) file names them ``proj``/
-    # ``gate_layer`` and has to be built with ``fused_mlp=False``.
+    # A split MLP names its projections ``proj``/``gate_layer`` (``fused_mlp=False``).
     gate_up = shapes.get("transformer_blocks.0.img_mlp.gate_up.weight")
     if gate_up is not None:
         mlp_ratio, fused_mlp = gate_up[0] // 2 // inner_dim, True

@@ -1,9 +1,7 @@
-# Lumina S3-DiT core — the shared single-stream transformer behind Z-Image and
-# Ming-Image (ported from diffusers, text-to-image path only).
+# Lumina S3-DiT core — the shared single-stream transformer (ported from diffusers,
+# text-to-image path only).
 #
-# Family members differ by constructor data: ``pad_mode`` (learned vs zero_masked
-# padding) and ``cap_extra`` (optional second conditioning). Copyright Alibaba
-# Z-Image / HF, Apache-2.0.
+# Copyright Alibaba Z-Image / HF, Apache-2.0.
 
 import torch
 import torch.nn as nn
@@ -37,8 +35,8 @@ ADALN_EMBED_DIM = 256
 SEQ_MULTI_OF = 32
 
 #: How the alignment padding is filled, and whether attention reads it.
-#:   ``learned``     — pads are learned tokens, attended (Z-Image).
-#:   ``zero_masked`` — pads are zeros, excluded from attention (Ming-Image).
+#:   ``learned``     — pads are learned tokens, attended.
+#:   ``zero_masked`` — pads are zeros, excluded from attention.
 PAD_MODES = ("learned", "zero_masked")
 
 
@@ -56,8 +54,7 @@ class TimestepEmbedder(nn.Module):
 
     def forward(self, t):
         t_freq = timestep_embedding(t, self.frequency_embedding_size)
-        # The sinusoidal embedding is computed in fp32 for precision; cast it to the
-        # projection weight dtype (bf16) before the MLP to avoid a dtype mismatch.
+        # The sinusoidal embedding is computed in fp32; cast it to the MLP's dtype.
         weight_dtype = self.mlp[0].weight.dtype
         if weight_dtype.is_floating_point:
             t_freq = t_freq.to(weight_dtype)
@@ -65,11 +62,7 @@ class TimestepEmbedder(nn.Module):
 
 
 class Attention(nn.Module):
-    """Multi-head attention with fused QKV, QK-RMSNorm and RoPE (complex multiply).
-
-    Matches the ComfyUI / Lumina layout: a single fused ``qkv`` projection,
-    per-head RMSNorm on query/key, and an ``out`` projection.
-    """
+    """Multi-head attention: fused QKV, per-head QK-RMSNorm, RoPE."""
 
     def __init__(self, dim, n_heads, eps):
         super().__init__()
@@ -83,8 +76,6 @@ class Attention(nn.Module):
         dim = hidden_states.shape[-1]
         q, k, v = self.qkv(hidden_states).split([dim, dim, dim], dim=-1)
 
-        # q/k/v are [B, H, L, D] (SDPA's native layout), so ``apply_rope`` and the
-        # shared attention helper consume them directly.
         query = q.unflatten(-1, (self.n_heads, -1)).transpose(1, 2)
         key = k.unflatten(-1, (self.n_heads, -1)).transpose(1, 2)
         value = v.unflatten(-1, (self.n_heads, -1)).transpose(1, 2)
@@ -96,8 +87,7 @@ class Attention(nn.Module):
 
         params = None
         if attention_mask is not None and attention_mask.ndim == 2:
-            # SDPA expects [B, H, L, S]; expand the [B, S] key-padding mask to
-            # [B, 1, 1, S] (bool: True = attend).
+            # Expand the [B, S] key-padding mask to SDPA's [B, 1, 1, S] (True = attend).
             params = AttentionParams(attention_mask=attention_mask[:, None, None, :])
 
         hidden_states = attention([query, key, value], attn_params=params, drop_rate=0.0)
@@ -105,8 +95,6 @@ class Attention(nn.Module):
 
 
 class FeedForward(nn.Module):
-    """SwiGLU feedforward: w2(silu(w1(x)) * w3(x))."""
-
     def __init__(self, dim, hidden_dim):
         super().__init__()
         self.w1 = QuantizedLinear(dim, hidden_dim, bias=False)
@@ -173,21 +161,13 @@ class FinalLayer(nn.Module):
 class TokenStream:
     """One forward pass's worth of one token stream's layout.
 
-    ``feats`` holds the REAL tokens only (for the caption stream, the raw
-    ``cap_feat_dim`` features, i.e. pre-``cap_embedder``); the alignment padding is
-    applied later, per stream, once the features are at DiT width, because that is
-    the only point where the pad fill (learned token vs. zero) is well defined.
+    ``feats`` holds the real tokens only; padding is applied later, once the
+    features are at DiT width, which is the only point where the pad fill is well
+    defined. ``pos_ids`` already covers the padded length: the real coordinate grid
+    then ``(0, 0, 0)`` per alignment pad, so RoPE depends on the geometry alone.
 
-    ``extra`` (caption stream only) is the second conditioning tensor, already at
-    DiT width, concatenated after ``cap_embedder``. It counts towards ``valid``.
-
-    ``pos_ids`` per item already covers the padded length: the real coordinate grid
-    followed by ``(0, 0, 0)`` for every alignment pad, so RoPE can be prepared from
-    the geometry alone (``prepare_rope``) without touching the features.
-
-    ``valid``/``padded`` are the per-item attended and padded token counts
-    (``padded == round_up(valid, SEQ_MULTI_OF)``); together they are the whole
-    attention-mask story (see ``utils.sequence.alignment_padding_mask``).
+    ``extra`` (caption stream only) is a second conditioning tensor, already at DiT
+    width, concatenated after ``cap_embedder``; it counts towards ``valid``.
     """
 
     feats: list[torch.Tensor]
@@ -232,7 +212,6 @@ class LuminaTransformer2DModel(nn.Module):
         self.rope_theta = rope_theta
         self.pad_mode = pad_mode
 
-        # ComfyUI / Lumina layout: plain (single patch config) embedder + final layer.
         self.x_embedder = QuantizedLinear(f_patch_size * patch_size * patch_size * in_channels, dim, bias=True)
         self.final_layer = FinalLayer(dim, patch_size * patch_size * f_patch_size * self.out_channels)
 
@@ -251,8 +230,6 @@ class LuminaTransformer2DModel(nn.Module):
         self.t_embedder = TimestepEmbedder(min(dim, ADALN_EMBED_DIM), mid_size=1024)
         self.cap_embedder = nn.Sequential(RMSNorm(cap_feat_dim, eps=norm_eps), QuantizedLinear(cap_feat_dim, dim, bias=True))
 
-        # Learned padding (Z-Image); ``zero_masked`` models ship no such tensors, so
-        # these parameters must not exist either.
         self.x_pad_token = nn.Parameter(torch.zeros(1, dim)) if pad_mode == "learned" else None
         self.cap_pad_token = nn.Parameter(torch.zeros(1, dim)) if pad_mode == "learned" else None
 
@@ -268,15 +245,13 @@ class LuminaTransformer2DModel(nn.Module):
     # ------------------------------------------------------------ patchify
     @staticmethod
     def create_coordinate_grid(size, start=None, device=None):
-        """``[prod(size), len(size)]`` int32 row-major grid (the token positions)."""
         return grid_positions(size, start=start, dtype=torch.int32, device=device)
 
     def _patchify_image(self, image, patch_size, f_patch_size):
         """``[C, F, H, W]`` latent -> ``[F_t*H_t*W_t, C*pF*pH*pW]`` patch tokens.
 
-        The token order is the frame-major row-major grid order the coordinate
-        builder below produces positions for, so token ``i`` and position ``i``
-        describe the same cell.
+        The token order matches the coordinate grid, so token ``i`` and position
+        ``i`` describe the same cell.
         """
         pH, pW, pF = patch_size, patch_size, f_patch_size
         C, F, H, W = image.size()
@@ -305,9 +280,8 @@ class LuminaTransformer2DModel(nn.Module):
     ):
         """Compute and cache the RoPE frequencies for one conditioning branch.
 
-        The image and caption positions depend only on the latent/caption shapes,
-        which are fixed for a prompt, so the frequencies are built once here and
-        reused by ``forward`` across every denoise step.
+        The positions depend only on the latent/caption shapes, which are fixed for
+        a prompt, so the frequencies are built once and reused by ``forward``.
         """
         patch_size = patch_size or self.patch_size
         f_patch_size = f_patch_size or self.f_patch_size
@@ -316,8 +290,6 @@ class LuminaTransformer2DModel(nn.Module):
         )
         if clear:
             self.rope_embedder.clear()
-        # ``rope`` expects a batch dim; the per-sample positions are concatenated and
-        # carried as a single batch, then split back per sample in ``_prepare_stream``.
         self.rope_embedder.store(f"img{key}", torch.cat(x_stream.pos_ids, dim=0).unsqueeze(0))
         self.rope_embedder.store(f"cap{key}", torch.cat(cap_stream.pos_ids, dim=0).unsqueeze(0))
 
@@ -329,12 +301,10 @@ class LuminaTransformer2DModel(nn.Module):
         f_patch_size=None,
         all_cap_extra=None,
     ) -> tuple[TokenStream, TokenStream]:
-        """Patchify the latents and lay out both token streams.
+        """Patchify the latents and lay out the ``(image, caption)`` ``TokenStream``s.
 
-        Returns the ``(image, caption)`` ``TokenStream``s. The image stream starts at
-        ``t = round_up(caption_len, SEQ_MULTI_OF) + 1`` on the temporal axis (the
-        caption owns positions ``1..padded_len``), which is what makes the caption's
-        padded length — extra conditioning included — part of the geometry.
+        The image stream starts at ``t = cap_padded + 1`` on the temporal axis, which
+        makes the caption's padded length part of the geometry.
         """
         device = all_image[0].device
         if all_cap_extra is not None and len(all_cap_extra) != len(all_cap_feats):
@@ -344,8 +314,7 @@ class LuminaTransformer2DModel(nn.Module):
         cap_feats, cap_pos_ids, cap_valid, cap_padded = [], [], [], []
 
         for i, (image, cap_feat) in enumerate(zip(all_image, all_cap_feats)):
-            # The caption block is [caption, extra], padded as a whole; the grid is
-            # built for the actual token count and padded afterwards.
+            # The caption block is [caption, extra], padded as a whole.
             cap_len = len(cap_feat)
             if all_cap_extra is not None:
                 cap_len += len(all_cap_extra[i])
@@ -372,11 +341,9 @@ class LuminaTransformer2DModel(nn.Module):
         """Batch a padded stream, split its frequencies and mask it.
 
         ``feats`` are the per-item DiT-width features padded out to
-        ``stream.padded`` (so the frequencies split in lockstep); ``pad_to_batch``
-        then right-pads the batch to its longest item.
+        ``stream.padded``, so the frequencies split in lockstep.
         """
-        # ``pe`` is concatenated per-token frequencies (batch dim 1); drop that dim
-        # and split back per sample so the pad helper pads in lockstep with features.
+        # Drop the batch dim of ``pe`` and split the frequencies back per sample.
         positions = list(pe.squeeze(0).split(stream.padded, dim=0))
         feats, positions, _ = pad_to_batch(feats, positions)
         mask = self._attention_mask([[seg] for seg in stream.segments], device)
@@ -385,10 +352,9 @@ class LuminaTransformer2DModel(nn.Module):
     def _attention_mask(self, item_segments: Sequence[Sequence[tuple[int, int]]], device):
         """Attention mask for one stream, from its per-item ``(valid, padded)`` segments.
 
-        A ``learned`` pad slot holds a real (learned) embedding, so only the batch
-        padding beyond an item's own padded length is masked — a valid prefix, exactly
-        ``make_key_padding_mask``. A ``zero_masked`` pad slot holds a zero, so it has to
-        be punched out of the middle of the sequence too.
+        A ``learned`` pad slot holds a real embedding, so only the batch padding
+        beyond an item's padded length is masked. A ``zero_masked`` pad slot also has
+        to be punched out of the middle of the sequence.
         """
         if self.pad_mode == "learned":
             return make_key_padding_mask([sum(p for _, p in segs) for segs in item_segments], device)
@@ -414,19 +380,12 @@ class LuminaTransformer2DModel(nn.Module):
     def forward(self, x, t, cap_feats, cap_extra=None, patch_size=None, f_patch_size=None, rope_key=""):
         """Denoise one step.
 
-        Args:
-            x: list of per-sample image latents ``[C, F, H, W]``.
-            t: timestep tensor, shape ``(B,)``, in ``[0, 1]`` (``1 - sigma``), scaled
-                by 1000 for the sinusoidal embedding.
-            cap_feats: list of per-sample caption embeddings ``[seq, cap_feat_dim]``.
-            cap_extra: optional list of per-sample second-conditioning tensors
-                ``[seq, dim]``, concatenated after ``cap_embedder``. ``None`` (the
-                Z-Image path) leaves the caption stream exactly as it was.
-            rope_key: which ``prepare_rope`` entry pair (``img``/``cap`` + suffix) to
-                use; CFG passes the key its caption was prepared with.
+        ``t`` has shape ``(B,)`` and is in ``[0, 1]`` (``1 - sigma``). ``cap_extra``
+        is an optional per-sample second conditioning tensor ``[seq, dim]``,
+        concatenated after ``cap_embedder``. ``rope_key`` selects the ``prepare_rope``
+        entry pair (``img``/``cap`` + suffix).
 
-        Returns:
-            list of per-sample velocity tensors ``[C, F, H, W]`` (the flow direction).
+        Returns per-sample velocity tensors ``[C, F, H, W]``.
         """
         patch_size = patch_size or self.patch_size
         f_patch_size = f_patch_size or self.f_patch_size
@@ -449,8 +408,8 @@ class LuminaTransformer2DModel(nn.Module):
         for layer in self.noise_refiner:
             x = layer(x, x_mask, x_freqs, adaln_input)
 
-        # Cap embed & refine. The embedder maps cap_feat_dim -> dim; extra conditioning
-        # is already dim-wide and is spliced in before the block is padded.
+        # Cap embed & refine; extra conditioning is already dim-wide and is spliced
+        # in before the block is padded.
         cap = self.cap_embedder(torch.cat(cap_stream.feats, dim=0))
         cap = list(cap.split([len(c) for c in cap_stream.feats], dim=0))
         if cap_stream.extra is not None:
@@ -463,7 +422,7 @@ class LuminaTransformer2DModel(nn.Module):
             cap = layer(cap, cap_mask, cap_freqs)
 
         # Unified sequence: [x, cap]. Both are already padded to their own multiple,
-        # so the segments (and their holes) carry over into the unified mask.
+        # so their segments carry over into the unified mask.
         unified, unified_freqs, unified_segments = [], [], []
         for i in range(len(x_stream.padded)):
             x_len, cap_len = x_stream.padded[i], cap_stream.padded[i]

@@ -1,10 +1,8 @@
 """Krea 2 (K2) single-stream MMDiT.
 
-Ported from references/Krea2/mmdit.py, plus musubi training hooks (gradient checkpointing,
-block swap) and the shared attention backend. The core attention now goes through
-musubi's common ``modules.attention`` (PyTorch SDPA),
-with the combined sequence ordered image-first so that valid tokens form a contiguous
-prefix per sample — this lets the shared attention machinery handle text padding.
+Ported from references/Krea2/mmdit.py. The combined sequence is ordered image-first so
+each sample's valid tokens form a contiguous prefix, which is what lets the shared
+attention machinery handle text padding.
 """
 
 import torch
@@ -28,8 +26,7 @@ def temb(
     period: float = 1e4,
     tfactor: float = 1e3,
 ) -> Tensor:
-    # Shared sinusoidal embedding; K2 keeps the extra leading dim so the result
-    # broadcasts as a per-sample vector in the modulation blocks.
+    # The extra leading dim lets the result broadcast as a per-sample vector.
     return timestep_embedding(t, dim, max_period=period, time_factor=tfactor).unsqueeze(1)
 
 
@@ -108,7 +105,7 @@ class Attention(torch.nn.Module):
     def forward(self, qkv: Tensor, freqs: Tensor | None = None, attn_params: AttentionParams | None = None) -> Tensor:
         q, k, v, gate = self.wq(qkv), self.wk(qkv), self.wv(qkv), self.gate(qkv)
 
-        # QKNorm + RoPE run in [B, H, L, D] (K2-native layout) to preserve the reference numerics.
+        # QKNorm + RoPE run in [B, H, L, D] to preserve the reference numerics.
         q, k, v = (
             rearrange(q, "B L (H D) -> B H L D", H=self.heads),
             rearrange(k, "B L (H D) -> B H L D", H=self.kvheads),
@@ -162,7 +159,7 @@ class TextFusionBlock(torch.nn.Module):
 
 class TextFusionTransformer(torch.nn.Module):
     # num_txt_layers is the number of selected encoder hidden-state layers fed in
-    # (projected down to 1), NOT the transformer depth — that's fixed at 2 + 2 blocks.
+    # (projected down to 1); the depth is fixed at 2 + 2 blocks.
     def __init__(
         self,
         num_txt_layers: int,
@@ -277,14 +274,11 @@ class SingleStreamDiT(nn.Module):
     def fuse_text(self, context: Tensor, txtmask: Tensor | None) -> Tensor:
         """Run the text-fusion stream (TextFusionTransformer) + text-MLP.
 
-        Depends only on the text embeddings and their key-padding mask — NOT on the
-        image latent or timestep. Callers may precompute it once per prompt and reuse
-        the result across all denoise steps / resolutions (it is cached at the prompt
-        stage in the adapter). ``txtmask`` is the text-only key-padding mask, shape
-        (B, txt_len) bool.
+        Depends only on the text embeddings and their key-padding mask, so callers
+        may precompute it once per prompt. ``txtmask`` is the text-only key-padding
+        mask, shape (B, txt_len) bool.
         """
-        # Text fusion is a self-attention over text tokens only (img_len=0). The per-layer
-        # blocks see every token (no mask); the refiner masks padding via txtmask.
+        # Self-attention over text tokens only (img_len=0); the refiner masks padding.
         txt_attn_params_nomask = AttentionParams.create_attention_params_from_mask(0, None)
         txt_attn_params = AttentionParams.create_attention_params_from_mask(0, txtmask)
         context = self.txtfusion(context, txt_attn_params_nomask, txt_attn_params)
@@ -303,18 +297,14 @@ class SingleStreamDiT(nn.Module):
         t = self.tmlp(temb(t, self.config.tdim))
         tvec = self.tproj(t)
 
-        # `mask` arrives in image-first order: [img (all valid), text (valid prefix + pad)].
-        # The text-only key-padding mask is therefore the tail beyond the image tokens.
+        # `mask` arrives image-first, so the text key-padding mask is the tail.
         imglen = img.shape[1]
         txtmask = mask[:, imglen:]  # (B, txt_len) bool
 
-        # `context` is the already-fused text representation (see ``fuse_text``). The adapter
-        # precomputes it once per prompt because it is independent of image/timestep.
         combined = torch.cat((img, context), dim=1)  # image first, then text
 
-        # Pad the combined sequence to a multiple of 256 to keep compiled kernel shapes stable.
-        # The pad lands on the text tail; extending txtmask with False makes the shared attention
-        # machinery (key-padding mask / trim) exclude it, so it is numerically inert.
+        # Pad to a multiple of 256 for stable compiled kernel shapes. The pad lands
+        # on the text tail; masking it with False keeps it numerically inert.
         fulllen = combined.shape[1]
         padlen = (-fulllen) % 256
         if padlen > 0:
@@ -322,9 +312,7 @@ class SingleStreamDiT(nn.Module):
             txtmask = F.pad(txtmask, (0, padlen), value=False)
             freqs = F.pad(freqs, (0, 0, 0, 0, 0, 0, 0, padlen, 0, 0))
 
-        # Main blocks: bidirectional attention over [image (img_len, all valid) + text (padded)].
-        # Image-first ordering keeps each sample's valid tokens a contiguous prefix, which the
-        # shared key-padding-mask path uses.
+        # Bidirectional attention over [image, text].
         attn_params = AttentionParams.create_attention_params_from_mask(imglen, txtmask)
 
         for block in self.blocks:

@@ -1,14 +1,8 @@
 """Flux.2 (Flux Klein) model-loading utilities.
 
-The DiT is the ``Flux2`` transformer; the text encoder is a Qwen3 (4B or 8B)
-language model whose hidden states from layers [9, 18, 27] are concatenated to
-form the DiT's context (context width = 3 * Qwen3 hidden). The Klein DiT variant
-(4B vs 9B) is read from the checkpoint's ``img_in`` width, which selects the
-matching Qwen3 text encoder.
-
-The Qwen3 tokenizer config files are vendored under the Z-Image package
-(``thenoise/dit/zimage/configs/tokenizer/``) and reused here — it is the same
-Qwen3 tokenizer, and its chat template accepts ``enable_thinking``.
+The text encoder is a Qwen3 language model whose hidden states from layers
+[9, 18, 27] are concatenated into the DiT's context; the Klein DiT variant is read
+from the checkpoint's ``img_in`` width, which selects the matching Qwen3 encoder.
 """
 from __future__ import annotations
 
@@ -36,13 +30,12 @@ logger = logging.getLogger(__name__)
 OUTPUT_LAYERS_QWEN3 = [9, 18, 27]
 MAX_LENGTH = 512
 
-#: hidden_size -> Klein params. Used to pick the variant from the DiT checkpoint.
+#: hidden_size -> Klein params.
 _KLEIN_VARIANTS = {3072: Klein4BParams, 4096: Klein9BParams}
 
 
-# The official Flux Klein BF16 checkpoint uses ``scale``. The shared
-# ``RMSNorm`` (from ``thenoise.utils.rms_norm``) names the parameter ``weight``,
-# so reconcile the official ``scale`` keys here.
+# The official checkpoints name the RMSNorm parameter ``scale``; the shared
+# ``RMSNorm`` names it ``weight``.
 _NORM_SCALE_SUFFIXES = (".norm.key_norm.scale", ".norm.query_norm.scale")
 
 
@@ -97,10 +90,10 @@ def load_flux2_dit(
 
 
 class Qwen3Embedder:
-    """Qwen3 -> DiT context embedder (concatenates hidden states [9, 18, 27]).
+    """Qwen3 -> DiT context embedder.
 
-    Mirrors the Flux.2 pipeline: applies the Qwen chat template with
-    ``enable_thinking=False`` and returns ``[1, 512, 3 * hidden_size]``.
+    Applies the Qwen chat template with ``enable_thinking=False`` and concatenates
+    hidden states [9, 18, 27] into ``[1, 512, 3 * hidden_size]``.
     """
 
     def __init__(self, tokenizer, model):
@@ -110,7 +103,6 @@ class Qwen3Embedder:
 
     @property
     def device(self):
-        """The embedder's model device (follows the model when it is moved)."""
         return next(self.model.parameters()).device
 
     def to(self, device):
@@ -152,8 +144,7 @@ def load_qwen3_embedder(
 ) -> Qwen3Embedder:
     """Load the Qwen3 text encoder + tokenizer and wrap it as a context embedder.
 
-    ``path`` is a safetensors checkpoint.  The tokenizer is loaded from ``tokenizer_dir`` 
-    if given, else from the vendored Z-Image Qwen3 tokenizer directory.
+    The tokenizer comes from ``tokenizer_dir`` when given, else the vendored one.
     """
     tokenizer_dir = tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR
     if not os.path.isdir(tokenizer_dir):
