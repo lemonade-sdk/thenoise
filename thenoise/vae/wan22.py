@@ -1,22 +1,10 @@
 # Wan 2.2 VAE (AutoencoderKL) — single-frame (2D) port of the official video
-# VAE (via ComfyUI's ``comfy/ldm/wan/vae2_2.py``). The video-only machinery is
-# dropped: causal 3D convs become plain Conv2d (the loader keeps the last time
-# slice of each 5D weight), the per-chunk ``time_conv`` layers and ``feat_cache``
-# streaming are removed, and the parameter-free ``AvgDown3D``/``DupUp3D``
-# shortcuts are folded to their exact one-frame behaviour (see the classes).
+# VAE (via ComfyUI's ``comfy/ldm/wan/vae2_2.py``): causal 3D convs become plain
+# Conv2d (the loader keeps the last time slice of each 5D weight), the
+# parameter-free ``AvgDown3D``/``DupUp3D`` shortcuts are folded to their exact
+# one-frame behaviour, and the streaming machinery is dropped.
 # Net effect: [B, C, H, W] in [-1, 1] <-> [B, z_dim, H/16, W/16] latents
-# (2x2 patchify + 8x spatial compression), matching the reference's 4D path.
-#
-# Two shipped checkpoints share this layout, and ``load_wan22_vae`` infers which
-# one it is from the file:
-#
-#   * Wan 2.2 VAE    — 48ch latent, RGB, 2x2 patchify, temporal kernel 3
-#   * Qwen-Image 2.1 — 64ch latent, RGBA, no patchify, temporal kernel 1
-#
-# The pixel channel count is the one thing that is not architecture: Qwen-Image
-# 2.1's VAE takes and returns 4 channels, so ``pixel_channels`` is part of the
-# interface and the encode/decode boundary pads an opaque alpha onto RGB input
-# (and keeps the alpha on output).
+# (2x2 patchify + 8x spatial compression).
 #
 # Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 #
@@ -72,13 +60,9 @@ def strip_apply(fn, x: torch.Tensor, scale: int = 1, halo: int = 1, out: torch.T
 
     ``scale`` is the height multiplier of ``fn`` (2 for a 2x upsample), ``halo``
     is the number of neighbouring rows fed in on each side — one per 3x3 conv in
-    ``fn``, so the kept rows are bit-identical to the unstripped call. The strip
-    count is chosen from the element count, so small activations (and every
-    encoder pass at normal resolutions) take the plain ``fn(x)`` path.
+    ``fn``, so the kept rows are bit-identical to the unstripped call.
 
-    ``out`` is a preallocated result to ADD into (used to fold an upsample
-    shortcut into a buffer that already exists instead of allocating a second
-    full-size one).
+    ``out`` is a preallocated result to ADD into.
     """
     n = -(-x.numel() * scale * scale // STRIP_ELEMS)
     if n <= 1 and out is None:
@@ -113,8 +97,8 @@ class Wan22RMSNorm(nn.Module):
 
 
 class Wan22ResidualBlock(nn.Module):
-    """v2_2 residual block; the fixed 7-slot ``residual`` and 1x1-conv
-    ``shortcut`` match the checkpoint's key layout."""
+    """v2_2 residual block; the fixed 7-slot ``residual`` and 1x1-conv ``shortcut``
+    match the checkpoint's key layout."""
 
     def __init__(self, in_dim: int, out_dim: int) -> None:
         super().__init__()
@@ -130,8 +114,7 @@ class Wan22ResidualBlock(nn.Module):
         self.shortcut = nn.Conv2d(in_dim, out_dim, 1) if in_dim != out_dim else nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # The whole block in strips: its intermediates never exist at full size
-        # (``halo=2`` covers the two 3x3 convs, so the result is exact).
+        # In strips: halo=2 covers the two 3x3 convs, so the result is exact.
         return strip_apply(lambda s: self.residual(s).add_(self.shortcut(s)), x, halo=2)
 
 
@@ -153,7 +136,7 @@ class Wan22AttentionBlock(nn.Module):
         k = k.view(b, c, -1).transpose(1, 2)
         v = v.view(b, c, -1).transpose(1, 2)
         # Manual single-head attention: ROCm's fused SDPA backends produce
-        # broken-pixel artifacts in VAE decoders (see thenoise/vae/qwen_image.py).
+        # broken-pixel artifacts in VAE decoders.
         attn = (q @ k.transpose(-2, -1)) / c**0.5  # 1/sqrt(head_dim), single head
         attn = attn.softmax(dim=-1)
         x = (attn @ v).transpose(1, 2).reshape(b, c, h, w)
@@ -163,9 +146,9 @@ class Wan22AttentionBlock(nn.Module):
 class Wan22Resample(nn.Module):
     """2x spatial up/down sampling.
 
-    The v2_2 ``time_conv`` layers are dropped: the reference runs them only on its
-    streaming (``feat_cache``) path, never on the single-image one, so they carry
-    no information in the 2D fold (the loader drops their weights).
+    The v2_2 ``time_conv`` layers are dropped: they run only on the reference's
+    streaming path, so they carry no information in the 2D fold (the loader drops
+    their weights).
     """
 
     def __init__(self, dim: int, upsample: bool) -> None:
@@ -187,8 +170,7 @@ class Wan22Resample(nn.Module):
 
 
 class Wan22AvgDown(nn.Module):
-    """One-frame fold of the v2_2 ``AvgDown3D`` shortcut: the mean over each
-    channel group, zero-padded time slot at the front of each group."""
+    """One-frame fold of the v2_2 ``AvgDown3D`` shortcut."""
 
     def __init__(self, in_channels: int, out_channels: int, factor_t: int = 1, factor_s: int = 2) -> None:
         super().__init__()
@@ -210,8 +192,7 @@ class Wan22AvgDown(nn.Module):
 
 
 class Wan22DupUp(nn.Module):
-    """One-frame fold of the v2_2 ``DupUp3D`` shortcut: ``repeat_interleave``
-    over the (t, r, s) channel cells, keeping only the last temporal cell."""
+    """One-frame fold of the v2_2 ``DupUp3D`` shortcut."""
 
     def __init__(self, in_channels: int, out_channels: int, factor_t: int = 1, factor_s: int = 2) -> None:
         super().__init__()
@@ -232,8 +213,8 @@ class Wan22DupUp(nn.Module):
 
 
 class Wan22DownBlock(nn.Module):
-    """v2_2 ``Down_ResidualBlock``: residual stack + resample, plus the
-    parameter-free ``avg_shortcut`` (no checkpoint keys of its own)."""
+    """v2_2 ``Down_ResidualBlock``: residual stack + resample + the parameter-free
+    ``avg_shortcut``."""
 
     def __init__(self, in_dim: int, out_dim: int, num_res_blocks: int, temperal_downsample: bool, downsample: bool) -> None:
         super().__init__()
@@ -259,8 +240,8 @@ class Wan22DownBlock(nn.Module):
 
 
 class Wan22UpBlock(nn.Module):
-    """v2_2 ``Up_ResidualBlock``: residual stack + resample, plus the
-    parameter-free ``avg_shortcut`` (no checkpoint keys of its own)."""
+    """v2_2 ``Up_ResidualBlock``: residual stack + resample + the parameter-free
+    ``avg_shortcut``."""
 
     def __init__(self, in_dim: int, out_dim: int, num_res_blocks: int, temperal_upsample: bool, upsample: bool) -> None:
         super().__init__()
@@ -283,14 +264,13 @@ class Wan22UpBlock(nn.Module):
         for layer in self.upsamples:
             h = layer(h)
         if self.avg_shortcut is not None:
-            # add the shortcut straight into the block's own buffer rather than
-            # through a second full-size temporary
+            # add the shortcut into the block's own buffer, not a second full-size one
             h = strip_apply(self.avg_shortcut, x, scale=self.avg_shortcut.factor_s, halo=0, out=h)
         return h
 
 
 def _middle(dim: int) -> nn.Sequential:
-    """resnet -> attention -> resnet, shared verbatim by encoder and decoder."""
+    """resnet -> attention -> resnet."""
     return nn.Sequential(
         Wan22ResidualBlock(dim, dim),
         Wan22AttentionBlock(dim),
@@ -299,12 +279,12 @@ def _middle(dim: int) -> nn.Sequential:
 
 
 def _head(dim: int, out_dim: int) -> nn.Sequential:
-    """RMS -> SiLU -> 3x3 conv, shared verbatim by encoder and decoder."""
+    """RMS -> SiLU -> 3x3 conv."""
     return nn.Sequential(Wan22RMSNorm(dim), nn.SiLU(), nn.Conv2d(dim, out_dim, 3, padding=1))
 
 
 class Wan22Encoder(nn.Module):
-    """2D encoder (v2_2 ``Encoder3d`` without the video cache path)."""
+    """2D encoder (v2_2 ``Encoder3d``)."""
 
     def __init__(
         self,
@@ -345,8 +325,7 @@ class Wan22Encoder(nn.Module):
 
 
 class Wan22Decoder(nn.Module):
-    """2D decoder (v2_2 ``Decoder3d`` without the video cache path); the
-    ``temperal_upsample`` flags are the reverse of the encoder's."""
+    """2D decoder (v2_2 ``Decoder3d``)."""
 
     def __init__(
         self,
@@ -387,9 +366,8 @@ class Wan22Decoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Latent normalisation (latents are stored as ``(mu - mean) / std`` and the
-# inverse is applied before decoding). Keyed by ``z_dim``, which is what the
-# loader has to go on when it picks them for a checkpoint.
+# Latent normalisation: latents are stored as ``(mu - mean) / std`` and the
+# inverse is applied before decoding. Keyed by ``z_dim``.
 # ---------------------------------------------------------------------------
 
 # Official Wan 2.2 (48ch), from the release's ``Wan2_2_VAE`` wrapper.
@@ -434,7 +412,7 @@ QWEN_IMAGE21_LATENTS_STD = [
     3.8747, 3.7608, 3.5735, 3.1490, 3.7662, 3.6746, 3.4563, 3.8161,
 ]
 
-#: z_dim -> (mean, std). A new checkpoint of this family is one more entry.
+#: z_dim -> (mean, std).
 LATENT_STATS: dict[int, tuple[list[float], list[float]]] = {
     48: (WAN22_LATENTS_MEAN, WAN22_LATENTS_STD),
     64: (QWEN_IMAGE21_LATENTS_MEAN, QWEN_IMAGE21_LATENTS_STD),
@@ -450,8 +428,7 @@ class AutoencoderKLWan22(nn.Module):
     Defaults match the released Wan 2.2 weights (dim=160, dec_dim=256, z_dim=48,
     2x2 patchify, RGB); the Qwen-Image 2.1 VAE is the same module with
     ``z_dim=64``, five ``dim_mult`` stages, ``patch_size=1`` and
-    ``image_channels=4`` (RGBA). The per-stage temporal flags only pick the
-    channel grouping of the parameter-free shortcuts.
+    ``image_channels=4`` (RGBA).
 
     ``image_channels`` is the VAE's own pixel width and part of the interface:
     the encode/decode boundary pads an opaque alpha onto RGB input when the VAE
@@ -539,9 +516,6 @@ class AutoencoderKLWan22(nn.Module):
         The leading part of a normal decode — ``conv2``, the decoder's ``conv1``,
         its ``middle``, then the first ``blocks`` upsample blocks — returned before
         the remaining stages and the pixel ``head``.
-        
-        This exists for latent-domain tools that want the decoder's own view of the
-        image without paying for a full decode.
         """
         stages = len(self.decoder.upsamples)
         if not 1 <= blocks <= stages:
@@ -562,8 +536,7 @@ class AutoencoderKLWan22(nn.Module):
         """Fit a pixel tensor to the VAE's channel count.
 
         RGB into an RGBA VAE gets an opaque alpha (``pad_channel_value``); more
-        channels than the VAE wants are truncated to RGB. Anything else is a
-        caller error rather than a silent guess.
+        channels than the VAE wants are truncated to RGB.
         """
         want = self.pixel_channels
         got = x.shape[1]
@@ -596,12 +569,10 @@ class AutoencoderKLWan22(nn.Module):
 def _infer_arch(state_dict: dict, vae_path: str) -> dict:
     """Recover the architecture knobs a Wan 2.2 family checkpoint was built with.
 
-    Only the names and shapes are read. The two shipped variants differ in width,
-    depth (three vs four downsample stages), latent width and pixel channels, and
-    all of it is recoverable: stage widths from the residual blocks, the number of
-    residual blocks by counting them, the pixel patch from the 16x compression the
-    family always delivers (``patch_size x 2^stages``), the per-stage temporal
-    flags from the video-only ``time_conv`` layers the image path never runs.
+    Only the names and shapes are read: stage widths from the residual blocks, the
+    number of residual blocks by counting them, the pixel patch from the 16x
+    compression the family always delivers, and the per-stage temporal flags from
+    the video-only ``time_conv`` layers.
     """
     enc_conv = state_dict["encoder.conv1.weight"]
     if enc_conv.dim() != 5:
@@ -610,7 +581,7 @@ def _infer_arch(state_dict: dict, vae_path: str) -> dict:
     dec_dim = state_dict["decoder.head.0.gamma"].shape[0]
     z_dim = state_dict["conv2.weight"].shape[0]
 
-    # Residual blocks per stage: the reference puts the same count in every stage.
+    # The reference puts the same residual-block count in every stage.
     num_res_blocks = 0
     while f"encoder.downsamples.0.downsamples.{num_res_blocks}.residual.2.weight" in state_dict:
         num_res_blocks += 1
@@ -689,10 +660,10 @@ def load_wan22_vae(
     """Load a Wan 2.2 family VAE (ComfyUI ``vae2_2`` layout) for single-frame use.
 
     The architecture is inferred from the checkpoint (see :func:`_infer_arch`) and
-    the latent statistics are picked from its ``z_dim`` unless passed explicitly,
-    so both the 48ch Wan 2.2 and the 64ch RGBA Qwen-Image 2.1 file load through
-    here. The video weights are then collapsed to 2D: drop ``time_conv``, keep the
-    last time slice of 5D convs (causal padding puts the single frame at the end),
+    the latent statistics picked from its ``z_dim`` unless passed explicitly, so
+    both the 48ch Wan 2.2 and the 64ch RGBA Qwen-Image 2.1 file load through here.
+    The video weights are then collapsed to 2D: drop ``time_conv``, keep the last
+    time slice of 5D convs (causal padding puts the single frame at the end),
     squeeze 4D gammas.
     """
     logger.info("Loading Wan 2.2 family VAE from %s", vae_path)

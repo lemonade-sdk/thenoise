@@ -1,18 +1,8 @@
 """Latent-format adaptors for Sesqui inference.
 
-Sesqui upscalers are trained on *raw* VAE latents. A ``LatentFormatAdaptor``
-converts between a pipeline's external latent space (what the diffusion model
-passes around) and the canonical raw VAE latent space that Sesqui upscalers
-operate on.
-
-thenoise's canonical latent is the *normalized* (per-channel z-score) latent
-``(VAE_raw - mean) / std``, exactly the Qwen-Image / Wan21 / Anima latent
-format that ``make_wan21`` returns.
-
-The ``make_*`` constructors cover the other formats SesquiLSR supports (SDXL,
-Flux, Flux2, Ideogram4). They are imported here as groundwork for future VAE
-support: a model whose VAE uses a different latent format can build the matching
-adaptor and hand it to ``load_latent_upscaler``.
+A ``LatentFormatAdaptor`` converts between a pipeline's external latent space
+(what the diffusion model passes around) and the canonical raw VAE latent space
+that Sesqui upscalers operate on.
 
 Copied and trimmed from https://github.com/LoganBooker/SesquiLSR (MIT).
 """
@@ -54,14 +44,9 @@ def _unpatchify(z: Tensor) -> Tensor:
 class LatentFormatAdaptor:
     """Convert between an external pipeline's latent and VAE latent.
 
-    Parameters
-    ----------
-    external_channels : int
-        Channel count of the external/pipeline latent.
-    spatial_scale : int, default 1
-        Spatial multiplier between external and VAE-latent coords.
-        Flux2-family formats use ``2`` (VAE latent is 2x spatially larger
-        because the pipeline packs 2x2 into channels). All others use ``1``.
+    ``spatial_scale`` is the multiplier from external to VAE-latent coordinates:
+    the Flux2-family formats use ``2`` (their raw latent is 2x larger spatially),
+    all others ``1``.
     """
 
     def __init__(self, external_channels: int, spatial_scale: int = 1):
@@ -90,13 +75,7 @@ def make_wan21(
     latents_mean: Tensor | None = None,
     latents_std: Tensor | None = None,
 ) -> LatentFormatAdaptor:
-    """Wan21 / Anima / QwenImage — per-channel z-score.
-
-    Pipeline latent = ``(VAE_raw - mean) / std``; Sesqui operates on ``VAE_raw``.
-
-    Matches thenoise's canonical latent format (the Qwen-Image VAE applies
-    ``(z - mean) / std`` on encode and ``z / std + mean`` on decode).
-    """
+    """Wan21 / Anima / QwenImage — per-channel z-score: ``(VAE_raw - mean) / std``."""
     if latents_mean is None:
         latents_mean = torch.tensor([
             -0.7571, -0.7089, -0.9113,  0.1075, -0.1745,  0.9653, -0.1517,  1.5508,
@@ -125,10 +104,9 @@ def make_flux2(
     running_var: Tensor | None = None,
     eps: float = 1e-4,
 ) -> LatentFormatAdaptor:
-    """Flux2 - 32ch raw VAE ↔ 128ch patched + BN pipeline latent.
+    """Flux2 - 32ch raw VAE <-> 128ch patched + BN pipeline latent.
 
-    Uses BN statistics from the Flux2 VAE's ``bn`` module.
-    Defaults are extracted from the official Flux2 VAE checkpoint.
+    The BN statistics are the official Flux2 VAE's.
     """
     if running_mean is None:
         running_mean = torch.tensor([
@@ -175,11 +153,7 @@ def make_ideogram4(
     shift: Tensor | None = None,
     scale: Tensor | None = None,
 ) -> LatentFormatAdaptor:
-    """Ideogram 4 - 32ch raw VAE ↔ 128ch patched + shift/scale pipeline latent.
-
-    Uses the same Flux2 VAE with 2x2 patchify, but applies per-channel
-    shift+scale normalization instead of BatchNorm.
-    """
+    """Ideogram 4 - 32ch raw VAE <-> 128ch patched + per-channel shift/scale."""
     if shift is None:
         shift = torch.tensor([
             0.01984364, 0.10149707, 0.29689495, 0.27188619, -0.21445648, -0.15979549,
@@ -237,13 +211,7 @@ def make_ideogram4(
 
 
 class _AffineAdaptor(LatentFormatAdaptor):
-    """Affine transform: z / scale + shift and inverse.
-
-    Used by SDXL and Flux. The diffusion model / VAE operate on a latent scaled
-    by ``(raw - shift) * scale``, so converting the external (model) latent to the
-    raw VAE latent that Sesqui upscalers consume is ``z / scale + shift`` (the
-    inverse of the VAE's decode normalization).
-    """
+    """Affine latent format (SDXL, Flux): model latent = ``(raw - shift) * scale``."""
 
     def __init__(self, external_channels: int, scale: float, shift: float):
         super().__init__(external_channels=external_channels)
@@ -251,19 +219,14 @@ class _AffineAdaptor(LatentFormatAdaptor):
         self.shift = shift
 
     def to_vae_latent(self, z: Tensor) -> Tensor:
-        # Model latent = (raw - shift) * scale  ->  raw = z / scale + shift.
         return z.float() / self.scale + self.shift
 
     def from_vae_latent(self, z: Tensor) -> Tensor:
-        # raw VAE latent -> model latent: (z - shift) * scale.
         return (z.float() - self.shift) * self.scale
 
 
 class _ZScoreAdaptor(LatentFormatAdaptor):
-    """Per-channel z-score normalization (Wan21 / Anima / QwenImage).
-
-    Pipeline latent = ``(VAE_raw - mean) / std``; Sesqui operates on ``VAE_raw``.
-    """
+    """Per-channel z-score latent format: pipeline latent = ``(VAE_raw - mean) / std``."""
 
     def __init__(self, external_channels: int, mean: Tensor, std: Tensor):
         super().__init__(external_channels=external_channels)
@@ -278,7 +241,6 @@ class _ZScoreAdaptor(LatentFormatAdaptor):
         )
 
     def to_vae_latent(self, z: Tensor) -> Tensor:
-        # Pipeline = (VAE_raw - mean) / std  ->  VAE_raw = z * std + mean
         m, s = self._cast(z)
         return z.float() * s + m
 
@@ -288,7 +250,7 @@ class _ZScoreAdaptor(LatentFormatAdaptor):
 
 
 class _Flux2BNAdaptor(LatentFormatAdaptor):
-    """Flux2: 32ch raw VAE ↔ 128ch patched + BN-normalized pipeline."""
+    """Flux2: 32ch raw VAE <-> 128ch patched + BN-normalized pipeline."""
 
     def __init__(self, running_mean: Tensor, running_var: Tensor, eps: float = 1e-4):
         super().__init__(external_channels=128, spatial_scale=2)
@@ -297,8 +259,7 @@ class _Flux2BNAdaptor(LatentFormatAdaptor):
         self.bn_eps = eps
 
     def to_vae_latent(self, z: Tensor) -> Tensor:
-        # Pipeline = BN(patchify(VAE_raw))
-        # Undo BN: x * sqrt(var) + mean
+        # Undo the BatchNorm: x * sqrt(var) + mean
         var = self.bn_var.to(dtype=z.dtype, device=z.device)
         mean = self.bn_mean.to(dtype=z.dtype, device=z.device)
         z = z.float() * torch.sqrt(var + self.bn_eps) + mean
@@ -318,10 +279,7 @@ class _Flux2BNAdaptor(LatentFormatAdaptor):
 
 
 class _ShiftScalePatchAdaptor(LatentFormatAdaptor):
-    """Ideogram 4: 32ch raw VAE <-> 128ch patched + per-channel shift/scale.
-
-    Pipeline latent = ``patchify(VAE_raw) * scale + shift``.
-    """
+    """Ideogram 4: 32ch raw VAE <-> 128ch ``patchify(VAE_raw) * scale + shift``."""
 
     def __init__(self, shift: Tensor, scale: Tensor):
         super().__init__(external_channels=128, spatial_scale=2)
@@ -336,8 +294,6 @@ class _ShiftScalePatchAdaptor(LatentFormatAdaptor):
         )
 
     def to_vae_latent(self, z: Tensor) -> Tensor:
-        # Pipeline = patchify(VAE_raw) * scale + shift
-        # -> VAE_raw = unpatchify((z - shift) / scale)
         s, sc = self._cast(z)
         return _unpatchify((z.float() - s) / sc)
 

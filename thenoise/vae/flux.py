@@ -1,10 +1,8 @@
 # Flux VAE decoder (AutoencoderKL), ported from diffusers / black-forest-labs.
 #
-# Only still-image DECODE is supported here (this engine generates images; it never
-# encodes pixels), so only the decoder side of the Flux AutoencoderKL is kept. The
-# encoder, quant_conv and post_quant_conv are omitted. Latent post-processing follows
-# the Flux convention: z = (latent / scaling_factor) + shift_factor before decoding,
-# then the pixels are clamped to [-1, 1].
+# Decode-only: the encoder, quant_conv and post_quant_conv are omitted. Latent
+# post-processing follows the Flux convention: z = (latent / scaling_factor) +
+# shift_factor before decoding, then the pixels are clamped to [-1, 1].
 #
 # Copyright 2023 The HuggingFace Team. Licensed under the Apache-2.0 License.
 # Copyright 2024 Black Forest Labs. The Flux VAE is released under the Apache-2.0 License.
@@ -61,8 +59,7 @@ class _Attention(nn.Module):
     def forward(self, x):
         b, c, h, w = x.shape
         hidden = self.norm(x)
-        # Spatial attention over the h*w positions with a single head:
-        # [B, C, H, W] -> [B, 1, H*W, C]; SDPA over the H*W sequence.
+        # [B, C, H, W] -> [B, 1, H*W, C], one head over the H*W positions.
         q = self.q(hidden).view(b, 1, c, -1).transpose(2, 3).contiguous()  # (b, 1, hw, c)
         k = self.k(hidden).view(b, 1, c, -1).transpose(2, 3).contiguous()
         v = self.v(hidden).view(b, 1, c, -1).transpose(2, 3).contiguous()
@@ -116,15 +113,14 @@ class _UpBlock(nn.Module):
 class AutoencoderKLFlux(nn.Module):
     """Flux VAE decoder (decode-only), with ComfyUI / Flux-VAE key naming.
 
-    The decoder up blocks are applied in the order ``up.3 -> up.2 -> up.1 -> up.0``
-    (512 -> 512 -> 256 -> 128), with nearest upsamplers on the first three and none
-    on the last — 8x spatial compression. Accepts canonical 4D latents
+    The decoder up blocks are applied in the order ``up.3 -> up.2 -> up.1 ->
+    up.0`` (512 -> 512 -> 256 -> 128). Accepts canonical 4D latents
     ``[B, C, H, W]``.
     """
 
     z_dim = 16
-    spatial_compression = 8  # pixel / latent ratio (three down blocks)
-    pixel_channels = 3  # decode-only VAE: it emits RGB, never an alpha
+    spatial_compression = 8  # pixel / latent ratio
+    pixel_channels = 3  # RGB
     scaling_factor = 0.3611
     shift_factor = 0.1159
 
@@ -135,8 +131,6 @@ class AutoencoderKLFlux(nn.Module):
         self.conv_in = nn.Conv2d(in_channels, self.block_out_channels[-1], kernel_size=3, padding=1)
         self.mid = _MidBlock(self.block_out_channels[-1], norm_num_groups, act_fn, mid_block_add_attention)
 
-        # Decoder application order (up.3 -> up.2 -> up.1 -> up.0) with out dims
-        # [512, 512, 256, 128]; the first three upsample, the last does not.
         outs = self.block_out_channels[::-1]                 # [512, 512, 256, 128]
         ins = [self.block_out_channels[-1]] + outs[:-1]      # [512, 512, 512, 256]
         flags = [True, True, True, False]
@@ -173,11 +167,7 @@ class AutoencoderKLFlux(nn.Module):
         return x
 
     def decode_to_pixels(self, latents: torch.Tensor) -> torch.Tensor:
-        """Decode canonical 2D latents ``[B, C, H, W]`` to pixels in [-1, 1].
-
-        The VAE is 2D / single-frame: it accepts the canonical latent directly and
-        returns ``[B, C, H, W]`` pixels (no frame axis is added).
-        """
+        """Decode canonical 2D latents ``[B, C, H, W]`` to ``[B, C, H, W]`` pixels in [-1, 1]."""
         z = (latents.float() / self.scaling_factor) + self.shift_factor
         image = self.decode(z.to(self.dtype))
         return image.clamp(-1.0, 1.0)
@@ -188,18 +178,13 @@ def load_flux_vae(
     device: Union[str, torch.device],
     dtype: Optional[torch.dtype] = None,
 ) -> AutoencoderKLFlux:
-    """Load the Flux VAE decoder weights from ``vae_path`` (e.g. flux-dev/ae.safetensors).
-
-    Only ``decoder.*`` keys are needed; the encoder/quant_conv/post_quant_conv keys
-    present in the file are ignored.
-    """
+    """Load the Flux VAE decoder weights from ``vae_path`` (e.g. flux-dev/ae.safetensors)."""
     device = torch.device(device)
     logger.info("Loading Flux VAE from %s", vae_path)
     state_dict = load_safetensors(vae_path, device=device)
 
     vae = AutoencoderKLFlux()
-    # Keep only the decoder side and strip the ``decoder.`` prefix so keys line up
-    # with the model's bare ``conv_in.*`` / ``up.*`` names.
+    # Strip the ``decoder.`` prefix so keys line up with the model's bare names.
     decoder_sd = {
         k[len("decoder."):]: v for k, v in state_dict.items() if k.startswith("decoder.")
     }

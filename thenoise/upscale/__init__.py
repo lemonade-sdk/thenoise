@@ -1,18 +1,13 @@
 """Latent- and pixel-domain upscalers.
 
-Two independent families live here:
-
-*latent-domain* — ``base.LatentUpscaler`` is the interface the pipeline drives:
-a canonical latent goes in, the canonical latent at ``scale`` times the resolution
-comes out, ready for the refine denoise and the VAE decode. A model adapter picks
-the strategy that fits its VAE by returning one from ``_create_upscaler()``: a
-trained network on the latent (``sesqui``, for the formats in its registry), a
-trained bridge conditioned on the VAE's own decoder prefix
-(``qwen21_transcode``), or the weight-free VAE round trip (``vae_pixel``).
+*latent-domain* — ``base.LatentUpscaler`` is the interface the pipeline drives: a
+canonical latent goes in, the canonical latent at ``scale`` times the resolution
+comes out. A model adapter picks the strategy that fits its VAE in
+``_create_upscaler()``.
 
 *pixel-domain* — ``pixel.PixelUpscalerManager`` loads and runs postprocessing
-upscalers (Real-ESRGAN today) on decoded pixels. It needs no diffusion model and
-is configured server-wide via ``--upscaler-dir``.
+upscalers on decoded pixels. It needs no diffusion model and is configured
+server-wide via ``--upscaler-dir``.
 """
 from __future__ import annotations
 
@@ -35,22 +30,12 @@ from .esrgan import load_esrgan, detect_esrgan_scale, detect_esrgan_scheme
 
 
 def load_pixel_upscaler(path: str, device: str) -> tuple:
-    """Load a pixel-domain upscaler from a safetensors file.
-
-    Generic entry point so the model-facing code never names a specific pixel
-    upscaler architecture. Today the only pixel-space upscaler is Real-ESRGAN,
-    so this dispatches to ``load_esrgan``; future pixel upscalers plug in here.
-    Returns ``(model, scale)``.
-    """
+    """Load a pixel-domain upscaler from a safetensors file; returns ``(model, scale)``."""
     return load_esrgan(path, device=device)
 
 
 def detect_pixel_upscaler_scale(path: str) -> int:
-    """Detect a pixel upscaler's upscale scale (2 or 4) from its header.
-
-    Generic wrapper around the ESRGAN scale detection; see
-    ``load_pixel_upscaler`` for the rationale.
-    """
+    """Detect a pixel upscaler's upscale scale (2 or 4) from its header."""
     return detect_esrgan_scale(path)
 
 
