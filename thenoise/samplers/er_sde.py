@@ -1,10 +1,8 @@
-"""ER-SDE sampler: a higher-order stochastic flow solver (CONST-style).
+"""ER-SDE sampler: higher-order stochastic flow solver (CONST-style).
 
-Still one ``denoise_step`` per schedule step (same compute cost as Euler), but with a
-second-order correction and stochastic noise. ``denoised`` is the CONST-style x0
-prediction ``x - sigma*v`` derived from the model's velocity ``v``. The sigmas are
-reconstructed from the schedule (t: 1->0, plus a trailing 0); the first sigma is nudged
-just below 1 via the model's ``percent_to_sigma`` so ``sigma/(1-sigma)`` stays finite.
+One ``denoise_step`` per schedule step, plus second-order corrections and
+stochastic noise. ``denoised`` is the x0 prediction ``x - sigma * v`` rebuilt
+from the model's velocity.
 """
 from __future__ import annotations
 
@@ -39,10 +37,11 @@ class ErSdeSampler(Sampler):
             dtype=torch.float32,
         )
         if sigmas[0].item() >= 1.0:
+            # sigma / (1 - sigma) must stay finite.
             sigmas[0] = model.percent_to_sigma(1e-4)
 
-        half_log_snrs = -torch.log(sigmas / (1.0 - sigmas))  # CONST: -logit(sigma)
-        er_lambdas = (-half_log_snrs).exp()                   # sigma/(1-sigma)
+        half_log_snrs = -torch.log(sigmas / (1.0 - sigmas))
+        er_lambdas = (-half_log_snrs).exp()
 
         generator = torch.Generator(device=x.device).manual_seed(seed)
         num_points = 200.0

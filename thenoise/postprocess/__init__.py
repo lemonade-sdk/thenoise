@@ -1,8 +1,7 @@
 """Tensor post-processing filters for decoded pixel tensors.
 
-Filters operate on the fp32 GPU pixel tensor ``[C, H, W]`` produced by
-``DiffusionModel.decode`` (values in ``[-1, 1]``) and return the same shape.
-They are applied by the base model's ``postprocess`` hook.
+Filters take the fp32 GPU pixel tensor ``[C, H, W]`` in ``[-1, 1]`` and return the
+same shape.
 """
 from __future__ import annotations
 

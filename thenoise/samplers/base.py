@@ -13,11 +13,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class Step:
-    """One denoising step: current timestep ``t`` and Euler step size ``delta``.
-
-    The shared integration updates ``latents -= delta * velocity``; ``t`` is handed
-    to ``denoise_step`` to build the DiT's per-step conditioning.
-    """
+    """One denoising step: timestep ``t`` and Euler step size ``delta``."""
 
     t: torch.Tensor
     delta: torch.Tensor
@@ -41,7 +37,6 @@ class Sampler(ABC):
     ) -> torch.Tensor:
         """Run one denoising pass over ``schedule``, returning the denoised latent.
 
-        ``x`` is the model-internal latent produced by ``prepare_latent``; the return
-        value is passed to ``finalize_latent``. Solvers may ignore ``seed`` (Euler).
-        Integration runs in fp32 and is cast back to ``x.dtype`` as needed.
+        ``x`` is the model-internal latent coming from ``prepare_latent``; the return
+        value goes to ``finalize_latent``.
         """

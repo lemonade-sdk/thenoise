@@ -1,4 +1,4 @@
-"""Euler sampler: first-order integration of a flow ODE with CFG."""
+"""Euler sampler: first-order integration of the flow ODE."""
 from __future__ import annotations
 
 from typing import List
@@ -11,12 +11,6 @@ from .base import Sampler, Step
 
 
 class EulerSampler(Sampler):
-    """Euler integration of the flow ODE with CFG.
-
-    ``x <- x - delta * velocity``, one ``denoise_step`` per schedule step. Integration
-    runs in fp32 (precise, cheap) and is cast back to the latent dtype each step.
-    """
-
     def sample(
         self,
         x: torch.Tensor,
@@ -31,6 +25,6 @@ class EulerSampler(Sampler):
             v = self.model.denoise_step(x, step.t, cond, guidance_scale, i)
             x = x.float() - step.delta * v.float()
             x = x.to(dtype)
-            # Synchronize to get accurate timing, on whatever device we're on.
+            # Keep the per-step timing accurate.
             synchronize_device(x.device)
         return x
