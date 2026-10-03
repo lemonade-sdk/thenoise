@@ -2,6 +2,9 @@
 
 TheNoise is fully integrated with [Lemonade Server](https://lemonade-server.ai) and ships as its `thenoise` backend. You can generate and edit images directly from the Lemonade web UI or through its HTTP API.
 
+<img width="80%" alt="Screenshot From 2026-10-03 19-44-48" src="https://github.com/user-attachments/assets/9ecbea8c-f702-427f-b147-d0994759c0f2" />
+
+
 ## Load a TheNoise-compatible model or a ready-made recipe
 
 Ready-made Lemonade recipes for every supported model - checkpoints, labels
