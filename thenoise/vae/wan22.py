@@ -25,6 +25,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
+from thenoise.utils.attention import single_head_attention
 from thenoise.utils.safetensors import load_safetensors
 
 from thenoise.utils.setup_logging import setup_logging
@@ -135,11 +136,7 @@ class Wan22AttentionBlock(nn.Module):
         q = q.view(b, c, -1).transpose(1, 2)  # (b, h*w, c)
         k = k.view(b, c, -1).transpose(1, 2)
         v = v.view(b, c, -1).transpose(1, 2)
-        # Manual single-head attention: ROCm's fused SDPA backends produce
-        # broken-pixel artifacts in VAE decoders.
-        attn = (q @ k.transpose(-2, -1)) / c**0.5  # 1/sqrt(head_dim), single head
-        attn = attn.softmax(dim=-1)
-        x = (attn @ v).transpose(1, 2).reshape(b, c, h, w)
+        x = single_head_attention(q, k, v).transpose(1, 2).reshape(b, c, h, w)
         return self.proj(x) + identity
 
 

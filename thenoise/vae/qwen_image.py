@@ -26,8 +26,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from thenoise.utils.attention import single_head_attention
 from thenoise.utils.safetensors import load_safetensors
 
 from thenoise.utils.setup_logging import setup_logging
@@ -187,13 +187,7 @@ class QwenImageAttentionBlock(nn.Module):
         qkv = qkv.permute(0, 1, 3, 2).contiguous()
         q, k, v = qkv.chunk(3, dim=-1)
 
-        # Manual single-head attention: on ROCm the fused SDPA backends (flash and
-        # memory-efficient) produce localized broken-pixel artifacts in this decoder.
-        # ``sdpa_kernel([SDPBackend.MATH])`` is clean too but adds latency on gfx1150.
-        scale = channels ** 0.5  # SDPA default scale = 1/sqrt(head_dim)
-        attn = (q @ k.transpose(-2, -1)) / scale
-        attn = attn.softmax(dim=-1)
-        x = attn @ v
+        x = single_head_attention(q, k, v)
 
         x = x.squeeze(1).permute(0, 2, 1).reshape(batch_size, channels, height, width)
 
