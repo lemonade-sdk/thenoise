@@ -30,7 +30,6 @@ exit /b 1
 set "PATH=%SP%\_rocm_sdk_core\bin;%SP%\_rocm_sdk_core\lib;%SP%\_rocm_sdk_core\lib\llvm\lib;%SP%\_rocm_sdk_libraries\bin;%SP%\torch\lib;%SP%;%ROOT%;%PATH%"
 set "TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1"
 set "MIOPEN_FIND_MODE=FAST"
-set "TORCH_BLAS_PREFER_HIPBLASLT=1"
 set "TORCH_COMPILE_DISABLE=1"
 set "TORCHDYNAMO_DISABLE=1"
 "%ROOT%python.exe" -s -m thenoise %*

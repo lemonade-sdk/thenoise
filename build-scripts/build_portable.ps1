@@ -53,8 +53,8 @@ $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 $PbsTag = if ($env:PBS_TAG) { $env:PBS_TAG } else { "20260901" }
 $PbsPy = if ($env:PBS_PY) { $env:PBS_PY } else { "3.14.7" }
 $PyVer = if ($env:PYVER) { $env:PYVER } else { "3.14" }
-$TorchVer = if ($env:TORCH_VER) { $env:TORCH_VER } else { "2.14.0" }
-$TorchVisionVer = if ($env:TORCHVISION_VER) { $env:TORCHVISION_VER } else { "0.29.0a" }
+$TorchVer = if ($env:TORCH_VER) { $env:TORCH_VER } else { "2.14.0+rocm10.1.0rc2" }
+$TorchVisionVer = if ($env:TORCHVISION_VER) { $env:TORCHVISION_VER } else { "0.29.0a0+rocm10.1.0rc2" }
 $TorchIndex = if ($env:TORCH_INDEX) { $env:TORCH_INDEX } else { "https://rc.repo.amd.com/rocm/whl-next/" }
 
 $SP = "Lib\site-packages"

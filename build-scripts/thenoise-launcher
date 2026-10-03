@@ -23,5 +23,4 @@
         export CC="$CLANG"
         export TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1
         export MIOPEN_FIND_MODE=FAST
-        export TORCH_BLAS_PREFER_HIPBLASLT=1
         exec "$SCRIPT_DIR/python3" -m thenoise "$@"

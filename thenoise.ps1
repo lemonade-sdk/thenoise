@@ -70,8 +70,8 @@ if (-not $torchInstalled) {
   else { Write-Host "Auto-detected GFX_ARCH=$GFX (set `$env:GFX_ARCH to override)" }
 
   & uv pip install `
-    "torch[device-$GFX]==2.14.0" `
-    "torchvision[device-$GFX]==0.29.0a" `
+    "torch[device-$GFX]==2.14.0+rocm10.1.0rc2" `
+    "torchvision[device-$GFX]==0.29.0a0+rocm10.1.0rc2" `
     "triton-windows<3.9" `
     --extra-index-url https://pypi.org/simple/ `
     --index-url https://rc.repo.amd.com/rocm/whl-next/
@@ -85,7 +85,6 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 # ---- 5. Set ROCm-specific environment variables ---------------------------
 $env:TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL = "1"
 $env:MIOPEN_FIND_MODE = "FAST"
-$env:TORCH_BLAS_PREFER_HIPBLASLT = "1"
 $env:TORCH_COMPILE_DISABLE = "1"
 $env:TORCHDYNAMO_DISABLE = "1"
 

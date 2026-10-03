@@ -73,8 +73,8 @@ if ! "$VENV_DIR/bin/python" -c "import torch" &>/dev/null; then
   fi
 
   uv pip install \
-    "torch[device-$GFX_ARCH]==2.14" \
-    "torchvision[device-$GFX_ARCH]==0.29.0a" \
+    "torch[device-$GFX_ARCH]==2.14.0+rocm10.1.0rc2" \
+    "torchvision[device-$GFX_ARCH]==0.29.0a0+rocm10.1.0rc2" \
     --index-url https://rc.repo.amd.com/rocm/whl-next/
 fi
 
@@ -84,7 +84,6 @@ uv pip install -e "$PROJECT_DIR"
 # ---- 5. Set ROCm-specific environment variables ---------------------------
 export TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1
 export MIOPEN_FIND_MODE=FAST
-export TORCH_BLAS_PREFER_HIPBLASLT=1
 
 # ---- 6. Launch the project, forwarding all arguments ----------------------
 exec "$VENV_DIR/bin/python" -m thenoise "$@"
