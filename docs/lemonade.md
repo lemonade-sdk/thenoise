@@ -44,7 +44,7 @@ To use the latest TheNoise version, update your Lemonade config. The `lemonade c
 
 ```bash
 # create loras dir
-sudo mkdir /var/cache/thenoise/loras
+sudo mkdir -p /var/cache/thenoise/loras
 
 # grant permissions to lemonade
 sudo chmod -R lemonade:lemonade /var/cache/thenoise/loras
@@ -63,6 +63,6 @@ To use a LoRA with a model:
    configured LoRA directory.
 2. In the model's recipe `.json` file, add a `"lora_specs"` entry to the
    `"recipe_options"` block, with the LoRA name and its weight
-   (several LoRAs are comma-separated): `"lora_specs": "lora-name:0.8"`.
+   (multiple LoRAs are comma-separated): `"lora_specs": "lora-name:0.8"`.
 3. Import the updated recipe in the Lemonade Server web UI at
    `http://localhost:13305/` (`File → New Model → From JSON`).

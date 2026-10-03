@@ -18,6 +18,7 @@ prompt produces a real alpha channel rather than a checkerboard.
 
 ## Specs
 
+| Spec | Data |
 |---|---|
 | Architecture | S3-DiT (flow matching), 30 blocks + 2 refiners, dim 3840 |
 | Download size | ~49 GB bf16 (12 GB DiT + 35 GB text encoder + 0.25 GB VAE); ~15 GB int8-convrot |

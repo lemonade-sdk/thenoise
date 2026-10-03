@@ -18,7 +18,7 @@ Strix Halo, and both have int8-convrot checkpoints.
 
 ## Specs
 
-
+| Spec | Data |
 |---|---|
 | Architecture | Distilled flow-matching MMDiT (Flux.2 packed 128-ch latent) |
 | Download size | 4B: ~12 GB · 9B: ~25 GB (bf16) |

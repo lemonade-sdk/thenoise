@@ -17,6 +17,7 @@ reason people run TheNoise at all.
 
 ## Specs
 
+| Spec | Data |
 |---|---|
 | Architecture | Turbo MMDiT (flow matching) |
 | Download size | ~35 GB (Turbo + VAE + text encoder, bf16) |

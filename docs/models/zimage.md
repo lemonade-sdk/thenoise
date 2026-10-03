@@ -19,6 +19,7 @@ steps.
 
 ## Specs
 
+| Spec | Data |
 |---|---|
 | Architecture | S3-DiT (flow matching) |
 | Download size | ~21 GB (bf16 DiT + Flux VAE + Qwen3-4B) |
