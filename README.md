@@ -29,6 +29,7 @@ TheNoise can be used standalone, from the command line or through a webui or thr
 TheNoise ships: 
 
 - image generation / editing support for major open-weights models,
+- [Lemonade Server](https://lemonade-server.ai) integration - TheNoise ships as its `thenoise` backend, see [Using TheNoise with Lemonade Server](docs/lemonade.md),
 - a built-in 2× refiner-based (SesquiLSR) upscaler - fast and high-quality upscaling without loading extra model files,
 - pixel-space upscalers (Real-ESRGAN) up to 4× - standard ESRGAN-based models,
 - film grain and RCAS sharpening as post-processing,
@@ -135,57 +136,6 @@ uv pip install -e ".[scripts]"
 | generate an image from the command line | the [CLI](docs/cli.md) - `generate`, `edit`, `upscale` |
 | work through a browser | the web UI at `http://localhost:8000/` when running `serve` |
 | call it from other software | the [HTTP API](docs/api.md) - `/text2image`, `/edit`, `/upscale` |
-
-## Using TheNoise with Lemonade Server
-
-TheNoise is fully integrated with [Lemonade Server](https://lemonade-server.ai) and ships as its `thenoise` backend.
-
-### Use the latest TheNoise version
-
-```bash
-lemonade config set thenoise.rocm_bin="latest"
-```
-
-### Configure the LoRA directory
-
-```bash
-lemonade config set thenoise.lora_dir="/var/lib/lemonade/loras"
-```
-
-### Configure the upscaler directory
-
-```bash
-lemonade config set thenoise.upscaler_dir="/var/lib/lemonade/upscalers"
-```
-
-### Load a TheNoise-compatible model or a ready-made recipe
-
-Ready-made Lemonade recipes for every supported model — checkpoints, labels
-and generation defaults — are in [`recipes/`](recipes/); each model page
-links its own recipes.
-
-Once everything is set up, a model can be registered and pulled with a single
-command (example: Anima Turbo, matching
-[recipes/anima/Anima-Turbo.json](recipes/anima/Anima-Turbo.json)) or from the
-Lemonade Server web UI: download a recipe you want to try, go to
-`http://localhost:13305/`, choose `File → New Model → From JSON`, select the
-recipe file, and wait for the model to finish downloading and loading.
-
-```bash
-lemonade pull user.Anima-Turbo \
-  --checkpoint main circlestone-labs/Anima:split_files/diffusion_models/anima-turbo-v1.1.safetensors \
-  --checkpoint text_encoder circlestone-labs/Anima:split_files/text_encoders/qwen_3_06b_base.safetensors \
-  --checkpoint vae circlestone-labs/Anima:split_files/vae/qwen_image_vae.safetensors \
-  --recipe thenoise
-```
-
-### Use LoRAs for image generation / editing
-
-To use LoRAs, download a preferred LoRA and copy the `.safetensors` file into
-the `/var/lib/lemonade/loras` directory. Then add a `"lora_specs"` option
-(comma-separated LoRA specs, e.g. `"style:0.8,sub/detail:0.5"`) to the
-`"recipe_options"` block of the model's recipe `.json` file, and load the
-updated recipe in Lemonade Server at `http://localhost:13305/`.
 
 ## Documentation
 

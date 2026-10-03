@@ -35,6 +35,18 @@ prompts quickly — dozens of takes, minimal wait — this is the model to start
 | `aesthetic-v1.1` | more | aesthetically tuned |
 | `base-v1.0` | ~20, CFG ~4 | base (non-distilled) checkpoint |
 
+## Lemonade recipes
+
+Ready-made [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends)
+recipes for this model - each pins the checkpoints and the generation defaults:
+
+- [Anima-Turbo.json](../../recipes/anima/Anima-Turbo.json) - Turbo BF16, 8 steps
+- [Anima-Turbo-INT8.json](../../recipes/anima/Anima-Turbo-INT8.json) - Turbo INT8-ConvRot, 8 steps
+- [Anima-Aesthetic.json](../../recipes/anima/Anima-Aesthetic.json) - Aesthetic BF16, 20 steps, CFG 4
+- [Anima-Aesthetic-INT8.json](../../recipes/anima/Anima-Aesthetic-INT8.json) - Aesthetic INT8-ConvRot, 20 steps, CFG 4
+- [Anima-Base.json](../../recipes/anima/Anima-Base.json) - Base BF16, 20 steps, CFG 4
+- [Anima-Base-INT8.json](../../recipes/anima/Anima-Base-INT8.json) - Base INT8-ConvRot, 20 steps, CFG 4
+
 ## Performance (Strix Halo)
 
 - Turbo @ 8 steps: **~5 s** (1024×768)
@@ -95,15 +107,3 @@ Serve over HTTP with the web UI (open <http://localhost:8000/>):
 
 For every flag (size, steps, seed, LoRAs, upscaling, post-processing), see the
 [CLI reference](../cli.md) and the [HTTP API reference](../api.md).
-
-## Lemonade recipes
-
-Ready-made [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends)
-recipes for this model — each pins the checkpoints and the generation defaults:
-
-- [Anima-Turbo.json](../../recipes/anima/Anima-Turbo.json) — Turbo BF16, 8 steps
-- [Anima-Turbo-INT8.json](../../recipes/anima/Anima-Turbo-INT8.json) — Turbo INT8-ConvRot, 8 steps
-- [Anima-Aesthetic.json](../../recipes/anima/Anima-Aesthetic.json) — Aesthetic BF16, 20 steps, CFG 4
-- [Anima-Aesthetic-INT8.json](../../recipes/anima/Anima-Aesthetic-INT8.json) — Aesthetic INT8-ConvRot, 20 steps, CFG 4
-- [Anima-Base.json](../../recipes/anima/Anima-Base.json) — Base BF16, 20 steps, CFG 4
-- [Anima-Base-INT8.json](../../recipes/anima/Anima-Base-INT8.json) — Base INT8-ConvRot, 20 steps, CFG 4

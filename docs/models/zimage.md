@@ -41,13 +41,23 @@ explicit `--steps` and `--guidance-scale` on every run; the upstream
 [Z-Image](https://huggingface.co/Tongyi-MAI/Z-Image) page documents the
 reference settings.
 
+## Lemonade recipes
+
+Ready-made [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends)
+recipes for this model - each pins the checkpoints and the generation defaults:
+
+- [Z-Image-Turbo.json](../../recipes/zimage/Z-Image-Turbo.json) - Turbo BF16, 8 steps
+- [Z-Image-Turbo-INT8.json](../../recipes/zimage/Z-Image-Turbo-INT8.json) - Turbo INT8-ConvRot, 8 steps
+- [Z-Image.json](../../recipes/zimage/Z-Image.json) - Base BF16, 28 steps, CFG 3
+- [Z-Image-INT8.json](../../recipes/zimage/Z-Image-INT8.json) - Base INT8-ConvRot, 28 steps, CFG 3
+
 ## Performance (Strix Halo)
 
 - Turbo @ 8 steps: **~10 s** (1024×768)
 
 ## Examples
 
-*Generated — Turbo:*
+*Generated - Turbo:*
 
 <img width="45%" alt="thenoise_1484041240" src="https://github.com/user-attachments/assets/ffc2ef78-51d3-415b-a263-372353c9eb76" />
 <img width="45%" alt="thenoise_3826314304" src="https://github.com/user-attachments/assets/00298384-47a0-469e-bea7-fb7a809a1830" />
@@ -106,13 +116,3 @@ Serve over HTTP with the web UI (open <http://localhost:8000/>):
 
 For every flag (size, steps, seed, LoRAs, upscaling, post-processing), see the
 [CLI reference](../cli.md) and the [HTTP API reference](../api.md).
-
-## Lemonade recipes
-
-Ready-made [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends)
-recipes for this model — each pins the checkpoints and the generation defaults:
-
-- [Z-Image-Turbo.json](../../recipes/zimage/Z-Image-Turbo.json) — Turbo BF16, 8 steps
-- [Z-Image-Turbo-INT8.json](../../recipes/zimage/Z-Image-Turbo-INT8.json) — Turbo INT8-ConvRot, 8 steps
-- [Z-Image.json](../../recipes/zimage/Z-Image.json) — Base BF16, 28 steps, CFG 3
-- [Z-Image-INT8.json](../../recipes/zimage/Z-Image-INT8.json) — Base INT8-ConvRot, 28 steps, CFG 3
