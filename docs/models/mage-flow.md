@@ -60,10 +60,10 @@ recipes for this model - each pins the checkpoints and the generation defaults:
 - [Mage-Flow-Turbo-Edit.json](../../recipes/mageflow/Mage-Flow-Turbo-Edit.json) - Turbo edit BF16, 4 steps
 - [Mage-Flow-Turbo-INT8.json](../../recipes/mageflow/Mage-Flow-Turbo-INT8.json) - Turbo INT8-ConvRot, 4 steps
 - [Mage-Flow-Turbo-Edit-INT8.json](../../recipes/mageflow/Mage-Flow-Turbo-Edit-INT8.json) - Turbo edit INT8-ConvRot, 4 steps
-- [Mage-Flow.json](../../recipes/mageflow/Mage-Flow-RL.json) - RL BF16, 20 steps, CFG 5
-- [Mage-Flow-Edit.json](../../recipes/mageflow/Mage-Flow-RL-Edit.json) - RL edit BF16, 20 steps, CFG 5
-- [Mage-Flow-INT8.json](../../recipes/mageflow/Mage-Flow-RL-INT8.json) - RL INT8-ConvRot, 20 steps, CFG 5
-- [Mage-Flow-Edit-INT8.json](../../recipes/mageflow/Mage-Flow-RL-Edit-INT8.json) - RL edit INT8-ConvRot, 20 steps, CFG 5
+- [Mage-Flow.json](../../recipes/mageflow/Mage-Flow.json) - RL BF16, 20 steps, CFG 5
+- [Mage-Flow-Edit.json](../../recipes/mageflow/Mage-Flow-Edit.json) - RL edit BF16, 20 steps, CFG 5
+- [Mage-Flow-INT8.json](../../recipes/mageflow/Mage-Flow-INT8.json) - RL INT8-ConvRot, 20 steps, CFG 5
+- [Mage-Flow-Edit-INT8.json](../../recipes/mageflow/Mage-Flow-Edit-INT8.json) - RL edit INT8-ConvRot, 20 steps, CFG 5
 
 ## Performance (Strix Halo)
 
