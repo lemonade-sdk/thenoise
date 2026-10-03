@@ -21,7 +21,6 @@ default.
 
 ## Specs
 
-| | |
 |---|---|
 | Architecture | Single-stream DiT (flow matching, causal text/reference prefix) |
 | Download size | ~32 GB (bf16) · ~17 GB (int8-convrot) |

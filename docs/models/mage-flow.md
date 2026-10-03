@@ -22,7 +22,6 @@ an edit (reference image + instruction) comes back in ~5 s.
 
 ## Specs
 
-| | |
 |---|---|
 | Architecture | Dual-stream DiT (flow matching), 12 blocks, dim 3072, patch 1 |
 | Download size | ~25 GB bf16 (7.7 GB per DiT + 8.9 GB TE + 0.35 GB VAE) · ~18 GB int8-convrot |

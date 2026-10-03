@@ -20,7 +20,6 @@ supports the reference-latent KV cache for faster edits.
 
 ## Specs
 
-| | |
 |---|---|
 | Architecture | Dual-stream DiT (flow matching) |
 | Download size | ~40 GB (both DiTs + shared TE + VAE, bf16) |

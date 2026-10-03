@@ -17,7 +17,7 @@ prompts quickly — dozens of takes, minimal wait — this is the model to start
 
 ## Specs
 
-| | |
+
 |---|---|
 | Architecture | 2B Cosmos-Predict2 MMDiT (flow matching) |
 | Download size | ~5.4 GB (bf16), less with `--int8-convrot` |
