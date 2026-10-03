@@ -120,3 +120,13 @@ appears because this model supports editing:
 For every flag (size, steps, seed, multi-image references, KV cache, LoRAs,
 upscaling, post-processing), see the [CLI reference](../cli.md) and the
 [HTTP API reference](../api.md).
+
+## Lemonade recipes
+
+Ready-made [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends)
+recipes for this model — each pins the checkpoints and the generation defaults:
+
+- [Flux-2-Klein-4B-TheNoise.json](../../recipes/flux/Flux-2-Klein-4B-TheNoise.json) — 4B BF16, 4 steps
+- [Flux-2-Klein-4B-INT8.json](../../recipes/flux/Flux-2-Klein-4B-INT8.json) — 4B INT8-ConvRot, 4 steps
+- [Flux-2-Klein-9B-TheNoise.json](../../recipes/flux/Flux-2-Klein-9B-TheNoise.json) — 9B BF16, 4 steps
+- [Flux-2-Klein-9B-INT8.json](../../recipes/flux/Flux-2-Klein-9B-INT8.json) — 9B INT8-ConvRot, 4 steps

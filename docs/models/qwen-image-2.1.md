@@ -124,3 +124,11 @@ grid, for the turbo recipes the community ships:
 
 They go over the wire as [`sigmas`](../api.md#custom-sigmas), so the same grids can be
 posted to `/text2image` / `/edit` by hand.
+
+## Lemonade recipes
+
+Ready-made [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends)
+recipes for this model — each pins the checkpoints and the generation defaults:
+
+- [Qwen-Image-2.1.json](../../recipes/qwen-image2.1/Qwen-Image-2.1.json) — BF16, 28 steps
+- [Qwen-Image-2.1-INT8.json](../../recipes/qwen-image2.1/Qwen-Image-2.1-INT8.json) — INT8-ConvRot, 28 steps

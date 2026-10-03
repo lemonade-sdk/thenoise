@@ -79,3 +79,11 @@ Serve over HTTP with the web UI (open <http://localhost:8000/>):
 
 For every flag (size, steps, seed, LoRAs, upscaling, post-processing), see the
 [CLI reference](../cli.md) and the [HTTP API reference](../api.md).
+
+## Lemonade recipes
+
+Ready-made [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends)
+recipes for this model — each pins the checkpoints and the generation defaults:
+
+- [Ming-Image-0.1-Design.json](../../recipes/ming-image/Ming-Image-0.1-Design.json) — Design BF16, 12 steps
+- [Ming-Image-0.1-Design-INT8.json](../../recipes/ming-image/Ming-Image-0.1-Design-INT8.json) — Design INT8-ConvRot (DiT *and* text encoder), 12 steps

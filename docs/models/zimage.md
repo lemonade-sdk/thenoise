@@ -106,3 +106,13 @@ Serve over HTTP with the web UI (open <http://localhost:8000/>):
 
 For every flag (size, steps, seed, LoRAs, upscaling, post-processing), see the
 [CLI reference](../cli.md) and the [HTTP API reference](../api.md).
+
+## Lemonade recipes
+
+Ready-made [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends)
+recipes for this model — each pins the checkpoints and the generation defaults:
+
+- [Z-Image-Turbo.json](../../recipes/zimage/Z-Image-Turbo.json) — Turbo BF16, 8 steps
+- [Z-Image-Turbo-INT8.json](../../recipes/zimage/Z-Image-Turbo-INT8.json) — Turbo INT8-ConvRot, 8 steps
+- [Z-Image.json](../../recipes/zimage/Z-Image.json) — Base BF16, 28 steps, CFG 3
+- [Z-Image-INT8.json](../../recipes/zimage/Z-Image-INT8.json) — Base INT8-ConvRot, 28 steps, CFG 3

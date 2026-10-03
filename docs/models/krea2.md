@@ -88,3 +88,11 @@ Serve over HTTP with the web UI (open <http://localhost:8000/>):
 
 For every flag (size, steps, seed, LoRAs, upscaling, post-processing), see the
 [CLI reference](../cli.md) and the [HTTP API reference](../api.md).
+
+## Lemonade recipes
+
+Ready-made [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends)
+recipes for this model — each pins the checkpoints and the generation defaults:
+
+- [Krea-2-Turbo-INT8.json](../../recipes/krea2/Krea-2-Turbo-INT8.json) — Turbo INT8-ConvRot, 8 steps
+- [Krea-2-better-VAE.json](../../recipes/krea2/Krea-2-better-VAE.json) — Turbo BF16, 8 steps

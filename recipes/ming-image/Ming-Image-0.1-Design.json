@@ -1,0 +1,28 @@
+{
+  "checkpoints": {
+    "main": "Comfy-Org/Ming-Image:diffusion_models/ming_image_0.1_design_bf16.safetensors",
+    "text_encoder": "Comfy-Org/Ming-Image:text_encoders/ming_image_0.1_ling_mini_2.0_bf16.safetensors",
+    "vae": "Comfy-Org/Ming-Image:vae/ming_image_vae_bf16.safetensors"
+  },
+  "image_defaults": {
+    "cfg_scale": 1,
+    "height": 1024,
+    "steps": 12,
+    "width": 1024
+  },
+  "labels": [
+    "custom",
+    "image"
+  ],
+  "recipe": "thenoise",
+  "recipe_options": {
+    "cfg_scale": 1,
+    "height": 1024,
+    "steps": 12,
+    "width": 1024
+  },
+  "registry_source": "huggingface",
+  "size": 45.86,
+  "source": "huggingface",
+  "model_name": "user.Ming-Image-0.1-Design"
+}

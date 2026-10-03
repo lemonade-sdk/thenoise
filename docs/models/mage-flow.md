@@ -136,3 +136,19 @@ appears because this model supports editing:
 For every flag (size, steps, seed, multi-image references, LoRAs, upscaling,
 post-processing), see the [CLI reference](../cli.md) and the
 [HTTP API reference](../api.md).
+
+## Lemonade recipes
+
+Ready-made [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends)
+recipes for this model — each pins the checkpoints and the generation defaults:
+
+- [Mage-Flow-Turbo.json](../../recipes/mageflow/Mage-Flow-Turbo.json) — Turbo BF16, 4 steps
+- [Mage-Flow-Turbo-Edit.json](../../recipes/mageflow/Mage-Flow-Turbo-Edit.json) — Turbo edit BF16, 4 steps
+- [Mage-Flow-Turbo-INT8.json](../../recipes/mageflow/Mage-Flow-Turbo-INT8.json) — Turbo INT8-ConvRot, 4 steps
+- [Mage-Flow-Turbo-Edit-INT8.json](../../recipes/mageflow/Mage-Flow-Turbo-Edit-INT8.json) — Turbo edit INT8-ConvRot, 4 steps
+- [Mage-Flow-RL.json](../../recipes/mageflow/Mage-Flow-RL.json) — RL BF16, 20 steps, CFG 5
+- [Mage-Flow-RL-Edit.json](../../recipes/mageflow/Mage-Flow-RL-Edit.json) — RL edit BF16, 20 steps, CFG 5
+- [Mage-Flow-RL-INT8.json](../../recipes/mageflow/Mage-Flow-RL-INT8.json) — RL INT8-ConvRot, 20 steps, CFG 5
+- [Mage-Flow-RL-Edit-INT8.json](../../recipes/mageflow/Mage-Flow-RL-Edit-INT8.json) — RL edit INT8-ConvRot, 20 steps, CFG 5
+- [Mage-Flow-Base.json](../../recipes/mageflow/Mage-Flow-Base.json) — Base BF16, 30 steps, CFG 5
+- [Mage-Flow-Base-Edit.json](../../recipes/mageflow/Mage-Flow-Base-Edit.json) — Base edit BF16, 30 steps, CFG 5

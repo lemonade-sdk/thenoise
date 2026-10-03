@@ -123,3 +123,13 @@ Serve over HTTP with the web UI (open <http://localhost:8000/>):
 For every flag (size, steps, seed, multi-image references, KV cache, LoRAs,
 upscaling, post-processing), see the [CLI reference](../cli.md) and the
 [HTTP API reference](../api.md).
+
+## Lemonade recipes
+
+Ready-made [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends)
+recipes for this model — each pins the checkpoints and the generation defaults:
+
+- [Qwen-Image-2512.json](../../recipes/qwen-image/Qwen-Image-2512.json) — 2512 BF16, 28 steps, CFG 2.5
+- [Qwen-Image-2512-INT8.json](../../recipes/qwen-image/Qwen-Image-2512-INT8.json) — 2512 INT8-ConvRot, 28 steps, CFG 2.5
+- [Qwen-Image-Edit-2511.json](../../recipes/qwen-image/Qwen-Image-Edit-2511.json) — Edit 2511 BF16, 28 steps, CFG 2.5
+- [Qwen-Image-Edit-2511-INT8.json](../../recipes/qwen-image/Qwen-Image-Edit-2511-INT8.json) — Edit 2511 INT8-ConvRot, 28 steps, CFG 2.5
