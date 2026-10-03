@@ -21,7 +21,7 @@ default.
 
 ## Specs
 
-| | |
+| Spec | Data |
 |---|---|
 | Architecture | Single-stream DiT (flow matching, causal text/reference prefix) |
 | Download size | ~32 GB (bf16) · ~17 GB (int8-convrot) |
@@ -30,6 +30,14 @@ default.
 | Editing | ✓ |
 | KV cache | ✓ (exact, on by default) |
 | Default settings | 1024×1024, 28 steps, guidance 1.0, euler |
+
+## Lemonade recipes
+
+Ready-made [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends)
+recipes for this model - each pins the checkpoints and the generation defaults:
+
+- [Qwen-Image-2.1.json](../../recipes/qwen-image2.1/Qwen-Image-2.1.json) - BF16, 28 steps
+- [Qwen-Image-2.1-INT8.json](../../recipes/qwen-image2.1/Qwen-Image-2.1-INT8.json) - INT8-ConvRot, 28 steps
 
 ## Performance (Strix Halo)
 

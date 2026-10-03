@@ -18,7 +18,7 @@ prompt produces a real alpha channel rather than a checkerboard.
 
 ## Specs
 
-| | |
+| Spec | Data |
 |---|---|
 | Architecture | S3-DiT (flow matching), 30 blocks + 2 refiners, dim 3840 |
 | Download size | ~49 GB bf16 (12 GB DiT + 35 GB text encoder + 0.25 GB VAE); ~15 GB int8-convrot |
@@ -33,6 +33,14 @@ prompt produces a real alpha channel rather than a checkerboard.
 | Checkpoint | File |
 |---|---|
 | `--variant design` *(default)* | `ming_image_0.1_design_{bf16,int8_convrot}.safetensors` |
+
+## Lemonade recipes
+
+Ready-made [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends)
+recipes for this model - each pins the checkpoints and the generation defaults:
+
+- [Ming-Image-0.1-Design.json](../../recipes/ming-image/Ming-Image-0.1-Design.json) - Design BF16, 12 steps
+- [Ming-Image-0.1-Design-INT8.json](../../recipes/ming-image/Ming-Image-0.1-Design-INT8.json) - Design INT8-ConvRot (DiT *and* text encoder), 12 steps
 
 ## Performance (Strix Halo)
 

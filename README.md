@@ -29,6 +29,7 @@ TheNoise can be used standalone, from the command line or through a webui or thr
 TheNoise ships: 
 
 - image generation / editing support for major open-weights models,
+- [Lemonade Server](https://lemonade-server.ai) integration - TheNoise ships as its `thenoise` backend, see [Using TheNoise with Lemonade Server](docs/lemonade.md),
 - a built-in 2× refiner-based (SesquiLSR) upscaler - fast and high-quality upscaling without loading extra model files,
 - pixel-space upscalers (Real-ESRGAN) up to 4× - standard ESRGAN-based models,
 - film grain and RCAS sharpening as post-processing,
@@ -86,7 +87,7 @@ a warmup run.
 
 | Model & settings | 1024×1024 · KV-cache OFF | 1024×1024 · KV-cache ON |
 |---|---|---|
-| Flux.2 Klein 9B · INT8-ConvRot · 4 steps | 14.2s | 10.6s |
+| Flux.2 Klein 9B · INT8-ConvRot · 4 steps | 19.2s | 10.6s |
 | Qwen-Image-Edit 2511 · BF16 · 4 steps | 15.8s | 10.6s |
 | Qwen-Image 2.1 · BF16 · 4 steps | 15.4s | 9.8s |
 | Qwen-Image 2.1 · INT8-ConvRot · 4 steps | 14.4s | 9.2s |

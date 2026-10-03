@@ -1,0 +1,28 @@
+{
+  "checkpoints": {
+    "main": "Bedovyy/Anima-INT8:anima-turbo-v1.1-int8convrot.safetensors",
+    "text_encoder": "circlestone-labs/Anima:split_files/text_encoders/qwen_3_06b_base.safetensors",
+    "vae": "circlestone-labs/Anima:split_files/vae/qwen_image_vae.safetensors"
+  },
+  "image_defaults": {
+    "cfg_scale": 1,
+    "height": 1024,
+    "steps": 8,
+    "width": 768
+  },
+  "labels": [
+    "custom",
+    "image"
+  ],
+  "recipe": "thenoise",
+  "recipe_options": {
+    "cfg_scale": 1,
+    "height": 1024,
+    "steps": 8,
+    "width": 768
+  },
+  "registry_source": "huggingface",
+  "size": 3.81,
+  "source": "huggingface",
+  "model_name": "user.Anima-Turbo-1.1-INT8"
+}

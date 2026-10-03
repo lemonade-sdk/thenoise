@@ -22,7 +22,7 @@ an edit (reference image + instruction) comes back in ~5 s.
 
 ## Specs
 
-| | |
+| Spec | Data |
 |---|---|
 | Architecture | Dual-stream DiT (flow matching), 12 blocks, dim 3072, patch 1 |
 | Download size | ~25 GB bf16 (7.7 GB per DiT + 8.9 GB TE + 0.35 GB VAE) · ~18 GB int8-convrot |
@@ -51,6 +51,20 @@ but use the matching `_edit_` checkpoint for `edit`. The `--image` references
 reach the model twice — as Qwen3-VL vision tokens in the text stream and as
 latent tokens in the image stream.
 
+## Lemonade recipes
+
+Ready-made [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends)
+recipes for this model - each pins the checkpoints and the generation defaults:
+
+- [Mage-Flow-Turbo.json](../../recipes/mageflow/Mage-Flow-Turbo.json) - Turbo BF16, 4 steps
+- [Mage-Flow-Turbo-Edit.json](../../recipes/mageflow/Mage-Flow-Turbo-Edit.json) - Turbo edit BF16, 4 steps
+- [Mage-Flow-Turbo-INT8.json](../../recipes/mageflow/Mage-Flow-Turbo-INT8.json) - Turbo INT8-ConvRot, 4 steps
+- [Mage-Flow-Turbo-Edit-INT8.json](../../recipes/mageflow/Mage-Flow-Turbo-Edit-INT8.json) - Turbo edit INT8-ConvRot, 4 steps
+- [Mage-Flow.json](../../recipes/mageflow/Mage-Flow.json) - RL BF16, 20 steps, CFG 5
+- [Mage-Flow-Edit.json](../../recipes/mageflow/Mage-Flow-Edit.json) - RL edit BF16, 20 steps, CFG 5
+- [Mage-Flow-INT8.json](../../recipes/mageflow/Mage-Flow-INT8.json) - RL INT8-ConvRot, 20 steps, CFG 5
+- [Mage-Flow-Edit-INT8.json](../../recipes/mageflow/Mage-Flow-Edit-INT8.json) - RL edit INT8-ConvRot, 20 steps, CFG 5
+
 ## Performance (Strix Halo)
 
 Turbo BF16:
@@ -60,12 +74,12 @@ Turbo BF16:
 
 ## Examples
 
-*Generated — Turbo @ 4 steps:*
+*Generated - Turbo @ 4 steps:*
 
 <img width="45%" alt="c3773587-d948-4592-86fe-741f2e854ed2" src="https://github.com/user-attachments/assets/511d1bbe-4f81-41a0-840e-3315b454d673" />
 <img width="45%" alt="9aa0cc36-2ec8-4aa5-bc2e-eac17970b125" src="https://github.com/user-attachments/assets/ddae7d8c-b7a4-4652-b0df-53f2bbc49208" />
 
-*Edited — Turbo @ 4 steps:*
+*Edited - Turbo @ 4 steps:*
 
 | Before | After | Prompt |
 |---|---|---|

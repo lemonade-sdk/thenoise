@@ -1,0 +1,29 @@
+{
+  "checkpoints": {
+    "main": "Comfy-Org/Qwen-Image-2.1:diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
+    "text_encoder": "Comfy-Org/Qwen-Image-2.1:text_encoders/qwen3vl_8b_int8_convrot.safetensors",
+    "vae": "Comfy-Org/Qwen-Image-2.1:vae/qwen_image_2.1_vae_bf16.safetensors"
+  },
+  "image_defaults": {
+    "cfg_scale": 1,
+    "height": 1024,
+    "steps": 28,
+    "width": 1024
+  },
+  "labels": [
+    "custom",
+    "image",
+    "edit"
+  ],
+  "recipe": "thenoise",
+  "recipe_options": {
+    "cfg_scale": 1,
+    "height": 1024,
+    "steps": 28,
+    "width": 1024
+  },
+  "registry_source": "huggingface",
+  "size": 16.1,
+  "source": "huggingface",
+  "model_name": "user.Qwen-Image-2.1-INT8"
+}

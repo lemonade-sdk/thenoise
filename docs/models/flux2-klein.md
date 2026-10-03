@@ -18,7 +18,7 @@ Strix Halo, and both have int8-convrot checkpoints.
 
 ## Specs
 
-| | |
+| Spec | Data |
 |---|---|
 | Architecture | Distilled flow-matching MMDiT (Flux.2 packed 128-ch latent) |
 | Download size | 4B: ~12 GB · 9B: ~25 GB (bf16) |
@@ -43,6 +43,16 @@ Strix Halo, and both have int8-convrot checkpoints.
 
 Base variants have no int8-convrot release.
 
+## Lemonade recipes
+
+Ready-made [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends)
+recipes for this model - each pins the checkpoints and the generation defaults:
+
+- [Flux-2-Klein-4B-TheNoise.json](../../recipes/flux/Flux-2-Klein-4B-TheNoise.json) - 4B BF16, 4 steps
+- [Flux-2-Klein-4B-INT8.json](../../recipes/flux/Flux-2-Klein-4B-INT8.json) - 4B INT8-ConvRot, 4 steps
+- [Flux-2-Klein-9B-TheNoise.json](../../recipes/flux/Flux-2-Klein-9B-TheNoise.json) - 9B BF16, 4 steps
+- [Flux-2-Klein-9B-INT8.json](../../recipes/flux/Flux-2-Klein-9B-INT8.json) - 9B INT8-ConvRot, 4 steps
+
 ## Performance (Strix Halo)
 
 9B INT8-ConvRot, 1024×768:
@@ -52,11 +62,11 @@ Base variants have no int8-convrot release.
 
 ## Examples
 
-*Generated — 9B @ 4 steps:*
+*Generated - 9B @ 4 steps:*
 
 <img width="45%" alt="thenoise_269346642" src="https://github.com/user-attachments/assets/7784ad89-12f6-4838-a412-508cc23ecf31" />
 
-*Edited — instruction: "Color this image":*
+*Edited - instruction: "Color this image":*
 
 | Before | After |
 |---|---|
@@ -94,7 +104,7 @@ Generate (9B):
 (4B paths: `split_files/diffusion_models/flux-2-klein-4b.safetensors` and
 `split_files/text_encoders/qwen_3_4b.safetensors`.)
 
-Edit (4B — `--image` is repeatable; the first image sets the output size):
+Edit (4B - `--image` is repeatable; the first image sets the output size):
 
 ```bash
 ./thenoise.sh edit \

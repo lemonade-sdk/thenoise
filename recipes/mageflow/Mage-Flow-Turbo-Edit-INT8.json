@@ -1,0 +1,29 @@
+{
+  "checkpoints": {
+    "main": "Comfy-Org/Mage-Flow:diffusion_models/mage_flow_edit_turbo_int8_convrot.safetensors",
+    "text_encoder": "Comfy-Org/Mage-Flow:text_encoders/qwen3vl_4b_bf16.safetensors",
+    "vae": "Comfy-Org/Mage-Flow:vae/mage_flow_vae_bf16.safetensors"
+  },
+  "image_defaults": {
+    "cfg_scale": 1,
+    "height": 1024,
+    "steps": 4,
+    "width": 1024
+  },
+  "labels": [
+    "custom",
+    "image",
+    "edit"
+  ],
+  "recipe": "thenoise",
+  "recipe_options": {
+    "cfg_scale": 1,
+    "height": 1024,
+    "steps": 4,
+    "width": 1024
+  },
+  "registry_source": "huggingface",
+  "size": 12.46,
+  "source": "huggingface",
+  "model_name": "user.Mage-Flow-Turbo-Edit-INT8"
+}

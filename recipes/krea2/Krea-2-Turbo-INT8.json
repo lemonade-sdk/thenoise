@@ -1,0 +1,28 @@
+{
+  "checkpoints": {
+    "main": "Comfy-Org/Krea-2:diffusion_models/krea2_turbo_int8_convrot.safetensors",
+    "text_encoder": "Comfy-Org/Krea-2:text_encoders/qwen3vl_4b_bf16.safetensors",
+    "vae": "mikkoph/krea2-vae:krea2-vae.safetensors"
+  },
+  "image_defaults": {
+    "cfg_scale": 1,
+    "height": 1024,
+    "steps": 8,
+    "width": 1024
+  },
+  "labels": [
+    "custom",
+    "image"
+  ],
+  "recipe": "thenoise",
+  "recipe_options": {
+    "cfg_scale": 1,
+    "height": 1024,
+    "steps": 8,
+    "width": 1024
+  },
+  "registry_source": "huggingface",
+  "size": 21.07,
+  "source": "huggingface",
+  "model_name": "user.Krea-2-Turbo-INT8"
+}

@@ -1,0 +1,28 @@
+{
+  "checkpoints": {
+    "main": "obsxrver/ComfyUI-Native-INT8_ConvRot:diffusion_models/flux-2-klein-9b_int8_convrot.safetensors",
+    "text_encoder": "Comfy-Org/vae-text-encorder-for-flux-klein-9b:split_files/text_encoders/qwen_3_8b.safetensors",
+    "vae": "Comfy-Org/vae-text-encorder-for-flux-klein-9b:split_files/vae/flux2-vae.safetensors"
+  },
+  "image_defaults": {
+    "cfg_scale": 1,
+    "height": 1024,
+    "steps": 4,
+    "width": 1024
+  },
+  "labels": [
+    "image",
+    "edit"
+  ],
+  "recipe": "thenoise",
+  "recipe_options": {
+    "cfg_scale": 1,
+    "height": 1024,
+    "steps": 4,
+    "width": 1024
+  },
+  "registry_source": "huggingface",
+  "size": 24.36,
+  "source": "huggingface",
+  "model_name": "user.Flux-2-Klein-9B-INT8"
+}
