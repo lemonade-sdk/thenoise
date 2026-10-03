@@ -29,6 +29,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from thenoise.utils.attention import single_head_attention
 from thenoise.utils.safetensors import MemoryEfficientSafeOpen, load_safetensors
 from thenoise.utils.setup_logging import setup_logging
 from .flux2 import AutoencoderKLFlux2, load_flux2_vae
@@ -56,18 +57,10 @@ def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch
 
 
 def _attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    """Single-head attention over the token axis: ``[B, C, L] -> [B, C, L]``.
-
-    Written out as matmul + softmax rather than ``F.scaled_dot_product_attention``:
-    the fused ROCm SDPA backends are unreliable inside VAE decoders (broken pixels on
-    gfx1151, a hard ``profiler is not initialized`` error on others). The window is
-    32x32 tokens, so the explicit score matrix is not a memory concern.
-    """
+    """Single-head attention over the token axis: ``[B, C, L] -> [B, C, L]``."""
     b, c, length = q.shape
-    q, k, v = (t.view(b, 1, length, c) for t in (q, k, v))
-    attn = (q @ k.transpose(-2, -1)) / (c**0.5)  # SDPA's default 1/sqrt(head_dim)
-    attn = attn.softmax(dim=-1)
-    return (attn @ v).transpose(1, 2).reshape(b, c, length)
+    q, k, v = (t.view(b, 1, c, length).transpose(2, 3) for t in (q, k, v))
+    return single_head_attention(q, k, v).transpose(2, 3).reshape(b, c, length)
 
 
 class LayerNorm2d(nn.LayerNorm):

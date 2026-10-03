@@ -19,6 +19,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from thenoise.utils.attention import single_head_attention
+
 from thenoise.utils.safetensors import load_safetensors
 from thenoise.utils.setup_logging import setup_logging
 
@@ -70,11 +72,11 @@ class _AttnBlock(nn.Module):
         k = self.k(h_)
         v = self.v(h_)
         b, c, h, w = q.shape
-        q = q.view(b, 1, h * w, c).transpose(2, 3)
-        k = k.view(b, 1, h * w, c).transpose(2, 3)
-        v = v.view(b, 1, h * w, c).transpose(2, 3)
-        h_ = F.scaled_dot_product_attention(q, k, v)
-        return h_.transpose(2, 3).reshape(b, c, h, w)
+        q = q.view(b, c, h * w).transpose(1, 2).unsqueeze(1)
+        k = k.view(b, c, h * w).transpose(1, 2).unsqueeze(1)
+        v = v.view(b, c, h * w).transpose(1, 2).unsqueeze(1)
+        h_ = single_head_attention(q, k, v)
+        return h_.squeeze(1).transpose(1, 2).reshape(b, c, h, w)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x + self.proj_out(self.attention(x))

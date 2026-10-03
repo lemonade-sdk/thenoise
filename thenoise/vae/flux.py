@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from thenoise.utils.attention import single_head_attention
 from thenoise.utils.safetensors import load_safetensors
 from thenoise.utils.setup_logging import setup_logging
 
@@ -63,7 +64,7 @@ class _Attention(nn.Module):
         q = self.q(hidden).view(b, 1, c, -1).transpose(2, 3).contiguous()  # (b, 1, hw, c)
         k = self.k(hidden).view(b, 1, c, -1).transpose(2, 3).contiguous()
         v = self.v(hidden).view(b, 1, c, -1).transpose(2, 3).contiguous()
-        hidden = F.scaled_dot_product_attention(q, k, v)
+        hidden = single_head_attention(q, k, v)
         hidden = hidden.transpose(2, 3).reshape(b, c, h, w).contiguous()
         return x + self.proj_out(hidden)
 

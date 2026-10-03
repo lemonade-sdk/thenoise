@@ -1,6 +1,8 @@
-# SDPA wrapper handling masking, GQA and layout.
+# SDPA wrapper for the DiT (masking, GQA, layout), and the manual attention the VAE
+# decoders use instead of SDPA.
 
 from dataclasses import dataclass
+import math
 import torch
 import torch.nn.functional as F
 from typing import Optional, Union
@@ -58,6 +60,55 @@ def uniform_layout(
     if not l_major(v):
         v = v.contiguous()
     return q, k, v
+
+SCORE_LIMIT_BYTES = 2 << 30   # at or under this a whole matrix is scored at once
+SCORE_TILE_BYTES = 256 << 20  # target tile size above it
+MIN_TILE_ROWS = 64            # thinner than this a tile is launch overhead, not a tile
+
+
+def score_tile_rows(n: int) -> int:
+    """Query rows to score at once for an ``N x N`` score matrix. ``n`` means: all of it.
+
+    A row of scores costs ``4N`` bytes (two live bf16 matrices ``N`` wide), so a tile is
+    ``SCORE_TILE_BYTES / 4N`` rows, floored at ``MIN_TILE_ROWS``.
+    """
+    if 4 * n * n <= SCORE_LIMIT_BYTES:
+        return n
+    rows = -(-SCORE_TILE_BYTES // (4 * n))
+    return max(MIN_TILE_ROWS, min(n, rows))
+
+
+def single_head_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                          rows: int | None = None) -> torch.Tensor:
+    """Attention over the second-to-last axis as two matmuls and a softmax.
+
+    A VAE attention block is one head as wide as the whole channel count, over every
+    pixel of the latent. As of ROCm 10.1.0rc2, the fused SDPA backends do not serve 
+    that shape honestly: they refuse it, or accept it and return wrong values, and the 
+    math backend they fall back to costs several times these two matmuls.
+    """
+    n, embed = q.shape[-2], q.shape[-1]
+    scale = math.sqrt(embed)
+    if rows is None:
+        rows = score_tile_rows(n)
+
+    if rows >= n:
+        scores = q @ k.transpose(-2, -1)
+        scores.div_(scale)
+        return scores.softmax(-1) @ v
+
+    rows = max(MIN_TILE_ROWS, rows)
+    out = torch.empty((*q.shape[:-1], v.shape[-1]), dtype=q.dtype, device=q.device)
+    scratch = torch.empty((*q.shape[:-2], rows, n), dtype=q.dtype, device=q.device)
+    keys_t = k.transpose(-2, -1)
+    for start in range(0, n, rows):
+        stop = min(start + rows, n)
+        tile = scratch[..., : stop - start, :]
+        torch.matmul(q[..., start:stop, :], keys_t, out=tile)
+        tile.div_(scale)
+        torch.matmul(tile.softmax(-1), v, out=out[..., start:stop, :])
+    return out
+
 
 @torch._dynamo.disable()
 def eager_attention(
