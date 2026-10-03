@@ -61,9 +61,6 @@ def uniform_layout(
         v = v.contiguous()
     return q, k, v
 
-# Tiling policy. The N x N score matrix is the largest allocation in a VAE decode, and
-# tiling the queries is free-to-faster at the top of the ladder and costs about double
-# at the bottom, so small shapes are scored whole and large ones run in bounded tiles.
 SCORE_LIMIT_BYTES = 2 << 30   # at or under this a whole matrix is scored at once
 SCORE_TILE_BYTES = 256 << 20  # target tile size above it
 MIN_TILE_ROWS = 64            # thinner than this a tile is launch overhead, not a tile
@@ -83,20 +80,12 @@ def score_tile_rows(n: int) -> int:
 
 def single_head_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                           rows: int | None = None) -> torch.Tensor:
-    """Attention over the second-to-last axis as two matmuls and a softmax: no SDPA.
+    """Attention over the second-to-last axis as two matmuls and a softmax.
 
     A VAE attention block is one head as wide as the whole channel count, over every
-    pixel of the latent. The fused SDPA backends do not serve that shape honestly: they
-    refuse it, or accept it and return wrong values, and the math backend they fall back
-    to costs several times these two matmuls. Inputs are ``(..., N, E)`` with whatever
-    leading axes the caller has, the output has the shape of ``q``, and the scale is
-    SDPA's default ``1/sqrt(E)``, applied in place.
-
-    ``rows`` bounds how many queries are scored at once, which is the only handle on
-    peak memory: the score matrix is ``N x N``. Cutting the query axis is exact — every
-    query reads all of K and V and no tile depends on another tile's rows, so unlike the
-    conv tiling in ``vae.wan22.strip_apply`` there is no halo and no overlap-add.
-    ``None`` takes ``score_tile_rows``.
+    pixel of the latent. As of ROCm 10.1.0rc2, the fused SDPA backends do not serve 
+    that shape honestly: they refuse it, or accept it and return wrong values, and the 
+    math backend they fall back to costs several times these two matmuls.
     """
     n, embed = q.shape[-2], q.shape[-1]
     scale = math.sqrt(embed)
@@ -110,8 +99,6 @@ def single_head_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
 
     rows = max(MIN_TILE_ROWS, rows)
     out = torch.empty((*q.shape[:-1], v.shape[-1]), dtype=q.dtype, device=q.device)
-    # One score buffer, reused: allocating per tile would let the peak drift above the
-    # tile size, which is the whole point of tiling.
     scratch = torch.empty((*q.shape[:-2], rows, n), dtype=q.dtype, device=q.device)
     keys_t = k.transpose(-2, -1)
     for start in range(0, n, rows):
