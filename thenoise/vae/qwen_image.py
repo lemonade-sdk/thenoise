@@ -104,7 +104,7 @@ class QwenImageRMS_norm(nn.Module):
         self.gamma = nn.Parameter(torch.ones(dim, 1, 1))
 
     def forward(self, x):
-        return F.normalize(x, dim=1) * self.scale * self.gamma
+        return F.normalize(x, dim=1) * (self.scale * self.gamma)
 
 
 class QwenImageResample(nn.Module):
