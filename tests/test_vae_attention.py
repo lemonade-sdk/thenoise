@@ -49,12 +49,47 @@ def test_it_survives_the_compute_dtype_the_decoders_run_in():
     assert torch.isfinite(out).all()
 
 
-def test_the_tile_policy_leaves_the_small_shapes_alone():
-    """Where tiling starts, in rows, at the shapes the real decoders hit."""
+def test_the_tile_policy_leaves_the_measured_shapes_alone():
+    """Where tiling starts, in rows, at the shapes the real decoders hit.
+
+    The limit is measured on gfx1151 rather than derived: scoring whole won up to
+    49152 positions (4.3 GiB of scores) and lost at 65536 (8 GiB), so the allowance
+    sits between the two and everything past it keeps 256 MiB tiles.
+    """
     assert attn.score_tile_rows(1024) == 1024     # mage windows
     assert attn.score_tile_rows(16384) == 16384   # every codec's 1024x1024 rung
-    assert attn.score_tile_rows(65536) == 1024    # qwen/ming/Flux at 2048x2048
-    assert attn.score_tile_rows(262144) == 256    # 4K latents
+    assert attn.score_tile_rows(49152) == 49152   # the 8x codecs at 1536x2048
+    assert attn.score_tile_rows(65536) == 2048    # the 8x codecs at 2048x2048
+    assert attn.score_tile_rows(262144) == 512    # 4K latents
+
+
+def test_the_conv_layout_costs_no_copies_and_comes_back_the_way_it_came():
+    """A GEMM wants a leading dimension, not a particular orientation.
+
+    Channels-first conv outputs seen as ``(..., L, C)`` tokens must reach the matmuls
+    without anything being made contiguous, and the answer must be stored ``(C, L)``
+    so the projection conv reads it as a view. On gfx1151 the copies this replaces
+    were 1.4x the attention call and the whole of a codec's 1024x1024 encode.
+    """
+    torch.manual_seed(0)
+    b, c, n = 1, 16, 700
+    tokens = [t.view(b, 1, c, n).transpose(2, 3)
+              for t in (torch.randn(b, c, n) for _ in range(3))]
+
+    class NoCopies(torch.utils._python_dispatch.TorchDispatchMode):
+        def __init__(self): self.seen = []
+
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            if func._name in ("aten::copy_", "aten::contiguous", "aten::clone"):
+                self.seen.append(func._name)
+            return func(*args, **(kwargs or {}))
+
+    with NoCopies() as spy:
+        out = single_head_attention(*tokens)
+    assert not spy.seen, f"attention copied: {spy.seen}"
+    assert out.shape == tokens[0].shape and out.stride(-1) != 1   # stored (C, L)
+    assert out.transpose(2, 3).reshape(b, 1, c, n).is_contiguous()  # exit is a view
+    assert torch.allclose(out.float(), _sdpa_formula(*tokens), atol=1e-5, rtol=1e-4)
 
 
 @pytest.mark.parametrize("rows", [1, 63, 128, 257, 10_000])
