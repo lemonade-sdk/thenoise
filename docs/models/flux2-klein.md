@@ -52,6 +52,8 @@ recipes for this model - each pins the checkpoints and the generation defaults:
 - [Flux-2-Klein-4B-INT8.json](../../recipes/flux/Flux-2-Klein-4B-INT8.json) - 4B INT8-ConvRot, 4 steps
 - [Flux-2-Klein-9B-TheNoise.json](../../recipes/flux/Flux-2-Klein-9B-TheNoise.json) - 9B BF16, 4 steps
 - [Flux-2-Klein-9B-INT8.json](../../recipes/flux/Flux-2-Klein-9B-INT8.json) - 9B INT8-ConvRot, 4 steps
+- [Flux-2-Klein-9B-KV.json](../../recipes/flux/Flux-2-Klein-9B-KV.json) - 9B KV-cache BF16, 4 steps
+- [Flux-2-Klein-9B-KV-INT8.json](../../recipes/flux/Flux-2-Klein-9B-KV-INT8.json) - 9B KV-cache INT8-ConvRot, 4 steps
 
 ## Performance (Strix Halo)
 
