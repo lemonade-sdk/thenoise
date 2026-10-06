@@ -41,8 +41,12 @@ recipes for this model - each pins the checkpoints and the generation defaults:
 
 - [Qwen-Image-2512.json](../../recipes/qwen-image/Qwen-Image-2512.json) - 2512 BF16, 28 steps, CFG 2.5
 - [Qwen-Image-2512-INT8.json](../../recipes/qwen-image/Qwen-Image-2512-INT8.json) - 2512 INT8-ConvRot, 28 steps, CFG 2.5
+- [Qwen-Image-2512-4steps.json](../../recipes/qwen-image/Qwen-Image-2512-4steps.json) - 2512 BF16 merged with [lightx2v/Qwen-Image-2512-Lightning LoRA](https://huggingface.co/lightx2v/Qwen-Image-2512-Lightning), 4 steps, CFG 1
+- [Qwen-Image-2512-4steps-INT8.json](../../recipes/qwen-image/Qwen-Image-2512-4steps-INT8.json) - 2512 INT8-ConvRot merged with [lightx2v/Qwen-Image-2512-Lightning LoRA](https://huggingface.co/lightx2v/Qwen-Image-2512-Lightning), 4 steps, CFG 1
 - [Qwen-Image-Edit-2511.json](../../recipes/qwen-image/Qwen-Image-Edit-2511.json) - Edit 2511 BF16, 28 steps, CFG 2.5
 - [Qwen-Image-Edit-2511-INT8.json](../../recipes/qwen-image/Qwen-Image-Edit-2511-INT8.json) - Edit 2511 INT8-ConvRot, 28 steps, CFG 2.5
+- [Qwen-Image-Edit-2511-4steps.json](../../recipes/qwen-image/Qwen-Image-Edit-2511-4steps.json) - Edit 2511 BF16 merged with [lightx2v/Qwen-Image-Edit-2511-Lightning LoRA](https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning), 4 steps, CFG 1
+- [Qwen-Image-Edit-2511-4steps-INT8.json](../../recipes/qwen-image/Qwen-Image-Edit-2511-4steps-INT8.json) - Edit 2511 INT8-ConvRot merged with [lightx2v/Qwen-Image-Edit-2511-Lightning LoRA](https://huggingface.co/lightx2v/Qwen-Image-Edit-2511-Lightning), 4 steps, CFG 1
 
 ## Performance (Strix Halo)
 

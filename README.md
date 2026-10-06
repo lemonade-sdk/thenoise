@@ -87,10 +87,10 @@ a warmup run.
 
 | Model & settings | 1024×1024 · KV-cache OFF | 1024×1024 · KV-cache ON |
 |---|---|---|
-| Flux.2 Klein 9B · INT8-ConvRot · 4 steps | 19.2s | 10.6s |
-| Qwen-Image-Edit 2511 · BF16 · 4 steps | 15.8s | 10.6s |
-| Qwen-Image 2.1 · BF16 · 4 steps | 15.4s | 9.8s |
-| Qwen-Image 2.1 · INT8-ConvRot · 4 steps | 14.4s | 9.2s |
+| Flux.2 Klein 9B · INT8-ConvRot · 4 steps | 19.2s | 13.4s |
+| Qwen-Image-Edit 2511 · BF16 · 4 steps | 21.7s | 14.2s |
+| Qwen-Image 2.1 · BF16 · 4 steps | 20.8s | 13.1s |
+| Qwen-Image 2.1 · INT8-ConvRot · 4 steps | 19.4s | 12.3s |
 | Mage-Flow Turbo · BF16 · 4 steps | 4.9s | — *(no KV cache)* |
 
 <small>TheNoise 0.9.0, Strix Halo (gfx1151, 128 GB unified)</small>
