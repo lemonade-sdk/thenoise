@@ -7,15 +7,24 @@ A/B switches — nothing here patches a model, swaps an attention backend or
 toggles compilation. Snapshot before a change, snapshot after it, and a regression is
 a row: ``diff_bench.py`` is that diff, and it is the only way to read a snapshot.
 
+The one axis in the photograph is the *weight format*, because both ends of it
+ship: every model here has an int8-convrot recipe, so a block genuinely runs both,
+and a camera that saw only one would be photographing half the engine.
+
 What gets photographed
 ----------------------
-One case per ``(block, scenario, token count)``:
+One case per ``(block, scenario, weights, token count)``:
 
 * **block** — every transformer block class the engine ships, at its real
   production width, with random (seeded) weights. No checkpoints, no server.
 * **scenario** — the paths a block actually runs: ``plain`` (no KV cache) and
   ``fill`` / ``read`` (the reference-token KV cache of ``thenoise.dit.kvcache``,
   which changes the sequence a block attends over and its modulation layout).
+* **weights** — ``bf16``, and ``int8``: the INT8 + ConvRot weights an int8-convrot
+  checkpoint loads, with the codes quantized from those same seeded weights instead
+  of read off disk (see ``to_int8_convrot``). Both formats of one block, scenario
+  and count are measured back to back, so their ratio is a comparison rather than
+  two moments in a warming box.
 * **tokens** — the image-token ladder from ``--tokens``, which is the token grid the
   block sees (the default 4096, 9216, 16384 are 64x64, 96x96 and 128x128). What a
   token is worth in pixels depends on the model's VAE and patch size, so the ladder
@@ -35,12 +44,17 @@ Measurement protocol
 Fixed, and recorded in the JSON: numbers are only comparable between runs of the
 same protocol *and* environment, which the JSON records next to them.
 
-* batch 1, ``bfloat16``, ``torch.no_grad()``, the block's own ``@torch.compile``
-  forward, in the order printed: every block at one token count, then the next
-  count. The first count compiles statically and later ones exercise Dynamo's
-  dynamic promotion — the order a server sees.
+* batch 1, ``bfloat16`` activations, ``torch.no_grad()``, the block's own
+  ``@torch.compile`` forward — compiled from quantized weights too, exactly as an
+  int8 checkpoint is — in the order printed: every block at one token count, then
+  the next count, bf16 immediately followed by int8. The first count compiles
+  statically and later ones exercise Dynamo's dynamic promotion — the order a
+  server sees. Every key names its format — ``krea2/block/plain/bf16@9216``,
+  ``krea2/block/plain/int8@9216`` — so nothing in ``snapshots/`` predates the axis
+  usefully: retake a baseline before diffing against one.
 * weights are seeded from the block's name (so a block gets identical weights at
-  every token count and scenario), activations from the case key.
+  every token count, scenario and format — the int8 codes are quantized from the
+  same bf16 weights every time), activations from the case key.
 * one call to compile (timed as ``comp``), ``--warmup`` warmup calls, then
   ``--repeats`` groups of ``--iters`` timed calls. ``ms`` is the median of the
   groups, ``±%`` their coefficient of variation — read it before believing a small
@@ -52,18 +66,24 @@ same protocol *and* environment, which the JSON records next to them.
   neighbour) would otherwise be indistinguishable from a token-count effect.
 * a case that raises is reported and skipped, so one broken block still leaves a
   snapshot of everything else (the exit code is 1).
-* at the end, a *watchlist*: cases over ``±1%``, and blocks that end the ladder
-  costing more per FLOP than they started it. In a single snapshot a block that
-  decays while its neighbours stay flat is the interesting row, and spotting that
-  costs no arithmetic.
+* at the end, a *watchlist*: cases over ``±1%``, blocks that end the ladder costing
+  more per FLOP than they started it, and int8 cases that did not beat the bf16 one
+  measured next to them. In a single snapshot a block that decays while its
+  neighbours stay flat is the interesting row, and spotting that costs no
+  arithmetic; nor does an int8 row no faster than its bf16 twin, which is what a
+  quantized GEMM that could not find its kernel looks like — it dequantizes and
+  carries on in bf16, and nothing else in the run complains.
 
-A cold ``TORCHINDUCTOR_CACHE_DIR`` costs compile time, never measured time.
+A cold ``TORCHINDUCTOR_CACHE_DIR`` costs compile time, never measured time. The first
+int8 case also prints one AOT-autograd warning about ``QuantizedTensor`` not
+implementing ``_stable_hash_for_caching`` — comfy_kitchen's, not a compile failure.
 
 Usage
 -----
     .venv/bin/python bench-scripts/block_bench.py --list
     .venv/bin/python bench-scripts/block_bench.py                       # everything
     .venv/bin/python bench-scripts/block_bench.py --models krea2,zimage
+    .venv/bin/python bench-scripts/block_bench.py --weights bf16     # skip int8
     .venv/bin/python bench-scripts/block_bench.py --tokens 4096 --refs 0
     .venv/bin/python bench-scripts/block_bench.py --out bench-scripts/snapshots/head.json
     .venv/bin/python bench-scripts/diff_bench.py before.json after.json   # what moved
@@ -86,9 +106,11 @@ from typing import Callable, Optional
 import torch
 from torch import nn
 
-SCHEMA = 2
+SCHEMA = 3                     # 3: the weights axis, which is part of every case key
 DEFAULT_TOKENS = "4096,9216,16384"
 CACHE_SCENARIOS = ("plain", "fill", "read")
+WEIGHT_MODES = ("bf16", "int8")
+CONVROT_GROUP = 256            # the ConvRot group the int8 exports are quantized at
 
 # Environment that silently changes which kernels get measured. Recorded so two
 # snapshots that disagree can still be told apart from a real change.
@@ -143,6 +165,8 @@ class Ctx:
     iters: int = 5
     repeats: int = 3
     dtype: torch.dtype = torch.bfloat16
+    weights: str = "bf16"
+    quant_note: str = ""       # what ``new_block`` did to the current case's weights
 
     @property
     def tdev(self) -> torch.device:
@@ -155,12 +179,82 @@ def seed_of(key: str) -> int:
 
 
 def new_block(ctx: Ctx, name: str, cls, *args, **kwargs):
-    """Seeded random weights, on device, compute dtype, eval — as a loaded block is."""
+    """Seeded random weights, on device, compute dtype, eval — as a loaded block is.
+
+    ``--weights int8`` swaps those weights for INT8 + ConvRot ones on the way out, so
+    no fixture has to know a format exists: each one captures ``blk`` in its ``run``
+    closure, and the swap happens inside ``blk``.
+    """
     torch.manual_seed(seed_of(name))
     with torch.device(ctx.device):
         blk = cls(*args, **kwargs).to(ctx.dtype).eval()
     blk.requires_grad_(False)
+    if ctx.weights != "bf16":
+        ctx.quant_note = to_int8_convrot(blk)
     return blk
+
+
+def _swappable(module: nn.Module) -> bool:
+    """Is this a projection still holding full-precision weights?
+
+    Every shipped block builds its projections as ``QuantizedLinear``, which waits for
+    a quantized checkpoint to fill it; a bare ``nn.Linear`` is what a block not yet
+    converted holds, and gets the same treatment.
+    """
+    from thenoise.dit.quantized import QuantizedLinear
+
+    if isinstance(module, QuantizedLinear):
+        return not module._quantized
+    return module.__class__ is nn.Linear
+
+
+def to_int8_convrot(blk: nn.Module, group: int = CONVROT_GROUP) -> str:
+    """Turn a built block into the one an int8-convrot checkpoint loads.
+
+    The codes are quantized here, from the block's own seeded weights, instead of read
+    from a file; ``load_quantized`` is the loader's own call, with the profile a
+    checkpoint's ``comfy_quant`` marker carries — per-row scale, ConvRot rotating
+    ``group``-wide groups. A layer whose input features are not a multiple of ``group``
+    is stored unrotated, exactly as the exporter marks it, and one that is not even a
+    multiple of 16 cannot run the INT8 GEMM at all and keeps its bf16 weight.
+
+    Returns the split as a note for the snapshot's ``detail``: an ``int8`` row whose
+    layers had nowhere to go and stayed bf16 would otherwise measure bf16 in silence.
+    """
+    from comfy_kitchen.tensor import QuantizedTensor
+    from thenoise.dit.quantized import QuantizedLinear
+
+    rotated = unrotated = bf16 = 0
+    for name, module in list(blk.named_modules()):
+        if not _swappable(module):
+            continue
+        k = module.in_features
+        if k % 16 or (not name and module.__class__ is nn.Linear):
+            # A row the INT8 GEMM cannot read (it goes 16 bytes at a time), or a bare
+            # Linear as the root, which has no parent to swap into. Both keep their
+            # bf16 weight and land in the note, so neither is silently "int8".
+            bf16 += 1
+            continue
+        qt = QuantizedTensor.from_float(
+            module.weight.detach(), "TensorWiseINT8Layout", is_weight=True,
+            per_channel=True, convrot=k % group == 0, convrot_groupsize=group)
+        target = module
+        if target.__class__ is nn.Linear:       # a block not built on QuantizedLinear
+            parent_path, _, attr = name.rpartition(".")
+            with torch.device("meta"):          # its bf16 weight is about to be dropped
+                target = QuantizedLinear(k, module.out_features, bias=module.bias is not None)
+            if module.bias is not None:
+                target.bias = nn.Parameter(module.bias.detach())
+            setattr(blk.get_submodule(parent_path) if parent_path else blk, attr, target)
+        target.load_quantized(qt)
+        rotated += int(qt.params.convrot)
+        unrotated += int(not qt.params.convrot)
+    note = f"int8 g={group} rot={rotated}"
+    if unrotated:
+        note += f" unrotated={unrotated}"
+    if bf16:
+        note += f" bf16={bf16}"
+    return note
 
 
 def seed_inputs(name: str, scenario: str, tokens: int) -> None:
@@ -770,20 +864,33 @@ def measure(run, ctx: Ctx) -> Timing:
 
 
 def watchlist(results: list[dict], cov_warn: float = 1.0, decay_pct: float = 25.0,
-              show: int = 5) -> None:
+              int8_gain: float = 2.0, show: int = 5) -> None:
     """Rows worth a second look inside *this* snapshot, printed as they are found.
 
-    Two cheap rules, no judgement: a case that was not stable (``±%`` over
-    ``cov_warn``), and a block that ends the ladder costing more per FLOP than it
-    started it. Blocks that get *better* along the ladder are only counted, never
-    listed — that is normal, since attention's share of the FLOPs grows with length —
-    so what is left is decay, the one thing a single snapshot cannot show otherwise.
+    Three cheap rules, no judgement: a case that was not stable (``±%`` over
+    ``cov_warn``), a block that ends the ladder costing more per FLOP than it started
+    it, and an int8 case that did not beat the bf16 one timed next to it by at least
+    ``int8_gain`` percent. Blocks that get *better* along the ladder are only counted,
+    never listed — that is normal, since attention's share of the FLOPs grows with
+    length — so what is left is decay, the one thing a single snapshot cannot show
+    otherwise. A quantized GEMM that finds no kernel for its shape dequantizes and
+    carries on in bf16, and the third rule is the only trace that leaves: an int8 row
+    costing what its bf16 twin costs, reported by nothing else in the run.
     """
     ok = [r for r in results if r["status"] == "ok"]
     noisy = sorted((r for r in ok if r["cov_pct"] > cov_warn), key=lambda r: -r["cov_pct"])
-    series: dict[tuple[str, str, str], list[dict]] = {}
+    twin_ms = {(r["model"], r["block"], r["scenario"], r["image_tokens"]): r["ms"]
+               for r in ok if r["weights"] == "bf16"}
+    flat = []
     for r in ok:
-        series.setdefault((r["model"], r["block"], r["scenario"]), []).append(r)
+        if r["weights"] == "bf16":
+            continue
+        twin = twin_ms.get((r["model"], r["block"], r["scenario"], r["image_tokens"]))
+        if twin and r["ms"] >= twin * (1 - int8_gain / 100):
+            flat.append((100 * (1 - r["ms"] / twin), r, twin))
+    series: dict[tuple[str, str, str, str], list[dict]] = {}
+    for r in ok:
+        series.setdefault((r["model"], r["block"], r["scenario"], r["weights"]), []).append(r)
     decaying, gaining = [], 0
     for key, rows in series.items():
         if len(rows) < 2:
@@ -794,9 +901,10 @@ def watchlist(results: list[dict], cov_warn: float = 1.0, decay_pct: float = 25.
             decaying.append((lost, key, rows))
         elif 100 * (rows[-1]["tflops"] / rows[0]["tflops"] - 1) > decay_pct:
             gaining += 1
-    if not decaying and not noisy:
+    if not (decaying or noisy or flat):
         print(f"\nwatchlist: clean (no block losing {decay_pct:.0f}% of its TFLOPS along "
-              f"the ladder, every case under ±{cov_warn}%)")
+              f"the ladder, every int8 case at least {int8_gain:.0f}% under its bf16 "
+              f"twin, every case under ±{cov_warn}%)")
         return
     print("\nwatchlist")
     for lost, key, rows in sorted(decaying, key=lambda d: -d[0]):
@@ -805,8 +913,16 @@ def watchlist(results: list[dict], cov_warn: float = 1.0, decay_pct: float = 25.
     if gaining:
         print(f"  {'':38s} ({gaining} block(s) gain {decay_pct:.0f}% along the ladder "
               f"instead — normal, attention's share grows)")
+    for gain, r, twin in sorted(flat, key=lambda t: t[0])[:show]:
+        verdict = f"saves only {gain:.1f}%" if gain > 0 else f"costs {-gain:.0f}% MORE"
+        print(f"  {'/'.join((r['model'], r['block'], r['scenario'], 'int8')):38s} "
+              f"{verdict:>16s}  {r['ms']:.2f} vs {twin:.2f} ms at "
+              f"{r['image_tokens']} tokens")
+    if len(flat) > show:
+        print(f"  {'':38s} (+{len(flat) - show} more int8 rows under {int8_gain:.0f}% of "
+              f"their bf16 twin)")
     for r in noisy[:show]:
-        print(f"  {'/'.join((r['model'], r['block'], r['scenario'])):38s} "
+        print(f"  {'/'.join((r['model'], r['block'], r['scenario'], r['weights'])):38s} "
               f"unstable: ±{r['cov_pct']:.1f}% at {r['image_tokens']} tokens")
     if len(noisy) > show:
         print(f"  {'':38s} (+{len(noisy) - show} more over ±{cov_warn}%)")
@@ -859,18 +975,22 @@ def select(models: str) -> list[Fixture]:
     return keep
 
 
-def case_list(fixtures: list[Fixture], tokens: list[int], refs: int):
+def case_list(fixtures: list[Fixture], tokens: list[int], refs: int,
+              weight_modes: tuple[str, ...]):
     """Canonical order: every block at one token count, then the next count.
 
     A block whose sequence does not depend on the ladder is text-only, so the other
-    rungs would repeat the same measurement under a different key: it runs once.
+    rungs would repeat the same measurement under a different key: it runs once. The
+    two formats of one block/scenario/count stay adjacent: they are read as a ratio,
+    so they should share a thermal moment.
     """
-    return [(f, t, s) for t in tokens for f in fixtures
+    return [(f, t, s, w) for t in tokens for f in fixtures
             if t == tokens[0] or not f.fixed_seq
-            for s in (f.scenarios if refs else ("plain",))]
+            for s in (f.scenarios if refs else ("plain",)) for w in weight_modes]
 
 
 def main() -> None:
+    torch._dynamo.config.recompile_limit = 256
     ap = argparse.ArgumentParser(
         description="Snapshot the cost of every DiT transformer block.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -881,6 +1001,10 @@ def main() -> None:
     ap.add_argument("--txt", type=int, default=512, help="text / context tokens")
     ap.add_argument("--refs", type=int, default=1,
                     help="reference images per editing case; 0 drops fill and read")
+    ap.add_argument("--weights", default=",".join(WEIGHT_MODES),
+                    help="weight formats to photograph, comma separated: bf16, and "
+                         "int8 (INT8 + ConvRot, what an int8-convrot checkpoint "
+                         "loads); default %(default)s")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--iters", type=int, default=3, help="timed calls per group")
     ap.add_argument("--repeats", type=int, default=3, help="groups per case (median reported)")
@@ -893,40 +1017,48 @@ def main() -> None:
     tokens = sorted(int(t) for t in args.tokens.split(",") if t.strip())
     if args.refs < 0 or not tokens:
         raise SystemExit("--refs must be >= 0 and --tokens must not be empty")
+    weight_modes = tuple(dict.fromkeys(w.strip() for w in args.weights.split(",")
+                                       if w.strip()))
+    unknown = [w for w in weight_modes if w not in WEIGHT_MODES]
+    if unknown:
+        raise SystemExit(f"unknown --weights {', '.join(unknown)}: known are "
+                         f"{', '.join(WEIGHT_MODES)}")
     fixtures = select(args.models) if args.models else list(FIXTURES)
-    cases = case_list(fixtures, tokens, args.refs)
+    cases = case_list(fixtures, tokens, args.refs, weight_modes)
     if args.list:
-        print("\n".join(f"{f.model}/{f.block}/{s}@{t}" for f, t, s in cases))
-        print(f"\n{len(cases)} cases: {len(fixtures)} blocks over "
-              f"{len(tokens)} ladder rungs")
+        print("\n".join(f"{f.model}/{f.block}/{s}/{w}@{t}" for f, t, s, w in cases))
+        print(f"\n{len(cases)} cases: {len(fixtures)} blocks x {len(weight_modes)} "
+              f"weight formats over {len(tokens)} ladder rungs")
         return
 
     if args.device == "cuda" and not torch.cuda.is_available():
         raise SystemExit("no cuda/rocm device visible — run this on the GPU box")
     ctx = Ctx(device=args.device, txt=args.txt, refs=args.refs, warmup=args.warmup,
-              iters=args.iters, repeats=args.repeats)
+              iters=args.iters, repeats=args.repeats)   # ctx.weights: set per case
 
     env = env_info(args.device)
     print(f"{env.get('gpu', args.device)} | torch {torch.__version__} | hip {env.get('hip')}")
-    print(f"bf16 | batch 1 | ladder {','.join(map(str, tokens))} | txt {ctx.txt} "
-          f"| refs {ctx.refs} | warmup {ctx.warmup} + {ctx.repeats}x{ctx.iters} timed "
-          f"| {len(cases)} cases")
+    print(f"{'/'.join(weight_modes)} | batch 1 | ladder {','.join(map(str, tokens))} "
+          f"| txt {ctx.txt} | refs {ctx.refs} | warmup {ctx.warmup} + "
+          f"{ctx.repeats}x{ctx.iters} timed | {len(cases)} cases")
 
     results, failed, last_tokens, case = [], 0, None, None
     started = time.perf_counter()
-    for f, t, scenario in cases:
+    for f, t, scenario, weights in cases:
         if t != last_tokens:
             print(f"\n=== {t} image tokens ===")
-            print(f"  {'block/scenario':32s} {'seq':>7s} {'ms':>8s} {'±%':>5s} "
-                  f"{'TFLOPS':>7s} {'GiB':>6s} {'comp':>6s}")
+            print(f"  {'block/scenario weights':34s} {'seq':>7s} {'ms':>8s} "
+                  f"{'±%':>5s} {'TFLOPS':>7s} {'GiB':>6s} {'comp':>6s}")
             last_tokens = t
         label = f"{f.model}/{f.block}/{scenario}"
-        entry = {"key": f"{label}@{t}", "model": f.model, "block": f.block,
-                 "scenario": scenario, "image_tokens": t}
+        key = f"{label}/{weights}@{t}"
+        entry = {"key": key, "model": f.model, "block": f.block, "scenario": scenario,
+                 "weights": weights, "image_tokens": t}
         # The first call of a case compiles it, which can take a minute: print the row
         # label first so a long compile is visibly progress rather than a hang.
-        print(f"  {label:32s}", end="", flush=True)
+        print(f"  {label + ' ' + weights:34s}", end="", flush=True)
         try:
+            ctx.weights, ctx.quant_note = weights, ""   # new_block reads the format
             case = f.build(ctx, t, scenario)
             tim = measure(case.run, ctx)
             tflops = case.flops / (tim.ms / 1000) / 1e12
@@ -937,7 +1069,8 @@ def main() -> None:
                           "compile_s": round(tim.compile_s, 2),
                           "tflop": round(case.flops / 1e12, 4),
                           "tflops": round(tflops, 2), "peak_gib": round(tim.peak_gib, 3),
-                          "detail": case.detail})
+                          "detail": " ".join(s for s in (case.detail, ctx.quant_note)
+                                             if s)})
         except Exception as exc:                                # noqa: BLE001
             print(f" {'FAILED':>7s}  {type(exc).__name__}: {str(exc)[:110]}", flush=True)
             entry.update({"status": "error", "error": f"{type(exc).__name__}: {exc}"})
@@ -963,10 +1096,12 @@ def main() -> None:
         "git": git_info(),
         "env": env,
         "protocol": {"dtype": "bfloat16", "batch": 1, "grad": False,
-                     "compile": "as-shipped", "tokens": tokens, "txt_tokens": ctx.txt,
-                     "refs": ctx.refs, "warmup": ctx.warmup, "iters": ctx.iters,
-                     "repeats": ctx.repeats,
-                     "order": "token count ascending, fixtures in registry order"},
+                     "compile": "as-shipped", "weights": list(weight_modes),
+                     "convrot_group": CONVROT_GROUP, "tokens": tokens,
+                     "txt_tokens": ctx.txt, "refs": ctx.refs, "warmup": ctx.warmup,
+                     "iters": ctx.iters, "repeats": ctx.repeats,
+                     "order": "token count ascending, fixtures in registry order, "
+                             "bf16 then int8 for each case"},
         "cases": results,
     }
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
