@@ -104,7 +104,7 @@ class QwenImageRMS_norm(nn.Module):
         self.gamma = nn.Parameter(torch.ones(dim, 1, 1))
 
     def forward(self, x):
-        return F.normalize(x, dim=1) * self.scale * self.gamma
+        return F.normalize(x, dim=1) * (self.scale * self.gamma)
 
 
 class QwenImageResample(nn.Module):
@@ -184,8 +184,11 @@ class QwenImageAttentionBlock(nn.Module):
 
         qkv = self.to_qkv(x)
         qkv = qkv.reshape(batch_size, 1, channels * 3, -1)
-        qkv = qkv.permute(0, 1, 3, 2).contiguous()
-        q, k, v = qkv.chunk(3, dim=-1)
+        # Chunk the channels first and read the tokens out of each block: the
+        # permute-and-contiguous that used to sit here copied three feature maps to
+        # hand the matmuls an orientation they do not ask for, and this block runs at
+        # every level of the encoder and decoder.
+        q, k, v = (t.transpose(2, 3) for t in qkv.chunk(3, dim=2))
 
         x = single_head_attention(q, k, v)
 
