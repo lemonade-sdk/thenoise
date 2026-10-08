@@ -29,6 +29,7 @@ from thenoise.dit.kvcache import KVCache
 from thenoise.memory import MemoryManager
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.device import get_device_memory
+from thenoise.utils.image_tensor import ReferenceSizing
 from thenoise.samplers import Step
 from thenoise.upscale import LatentUpscaler
 
@@ -296,6 +297,16 @@ class DiffusionModel(ABC):
         return 1.0 - percent
 
     # ------------------------------------------------------------ editing
+    # How one reference is fitted for ``encode_reference``: aspect preserved, never
+    # cropped, aligned to the model's latent cell. ``prepare_reference`` must stay a
+    # pure function of the image and this struct — the pipeline caches the encoded
+    # reference on it.
+    REFERENCE_SIZING: ClassVar[ReferenceSizing] = ReferenceSizing()
+
+    def prepare_reference(self, image: Image.Image) -> Image.Image:
+        """Fit one reference image for :meth:`encode_reference`."""
+        return self.REFERENCE_SIZING.apply(image)
+
     def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
         """Encode input pixels (``[C,H,W]`` in [-1, 1]) into the canonical latent."""
         raise NotImplementedError(f"{self.name} does not support reference editing")

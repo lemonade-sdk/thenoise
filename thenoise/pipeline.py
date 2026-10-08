@@ -37,7 +37,6 @@ from thenoise.utils.image_tensor import (
     pil_to_pixels,
     pixels_to_pil,
     resize_to_target,
-    resize_to_cover_center_crop,
 )
 from thenoise.postprocess.film_grain import film_grain
 from thenoise.postprocess.nyquist import nyquist_notch
@@ -180,22 +179,17 @@ class PipelineController:
             return ("prompt",) + base
         return ("prompt_edit",) + base + (ref_key,)
 
-    def _cache_key_reference(
-        self,
-        images: list[Image.Image],
-        width: int,
-        height: int,
-    ) -> Tuple:
+    def _cache_key_reference(self, images: list[Image.Image]) -> Tuple:
         """Cache key for the encoded reference latent(s) (edit path).
 
         Hashes each image's normalized pixel bytes (RGBA when it carries
-        transparency) in order, plus the target size, since refs are resized and
-        center-cropped to the working resolution.
+        transparency) in order, plus the sizing policy that decided the size each one
+        was encoded at.
         """
         digests = tuple(
             hashlib.md5(load_image(img).tobytes()).hexdigest() for img in images
         )
-        return ("reference", width, height, digests)
+        return ("reference", self.model.REFERENCE_SIZING, digests)
 
     def _cache_key_sampling(
         self,
@@ -278,7 +272,7 @@ class PipelineController:
             local = replace(request, width=w, height=h)
 
         r = self._resolve_pipeline(local)
-        ref_key = self._cache_key_reference(images, r.width, r.height)
+        ref_key = self._cache_key_reference(images)
         with inference():
             return self._finalize(
                 self._run(local, r, ref_key=ref_key, ref_method=r.ref_method),
@@ -338,10 +332,8 @@ class PipelineController:
                 else:
                     ref_latents = []
                     for img in self._edit_images(request):
-                        # Scale each ref to cover the working size, center-cropping
-                        # when the aspect ratio differs.
-                        cover = resize_to_cover_center_crop(img, r.width, r.height)
-                        pixels = pil_to_pixels(cover, model.pixel_channels)
+                        fitted = model.prepare_reference(img)
+                        pixels = pil_to_pixels(fitted, model.pixel_channels)
                         ref_latents.append(model.encode_reference(pixels))  # [1,C,H,W]
                     self._cache.reference_store(ref_key, ref_latents)
 
@@ -356,8 +348,6 @@ class PipelineController:
                         negative_prompt=request.negative_prompt,
                         guidance_scale=r.guidance_scale,
                         image=request.image if is_edit else None,
-                        width=r.width,
-                        height=r.height,
                     )
                 )
                 memory.offload("text_encoder")

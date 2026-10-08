@@ -132,21 +132,6 @@ def test_pack_reference_latent_rejects_unsupported_method():
         model.pack_reference_latent(torch.randn(1, 8, 4, 4), method="crop")
 
 
-def test_resize_to_cover_center_crop_keeps_target_size():
-    """ComfyUI-style ref resize: cover the target, center-crop; no padding."""
-    from PIL import Image
-
-    from thenoise.utils.image_tensor import resize_to_cover_center_crop
-
-    # Wide source into a square target: scale height to 100, width overflows, crop.
-    assert resize_to_cover_center_crop(Image.new("RGB", (200, 50), "red"), 100, 100).size == (100, 100)
-    # Same aspect ratio: only resized, no crop.
-    assert resize_to_cover_center_crop(Image.new("RGB", (200, 100), "blue"), 100, 50).size == (100, 50)
-    # Already at target size: returned unchanged.
-    img = Image.new("RGB", (64, 64), "green")
-    assert resize_to_cover_center_crop(img, 64, 64) is img
-
-
 def _tiny_edit_inputs(model, seq=4, refseq=6, txtlen=8):
     """Build the target-only / reference / text pe + tokens for a tiny Flux2."""
     x = torch.randn(1, seq, 8)

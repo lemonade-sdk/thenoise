@@ -76,7 +76,7 @@ def test_an_opaque_reference_is_unaffected_by_the_alpha_plumbing():
 def test_reference_cache_key_sees_the_alpha():
     """Two references that differ only in transparency are not the same input."""
     controller = _controller(StubModel())
-    key = lambda img: controller._cache_key_reference([img], 64, 64)
+    key = lambda img: controller._cache_key_reference([img])
 
     opaque = Image.new("RGBA", (8, 8), (1, 2, 3, 255))
     clear = Image.new("RGBA", (8, 8), (1, 2, 3, 0))

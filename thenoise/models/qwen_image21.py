@@ -11,11 +11,10 @@ whole text + reference prefix is modulated at ``t = 0`` and is causally upstream
 the target, so its K/V are step-invariant and the KV cache is exact. That timestep-zero
 conditioning is architectural, so ``index_timestep_zero`` is the only reference method.
 
-The two halves of an edit are kept in step by construction: the reference is resized
-for the text encoder with the same cover-and-crop the pipeline applies before
-``encode_reference``, so the vision tokens removed and the latent tokens replacing
-them describe the same pixels (one vision token per 32x32 pixels, one latent cell per
-16x16 — hence the 32-pixel size alignment).
+The two halves of an edit are kept in step by construction: both are fitted by the
+same ``prepare_reference``, so the vision tokens removed and the latent tokens
+replacing them describe the same picture (one vision token per 32x32 pixels, one
+latent cell per 16x16 — hence the 32-pixel alignment of both).
 """
 from __future__ import annotations
 
@@ -41,7 +40,7 @@ from thenoise.models.base import (
 )
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, Qwen21TranscodeUpscaler
-from thenoise.utils.image_tensor import flatten_alpha, resize_to_cover_center_crop
+from thenoise.utils.image_tensor import flatten_alpha, ReferenceSizing
 from thenoise.utils.lora import FUSE_GATE_UP
 from thenoise.utils.math import round_up
 from thenoise.vae import load_wan22_vae
@@ -80,6 +79,9 @@ class QwenImage21Model(DiffusionModel):
 
     # The step-invariant slice is the LEADING text/reference prefix (target last).
     KV_CACHED_SLICE = "prefix"
+
+    # 32 px: a reference latent replaces whole 32x32 vision tokens, as in ``resolve_size``.
+    REFERENCE_SIZING = ReferenceSizing(align=32)
 
     @staticmethod
     def detect(f) -> bool:
@@ -121,7 +123,7 @@ class QwenImage21Model(DiffusionModel):
 
     # ------------------------------------------------------------ kernels
     def _encoder_images(self, args: EncodePromptArgs) -> Optional[list]:
-        """``args.image`` (single or list) as RGB, at the size the VAE saw.
+        """``args.image`` (single or list) as RGB, at the size the VAE sees.
 
         An alpha is composited onto white: the vision tower takes RGB only.
         """
@@ -130,9 +132,7 @@ class QwenImage21Model(DiffusionModel):
         images = args.image if isinstance(args.image, list) else [args.image]
         if not images:
             return None
-        if args.width and args.height:
-            images = [resize_to_cover_center_crop(img, args.width, args.height) for img in images]
-        return [flatten_alpha(img) for img in images]
+        return [flatten_alpha(self.prepare_reference(img)) for img in images]
 
     def encode_prompt(self, args: EncodePromptArgs) -> Conditioning:
         """Prompt (and, when editing, the references) -> embeddings + image slots.

@@ -85,9 +85,8 @@ Then open <http://localhost:8000/> for the web UI. Full endpoint reference:
 Edits an existing image from an instruction (image + prompt → edited image).
 Requires an editing-capable model and shares all generation flags with `generate`.
 
-`--image` is repeatable: the **first** image is resized to 1024 on its largest
-side (aspect preserved) and sets the output size; the rest are used as
-additional references.
+`--image` is repeatable. The **first** image sets the output size when
+`--width`/`--height` are omitted: 1024 on its largest side, aspect preserved.
 
 ```bash
 ./thenoise.sh edit \
