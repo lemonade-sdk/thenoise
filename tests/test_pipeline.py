@@ -41,7 +41,7 @@ def _request(**kwargs) -> GenerateRequest:
 def test_resolve_falls_back_to_model_defaults():
     """Every ``None`` request field takes the model's own default."""
     model = StubModel()
-    r = _controller(model)._resolve_pipeline(GenerateRequest(prompt="p"))
+    r = _controller(model)._resolve_pipeline(GenerateRequest(prompt="p"), is_edit=False)
 
     defaults = model.DEFAULT_PREFS
     assert (r.width, r.height) == (defaults["width"], defaults["height"])
@@ -57,7 +57,8 @@ def test_resolve_falls_back_to_model_defaults():
 
 def test_resolve_explicit_request_wins_over_defaults():
     r = _controller()._resolve_pipeline(
-        _request(width=128, height=64, steps=5, guidance_scale=3.5, sampler="er_sde")
+        _request(width=128, height=64, steps=5, guidance_scale=3.5, sampler="er_sde"),
+        is_edit=False,
     )
     assert (r.width, r.height, r.steps) == (128, 64, 5)
     assert r.guidance_scale == 3.5
@@ -67,7 +68,7 @@ def test_resolve_explicit_request_wins_over_defaults():
 def test_resolve_upscale_flag_without_factor_uses_the_latent_scale():
     """``upscale=True`` with the 1.0 default factor means "the model's 2x"."""
     model = StubModel()
-    r = _controller(model)._resolve_pipeline(_request(upscale=True))
+    r = _controller(model)._resolve_pipeline(_request(upscale=True), is_edit=False)
     assert r.factor == float(model.UPSCALE_SCALE)
     assert r.refined is True
     assert (r.target_width, r.target_height) == (
@@ -77,7 +78,7 @@ def test_resolve_upscale_flag_without_factor_uses_the_latent_scale():
 
 
 def test_resolve_target_size_is_the_rounded_factor():
-    r = _controller()._resolve_pipeline(_request(upscale_factor=1.5, upscale=True))
+    r = _controller()._resolve_pipeline(_request(upscale_factor=1.5, upscale=True), is_edit=False)
     assert (r.target_width, r.target_height) == (
         round(r.width * 1.5),
         round(r.height * 1.5),
@@ -92,7 +93,7 @@ def test_resolve_drops_pixel_upscaler_when_no_dir_is_configured(tmp_path):
     would hard-fail for every user who left the directory unset.
     """
     r = _controller()._resolve_pipeline(
-        _request(pixel_upscaler="RealESRGAN_x4", upscale=True)
+        _request(pixel_upscaler="RealESRGAN_x4", upscale=True), is_edit=False
     )
     assert r.pixel_upscaler is None
     assert r.pixel_scale == 0
@@ -102,7 +103,8 @@ def test_resolve_drops_pixel_upscaler_when_no_dir_is_configured(tmp_path):
     (tmp_path / "RealESRGAN_x4.safetensors").write_text("x")
     keep = _controller(upscaler_dir=str(tmp_path), upscaler_scales={"RealESRGAN_x4": 4})
     r2 = keep._resolve_pipeline(
-        _request(pixel_upscaler="RealESRGAN_x4", upscale_factor=4.0, upscale=True)
+        _request(pixel_upscaler="RealESRGAN_x4", upscale_factor=4.0, upscale=True),
+        is_edit=False,
     )
     assert r2.pixel_upscaler == "RealESRGAN_x4"
     assert r2.pixel_scale == 4
@@ -110,12 +112,16 @@ def test_resolve_drops_pixel_upscaler_when_no_dir_is_configured(tmp_path):
 
 @pytest.mark.parametrize("seed", [None, -1])
 def test_resolve_randomizes_negative_and_missing_seed(seed):
-    seen = {_controller()._resolve_pipeline(GenerateRequest(prompt="p", seed=seed)).seed
-            for _ in range(4)}
+    seen = {
+        _controller()._resolve_pipeline(
+            GenerateRequest(prompt="p", seed=seed), is_edit=False
+        ).seed
+        for _ in range(4)
+    }
     assert all(isinstance(s, int) and 0 <= s < 2**32 for s in seen)
     assert len(seen) > 1  # "random" really is random, not a fixed sentinel
 
-    assert _controller()._resolve_pipeline(_request(seed=42)).seed == 42
+    assert _controller()._resolve_pipeline(_request(seed=42), is_edit=False).seed == 42
 
 
 # ------------------------------------------------------------------ generate path
@@ -380,7 +386,7 @@ def test_sigma_steps_walk_the_grid_verbatim():
 def test_resolve_sigmas_set_the_step_count():
     model = StubModel()
     model.checkpoint_prefs = {"steps": 6}  # a marker is overridden too
-    r = _controller(model)._resolve_pipeline(_request(sigmas=[1.0, 0.5]))
+    r = _controller(model)._resolve_pipeline(_request(sigmas=[1.0, 0.5]), is_edit=False)
 
     assert r.sigmas == (1.0, 0.5, 0.0)
     assert r.steps == 2
@@ -388,7 +394,7 @@ def test_resolve_sigmas_set_the_step_count():
 
 def test_resolve_sigmas_override_steps_with_a_warning(caplog):
     caplog.set_level(logging.WARNING, logger="thenoise.pipeline")
-    r = _controller()._resolve_pipeline(_request(steps=8, sigmas=[1.0, 0.5]))
+    r = _controller()._resolve_pipeline(_request(steps=8, sigmas=[1.0, 0.5]), is_edit=False)
 
     assert r.steps == 2
     assert "overrides steps=8" in caplog.text
@@ -396,7 +402,7 @@ def test_resolve_sigmas_override_steps_with_a_warning(caplog):
 
 def test_resolve_sigmas_agreeing_with_steps_stay_quiet(caplog):
     caplog.set_level(logging.WARNING, logger="thenoise.pipeline")
-    _controller()._resolve_pipeline(_request(steps=2, sigmas=[1.0, 0.5]))
+    _controller()._resolve_pipeline(_request(steps=2, sigmas=[1.0, 0.5]), is_edit=False)
     assert caplog.text == ""
 
 
@@ -524,11 +530,11 @@ def test_finalize_applies_the_notch_filter_only_when_asked(monkeypatch):
     pixels = torch.zeros(3, 8, 8)
 
     plain = _request()
-    controller._finalize(pixels, plain, controller._resolve_pipeline(plain))
+    controller._finalize(pixels, plain, controller._resolve_pipeline(plain, is_edit=False))
     assert seen == []
 
     enhanced = _request(qwen_vae_enhance=True)
-    controller._finalize(pixels, enhanced, controller._resolve_pipeline(enhanced))
+    controller._finalize(pixels, enhanced, controller._resolve_pipeline(enhanced, is_edit=False))
     assert seen == [1]
 
 
@@ -536,7 +542,7 @@ def test_finalize_resizes_to_the_upscaled_target():
     controller = _controller()
     request = _request(upscale=True)
     image = controller._finalize(
-        torch.zeros(3, 64, 64), request, controller._resolve_pipeline(request)
+        torch.zeros(3, 64, 64), request, controller._resolve_pipeline(request, is_edit=False)
     )
     assert image.size == (128, 128)
 
@@ -613,7 +619,7 @@ def test_pnginfo_json_block_covers_every_field():
         steps=8, guidance_scale=1.5, seed=3, upscale=True, upscale_factor=2.0,
         upscale_type="no-refiner", sampler="er_sde", qwen_vae_enhance=True,
         film_grain=0.5, sharpening=0.2, lora_specs=["a:1.0"], pixel_upscaler="x4",
-        sigmas=[1.0, 0.5, 0.0],
+        sigmas=[1.0, 0.5, 0.0], ref_method="index_timestep_zero", kv_cache=True,
     )
     data = json.loads(_chunk_text(info, "generation_data"))
     assert data == {
@@ -622,8 +628,15 @@ def test_pnginfo_json_block_covers_every_field():
         "upscale": True, "upscale_factor": 2.0, "upscale_type": "no-refiner",
         "sampler": "er_sde", "qwen_vae_enhance": True, "film_grain": 0.5,
         "sharpening": 0.2, "lora_specs": ["a:1.0"], "pixel_upscaler": "x4",
-        "sigmas": [1.0, 0.5, 0.0],
+        "sigmas": [1.0, 0.5, 0.0], "ref_method": "index_timestep_zero",
+        "kv_cache": True,
     }
+
+
+def test_pnginfo_keeps_the_reference_flags_out_of_the_a1111_text():
+    """``parameters`` is read by third-party tools: it stays byte-compatible."""
+    assert "kv_cache" not in _parameters(kv_cache=True)
+    assert "ref_method" not in _parameters(ref_method="index")
 
 
 def test_pnginfo_parameters_layout():

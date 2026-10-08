@@ -30,6 +30,10 @@ def _request(**kwargs) -> GenerateRequest:
     return GenerateRequest(**{"prompt": "a fox", "seed": 1, **kwargs})
 
 
+def _edit_request(**kwargs) -> GenerateRequest:
+    return _request(image=Image.new("RGB", (64, 64), "white"), **kwargs)
+
+
 # ----------------------------------------------------------- checkpoint markers
 
 
@@ -76,7 +80,6 @@ def test_pref_falls_back_to_the_model_default():
     model = StubModel()
     assert model.checkpoint_prefs == {}
     assert model.pref("ref_method") == "index"
-    assert model.pref("kv_cache") is False
 
 
 def test_pref_checkpoint_beats_default_and_request_beats_checkpoint():
@@ -95,24 +98,67 @@ def test_pref_rejects_unknown_names():
     """Asking for an unregistered preference is a bug, not a silent default."""
     with pytest.raises(KeyError, match="unknown preference"):
         StubModel().pref("upscale_type")
+    # The KV cache is derived from the resolved reference method, never a preference.
+    with pytest.raises(KeyError, match="unknown preference"):
+        StubModel().pref("kv_cache")
 
 
 # ------------------------------------------------------- pipeline resolution
+
+
+class _KvCacheModel(EditingStubModel):
+    """An editing adapter that wired the reference KV cache into its blocks."""
+
+    CAPABILITIES = {**EditingStubModel.CAPABILITIES, "kv_cache": True}
+
+
+class _ZeroCondModel(_KvCacheModel):
+    """An adapter conditioning its references at timestep zero (Qwen-Image 2.1)."""
+
+    DEFAULT_PREFS = {
+        **EditingStubModel.DEFAULT_PREFS,
+        "ref_method": "index_timestep_zero",
+    }
 
 
 def test_resolve_takes_the_reference_method_from_the_checkpoint():
     """The marker layer feeds the pipeline: no request field, method auto-detected."""
     model = EditingStubModel()
     model.checkpoint_prefs = {"ref_method": "index_timestep_zero"}
-    r = _controller(model)._resolve_pipeline(_request())
+    r = _controller(model)._resolve_pipeline(_request(), is_edit=False)
     assert r.ref_method == "index_timestep_zero"
-    # The marker implies the *conditioning*, not the cache (that stays opt-in).
+    assert r.kv_cache is False  # a generation has no reference K/V to freeze
+
+
+def test_the_reference_method_decides_the_cache():
+    """Auto cache = timestep-zero conditioning on an edit."""
+    zero = _controller(_ZeroCondModel())._resolve_pipeline(_edit_request(), is_edit=True)
+    assert (zero.kv_cache, zero.ref_method) == (True, "index_timestep_zero")
+
+    # ``index`` re-conditions the references every step, so freezing them is off.
+    assert _controller(_KvCacheModel())._resolve_pipeline(
+        _edit_request(), is_edit=True
+    ).kv_cache is False
+
+
+def test_the_cache_default_respects_the_capability():
+    """Auto never asks an adapter for a cache it never wired in."""
+    model = _ZeroCondModel(capabilities={"kv_cache": False})
+    r = _controller(model)._resolve_pipeline(_edit_request(), is_edit=True)
     assert r.kv_cache is False
+
+
+def test_the_cache_default_stays_off_for_a_generation():
+    """Even on a model whose reference method is timestep-zero by default."""
+    controller = _controller(_ZeroCondModel())
+    assert controller._resolve_pipeline(_request(), is_edit=False).kv_cache is False
 
 
 def test_resolve_kv_cache_pulls_in_the_reference_method():
     """``kv_cache`` on with the method on auto picks the method that makes it valid."""
-    r = _controller(EditingStubModel())._resolve_pipeline(_request(kv_cache=True))
+    r = _controller(_KvCacheModel())._resolve_pipeline(
+        _edit_request(kv_cache=True), is_edit=True
+    )
     assert r.kv_cache is True
     assert r.ref_method == "index_timestep_zero"
 
@@ -120,37 +166,21 @@ def test_resolve_kv_cache_pulls_in_the_reference_method():
 def test_resolve_explicit_index_with_kv_cache_is_rejected():
     """An explicit ``index`` stays explicit: the frozen K/V would not be valid."""
     with pytest.raises(ValueError, match="index_timestep_zero"):
-        _controller(EditingStubModel())._resolve_pipeline(
-            _request(kv_cache=True, ref_method="index")
+        _controller(_KvCacheModel())._resolve_pipeline(
+            _edit_request(kv_cache=True, ref_method="index"), is_edit=True
         )
 
 
-def test_resolve_kv_cache_stays_off_by_default():
-    r = _controller(EditingStubModel())._resolve_pipeline(_request())
+def test_an_explicit_false_wins_over_the_derived_default():
+    r = _controller(_ZeroCondModel())._resolve_pipeline(
+        _edit_request(kv_cache=False), is_edit=True
+    )
     assert r.kv_cache is False
-    assert r.ref_method == "index"
-
-
-class _KvCacheByDefaultModel(EditingStubModel):
-    """A model that ships the reference KV cache ON (Qwen-Image 2.1's default)."""
-
-    DEFAULT_PREFS = {**EditingStubModel.DEFAULT_PREFS, "kv_cache": True}
-
-
-def test_a_model_defaulting_kv_cache_still_runs_a_plain_generation():
-    """The cache freezes *reference* K/V: off with no reference, on for an edit."""
-    controller = _controller(_KvCacheByDefaultModel())
-
-    assert controller._resolve_pipeline(_request()).kv_cache is False
-
-    edit = controller._resolve_pipeline(_request(image=Image.new("RGB", (64, 64), "white")))
-    assert edit.kv_cache is True
-    assert edit.ref_method == "index_timestep_zero"
 
 
 def test_an_explicit_kv_cache_without_a_reference_is_still_refused():
-    """Only the *default* yields to a plain generation; a request does not."""
-    controller = _controller(_KvCacheByDefaultModel())
+    """Only the derived default yields to a plain generation; a request does not."""
+    controller = _controller(_ZeroCondModel())
     with pytest.raises(ValueError, match="requires an edit request"):
         controller.generate(_request(kv_cache=True, steps=1))
 

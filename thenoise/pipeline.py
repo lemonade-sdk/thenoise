@@ -238,7 +238,7 @@ class PipelineController:
     # ------------------------------------------------------------ pipeline
     def generate(self, request: GenerateRequest) -> Image.Image:
         """Text-to-image pipeline. Returns a single PIL image."""
-        r = self._resolve_pipeline(request)
+        r = self._resolve_pipeline(request, is_edit=False)
         with inference():
             return self._finalize(self._run(request, r), request, r)
 
@@ -271,7 +271,7 @@ class PipelineController:
                 w = round(iw * target / ih)
             local = replace(request, width=w, height=h)
 
-        r = self._resolve_pipeline(local)
+        r = self._resolve_pipeline(local, is_edit=True)
         ref_key = self._cache_key_reference(images)
         with inference():
             return self._finalize(
@@ -423,7 +423,9 @@ class PipelineController:
         return model.finalize_latent(x, params)
 
     # ------------------------------------------------------------- resolution
-    def _resolve_pipeline(self, request: GenerateRequest) -> _ResolvedRequest:
+    def _resolve_pipeline(
+        self, request: GenerateRequest, *, is_edit: bool
+    ) -> _ResolvedRequest:
         """Resolve request defaults into concrete pipeline values.
 
         Shared by ``generate`` and ``edit`` so both use identical resolution
@@ -437,7 +439,15 @@ class PipelineController:
         guidance_scale = model.pref("guidance_scale", request.guidance_scale)
         effective_sampler = model.pref("sampler", request.sampler)
         ref_method = model.pref("ref_method", request.ref_method)
-        kv_cache = model.pref("kv_cache", request.kv_cache)
+
+        if request.kv_cache is None:
+            kv_cache = bool(
+                is_edit
+                and ref_method == "index_timestep_zero"
+                and model.capability("kv_cache")
+            )
+        else:
+            kv_cache = request.kv_cache
 
         sigmas: Optional[Tuple[float, ...]] = None
         if request.sigmas is not None:
@@ -448,10 +458,6 @@ class PipelineController:
                     "sigmas=%s overrides steps=%s: running %d steps",
                     sigmas, request.steps, steps,
                 )
-
-        # kv_cache only makes sense on an edit request.
-        if request.kv_cache is None and request.image is None:
-            kv_cache = False
 
         pixel_upscaler = request.pixel_upscaler
         if pixel_upscaler and self._pixel_upscalers.upscaler_dir:
@@ -476,10 +482,8 @@ class PipelineController:
             factor, upscale_type, pixel_upscaler
         )
 
-        # The KV cache freezes the reference K/V, which is only valid when those
-        # tokens are conditioned at timestep zero. With the method left on auto,
-        # pick the one that makes it valid; an explicit ``index`` stays explicit and
-        # is rejected below.
+        # An explicit cache with the method on auto picks the method that makes it
+        # valid; an explicit ``index`` stays explicit and is rejected below.
         if kv_cache and request.ref_method is None:
             ref_method = "index_timestep_zero"
         if kv_cache and ref_method != "index_timestep_zero":
@@ -558,6 +562,8 @@ class PipelineController:
             lora_specs=request.lora_specs,
             pixel_upscaler=r.pixel_upscaler,
             sigmas=list(r.sigmas) if r.sigmas else None,
+            ref_method=r.ref_method,
+            kv_cache=r.kv_cache,
         )
         image._pnginfo = pnginfo
         return image

@@ -73,7 +73,8 @@ def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png
                         "tokens' K/V across denoise steps for faster editing "
                         "(implies --ref-method index_timestep_zero unless given)")
     p.add_argument("--no-kv-cache", dest="kv_cache", action="store_false",
-                   help="disable the reference-latent KV cache (default)")
+                   help="disable the reference-latent KV cache (auto: on for "
+                        "'index_timestep_zero' reference conditioning)")
     p.set_defaults(kv_cache=None)
     p.add_argument("--ref-method", choices=["index", "index_timestep_zero"],
                    default=None,

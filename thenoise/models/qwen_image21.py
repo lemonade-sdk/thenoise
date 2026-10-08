@@ -69,10 +69,7 @@ class QwenImage21Model(DiffusionModel):
         "steps": 28,
         "guidance_scale": 1.0,
         "sampler": "euler",
-        # The prefix is modulated at t = 0 by construction: the only reference
-        # method, and its K/V are exactly step-invariant (``KV_CACHED_SLICE``).
         "ref_method": "index_timestep_zero",
-        "kv_cache": True,
     }
 
     CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": True}

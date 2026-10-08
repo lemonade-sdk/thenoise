@@ -121,15 +121,16 @@ Accepts all `/text2image` fields plus:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `image` | `string` \| `string[]` | *(required)* | One or more base64-encoded reference images (OpenAI-style; first sets the output size when `width`/`height` omitted) |
-| `kv_cache` | `boolean` | auto (off) | Reference-latent KV cache (freeze the reference tokens' K/V across denoise steps for faster editing). Turns on `ref_method: index_timestep_zero` unless you set it explicitly |
-| `ref_method` | `string` | auto | Reference conditioning: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index` |
+| `kv_cache` | `boolean` | auto | Reference-latent KV cache (freeze the reference tokens' K/V across denoise steps for faster editing). Auto = on when the resolved `ref_method` is `index_timestep_zero` and the model implements the cache, off otherwise. Forcing it to `true` also selects that method when `ref_method` is left on auto |
+| `ref_method` | `string` | auto | Reference conditioning: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index`. The cache default follows it |
 
 > **Reference method.** Checkpoints trained to condition their reference tokens
 > at timestep zero carry the `__index_timestep_zero__` marker, which makes
-> `ref_method` resolve to `index_timestep_zero` automatically. An explicit
-> `ref_method` always wins over detection — markers are only a hint, and some
-> trained checkpoints do not carry one. Asking for `kv_cache` together with an
-> explicit `ref_method: index` is rejected rather than silently degraded.
+> `ref_method` resolve to `index_timestep_zero` automatically — and the KV cache
+> with it. An explicit `ref_method` always wins over detection: markers are only
+> a hint, and some trained checkpoints do not carry one. An explicit `kv_cache`
+> together with an explicit `ref_method: index` is rejected rather than silently
+> degraded.
 
 ### Example
 
