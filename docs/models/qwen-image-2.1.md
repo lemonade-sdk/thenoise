@@ -13,7 +13,6 @@ default.
 - Reference-latent **KV cache** — exact, enabled by default
 - int8-convrot variant available (~17 GB instead of ~32 GB total)
 - Built-in defaults: **28 steps, guidance 1.0, euler**
-- Web UI **Schedule** presets for the community turbo recipes (see below)
 
 > Commands below assume a dev checkout (`./thenoise.sh`, `.venv/bin/python`).
 > On a [portable bundle](../setup.md) use `./bin/thenoise` and
@@ -38,6 +37,8 @@ recipes for this model - each pins the checkpoints and the generation defaults:
 
 - [Qwen-Image-2.1.json](../../recipes/qwen-image2.1/Qwen-Image-2.1.json) - BF16, 28 steps
 - [Qwen-Image-2.1-INT8.json](../../recipes/qwen-image2.1/Qwen-Image-2.1-INT8.json) - INT8-ConvRot, 28 steps
+- [Qwen-Image-2.1-Turbo.json](../../recipes/qwen-image2.1/Qwen-Image-2.1-Turbo.json) - BF16, Turbo, 8 steps
+- [Qwen-Image-2.1-Turbo-INT8.json](../../recipes/qwen-image2.1/Qwen-Image-2.1-Turbo-INT8.json) - Turbo INT8-ConvRot, 8 steps
 
 ## Performance (Strix Halo)
 
@@ -118,17 +119,3 @@ Serve over HTTP with the web UI (open <http://localhost:8000/>):
 For every flag (size, steps, seed, multi-image references, KV cache, LoRAs,
 upscaling, post-processing), see the [CLI reference](../cli.md) and the
 [HTTP API reference](../api.md).
-
-## Schedule presets
-
-The web UI's **Schedule** dropdown replaces the step count with a hand-picked sigma
-grid, for the turbo recipes the community ships:
-
-| Schedule | Steps |
-|---|---|
-| `Pruna Image 2.1 8 steps` | 8 |
-| `Pruna Image 2.1 5 steps` | 5 |
-| `Viggle Turbo` | 6 |
-
-They go over the wire as [`sigmas`](../api.md#custom-sigmas), so the same grids can be
-posted to `/text2image` / `/edit` by hand.
