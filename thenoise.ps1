@@ -6,7 +6,10 @@
 # directly from a terminal:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File thenoise.ps1 [args...]
 # ---------------------------------------------------------------------------
-param([Parameter(ValueFromRemainingArguments = $true)]$ForwardArgs)
+[CmdletBinding(PositionalBinding=$false)]
+param(
+  [Alias('-out', 'o')][string]$Out,
+  [Parameter(ValueFromRemainingArguments = $true)]$ForwardArgs)
 
 $ErrorActionPreference = "Stop"
 
@@ -392,5 +395,10 @@ $env:TORCH_COMPILE_DISABLE = "1"
 $env:TORCHDYNAMO_DISABLE = "1"
 
 # ---- 6. Launch the project, forwarding all arguments ----------------------
+
+if (-not [string]::IsNullOrEmpty($Out)) {
+  $ForwardArgs += "--out"
+  $ForwardArgs += $Out
+}
 & $Py -m thenoise @ForwardArgs
 exit $LASTEXITCODE
