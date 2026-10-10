@@ -11,8 +11,8 @@ default.
 
 - Text-to-image **and editing** (one DiT, both jobs)
 - Reference-latent **KV cache** — exact, enabled by default
-- int8-convrot variant available (~17 GB instead of ~32 GB total)
-- Built-in defaults: **28 steps, guidance 1.0, euler**
+- int8-convrot variant available (~16 GB instead of ~30 GB total)
+- Built-in defaults: **8 steps, guidance 1.0, euler**
 
 > Commands below assume a dev checkout (`./thenoise.sh`, `.venv/bin/python`).
 > On a [portable bundle](../setup.md) use `./bin/thenoise` and
@@ -23,22 +23,22 @@ default.
 | Spec | Data |
 |---|---|
 | Architecture | Single-stream DiT (flow matching, causal text/reference prefix) |
-| Download size | ~32 GB (bf16) · ~17 GB (int8-convrot) |
+| Download size | ~30 GB (bf16) · ~16 GB (int8-convrot) |
 | VAE | Wan 2.2-layout 64-ch/16× RGBA VAE (never quantized) |
 | Text encoder | Qwen3-VL-8B (LM *and* vision tower) |
 | Editing | ✓ |
 | KV cache | ✓ (exact, on by default) |
-| Default settings | 1024×1024, 28 steps, guidance 1.0, euler |
+| Default settings | 1024×1024, 8 steps (Turbo), guidance 1.0, euler |
 
 ## Lemonade recipes
 
 Ready-made [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends)
 recipes for this model - each pins the checkpoints and the generation defaults:
 
-- [Qwen-Image-2.1.json](../../recipes/qwen-image2.1/Qwen-Image-2.1.json) - BF16, 28 steps
-- [Qwen-Image-2.1-INT8.json](../../recipes/qwen-image2.1/Qwen-Image-2.1-INT8.json) - INT8-ConvRot, 28 steps
 - [Qwen-Image-2.1-Turbo.json](../../recipes/qwen-image2.1/Qwen-Image-2.1-Turbo.json) - BF16, Turbo, 8 steps
 - [Qwen-Image-2.1-Turbo-INT8.json](../../recipes/qwen-image2.1/Qwen-Image-2.1-Turbo-INT8.json) - Turbo INT8-ConvRot, 8 steps
+- [Qwen-Image-2.1.json](../../recipes/qwen-image2.1/Qwen-Image-2.1.json) - BF16, 28 steps
+- [Qwen-Image-2.1-INT8.json](../../recipes/qwen-image2.1/Qwen-Image-2.1-INT8.json) - INT8-ConvRot, 28 steps
 
 ## Performance (Strix Halo)
 
@@ -71,12 +71,18 @@ BF16, 1024×768, ViggleAI Turbo LoRA:
 .venv/bin/python scripts/download.py --model qwen-image-2.1
 ```
 
-Fetches the bf16 DiT (~14 GB), the Qwen3-VL-8B text encoder (~17.5 GB) and the
+Fetches the Turbo DiT (~14 GB), the Qwen3-VL-8B text encoder (~17.5 GB) and the
 VAE (~0.7 GB). Options:
 
 ```bash
-# int8-convrot DiT AND text encoder instead (~17 GB total)
+# Turbo int8-convrot DiT + int8 text encoder (~16 GB total)
 .venv/bin/python scripts/download.py --model qwen-image-2.1 --int8-convrot
+
+# Base (non-Turbo) DiT instead of Turbo
+.venv/bin/python scripts/download.py --model qwen-image-2.1 --variant base
+
+# Base int8-convrot DiT AND text encoder instead
+.venv/bin/python scripts/download.py --model qwen-image-2.1 --variant base --int8-convrot
 ```
 
 Everything lands in `./models/qwen_image21/...`.
@@ -87,9 +93,9 @@ Generate:
 
 ```bash
 ./thenoise.sh generate \
-  --dit ./models/qwen_image21/diffusion_models/qwen_image_2.1_bf16.safetensors \
+  --dit ./models/qwen_image21/diffusion_models/qwen_image_2.1_turbo_bf16.safetensors \
   --vae ./models/qwen_image21/vae/qwen_image_2.1_vae_bf16.safetensors \
-  --text-encoder ./models/qwen_image21/text_encoders/qwen3vl_8b_bf16.safetensors \
+  --text-encoder ./models/qwen_image21/text_encoders/qwen3vl_8b_int8_convrot.safetensors \
   --prompt "a bioluminescent forest at night" \
   --out forest.png
 ```
@@ -98,9 +104,9 @@ Edit (`--image` is repeatable; the KV cache is on by default for this model):
 
 ```bash
 ./thenoise.sh edit \
-  --dit ./models/qwen_image21/diffusion_models/qwen_image_2.1_bf16.safetensors \
+  --dit ./models/qwen_image21/diffusion_models/qwen_image_2.1_turbo_bf16.safetensors \
   --vae ./models/qwen_image21/vae/qwen_image_2.1_vae_bf16.safetensors \
-  --text-encoder ./models/qwen_image21/text_encoders/qwen3vl_8b_bf16.safetensors \
+  --text-encoder ./models/qwen_image21/text_encoders/qwen3vl_8b_int8_convrot.safetensors \
   --image fox.png \
   --prompt "a fox wearing a red scarf" \
   --out fox_edited.png
@@ -110,9 +116,9 @@ Serve over HTTP with the web UI (open <http://localhost:8000/>):
 
 ```bash
 ./thenoise.sh serve \
-  --dit ./models/qwen_image21/diffusion_models/qwen_image_2.1_bf16.safetensors \
+  --dit ./models/qwen_image21/diffusion_models/qwen_image_2.1_turbo_bf16.safetensors \
   --vae ./models/qwen_image21/vae/qwen_image_2.1_vae_bf16.safetensors \
-  --text-encoder ./models/qwen_image21/text_encoders/qwen3vl_8b_bf16.safetensors \
+  --text-encoder ./models/qwen_image21/text_encoders/qwen3vl_8b_int8_convrot.safetensors \
   --host 127.0.0.1 --port 8000
 ```
 

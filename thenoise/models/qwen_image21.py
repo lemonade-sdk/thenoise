@@ -66,7 +66,7 @@ class QwenImage21Model(DiffusionModel):
 
     DEFAULT_PREFS = {
         **DiffusionModel.DEFAULT_PREFS,
-        "steps": 28,
+        "steps": 8,
         "guidance_scale": 1.0,
         "sampler": "euler",
         "ref_method": "index_timestep_zero",

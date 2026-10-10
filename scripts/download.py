@@ -19,7 +19,7 @@ Models:
   ming-image      Ming-Image 0.1 (Design)
                   https://huggingface.co/Comfy-Org/Ming-Image
   qwen-image      Qwen-Image / Qwen-Image-Edit (latest dated checkpoints)
-  qwen-image-2.1  Qwen-Image 2.1 (t2i + edit in one DiT)
+  qwen-image-2.1  Qwen-Image 2.1 (t2i + edit in one DiT; Turbo by default)
                   https://huggingface.co/Comfy-Org/Qwen-Image-2.1
   mage-flow       Microsoft Mage-Flow (t2i + edit; base / RL / turbo)
                   https://huggingface.co/Comfy-Org/Mage-Flow
@@ -42,6 +42,8 @@ Usage:
     python scripts/download.py --model ming-image --int8-convrot
     python scripts/download.py --model qwen-image --edit-only
     python scripts/download.py --model qwen-image-2.1
+    python scripts/download.py --model qwen-image-2.1 --variant base
+    python scripts/download.py --model qwen-image-2.1 --variant base --int8-convrot
     python scripts/download.py --model mage-flow
     python scripts/download.py --model mage-flow --variant base
     python scripts/download.py --model mage-flow --int8-convrot --edit-only
@@ -205,18 +207,35 @@ def _qwen_image_jobs(args: argparse.Namespace) -> list[Artifact]:
 
 
 def _qwen_image_21_jobs(args: argparse.Namespace) -> list[Artifact]:
-    """Qwen-Image 2.1: DiT + Qwen3-VL-8B TE + VAE (VAE is never quantized)."""
+    """Qwen-Image 2.1: DiT (Turbo by default, or base) + Qwen3-VL-8B TE + VAE.
+
+    The Turbo checkpoint is the reference model. Both Turbo recipes (bf16 and
+    int8-convrot) pair the DiT with the int8-convrot text encoder; the base
+    variant follows the --int8-convrot flag for both DiT and text encoder.
+    """
     repo = "Comfy-Org/Qwen-Image-2.1"
-    if args.int8_convrot:
-        return [
-            ("dit", repo, "diffusion_models/qwen_image_2.1_int8_convrot.safetensors"),
-            ("vae", repo, "vae/qwen_image_2.1_vae_bf16.safetensors"),
-            ("text_encoder", repo, "text_encoders/qwen3vl_8b_int8_convrot.safetensors"),
-        ]
+    if args.variant == "turbo":
+        dit = (
+            "diffusion_models/qwen_image_2.1_turbo_int8_convrot.safetensors"
+            if args.int8_convrot
+            else "diffusion_models/qwen_image_2.1_turbo_bf16.safetensors"
+        )
+        te = "text_encoders/qwen3vl_8b_int8_convrot.safetensors"
+    else:
+        dit = (
+            "diffusion_models/qwen_image_2.1_int8_convrot.safetensors"
+            if args.int8_convrot
+            else "diffusion_models/qwen_image_2.1_bf16.safetensors"
+        )
+        te = (
+            "text_encoders/qwen3vl_8b_int8_convrot.safetensors"
+            if args.int8_convrot
+            else "text_encoders/qwen3vl_8b_bf16.safetensors"
+        )
     return [
-        ("dit", repo, "diffusion_models/qwen_image_2.1_bf16.safetensors"),
+        ("dit", repo, dit),
+        ("text_encoder", repo, te),
         ("vae", repo, "vae/qwen_image_2.1_vae_bf16.safetensors"),
-        ("text_encoder", repo, "text_encoders/qwen3vl_8b_bf16.safetensors"),
     ]
 
 
@@ -316,8 +335,11 @@ MODELS: dict[str, ModelSpec] = {
     ),
     "qwen-image-2.1": ModelSpec(
         "qwen-image-2.1", "./models/qwen_image21",
-        "Qwen-Image 2.1 (t2i + edit in one DiT)",
+        "Qwen-Image 2.1 (t2i + edit in one DiT; Turbo by default)",
         _qwen_image_21_jobs,
+        variant_supported=True,
+        variant_choices=("turbo", "base"),
+        default_variant="turbo",
     ),
     "mage-flow": ModelSpec(
         "mage-flow", "./models/mage_flow",
@@ -352,7 +374,7 @@ def _epilog() -> str:
         "  python scripts/download.py --model ming-image",
         "  python scripts/download.py --model ming-image --int8-convrot",
         "  python scripts/download.py --model qwen-image --edit-only",
-        "  python scripts/download.py --model qwen-image-2.1 --int8-convrot",
+        "  python scripts/download.py --model qwen-image-2.1 --variant base --int8-convrot",
         "  python scripts/download.py --model mage-flow",
         "  python scripts/download.py --model mage-flow --variant base",
         "  python scripts/download.py --model mage-flow --int8-convrot --edit-only",
@@ -385,6 +407,7 @@ def main() -> None:
             "anima: DiT variant name (default: turbo-v1.0; others include base-v1.0, "
             "aesthetic-v1.1) | zimage: turbo | base (default: turbo) | "
             "klein: 4b | 4b-base | 9b | 9b-base (default: 4b) | "
+            "qwen-image-2.1: turbo | base (default: turbo) | "
             "mage-flow: turbo | rl | base (default: turbo)"
         ),
     )
