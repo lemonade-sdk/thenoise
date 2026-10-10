@@ -70,6 +70,7 @@ class QwenImage21Model(DiffusionModel):
         "guidance_scale": 1.0,
         "sampler": "euler",
         "ref_method": "index_timestep_zero",
+        "sigmas": [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568]
     }
 
     CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": True}

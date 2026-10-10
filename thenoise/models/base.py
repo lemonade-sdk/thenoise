@@ -97,6 +97,7 @@ class DiffusionModel(ABC):
         "guidance_scale": 0.0,
         "sampler": "er_sde",
         "ref_method": "index",
+        "sigmas": None
     }
 
     UPSCALE_SCALE = 2

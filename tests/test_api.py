@@ -240,6 +240,15 @@ def test_edit_passes_sigmas_through():
     assert runtime._pipeline.edit_requests[-1].sigmas == [1.0, 0.0]
 
 
+def test_text2image_passes_empty_sigmas_through(client, tmp_path):
+    """``[]`` is a value, not "unset": pydantic must not drop it on the way in."""
+    runtime = _runtime(tmp_path)
+    res = client(runtime).post("/text2image", json={"prompt": "x", "sigmas": []})
+
+    assert res.status_code == 200
+    assert runtime._pipeline.requests[-1].sigmas == []
+
+
 def test_text2image_returns_400_for_an_invalid_field_value(client):
     """A rejected sigma grid (or any invalid value) is the caller's error, not ours."""
     runtime = _runtime(

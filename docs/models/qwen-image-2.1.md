@@ -12,7 +12,7 @@ default.
 - Text-to-image **and editing** (one DiT, both jobs)
 - Reference-latent **KV cache** — exact, enabled by default
 - int8-convrot variant available (~16 GB instead of ~30 GB total)
-- Built-in defaults: **8 steps, guidance 1.0, euler**
+- Built-in defaults: the **Turbo sigma grid** (8 steps), guidance 1.0, euler
 
 > Commands below assume a dev checkout (`./thenoise.sh`, `.venv/bin/python`).
 > On a [portable bundle](../setup.md) use `./bin/thenoise` and
@@ -28,7 +28,7 @@ default.
 | Text encoder | Qwen3-VL-8B (LM *and* vision tower) |
 | Editing | ✓ |
 | KV cache | ✓ (exact, on by default) |
-| Default settings | 1024×1024, 8 steps (Turbo), guidance 1.0, euler |
+| Default settings | 1024×1024, Turbo sigma grid (8 steps), guidance 1.0, euler |
 
 ## Lemonade recipes
 
@@ -125,3 +125,7 @@ Serve over HTTP with the web UI (open <http://localhost:8000/>):
 For every flag (size, steps, seed, multi-image references, KV cache, LoRAs,
 upscaling, post-processing), see the [CLI reference](../cli.md) and the
 [HTTP API reference](../api.md).
+
+The Turbo grid is only a default: `--steps` (or an API `steps`) drops it and runs the
+model's own shifted schedule, so the non-Turbo checkpoints are unaffected. Use
+`"sigmas": []` to drop it while keeping the step count automatic.
