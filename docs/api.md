@@ -54,7 +54,7 @@ index_timestep_zero` (see [`/edit`](#post-edit)).
 | `width` | `int` | model default | Output width in pixels |
 | `height` | `int` | model default | Output height in pixels |
 | `steps` | `int` | model default | Number of denoising steps |
-| `sigmas` | `float[]` | `null` | Custom sigma grid, replacing `steps` (see [Custom sigmas](#custom-sigmas)) |
+| `sigmas` | `float[]` | model default | Custom sigma grid, replacing `steps` (see [Custom sigmas](#custom-sigmas)) |
 | `guidance_scale` | `float` | model default | CFG scale (≤ 1.0 disables CFG) |
 | `seed` | `int` | random | Random seed (`-1` for random) |
 | `upscale` | `bool` | `false` | 2× latent-space upscale with refine denoise |
@@ -94,15 +94,15 @@ resolution-dependent shift is applied on top.
   always `len(sigmas) - 1`.
 - The grid must be strictly decreasing and inside `[0.0, 1.0]`; anything else is
   rejected with **HTTP 400**.
-- `sigmas` wins over `steps` and over any checkpoint marker. When the two disagree the
-  server logs a warning and runs the grid.
+- `sigmas` wins over `steps` in the same request. When the two disagree
+  the server logs a warning and runs the grid.
+- `sigmas: []` switches a default grid off explicitly.
 - The upscale refine pass is unaffected: it keeps its own short, low-strength
   sub-schedule.
 - The resolved grid (terminal `0.0` included) is recorded in the PNG `generation_data`
   chunk.
 
-There is no CLI flag for `sigmas`. The web UI exposes the presets it knows about as
-a **Schedule** dropdown for the models they were tuned for (see the model's page).
+There is no CLI flag for `sigmas`: it is an API-only field.
 
 ```bash
 curl -s localhost:8000/text2image \

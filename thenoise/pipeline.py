@@ -78,19 +78,24 @@ class _ResolvedRequest:
     ref_method: str
 
 
-def _normalize_sigmas(values: Sequence[float]) -> Tuple[float, ...]:
-    """Validate a user sigma list, returning the full grid (terminal 0 included).
+def _normalize_sigmas(
+    values: Optional[Sequence[float]],
+) -> Optional[Tuple[float, ...]]:
+    """Validate a sigma grid, returning the full grid (terminal 0 included).
 
-    The values decrease from 1.0 toward 0.0 and the trailing 0.0 is implied, so
-    ``len(grid) - 1`` is the step count. Strictly decreasing keeps the ER-SDE
-    solver's ``logit(sigma)`` and ``1/(1-sigma)`` finite.
+    ``None`` and ``[]`` both mean "no grid": the model's own schedule runs. Values
+    decrease toward 0.0 and the trailing 0.0 is implied, so ``len(grid) - 1`` is the
+    step count. Strictly decreasing keeps the ER-SDE solver's ``logit(sigma)`` and
+    ``1/(1-sigma)`` finite.
     """
-    if not values:
-        raise ValueError("sigmas must not be empty")
+    if values is None:
+        return None
     try:
         grid = [float(s) for s in values]
     except (TypeError, ValueError):
         raise ValueError("sigmas must be a list of numbers") from None
+    if not grid:
+        return None
     for s in grid:
         if not math.isfinite(s) or not 0.0 <= s <= 1.0:
             raise ValueError(f"sigmas must be finite values in [0.0, 1.0], got {s!r}")
@@ -440,6 +445,25 @@ class PipelineController:
         effective_sampler = model.pref("sampler", request.sampler)
         ref_method = model.pref("ref_method", request.ref_method)
 
+        sigmas = _normalize_sigmas(model.pref("sigmas", request.sigmas))
+        if sigmas is not None:
+            sigma_steps = len(sigmas) - 1
+            if request.steps is None or request.steps == sigma_steps:
+                steps = sigma_steps
+            elif request.sigmas is not None:
+                logger.warning(
+                    "sigmas=%s overrides steps=%s: running %d steps",
+                    sigmas, request.steps, sigma_steps,
+                )
+                steps = sigma_steps
+            else:
+                logger.info(
+                    "steps=%s drops the inherited %d-step sigma grid: running the "
+                    "model schedule",
+                    request.steps, sigma_steps,
+                )
+                sigmas = None
+
         if request.kv_cache is None:
             kv_cache = bool(
                 is_edit
@@ -448,16 +472,6 @@ class PipelineController:
             )
         else:
             kv_cache = request.kv_cache
-
-        sigmas: Optional[Tuple[float, ...]] = None
-        if request.sigmas is not None:
-            sigmas = _normalize_sigmas(request.sigmas)
-            steps = len(sigmas) - 1
-            if request.steps is not None and request.steps != steps:
-                logger.warning(
-                    "sigmas=%s overrides steps=%s: running %d steps",
-                    sigmas, request.steps, steps,
-                )
 
         pixel_upscaler = request.pixel_upscaler
         if pixel_upscaler and self._pixel_upscalers.upscaler_dir:

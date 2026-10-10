@@ -348,10 +348,15 @@ def test_normalize_sigmas_returns_the_full_grid(values, grid):
     assert _normalize_sigmas(values) == grid
 
 
+def test_normalize_sigmas_none_or_empty_is_no_grid():
+    """``None`` is "unset", ``[]`` is "switch the grid off"."""
+    assert _normalize_sigmas(None) is None
+    assert _normalize_sigmas([]) is None
+
+
 @pytest.mark.parametrize(
     "values",
     [
-        [],
         [0.0],
         [0.25, 0.75],
         [0.5, 0.5],
@@ -364,7 +369,7 @@ def test_normalize_sigmas_returns_the_full_grid(values, grid):
         "1.0, 0.5",
     ],
     ids=[
-        "empty", "only-zero", "ascending", "repeat", "repeat-one", "above-one",
+        "only-zero", "ascending", "repeat", "repeat-one", "above-one",
         "negative", "nan", "inf", "non-numeric", "string-not-list",
     ],
 )
@@ -406,6 +411,63 @@ def test_resolve_sigmas_agreeing_with_steps_stay_quiet(caplog):
     assert caplog.text == ""
 
 
+class _GridModel(StubModel):
+    """An adapter shipping a fixed sigma grid as a default (Qwen-Image 2.1 Turbo)."""
+
+    DEFAULT_PREFS = {
+        **StubModel.DEFAULT_PREFS,
+        "steps": 4,
+        "sigmas": [1.0, 0.75, 0.5, 0.25],
+    }
+
+
+_GRID = (1.0, 0.75, 0.5, 0.25, 0.0)
+
+
+def test_resolve_uses_the_model_default_sigma_grid():
+    r = _controller(_GridModel())._resolve_pipeline(_request(), is_edit=False)
+
+    assert r.sigmas == _GRID
+    assert r.steps == 4
+
+
+def test_resolve_explicit_steps_drop_an_inherited_sigma_grid(caplog):
+    """An inherited grid is a default, not a mandate: a pinned step count wins."""
+    caplog.set_level(logging.WARNING, logger="thenoise.pipeline")
+    r = _controller(_GridModel())._resolve_pipeline(_request(steps=6), is_edit=False)
+
+    assert r.sigmas is None
+    assert r.steps == 6  # not 4: the discarded grid must not decide
+    assert caplog.text == ""
+
+
+def test_resolve_inherited_grid_matching_the_request_steps_stays_quiet(caplog):
+    caplog.set_level(logging.WARNING, logger="thenoise.pipeline")
+    r = _controller(_GridModel())._resolve_pipeline(_request(steps=4), is_edit=False)
+
+    assert (r.sigmas, r.steps) == (_GRID, 4)
+    assert caplog.text == ""
+
+
+def test_resolve_empty_sigmas_switch_off_a_model_default_grid():
+    """``sigmas: []`` is the explicit "no grid" answer, at any step count."""
+    auto = _controller(_GridModel())._resolve_pipeline(_request(sigmas=[]), is_edit=False)
+    assert (auto.sigmas, auto.steps) == (None, 4)
+
+    pinned = _controller(_GridModel())._resolve_pipeline(
+        _request(sigmas=[], steps=6), is_edit=False
+    )
+    assert (pinned.sigmas, pinned.steps) == (None, 6)
+
+
+def test_resolve_request_grid_replaces_a_model_default_grid():
+    r = _controller(_GridModel())._resolve_pipeline(
+        _request(sigmas=[1.0, 0.5]), is_edit=False
+    )
+
+    assert (r.sigmas, r.steps) == ((1.0, 0.5, 0.0), 2)
+
+
 def test_generate_with_sigmas_bypasses_the_model_schedule():
     controller = _controller()
     controller.generate(_request(sigmas=[1.0, 0.6, 0.2]))
@@ -420,6 +482,22 @@ def test_generate_without_sigmas_still_uses_the_model_schedule():
 
     assert controller.model.calls["schedule"] == 1
     assert controller.model.calls["denoise_step"] == 3
+
+
+def test_generate_runs_a_model_default_grid_without_the_model_schedule():
+    controller = _controller(_GridModel())
+    controller.generate(_request())
+
+    assert controller.model.calls["schedule"] == 0
+    assert controller.model.calls["denoise_step"] == 4
+
+
+def test_generate_with_pinned_steps_falls_back_to_the_model_schedule():
+    controller = _controller(_GridModel())
+    controller.generate(_request(steps=5))
+
+    assert controller.model.calls["schedule"] == 1
+    assert controller.model.calls["denoise_step"] == 5
 
 
 def test_custom_sigmas_hand_denoise_step_a_timestep_tensor():

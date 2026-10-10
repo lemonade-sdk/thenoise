@@ -94,6 +94,13 @@ def test_pref_checkpoint_beats_default_and_request_beats_checkpoint():
     assert model.pref("ref_method", "index") == "index"  # the request still wins
 
 
+def test_pref_treats_an_empty_grid_as_a_value():
+    """An empty grid is a value: a falsy request field is not the same as unset."""
+    model = StubModel()
+    assert model.pref("sigmas") is None
+    assert model.pref("sigmas", []) == []
+
+
 def test_pref_rejects_unknown_names():
     """Asking for an unregistered preference is a bug, not a silent default."""
     with pytest.raises(KeyError, match="unknown preference"):

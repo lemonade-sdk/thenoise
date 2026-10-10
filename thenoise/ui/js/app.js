@@ -107,9 +107,6 @@ function applySettings(prefix, meta) {
   if (meta.pixel_upscaler) {
     $(p + 'pixel_upscaler').value = meta.pixel_upscaler;
   }
-  const schedule = $(p + 'schedule');
-  if (schedule) schedule.value = scheduleNameFor(meta.sigmas);
-  syncSchedule(p);
   updateUpscaleMax(p);
 }
 
@@ -277,7 +274,6 @@ async function applyModelState() {
       hasModel = (data.models || []).length > 0;
       caps = data.capabilities || {};
       rgba = (data.pixel_channels || 3) > 3;
-      currentModel = (data.models || [])[0] || null;
     }
   } catch (e) { /* assume a model is present on network errors */ }
   const capable = (name) => caps === null || !!caps[name];
@@ -296,29 +292,8 @@ async function applyModelState() {
   kv.disabled = !hasKvCache;
   if (!hasKvCache) kv.value = '';
   kv.title = hasKvCache ? '' : 'the loaded model has no reference-latent KV cache';
-  renderSchedule();
 }
 applyModelState();
-
-function renderSchedule() {
-  const presets = schedulesFor(currentModel);
-  const names = Object.keys(presets);
-  for (const p of ['', 'edit_']) {
-    const sel = $(p + 'schedule');
-    $(p + 'schedule_field').classList.toggle('hidden', names.length === 0);
-    const keep = sel.value;
-    fillSelect(sel, names);
-    const auto = document.createElement('option');
-    auto.value = '';
-    auto.textContent = 'auto';
-    sel.insertBefore(auto, sel.firstChild);
-    sel.value = presets[keep] ? keep : '';
-    syncSchedule(p);
-  }
-}
-
-['', 'edit_'].forEach(p =>
-  $(p + 'schedule').addEventListener('change', () => syncSchedule(p)));
 
 $('generate').addEventListener('click', () => {
   if (!validateDims('')) return;

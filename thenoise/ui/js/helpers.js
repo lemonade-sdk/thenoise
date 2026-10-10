@@ -306,59 +306,7 @@ function validateDims(prefix) {
   return true;
 }
 
-const SIGMA_SCHEDULES = {
-  qwen_image21: {
-    'Pruna Image 2.1 8 steps': [
-      1, 0.933333333, 0.857142857, 0.769230769, 0.666666667, 0.545454545, 0.4,
-      0.222222222,
-    ],
-    'Pruna Image 2.1 5 steps': [1, 0.94, 0.857142857, 0.666666667, 0.4],
-    'Viggle Turbo': [1.0, 0.9375, 0.875, 0.75, 0.5, 0.25],
-  },
-};
-
-let currentModel = null;
-
-function schedulesFor(model) {
-  return (model && SIGMA_SCHEDULES[model]) || {};
-}
-
-function selectedSigmas(prefix) {
-  const sel = $(prefix + 'schedule');
-  return (sel && sel.value && schedulesFor(currentModel)[sel.value]) || null;
-}
-
-function scheduleNameFor(sigmas) {
-  if (!Array.isArray(sigmas) || !sigmas.length) return '';
-  const grid = sigmas[sigmas.length - 1] === 0 ? sigmas.slice(0, -1) : sigmas;
-  const presets = schedulesFor(currentModel);
-  for (const name of Object.keys(presets)) {
-    const values = presets[name];
-    if (values.length === grid.length && values.every((v, i) => v === grid[i])) {
-      return name;
-    }
-  }
-  return '';
-}
-
-function syncSchedule(prefix) {
-  const sel = $(prefix + 'schedule');
-  const steps = $(prefix + 'steps');
-  if (!sel || !steps) return;
-  const grid = selectedSigmas(prefix);
-  $(prefix + 'schedule_hint').textContent = grid ? grid.length + ' steps' : '';
-  if (grid) {
-    if (!steps.disabled) steps.dataset.auto = steps.value;
-    steps.value = grid.length;
-    steps.disabled = true;
-  } else if (steps.disabled) {
-    steps.disabled = false;
-    steps.value = steps.dataset.auto || '';
-  }
-}
-
 function collectSettings(prefix, extra) {
-  const sigmas = selectedSigmas(prefix);
   const body = {
     prompt: $(prefix + 'prompt').value,
     negative_prompt: $(prefix + 'negative_prompt').value,
@@ -371,11 +319,9 @@ function collectSettings(prefix, extra) {
     lora_specs: parseLora($(prefix + 'lora_specs').value),
   };
   for (const f of ['width', 'height', 'steps', 'seed']) {
-    if (f === 'steps' && sigmas) continue; // the grid owns the step count
     const v = $(prefix + f).value;
     if (v !== '') body[f] = parseInt(v, 10);
   }
-  if (sigmas) body.sigmas = sigmas;
   const g = $(prefix + 'guidance_scale').value;
   if (g !== '') body.guidance_scale = parseFloat(g);
   const samplerVal = $(prefix + 'sampler').value;
