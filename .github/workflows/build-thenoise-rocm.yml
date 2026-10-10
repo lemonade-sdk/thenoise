@@ -119,8 +119,8 @@ jobs:
           # emit the whole runner spec from one place and let the jobs fromJSON
           # it. The self-hosted form keeps the original group+labels semantics.
           if [ "$SELF_HOSTED" = "true" ]; then
-            echo 'linux_runner={"group":"dev_lab","labels":["self-hosted","Linux"]}' >> "$GITHUB_OUTPUT"
-            echo 'windows_runner={"group":"dev_lab","labels":["self-hosted","Windows"]}' >> "$GITHUB_OUTPUT"
+            echo 'linux_runner={"labels":["self-hosted","Linux", "devlab-dispatch"]}' >> "$GITHUB_OUTPUT"
+            echo 'windows_runner={"labels":["self-hosted","Windows", "devlab-dispatch"]}' >> "$GITHUB_OUTPUT"
           else
             echo 'linux_runner="ubuntu-24.04"' >> "$GITHUB_OUTPUT"
             echo 'windows_runner="windows-2025"' >> "$GITHUB_OUTPUT"
@@ -246,9 +246,7 @@ jobs:
   # publish-release).
   qualify-linux:
     needs: [prepare-matrix, build-linux]
-    runs-on:
-      group: dev_lab
-      labels: [self-hosted, Linux]
+    runs-on: [self-hosted, Linux, devlab-dispatch, strix-halo]
     # Qualification always takes the dev_lab GPU box, independent of the
     # self_hosted input: builds and qualification are decoupled on purpose
     # (and a gfx1151 iGPU cannot be virtualised).
@@ -329,9 +327,7 @@ jobs:
   # disabled on Windows (no Triton), so the generation runs in eager mode.
   qualify-windows:
     needs: [prepare-matrix, build-windows]
-    runs-on:
-      group: dev_lab
-      labels: [self-hosted, Windows]
+    runs-on: [self-hosted, Linux, devlab-dispatch, strix-halo]
     if: |
       needs.prepare-matrix.outputs.skip_qualification != 'true' &&
       contains(needs.prepare-matrix.outputs.gfx_targets, 'gfx1151')
