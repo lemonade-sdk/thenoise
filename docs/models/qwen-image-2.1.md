@@ -42,10 +42,10 @@ recipes for this model - each pins the checkpoints and the generation defaults:
 
 ## Performance (Strix Halo)
 
-BF16, 1024×768, ViggleAI Turbo LoRA:
+INT8-ConvRot, Turbo, 768x1024:
 
-- Generate @ 6 steps : **~11.6 s**
-- Edit @ 6 steps: ~13.1 s
+- Generate @ 8 steps : **~13.2 s**
+- Edit @ 8 steps: ~16.2 s
 
 ## Examples
 
