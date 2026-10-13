@@ -447,6 +447,19 @@ def test_preprocessors_lists_kinds_and_defaults():
     assert res == {"preprocessors": {"canny": ["canny"]}, "defaults": {"canny": "canny"}}
 
 
+def test_preprocessors_list_discovered_depth_checkpoints(tmp_path):
+    """A preprocessor dir on disk widens what the dropdowns offer."""
+    directory = tmp_path / "depth_anything_v2_small"
+    directory.mkdir()
+    (directory / "config.json").write_text('{"model_type": "depth_anything"}')
+    runtime = Runtime(Settings(preprocessor_dir=str(tmp_path)))
+    res = _endpoint(create_app(runtime), "/preprocessors")()
+    assert res == {
+        "preprocessors": {"canny": ["canny"], "depth": ["depth_anything_v2_small"]},
+        "defaults": {"canny": "canny", "depth": "depth_anything_v2_small"},
+    }
+
+
 # ------------------------------------------------------------------- /preprocess
 
 
@@ -540,6 +553,19 @@ def test_preprocess_returns_400_for_undecodable_image(client):
     assert res.status_code == 400
 
 
+def test_preprocess_missing_depth_weights_names_the_download(client, tmp_path):
+    """A discovered kind whose checkpoint is incomplete answers 400 with the remedy."""
+    directory = tmp_path / "depth_anything_v2_small"
+    directory.mkdir()
+    (directory / "config.json").write_text('{"model_type": "depth_anything"}')
+    runtime = Runtime(Settings(preprocessor_dir=str(tmp_path)))
+    res = client(runtime).post(
+        "/preprocess", json={"image_b64": _edged_png_b64(), "type": "depth"}
+    )
+    assert res.status_code == 400
+    assert "scripts/download.py --model preprocess" in res.text
+
+
 def test_preprocess_backend_failure_is_500(client, monkeypatch):
     runtime = _cpu_runtime()
 
@@ -574,7 +600,7 @@ def test_preprocess_backend_failure_is_500(client, monkeypatch):
         # ``image_b64`` is required on /preprocess.
         ("/preprocess", {"type": "canny"}),
         # ``type`` only accepts the implemented control-map kinds.
-        ("/preprocess", {"image_b64": "abc", "type": "depth"}),
+        ("/preprocess", {"image_b64": "abc", "type": "lineart"}),
     ],
     ids=["bad-out", "missing-prompt", "missing-upscaler", "missing-image",
          "sigmas-string", "sigmas-not-numbers", "missing-map-image", "unknown-map-type"],

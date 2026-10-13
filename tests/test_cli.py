@@ -27,12 +27,14 @@ def test_cli_serve_parses_model_paths_and_defaults(parse):
         "serve", *PATHS,
         "--lora-dir", "/path/to/loras",
         "--upscaler-dir", "/path/to/upscalers",
+        "--preprocessor-dir", "/path/to/preprocessors",
         "--host", "0.0.0.0", "--port", "9000", "--device", "hip",
     ])
     assert args.command == "serve"
     assert args.dit == "d.safetensors"
     assert args.lora_dir == "/path/to/loras"
     assert args.upscaler_dir == "/path/to/upscalers"
+    assert args.preprocessor_dir == "/path/to/preprocessors"
     assert (args.host, args.port, args.device) == ("0.0.0.0", 9000, "hip")
 
     # A bare ``serve`` still parses: the server runs model-free (upscale only).
@@ -40,6 +42,7 @@ def test_cli_serve_parses_model_paths_and_defaults(parse):
     assert (bare.host, bare.port, bare.device) == ("127.0.0.1", 8000, "cuda")
     assert bare.dit is None and bare.vae is None and bare.text_encoder is None
     assert bare.upscaler_dir == "" and bare.offload_device == ""
+    assert bare.preprocessor_dir == ""
     # A one-shot server has no pixel-upscaler flag (it takes a directory instead).
     assert not hasattr(bare, "pixel_upscaler")
 
@@ -158,12 +161,16 @@ def test_cli_preprocess_parses_its_flags(parse):
         "--input", "in.png", "--type", "canny", "--type", "depth",
         "--model", "depth-anything-v2-base",
         "--canny-low", "30", "--canny-high", "60", "--canny-thickness", "2",
+        "--depth-invert", "--depth-colormap", "gray",
+        "--preprocessor-dir", "models/preprocessors",
         "--out", "map.png", "--device", "hip",
     ])
     assert args.command == "preprocess"
     assert (args.input, args.types) == ("in.png", ["canny", "depth"])
     assert args.model == "depth-anything-v2-base"
     assert (args.canny_low, args.canny_high, args.canny_thickness) == (30.0, 60.0, 2)
+    assert (args.depth_invert, args.depth_colormap) == (True, "gray")
+    assert args.preprocessor_dir == "models/preprocessors"
     assert (args.out, args.device, args.list) == ("map.png", "hip", False)
 
 
@@ -172,6 +179,7 @@ def test_cli_preprocess_defaults(parse):
     args = parse(["preprocess"])
     assert (args.input, args.types, args.model) == (None, None, "")
     assert (args.canny_low, args.canny_high, args.canny_thickness) == (100.0, 200.0, 1)
+    assert (args.depth_invert, args.depth_colormap) == (False, "gray")
     assert args.out == "out_control.png" and args.list is False
 
 

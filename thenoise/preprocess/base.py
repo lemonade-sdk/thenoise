@@ -16,10 +16,19 @@ class PreprocessOptions:
     """What a request asks of a kind. A kind with nothing to ask uses this as-is."""
 
 
+def scale_field(field: torch.Tensor) -> torch.Tensor:
+    """A ``[1, H, W]`` float field in ``[0, 1]`` -> ``[1, H, W]`` uint8 grey levels."""
+    return (field[:1].clamp(0.0, 1.0) * 255.0).round().to(torch.uint8)
+
+
+def uint8_to_pil(x: torch.Tensor) -> Image.Image:
+    """A ``[1, H, W]`` uint8 field -> 8-bit greyscale image."""
+    return Image.fromarray(x[0].cpu().numpy(), mode="L")
+
+
 def field_to_pil(field: torch.Tensor) -> Image.Image:
     """``[1, H, W]`` float field in ``[0, 1]`` -> 8-bit greyscale image."""
-    x = (field[:1].clamp(0.0, 1.0) * 255.0).round().to(torch.uint8).cpu().numpy()
-    return Image.fromarray(x[0], mode="L")
+    return uint8_to_pil(scale_field(field))
 
 
 class Preprocessor(ABC):
@@ -36,8 +45,9 @@ class Preprocessor(ABC):
     def __init__(self) -> None:
         self.device: Any = "cpu"
 
-    def load(self, device: Any) -> None:
-        """Put the weights on ``device``. Called once, under the inference lock."""
+    def load(self, device: Any, path: str | None = None) -> None:
+        """Put the weights on ``device``. Called once, under the inference lock.
+        ``path`` is the checkpoint directory a discoverable preprocessor loads from."""
         self.device = device
 
     def unload(self) -> None:
@@ -47,12 +57,12 @@ class Preprocessor(ABC):
     def detect(self, image: Image.Image, options: PreprocessOptions) -> Any:
         """Measure the control signal on the input image."""
 
-    def render(self, found: Any) -> Image.Image:
+    def render(self, found: Any, options: PreprocessOptions | None = None) -> Image.Image:
         """Paint what :meth:`detect` measured. Override to paint it differently."""
         return field_to_pil(found)
 
     def run(self, image: Image.Image, options: PreprocessOptions) -> Image.Image:
-        return self.render(self.detect(image, options))
+        return self.render(self.detect(image, options), options)
 
 
-__all__ = ["PreprocessOptions", "Preprocessor", "field_to_pil"]
+__all__ = ["PreprocessOptions", "Preprocessor", "field_to_pil", "scale_field", "uint8_to_pil"]

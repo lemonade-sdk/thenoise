@@ -321,13 +321,8 @@ def test_preprocess_is_model_free_and_maps_the_flags(fake_runtime, tmp_path):
     assert rt.preprocess.images[0].saved_path == ensure_png_extension("map")
 
 
-def test_each_type_gets_its_own_file(fake_runtime, tmp_path, monkeypatch):
-    """With more than one map requested every output is named after its type; the
-    second kind is a registry entry standing in for depth."""
-    from thenoise.preprocess.canny import CannyPreprocessor
-    from thenoise.preprocess.manager import REGISTRY
-
-    monkeypatch.setitem(REGISTRY, "depth", [CannyPreprocessor])
+def test_each_type_gets_its_own_file(fake_runtime, tmp_path):
+    """With more than one map requested every output is named after its type."""
     img_path = tmp_path / "in.png"
     Image.new("RGB", (64, 64)).save(img_path)
     run_preprocess(
@@ -355,8 +350,8 @@ def test_preprocess_without_input_or_type_explains_itself(fake_runtime):
 def test_preprocess_reports_an_unknown_type_as_an_exit(fake_runtime, tmp_path):
     img_path = tmp_path / "in.png"
     Image.new("RGB", (64, 64)).save(img_path)
-    with pytest.raises(SystemExit, match="no preprocessor for 'depth'"):
-        run_preprocess(_parse(["preprocess", "--input", str(img_path), "--type", "depth"]))
+    with pytest.raises(SystemExit, match="no preprocessor for 'lineart'"):
+        run_preprocess(_parse(["preprocess", "--input", str(img_path), "--type", "lineart"]))
 
 
 # ---------------------------------------------------------------- dispatch

@@ -13,6 +13,7 @@ const KIND_LABELS = {
 };
 const OPTION_LABELS = {
   low: 'Edge cutoff', high: 'Strong edge cutoff', thickness: 'Line width',
+  invert: 'Invert depth',
 };
 
 const kindLabel = kind => KIND_LABELS[kind]
@@ -22,11 +23,21 @@ function fillPreModels() {
   fillSelect($('p_model'), preAvailable[$('p_type').value] || []);
 }
 
+function showPreOptions() {
+  const type = $('p_type').value;
+  const methods = preAvailable[type] || [];
+  // A kind with one implementation needs no method picker.
+  $('p_model_field').classList.toggle('hidden', methods.length <= 1);
+  $('p_canny_opts').classList.toggle('hidden', type !== 'canny');
+  $('p_depth_opts').classList.toggle('hidden', type !== 'depth');
+}
+
 async function loadPreprocessors() {
   const data = await fetchJSON('/preprocessors');
   preAvailable = (data && data.preprocessors) || {};
   fillSelect($('p_type'), Object.keys(preAvailable), kindLabel);
   fillPreModels();
+  showPreOptions();
   $('p_run').disabled = preInputB64 === null || !Object.keys(preAvailable).length;
 }
 
@@ -69,7 +80,8 @@ function preRequest() {
   const body = {
     image_b64: preInputB64,
     type: type,
-    model: $('p_model').value || null,
+    // One method means there is nothing to choose: let the kind's default apply.
+    model: $('p_model_field').classList.contains('hidden') ? null : ($('p_model').value || null),
   };
   if (type === 'canny') {
     body.canny = {
@@ -78,11 +90,14 @@ function preRequest() {
       thickness: parseInt($('p_thickness').value, 10) || 1,
     };
   }
+  if (type === 'depth') {
+    body.depth = { invert: $('p_invert').checked, colormap: 'gray' };
+  }
   return body;
 }
 
 bindDropzone('p_dropzone', 'p_file', files => loadPreFile(files[0]));
-$('p_type').addEventListener('change', fillPreModels);
+$('p_type').addEventListener('change', () => { fillPreModels(); showPreOptions(); });
 
 $('p_run').addEventListener('click', () => {
   runWithBusy({

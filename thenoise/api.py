@@ -95,19 +95,32 @@ class CannyOptionsModel(BaseModel):
     thickness: int = 1
 
 
+class DepthOptionsModel(BaseModel):
+    """The depth request fields, mirroring :class:`DepthOptions` field for field."""
+
+    invert: bool = False
+    colormap: str = "gray"
+
+
 class PreprocessRequest(BaseModel):
     """Control-map extraction: image -> canny / depth / pose map, at the input's size.
     ``type`` lists only the kinds the engine implements; adding one widens the list.
     """
 
     image_b64: str
-    type: Literal["canny"]
+    type: Literal["canny", "depth"]
     model: Optional[str] = None  # implementation name; null = the kind's default
     canny: Optional[CannyOptionsModel] = None
+    depth: Optional[DepthOptionsModel] = None
     out: Literal["png", "json"] = "png"
 
-    def to_options(self) -> CannyOptions:
+    def to_options(self) -> "PreprocessOptions":
         """The request as the kind's option dataclass (same field names on both)."""
+        from thenoise.preprocess.base import PreprocessOptions
+        from thenoise.preprocess.depth import DepthOptions
+
+        if self.type == "depth":
+            return DepthOptions(**(self.depth or DepthOptionsModel()).model_dump())
         return CannyOptions(**(self.canny or CannyOptionsModel()).model_dump())
 
 

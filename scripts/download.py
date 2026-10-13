@@ -281,6 +281,22 @@ def _esrgan_jobs(args: argparse.Namespace) -> list[Artifact]:
     ]
 
 
+#: Depth-Anything-V2: (variant) -> huggingface repo, with the files a preprocessor dir
+#: needs (config + weights + processor config).
+_DEPTH_REPOS = {
+    "small": "depth-anything/Depth-Anything-V2-Small-hf",
+    "base": "depth-anything/Depth-Anything-V2-Base-hf",
+    "large": "depth-anything/Depth-Anything-V2-Large-hf",
+}
+_DEPTH_FILES = ("config.json", "model.safetensors", "preprocessor_config.json")
+
+
+def _preprocess_jobs(args: argparse.Namespace) -> list[Artifact]:
+    """Control-map preprocessor: Depth-Anything-V2 (small / base / large)."""
+    repo = _DEPTH_REPOS[args.variant]
+    return [(file, repo, file) for file in _DEPTH_FILES]
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     key: str
@@ -292,6 +308,8 @@ class ModelSpec:
     variant_supported: bool = False
     variant_choices: tuple[str, ...] | None = None
     default_variant: str | None = None
+    #: Whether the output directory gets ``_<variant>`` appended (per-variant dirs).
+    variant_out: bool = False
 
 
 MODELS: dict[str, ModelSpec] = {
@@ -355,6 +373,16 @@ MODELS: dict[str, ModelSpec] = {
         _esrgan_jobs,
         has_int8=False,
     ),
+    "preprocess": ModelSpec(
+        "preprocess", "./models/preprocessors/depth_anything_v2_{variant}",
+        "Depth-Anything-V2 depth map (control-map preprocessor)",
+        _preprocess_jobs,
+        has_int8=False,
+        variant_supported=True,
+        variant_choices=("small", "base", "large"),
+        default_variant="small",
+        variant_out=True,
+    ),
 }
 
 
@@ -379,6 +407,8 @@ def _epilog() -> str:
         "  python scripts/download.py --model mage-flow --variant base",
         "  python scripts/download.py --model mage-flow --int8-convrot --edit-only",
         "  python scripts/download.py --model esrgan",
+        "  python scripts/download.py --model preprocess",
+        "  python scripts/download.py --model preprocess --variant base",
     ]
     return "\n".join(lines)
 
@@ -452,7 +482,10 @@ def main() -> None:
         ap.error(f"--int8-convrot is not supported by --model {args.model}")
 
     # ---- download -----------------------------------------------------------
-    out_dir = args.out or spec.default_out
+    if spec.variant_out:
+        out_dir = args.out or spec.default_out.format(variant=args.variant)
+    else:
+        out_dir = args.out or spec.default_out
     jobs = spec.jobs(args)
 
     if args.dry_run:

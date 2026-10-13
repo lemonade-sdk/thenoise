@@ -27,6 +27,15 @@ def _add_upscaler_args(p: argparse.ArgumentParser) -> None:
                         "'pixel_upscaler' API field")
 
 
+def _add_preprocessor_args(p: argparse.ArgumentParser) -> None:
+    """Control-map flags for a subcommand: ``--preprocessor-dir`` is server/one-shot
+    configuration, the preprocessor being selected per request through ``--model``."""
+    p.add_argument("--preprocessor-dir", default="", metavar="PATH",
+                   help="directory containing control-map preprocessor checkpoints "
+                        "(e.g. Depth-Anything-V2); each subdirectory's config.json "
+                        "declares the kind it implements")
+
+
 def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png") -> None:
     """Add the generation options shared by ``generate`` and ``edit``."""
     p.add_argument("--pixel-upscaler", default="", metavar="PATH",
@@ -95,6 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve = sub.add_parser("serve", help="run the FastAPI HTTP server")
     _add_model_paths(serve, required=False)
     _add_upscaler_args(serve)
+    _add_preprocessor_args(serve)
     serve.add_argument("--host", default="127.0.0.1",
                        help="bind host (default: 127.0.0.1)")
     serve.add_argument("--port", type=int, default=8000,
@@ -145,6 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
     pre.add_argument("--model", default="",
                      help="implementation to use for the chosen type "
                           "(default: the type's own)")
+    _add_preprocessor_args(pre)
     pre.add_argument("--list", action="store_true",
                      help="list the available control-map types and exit")
     pre.add_argument("--canny-low", type=float, default=100.0,
@@ -153,6 +164,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Canny high threshold (default: 200)")
     pre.add_argument("--canny-thickness", type=int, default=1,
                      help="Canny line thickness in pixels (default: 1)")
+    pre.add_argument("--depth-invert", action="store_true",
+                     help="depth: invert near/far (default: near = bright)")
+    pre.add_argument("--depth-colormap", default="gray", choices=["gray"],
+                     help="depth colormap (default: gray)")
     pre.add_argument("--out", default="out_control.png",
                      help="output image path; the map is the size of the input, and "
                           "extra --type values add a _<type> suffix "

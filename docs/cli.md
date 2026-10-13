@@ -13,6 +13,7 @@ DiT checkpoint.
 | `generate` | Generate one image from a text prompt | yes |
 | `edit` | Edit an image from an instruction (image + prompt → edited image) | editing-capable model |
 | `upscale` | Pixel-upscale an existing image | no (upscaler only) |
+| `preprocess` | Extract a control map (canny / depth / pose) from an image | no |
 | `serve` | Serve a model over HTTP: JSON API + web UI at <http://localhost:8000/> | yes (lazily) |
 
 ## Shared flags (`serve`, `generate`, `edit`)
@@ -121,6 +122,39 @@ Pixel-upscales an existing image. Model-free - no `--dit`/`--vae`/
 | `--input` | yes | — | Input image to upscale |
 | `--upscale-factor` | no | `0.0` | Upscale factor (`0.0` = the model's detected scale; must be in [1, that scale]; larger values are rejected) |
 | `--out` | no | `out_upscaled.png` | Output image path |
+
+## Preprocess a control map
+
+Extracts a conditioning map - Canny edges or a Depth-Anything-V2 depth map - from an
+existing image. Model-free, like `upscale`:
+
+```bash
+./thenoise.sh preprocess \
+  --input /tmp/photo.jpg --type canny --out /tmp/photo_canny.png
+./thenoise.sh preprocess \
+  --input /tmp/photo.jpg --type depth --out /tmp/photo_depth.png \
+  --preprocessor-dir ./models/preprocessors
+```
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--input` | yes* | — | Input image to extract from (*unless `--list`) |
+| `--type` | yes* | — | Control map to extract; repeatable, each extra type writes its own `<out>_<type>.png` |
+| `--model` | no | type default | Implementation to use for that type |
+| `--preprocessor-dir` | no | — | Directory of control-map checkpoints (e.g. `./models/preprocessors`); each subdirectory's `config.json` declares the kind it implements |
+| `--list` | no | — | List the available control-map types and exit |
+| `--canny-low` | no | `100` | Canny low threshold, in Sobel magnitude units |
+| `--canny-high` | no | `200` | Canny high threshold; weak edges connected to a strong one are kept |
+| `--canny-thickness` | no | `1` | Rendered edge thickness in pixels |
+| `--depth-invert` | no | `false` | Depth: swap near/far (near is bright by default) |
+| `--depth-colormap` | no | `gray` | Depth colormap (only `gray` today) |
+| `--out` | no | `out_control.png` | Output image path |
+
+The map is white edges on black (`--type canny`) or a grey depth field (`--type
+depth`), at the size of the image it was extracted from, so it can be paired with
+that image later. It is written as a PNG with a `preprocess_data` text chunk
+recording the type, the model and every option that differed from its default,
+alongside whatever metadata the input already carried.
 
 ## Upscaling
 

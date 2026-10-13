@@ -23,6 +23,7 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 8000
     upscaler_dir: str = ""     # directory of pixel-domain upscaler models
+    preprocessor_dir: str = ""  # directory of control-map preprocessor checkpoints
 
 
 @dataclass
@@ -57,7 +58,9 @@ class Runtime:
         )
         self._upscaler = PixelUpscaleController(self._pixel_upscalers)
         # Control-map preprocessors: model-free too, and independent of the upscalers.
-        self._preprocessors = PreprocessorManager(device=settings.device)
+        self._preprocessors = PreprocessorManager(
+            device=settings.device, preprocessor_dir=settings.preprocessor_dir
+        )
         self._preprocess = PreprocessController(self._preprocessors)
         self._pipeline = None
 

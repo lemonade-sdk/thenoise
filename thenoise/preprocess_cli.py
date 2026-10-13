@@ -15,7 +15,7 @@ def run_preprocess(args) -> None:
     from .runtime import Settings, Runtime
     from .utils.image_tensor import load_image
 
-    runtime = Runtime(Settings(device=args.device))  # no load(): extraction is model-free
+    runtime = Runtime(Settings(device=args.device, preprocessor_dir=args.preprocessor_dir))  # no load(): extraction is model-free
 
     if args.list:
         for kind, names in runtime.preprocessors.available().items():

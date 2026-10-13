@@ -408,30 +408,36 @@
     <select id="p_type"></select>
   </div>
 
-  <div class="field">
+  <div class="field" id="p_model_field">
     <label class="label" for="p_model">Method</label>
     <select id="p_model"></select>
   </div>
 
   <div class="divider"></div>
 
-  <div class="row">
-    <div class="field">
-      <label class="label" for="p_low">Edge cutoff</label>
-      <input type="number" id="p_low" min="0" step="1" value="100">
-      <span class="hint">fainter edges are dropped</span>
+  <div class="opts" id="p_canny_opts">
+    <div class="row">
+      <div class="field">
+        <label class="label" for="p_low">Edge cutoff</label>
+        <input type="number" id="p_low" min="0" step="1" value="100">
+        <span class="hint">fainter edges are dropped</span>
+      </div>
+      <div class="field">
+        <label class="label" for="p_high">Strong edge cutoff</label>
+        <input type="number" id="p_high" min="0" step="1" value="200">
+        <span class="hint">kept on their own above this</span>
+      </div>
     </div>
     <div class="field">
-      <label class="label" for="p_high">Strong edge cutoff</label>
-      <input type="number" id="p_high" min="0" step="1" value="200">
-      <span class="hint">kept on their own above this</span>
+      <label class="label" for="p_thickness">Line width</label>
+      <input type="number" id="p_thickness" min="1" step="1" value="1">
+      <span class="hint">line thickness, in pixels</span>
     </div>
   </div>
 
-  <div class="field">
-    <label class="label" for="p_thickness">Line width</label>
-    <input type="number" id="p_thickness" min="1" step="1" value="1">
-    <span class="hint">line thickness, in pixels</span>
+  <div class="opts hidden" id="p_depth_opts">
+    <label class="check"><input type="checkbox" id="p_invert"> Invert depth <span
+        class="hint">(near = dark instead of bright)</span></label>
   </div>
 
   <button class="btn" id="p_run" disabled>Extract</button>
