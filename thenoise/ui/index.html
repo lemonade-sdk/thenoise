@@ -15,6 +15,7 @@
   <button class="tab ctrl active" data-tab="generate">Generate</button>
   <button class="tab ctrl" data-tab="edit">Edit</button>
   <button class="tab ctrl" data-tab="upscale">Upscale</button>
+  <button class="tab ctrl" data-tab="preprocess">Preprocess</button>
   <div class="tabs-prefs">
     <button class="pref-btn ctrl" id="sidebar_toggle" title="Move the sidebar to the other side"
       aria-label="Move the sidebar to the other side">
@@ -390,6 +391,71 @@
   <div class="timer" id="utimer"><span class="dot"></span><span id="utimer_text">idle</span></div>
 </main>
 </div><!-- /view-upscale -->
+
+<div class="view hidden" id="view-preprocess">
+<aside class="sidebar">
+  <div class="field">
+    <label class="label" for="p_file">Input image</label>
+    <div class="dropzone" id="p_dropzone">
+      <input type="file" id="p_file" accept="image/*" hidden>
+      <div class="dz-hint" id="p_dz_hint">Drag &amp; drop an image here or <span class="kbd">click to browse</span></div>
+      <div class="dz-name" id="p_dz_name" style="display:none"></div>
+    </div>
+  </div>
+
+  <div class="field">
+    <label class="label" for="p_type">Detect</label>
+    <select id="p_type"></select>
+  </div>
+
+  <div class="field">
+    <label class="label" for="p_model">Method</label>
+    <select id="p_model"></select>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="row">
+    <div class="field">
+      <label class="label" for="p_low">Edge cutoff</label>
+      <input type="number" id="p_low" min="0" step="1" value="100">
+      <span class="hint">fainter edges are dropped</span>
+    </div>
+    <div class="field">
+      <label class="label" for="p_high">Strong edge cutoff</label>
+      <input type="number" id="p_high" min="0" step="1" value="200">
+      <span class="hint">kept on their own above this</span>
+    </div>
+  </div>
+
+  <div class="field">
+    <label class="label" for="p_thickness">Line width</label>
+    <input type="number" id="p_thickness" min="1" step="1" value="1">
+    <span class="hint">line thickness, in pixels</span>
+  </div>
+
+  <button class="btn" id="p_run" disabled>Extract</button>
+</aside>
+
+<main class="main">
+  <div class="stage" id="pstage">
+    <div class="placeholder" id="p_placeholder">Drop an image and click <span class="kbd">Extract</span></div>
+    <div class="single hidden" id="p_single">
+      <img id="p_single_img" alt="input image">
+    </div>
+    <div class="result hidden" id="p_result">
+      <img id="p_img" alt="extracted map">
+    </div>
+    <div class="actions">
+      <button class="dl ctrl" id="p_download" disabled title="Download PNG">&#8595; Download</button>
+      <button class="info ctrl" id="p_info_btn" disabled title="Extraction info" aria-label="Extraction info">&#9432;</button>
+    </div>
+    <div class="overlay hidden" id="p_overlay"><div class="spinner"></div></div>
+  </div>
+
+  <div class="timer" id="p_timer"><span class="dot"></span><span id="p_timer_text">idle</span></div>
+</main>
+</div><!-- /view-preprocess -->
 </div><!-- /views -->
 
 <div class="modal hidden" id="info_modal">
@@ -405,5 +471,6 @@
 
 <script src="static/js/helpers.js"></script>
 <script src="static/js/app.js"></script>
+<script src="static/js/preprocess.js"></script>
 </body>
 </html>

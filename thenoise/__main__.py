@@ -56,8 +56,13 @@ def main(argv=None) -> None:
     elif args.command == "upscale":
         from .upscale_cli import run_upscale
         run_upscale(args)
+    elif args.command == "preprocess":
+        from .preprocess_cli import run_preprocess
+        run_preprocess(args)
     else:  # pragma: no cover - argparse requires a subcommand
-        raise SystemExit("choose a subcommand: serve | generate | edit | upscale")
+        raise SystemExit(
+            "choose a subcommand: serve | generate | edit | upscale | preprocess"
+        )
 
 
 if __name__ == "__main__":

@@ -775,6 +775,30 @@ def test_build_upscale_pnginfo_carries_over_and_replaces():
     }
 
 
+def test_save_output_writes_the_provenance_the_controller_attached(tmp_path):
+    from PIL import Image
+
+    from thenoise.utils.png import build_upscale_pnginfo, save_output
+
+    image = Image.new("RGB", (2, 2))
+    image._pnginfo = build_upscale_pnginfo(image, "RealESRGAN_x4", 2.0)
+
+    # A name with no extension cannot tell PIL a format, so it becomes the PNG the
+    # metadata needs; the path actually written is handed back for the caller to log.
+    path = save_output(image, str(tmp_path / "out"))
+    assert path.endswith("out.png")
+    saved = Image.open(path)
+    assert json.loads(saved.info["upscale_data"])["upscaler_model"] == "RealESRGAN_x4"
+
+
+def test_pnginfo_of_an_image_that_carries_none():
+    from PIL import Image
+
+    from thenoise.utils.png import pnginfo_of
+
+    assert pnginfo_of(Image.new("RGB", (2, 2))) is None
+
+
 def test_kv_cache_requires_an_edit_request():
     """``kv_cache`` is a reference-latent optimization: it needs a reference image."""
     controller = _controller()

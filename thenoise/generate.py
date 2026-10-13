@@ -1,7 +1,5 @@
-"""CLI generation: load one model, run one generation, save a single PNG.
-
-Thin wrappers over the same ``generate()``/``edit()`` paths the HTTP API uses. The
-seed is resolved here (when not given) so it can be reported for reproducibility.
+"""CLI generation: load one model, run one generation, save one PNG.
+Thin wrappers over the same paths the HTTP API uses, seed resolved here so it is reported.
 """
 from __future__ import annotations
 
@@ -10,7 +8,7 @@ import os
 import random
 import sys
 
-from .utils.paths import ensure_png_extension
+from .utils.png import save_output
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -85,10 +83,7 @@ def run_generate(args) -> None:
 
     image = runtime.pipeline.generate(request)
 
-    # Without an output extension PIL cannot infer a format; default to PNG.
-    out_path = ensure_png_extension(args.out)
-
-    image.save(out_path, pnginfo=getattr(image, "_pnginfo", None))
+    out_path = save_output(image, args.out)
     logger.info("saved %s (model=%s, seed=%s)", out_path, runtime.model_name, seed)
 
 
@@ -129,6 +124,5 @@ def run_edit(args) -> None:
     request.image = [load_image(p) for p in args.image]
     image = runtime.pipeline.edit(request)
 
-    out_path = ensure_png_extension(args.out)
-    image.save(out_path, pnginfo=getattr(image, "_pnginfo", None))
+    out_path = save_output(image, args.out)
     logger.info("saved %s (model=%s, seed=%s)", out_path, runtime.model_name, seed)

@@ -149,6 +149,39 @@ def test_cli_requires_the_subcommand_arguments(parse):
         parse(["upscale"])             # --pixel-upscaler/--input are required
 
 
+# ---------------------------------------------------------------- preprocess
+
+
+def test_cli_preprocess_parses_its_flags(parse):
+    args = parse([
+        "preprocess",
+        "--input", "in.png", "--type", "canny", "--type", "depth",
+        "--model", "depth-anything-v2-base",
+        "--canny-low", "30", "--canny-high", "60", "--canny-thickness", "2",
+        "--out", "map.png", "--device", "hip",
+    ])
+    assert args.command == "preprocess"
+    assert (args.input, args.types) == ("in.png", ["canny", "depth"])
+    assert args.model == "depth-anything-v2-base"
+    assert (args.canny_low, args.canny_high, args.canny_thickness) == (30.0, 60.0, 2)
+    assert (args.out, args.device, args.list) == ("map.png", "hip", False)
+
+
+def test_cli_preprocess_defaults(parse):
+    """A bare ``preprocess`` parses: ``--list`` needs no input and no type."""
+    args = parse(["preprocess"])
+    assert (args.input, args.types, args.model) == (None, None, "")
+    assert (args.canny_low, args.canny_high, args.canny_thickness) == (100.0, 200.0, 1)
+    assert args.out == "out_control.png" and args.list is False
+
+
+@pytest.mark.parametrize("flag", ["--width", "--height", "--fit"])
+def test_a_control_map_has_no_sizing_flags(parse, flag):
+    """The map comes out its input's size, so asking for one is not offered."""
+    with pytest.raises(SystemExit):
+        parse(["preprocess", "--input", "i.png", "--type", "canny", flag, "512"])
+
+
 # ----------------------------------------------------------------------- paths
 
 

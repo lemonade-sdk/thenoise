@@ -57,6 +57,18 @@ def test_backend_hooks_only_fire_for_accelerator_devices(calls, device, expected
     assert calls == expected
 
 
+def test_release_device_memory_collects_before_emptying(monkeypatch):
+    """Collecting is what makes the empty useful: a tensor only frees its allocator
+    block once the last reference to it is gone, so the order is the whole point."""
+    order = []
+    monkeypatch.setattr(device_mod.gc, "collect", lambda: order.append("collect"))
+    monkeypatch.setattr(
+        device_mod, "clean_memory_on_device", lambda d: order.append(("empty", d))
+    )
+    device_mod.release_device_memory("cuda")
+    assert order == ["collect", ("empty", "cuda")]
+
+
 def test_get_device_memory_only_knows_about_cuda(monkeypatch):
     seen = []
 

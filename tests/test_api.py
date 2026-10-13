@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import os
 import re
 
@@ -69,6 +70,11 @@ def _runtime(tmp_path=None, pipeline=None):
 
 def _empty_runtime():
     return Runtime(Settings())
+
+
+def _cpu_runtime():
+    """A model-free runtime that really extracts, on the CPU."""
+    return Runtime(Settings(device="cpu"))
 
 
 def _endpoint(app, path):
@@ -432,6 +438,122 @@ def test_upscale_works_without_a_model(client, monkeypatch):
     assert res.status_code == 200
 
 
+# ---------------------------------------------------------------- /preprocessors
+
+
+def test_preprocessors_lists_kinds_and_defaults():
+    """Extraction needs no diffusion model, so the UI can always fill its dropdowns."""
+    res = _endpoint(create_app(_empty_runtime()), "/preprocessors")()
+    assert res == {"preprocessors": {"canny": ["canny"]}, "defaults": {"canny": "canny"}}
+
+
+# ------------------------------------------------------------------- /preprocess
+
+
+def _edged_png_b64(size=(16, 8)) -> str:
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGB", size)
+    ImageDraw.Draw(image).rectangle([2, 2, size[0] - 3, size[1] - 3], fill="white")
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def test_preprocess_extracts_a_map_with_no_model_loaded(client):
+    res = client(_cpu_runtime()).post(
+        "/preprocess", json={"image_b64": _edged_png_b64(), "type": "canny"}
+    )
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "image/png"
+
+    from PIL import Image
+
+    image = Image.open(io.BytesIO(res.content))
+    assert (image.mode, image.size) == ("L", (16, 8))
+    assert set(image.get_flattened_data()) == {0, 255}  # a real map, not a blank one
+    assert json.loads(image.info["preprocess_data"])["model"] == "canny"
+
+
+def test_preprocess_answers_at_the_input_size(client):
+    """A control map is paired with the image it was extracted from."""
+    from PIL import Image
+
+    res = client(_cpu_runtime()).post(
+        "/preprocess", json={"image_b64": _edged_png_b64((30, 11)), "type": "canny"}
+    )
+    assert Image.open(io.BytesIO(res.content)).size == (30, 11)
+
+
+def test_preprocess_applies_the_requested_options(client):
+    res = client(_cpu_runtime()).post(
+        "/preprocess",
+        json={
+            "image_b64": _edged_png_b64(), "type": "canny",
+            "canny": {"low": 30, "high": 60, "thickness": 3},
+        },
+    )
+    assert res.status_code == 200
+
+    from PIL import Image
+
+    image = Image.open(io.BytesIO(res.content))
+    assert image.size == (16, 8)
+    assert json.loads(image.info["preprocess_data"]) == {
+        "type": "canny",
+        "model": "canny",
+        "options": {"low": 30.0, "high": 60.0, "thickness": 3},
+    }
+
+
+def test_preprocess_json_returns_decodable_b64(client):
+    res = client(_cpu_runtime()).post(
+        "/preprocess",
+        json={"image_b64": _edged_png_b64(), "type": "canny", "out": "json"},
+    )
+    assert set(res.json()) == {"b64_json"}
+    assert base64.b64decode(res.json()["b64_json"]).startswith(b"\x89PNG")
+
+
+def test_preprocess_rejects_an_unknown_implementation(client):
+    res = client(_cpu_runtime()).post(
+        "/preprocess", json={"image_b64": _edged_png_b64(), "type": "canny", "model": "canny-xl"}
+    )
+    assert res.status_code == 400
+    assert "available: canny" in res.text
+
+
+def test_preprocess_returns_400_for_invalid_options(client):
+    """Thresholds are validated by the request's own options dataclass."""
+    res = client(_cpu_runtime()).post(
+        "/preprocess",
+        json={"image_b64": _edged_png_b64(), "type": "canny", "canny": {"low": 200, "high": 100}},
+    )
+    assert res.status_code == 400
+    assert "exceeds high threshold" in res.text
+
+
+def test_preprocess_returns_400_for_undecodable_image(client):
+    res = client(_cpu_runtime()).post(
+        "/preprocess", json={"image_b64": "not base64 @@", "type": "canny"}
+    )
+    assert res.status_code == 400
+
+
+def test_preprocess_backend_failure_is_500(client, monkeypatch):
+    runtime = _cpu_runtime()
+
+    def boom(kind, name=""):
+        raise RuntimeError("out of memory")
+
+    monkeypatch.setattr(runtime.preprocessors, "get", boom)
+    res = client(runtime).post(
+        "/preprocess", json={"image_b64": _edged_png_b64(), "type": "canny"}
+    )
+    assert res.status_code == 500
+    assert "preprocess failed" in res.text
+
+
 # ------------------------------------------------------------- validation (422)
 
 
@@ -449,9 +571,13 @@ def test_upscale_works_without_a_model(client, monkeypatch):
         # ``sigmas`` is a list of numbers, not a ComfyUI string.
         ("/text2image", {"prompt": "x", "sigmas": "1.0, 0.5"}),
         ("/text2image", {"prompt": "x", "sigmas": ["abc"]}),
+        # ``image_b64`` is required on /preprocess.
+        ("/preprocess", {"type": "canny"}),
+        # ``type`` only accepts the implemented control-map kinds.
+        ("/preprocess", {"image_b64": "abc", "type": "depth"}),
     ],
     ids=["bad-out", "missing-prompt", "missing-upscaler", "missing-image",
-         "sigmas-string", "sigmas-not-numbers"],
+         "sigmas-string", "sigmas-not-numbers", "missing-map-image", "unknown-map-type"],
 )
 def test_invalid_payload_is_rejected_by_pydantic(client, path, payload):
     assert client(_runtime()).post(path, json=payload).status_code == 422

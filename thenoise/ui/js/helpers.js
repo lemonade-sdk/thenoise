@@ -244,12 +244,13 @@ function seedName(meta, fallback) {
   return meta && meta.seed != null ? meta.seed : fallback;
 }
 
-function fillSelect(sel, names) {
+function fillSelect(sel, names, label) {
   sel.innerHTML = '';
   for (const name of names) {
     const opt = document.createElement('option');
     opt.value = name;
-    opt.textContent = name;
+    // ``label`` turns a value into the words shown to the user (defaults to the value).
+    opt.textContent = label ? label(name) : name;
     sel.appendChild(opt);
   }
 }

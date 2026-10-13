@@ -1,11 +1,5 @@
-"""Focused HTTP API.
-
-A single generic /text2image endpoint serves whichever model the runtime currently
-holds. Requests are synchronous: ``generate()`` blocks until the image is ready,
-and the inference lock serializes concurrent requests.
-
-The request carries only the shared, model-agnostic parameters; per-model defaults
-live on the model class.
+"""Focused HTTP API: one endpoint per image job, synchronous, lock-serialized.
+Requests carry model-agnostic fields only; per-model defaults live on the model class.
 """
 from __future__ import annotations
 
@@ -20,11 +14,20 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 
+from thenoise.preprocess.canny import CannyOptions
 from thenoise.utils.image_tensor import load_image
+from thenoise.utils.png import pnginfo_of
 
 logger = logging.getLogger(__name__)
 
 _UI_DIR = os.path.join(os.path.dirname(__file__), "ui")
+
+
+def decode_image(encoded: str) -> "PIL.Image.Image":
+    """Base64 wire bytes -> PIL image, keeping the alpha when the input carries one.
+    Not base64, or an image PIL cannot read, raises the ``ValueError`` routes map to 400.
+    """
+    return load_image(io.BytesIO(base64.b64decode(encoded)))
 
 
 class Text2ImageRequest(BaseModel):
@@ -84,6 +87,30 @@ class UpscaleRequest(BaseModel):
     out: Literal["png", "json"] = "png"
 
 
+class CannyOptionsModel(BaseModel):
+    """The canny request fields, mirroring :class:`CannyOptions` field for field."""
+
+    low: float = 100.0
+    high: float = 200.0
+    thickness: int = 1
+
+
+class PreprocessRequest(BaseModel):
+    """Control-map extraction: image -> canny / depth / pose map, at the input's size.
+    ``type`` lists only the kinds the engine implements; adding one widens the list.
+    """
+
+    image_b64: str
+    type: Literal["canny"]
+    model: Optional[str] = None  # implementation name; null = the kind's default
+    canny: Optional[CannyOptionsModel] = None
+    out: Literal["png", "json"] = "png"
+
+    def to_options(self) -> CannyOptions:
+        """The request as the kind's option dataclass (same field names on both)."""
+        return CannyOptions(**(self.canny or CannyOptionsModel()).model_dump())
+
+
 class EditRequest(Text2ImageRequest):
     """Instruction-based editing: image(s) + prompt -> edited image.
 
@@ -98,7 +125,7 @@ class EditRequest(Text2ImageRequest):
 
         b64_list = self.image if isinstance(self.image, list) else [self.image]
         # Keep an alpha if the input has one; only the model knows whether it wants it.
-        images = [load_image(io.BytesIO(base64.b64decode(b))) for b in b64_list]
+        images = [decode_image(b) for b in b64_list]
         req: GenerateRequest = self.to_request()
         req.image = images[0] if len(images) == 1 else images
         return req
@@ -106,6 +133,27 @@ class EditRequest(Text2ImageRequest):
 
 def create_app(runtime) -> FastAPI:
     app = FastAPI(title="thenoise", version="0.1.0")
+
+    def image_response(image, out: str):
+        """PNG bytes, or the same bytes base64-wrapped, with the image's own metadata."""
+        content = io.BytesIO()
+        image.save(content, format="PNG", pnginfo=pnginfo_of(image))
+        if out == "json":
+            return {"b64_json": base64.b64encode(content.getvalue()).decode("ascii")}
+        return Response(content=content.getvalue(), media_type="image/png")
+
+    def image_job(failure: str, action, out: str):
+        """Run one image-producing request, answering with the image or the failure.
+        A ``ValueError`` is the request's fault (400, echoed); anything else is 500 + log.
+        """
+        try:
+            image = action()
+        except ValueError as e:
+            return Response(status_code=400, content=str(e))
+        except Exception as e:
+            logger.exception("%s failed", failure)
+            return Response(status_code=500, content=f"{failure} failed: {e}")
+        return image_response(image, out)
 
     @app.get("/", response_class=HTMLResponse)
     def ui():
@@ -147,10 +195,8 @@ def create_app(runtime) -> FastAPI:
 
     @app.get("/upscalers")
     def upscalers():
-        """List available pixel upscaler names + their detected native scales.
-
-        Works with no model loaded. ``scales`` maps each name to its detected
-        native scale (2 or 4); undetectable entries are 0.
+        """Pixel-upscaler names and their detected native scales, with no model loaded.
+        An undetectable entry is 0.
         """
         names = runtime.pixel_upscalers.list()
         scales = {}
@@ -162,28 +208,23 @@ def create_app(runtime) -> FastAPI:
                 scales[name] = 0
         return {"upscalers": names, "scales": scales}
 
+    @app.get("/preprocessors")
+    def preprocessors():
+        """Control-map kinds and the implementations of each (works with no model)."""
+        return {
+            "preprocessors": runtime.preprocessors.available(),
+            "defaults": runtime.preprocessors.defaults(),
+        }
+
     @app.post("/text2image")
     def text2image(req: Text2ImageRequest):
         pipeline = runtime.pipeline
         if pipeline is None:
             return Response(status_code=503, content="no model is loaded")
-        try:
-            image = pipeline.generate(req.to_request())
-        except ValueError as e:
-            return Response(status_code=400, content=str(e))
-        except Exception as e:
-            logger.exception("generation failed")
-            return Response(status_code=500, content=f"generation failed: {e}")
-
-        buf = io.BytesIO()
-        image.save(buf, format="PNG", pnginfo=getattr(image, "_pnginfo", None))
-        content = buf.getvalue()
-
-        if req.out == "json":
-            return {"b64_json": base64.b64encode(content).decode("ascii")}
-        return Response(
-            content=content,
-            media_type="image/png",
+        return image_job(
+            "generation",
+            lambda: pipeline.generate(req.to_request()),
+            req.out,
         )
 
     @app.post("/edit")
@@ -192,52 +233,34 @@ def create_app(runtime) -> FastAPI:
         pipeline = runtime.pipeline
         if pipeline is None:
             return Response(status_code=503, content="no model is loaded")
-        try:
-            image = pipeline.edit(req.to_edit_request())
-        except ValueError as e:  # model doesn't support editing / bad request
-            return Response(status_code=400, content=str(e))
-        except Exception as e:
-            logger.exception("edit failed")
-            return Response(status_code=500, content=f"edit failed: {e}")
-
-        buf = io.BytesIO()
-        image.save(buf, format="PNG", pnginfo=getattr(image, "_pnginfo", None))
-        content = buf.getvalue()
-
-        if req.out == "json":
-            return {"b64_json": base64.b64encode(content).decode("ascii")}
-        return Response(
-            content=content,
-            media_type="image/png",
+        # A ValueError here is "this model does not edit" or "an edit needs an image".
+        return image_job(
+            "edit", lambda: pipeline.edit(req.to_edit_request()), req.out
         )
 
     @app.post("/upscale")
     def upscale(req: UpscaleRequest):
-        """Upscale an input image by ``upscale_factor``x with a named pixel upscaler.
+        """Upscale an input image with a named pixel upscaler, with no model loaded."""
+        return image_job(
+            "upscale",
+            lambda: runtime.upscaler.upscale(
+                decode_image(req.image_b64), req.upscale_factor, req.pixel_upscaler
+            ),
+            req.out,
+        )
 
-        Works with no model loaded.
-        """
-        try:
-            image = runtime.upscaler.upscale(
-                load_image(io.BytesIO(base64.b64decode(req.image_b64))),
-                req.upscale_factor,
-                req.pixel_upscaler,
-            )
-        except ValueError as e:
-            return Response(status_code=400, content=str(e))
-        except Exception as e:
-            logger.exception("upscale failed")
-            return Response(status_code=500, content=f"upscale failed: {e}")
-
-        buf = io.BytesIO()
-        image.save(buf, format="PNG", pnginfo=getattr(image, "_pnginfo", None))
-        content = buf.getvalue()
-
-        if req.out == "json":
-            return {"b64_json": base64.b64encode(content).decode("ascii")}
-        return Response(
-            content=content,
-            media_type="image/png",
+    @app.post("/preprocess")
+    def preprocess(req: PreprocessRequest):
+        """Extract a control map from an input image, with no model loaded."""
+        return image_job(
+            "preprocess",
+            lambda: runtime.preprocess.run(
+                decode_image(req.image_b64),
+                req.type,
+                req.to_options(),
+                req.model or "",
+            ),
+            req.out,
         )
 
     return app

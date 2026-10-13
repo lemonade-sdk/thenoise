@@ -1,9 +1,5 @@
-"""Command-line interface for thenoise.
-
-Subcommands: ``serve`` (HTTP server), ``generate``, ``edit`` and ``upscale``.
-Model checkpoints are passed to ``serve``/``generate``/``edit`` as ``--dit`` /
-``--vae`` / ``--text-encoder``, and the model type is detected from the ``--dit``
-checkpoint. Every option is on the command line (there is no config file).
+"""CLI subcommands: serve, generate, edit, upscale, preprocess — the first three take
+model paths, the last two are model-free. No config file: everything is a flag.
 """
 from __future__ import annotations
 
@@ -23,11 +19,8 @@ def _add_model_paths(p: argparse.ArgumentParser, required: bool = True) -> None:
 
 
 def _add_upscaler_args(p: argparse.ArgumentParser) -> None:
-    """Add the pixel-upscaler flags for a subcommand.
-
-    ``serve`` takes ``--upscaler-dir``, with the upscaler selected per request via
-    the ``pixel_upscaler`` API field.
-    """
+    """Pixel-upscaler flags for a subcommand: ``serve`` takes ``--upscaler-dir``, the
+    upscaler itself being selected per request through the ``pixel_upscaler`` API field."""
     p.add_argument("--upscaler-dir", default="", metavar="PATH",
                    help="directory containing pixel upscaler .safetensors files "
                         "(e.g. Real-ESRGAN); selected per-request via the "
@@ -140,5 +133,31 @@ def build_parser() -> argparse.ArgumentParser:
                     help="output image path (default: out_upscaled.png)")
     up.add_argument("--device", default="cuda",
                     help="inference device; ROCm aliases cuda -> hip (default: cuda)")
+
+    # preprocess: extract a control map; needs no diffusion model either
+    pre = sub.add_parser("preprocess",
+                         help="extract a control map (canny / depth / pose) from an "
+                              "image (no model needed)")
+    pre.add_argument("--input", metavar="PATH", help="image to extract from")
+    pre.add_argument("--type", dest="types", action="append", metavar="KIND",
+                     help="control map to extract, repeatable "
+                          "(see --list for what is available)")
+    pre.add_argument("--model", default="",
+                     help="implementation to use for the chosen type "
+                          "(default: the type's own)")
+    pre.add_argument("--list", action="store_true",
+                     help="list the available control-map types and exit")
+    pre.add_argument("--canny-low", type=float, default=100.0,
+                     help="Canny low threshold, Sobel magnitude units (default: 100)")
+    pre.add_argument("--canny-high", type=float, default=200.0,
+                     help="Canny high threshold (default: 200)")
+    pre.add_argument("--canny-thickness", type=int, default=1,
+                     help="Canny line thickness in pixels (default: 1)")
+    pre.add_argument("--out", default="out_control.png",
+                     help="output image path; the map is the size of the input, and "
+                          "extra --type values add a _<type> suffix "
+                          "(default: out_control.png)")
+    pre.add_argument("--device", default="cuda",
+                     help="inference device; ROCm aliases cuda -> hip (default: cuda)")
 
     return parser

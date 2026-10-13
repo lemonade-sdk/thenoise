@@ -1,18 +1,14 @@
-"""Single-model runtime: loads exactly one DiffusionModel at a time.
-
-Detects the model class from the DiT checkpoint, holds the single resident
-instance, and swaps (unloads + GCs) on reload so only one set of weights is ever
-resident. The text encoder and VAE are assumed to match the detected model.
+"""Single-model runtime: loads exactly one DiffusionModel at a time, detected from the
+DiT checkpoint, swapping (unload + GC) on reload. The VAE and encoder match the model.
 """
 from __future__ import annotations
 
-import gc
 import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from thenoise.inference import inference
-from thenoise.utils.device import clean_memory_on_device
+from thenoise.utils.device import release_device_memory
 
 logger = logging.getLogger(__name__)
 
@@ -20,9 +16,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Settings:
     """Runtime knobs, all passed on the CLI (bf16 is fixed for this engine).
-
-    ``upscaler_dir`` is server configuration (like host/port): pixel-domain
-    upscaling needs no diffusion model.
+    ``upscaler_dir`` is server configuration: pixel upscaling needs no diffusion model.
     """
     device: str = "cuda"      # ROCm torch aliases cuda -> hip
     offload_device: str = ""   # empty = auto-detect from safetensors size vs VRAM
@@ -49,6 +43,8 @@ class NotLoadedError(RuntimeError):
 
 class Runtime:
     def __init__(self, settings):
+        from .preprocess import PreprocessorManager
+        from .preprocess_controller import PreprocessController
         from .upscale.pixel import PixelUpscalerManager
         from .upscale_controller import PixelUpscaleController
 
@@ -60,6 +56,9 @@ class Runtime:
             upscaler_dir=settings.upscaler_dir, device=settings.device
         )
         self._upscaler = PixelUpscaleController(self._pixel_upscalers)
+        # Control-map preprocessors: model-free too, and independent of the upscalers.
+        self._preprocessors = PreprocessorManager(device=settings.device)
+        self._preprocess = PreprocessController(self._preprocessors)
         self._pipeline = None
 
     def load(self, paths: ModelPaths) -> None:
@@ -93,8 +92,7 @@ class Runtime:
         del self._model
         self._model = None
         self._model_name = None
-        gc.collect()
-        clean_memory_on_device(self._settings.device)
+        release_device_memory(self._settings.device)
 
     @property
     def model(self) -> Any:
@@ -116,6 +114,16 @@ class Runtime:
     def upscaler(self):
         """Standalone pixel upscale controller (model-free, always available)."""
         return self._upscaler
+
+    @property
+    def preprocessors(self):
+        """The control-map preprocessor pool (available without a model)."""
+        return self._preprocessors
+
+    @property
+    def preprocess(self):
+        """Standalone control-map controller (model-free, always available)."""
+        return self._preprocess
 
     @property
     def model_name(self) -> str:

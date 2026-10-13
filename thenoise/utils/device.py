@@ -1,5 +1,6 @@
 """Device helpers that are agnostic to the active backend (CUDA/ROCm, XPU, MPS)."""
 from typing import Optional, Union
+import gc
 import torch
 
 def clean_memory_on_device(device: Optional[Union[str, torch.device]]):
@@ -13,6 +14,14 @@ def clean_memory_on_device(device: Optional[Union[str, torch.device]]):
         pass
     elif device.type == "mps":  # not tested
         torch.mps.empty_cache()
+
+
+def release_device_memory(device: Optional[Union[str, torch.device]]):
+    """Give back what a just-dropped model or pool entry was holding. Collecting first
+    is what makes it work: a tensor frees its allocator block only when unreferenced.
+    """
+    gc.collect()
+    clean_memory_on_device(device)
 
 
 def get_device_memory(device: Optional[Union[str, torch.device]]) -> Optional[int]:
