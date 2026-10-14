@@ -8,6 +8,10 @@ of the image it was measured on.
 Five kinds ship today: **canny**, **lineart** and **softedge** (all weights-free, pure
 `torch`), **depth** (Depth-Anything-V2) and **pose** (RT-DETR + ViTPose).
 
+| Input | Canny Edge | Depth map | Pose | Lineart | Soft-edged map | 
+|--------|---------|---------|---------|---------|---------|
+|<img width="1664" height="1248" alt="thenoise_edit_3564891533 (1)" src="https://github.com/user-attachments/assets/50ce8ae9-3adf-457c-8822-d916a00219ca" /> | <img width="1664" height="1248" alt="canny" src="https://github.com/user-attachments/assets/f210210d-b23e-481a-b373-bccd2efd1f8c" /> | <img width="1664" height="1248" alt="depth" src="https://github.com/user-attachments/assets/62485b42-6863-43b7-8173-966e93408e82" /> | <img width="1664" height="1248" alt="pose (3)" src="https://github.com/user-attachments/assets/6a8aa67e-796d-45c2-8089-0830665c2991" /> | <img width="1664" height="1248" alt="lineart" src="https://github.com/user-attachments/assets/d134594c-7a5c-4599-a132-3997fc84745b" /> | <img width="1664" height="1248" alt="softedge" src="https://github.com/user-attachments/assets/a4157140-07f9-47e9-b2a7-f9cc0372998d" />|
+
 ## Installing and downloading what each kind needs
 
 Canny, lineart and softedge run out of the box. Depth and pose need checkpoints:
