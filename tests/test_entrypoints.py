@@ -342,6 +342,15 @@ def test_preprocess_list_reports_the_available_types(fake_runtime, caplog):
     assert "canny: canny" in caplog.text
 
 
+def test_preprocess_list_says_what_is_missing(fake_runtime, caplog):
+    """A kind the engine has but whose weights have not been downloaded is worth naming:
+    an empty list alone leaves the user guessing whether the feature exists at all."""
+    with caplog.at_level(logging.INFO):
+        run_preprocess(_parse(["preprocess", "--list"]))
+    assert "pose: unavailable, has no checkpoint" in caplog.text
+    assert "scripts/download.py --model preprocess --variant pose" in caplog.text
+
+
 def test_preprocess_without_input_or_type_explains_itself(fake_runtime):
     with pytest.raises(SystemExit, match="--input and --type are required"):
         run_preprocess(_parse(["preprocess"]))

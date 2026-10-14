@@ -11,20 +11,29 @@ from thenoise.utils.device import release_device_memory
 from .base import PreprocessOptions, Preprocessor
 from .canny import CannyPreprocessor
 from .depth import DepthPreprocessor
+from .pose import PosePreprocessor
 
-#: Control-map kind -> the weights-free implementations it always has. Kinds whose
-#: implementations are checkpoints on disk come from ``--preprocessor-dir`` discovery.
+#: Control-map kind -> the weights-free implementations it always has; the rest come from discovery.
 REGISTRY: Dict[str, List[Type[Preprocessor]]] = {
     CannyPreprocessor.kind: [CannyPreprocessor]
 }
 
-#: A checkpoint's ``model_type`` -> the kind it implements, for discovery by reading
-#: ``config.json`` rather than trusting a directory name. In v5 Depth-Anything-V2 is
-#: merged into the ``depth_anything`` type.
-_MODEL_TYPE_KINDS = {"depth_anything": "depth"}
+#: A checkpoint's ``model_type`` -> what it is for, by reading ``config.json`` rather
+#: than trusting a directory name. A person detector is a pose companion, not a kind.
+_MODEL_TYPE_KINDS = {
+    "depth_anything": "depth",
+    "vitpose": "pose",
+    "rt_detr": "detector",
+}
 
 #: The class behind each discoverable kind.
-_KIND_CLASSES = {DepthPreprocessor.kind: DepthPreprocessor}
+_KIND_CLASSES = {
+    DepthPreprocessor.kind: DepthPreprocessor,
+    PosePreprocessor.kind: PosePreprocessor,
+}
+
+#: The companion checkpoints a kind needs, as ``kind -> (load keyword, discovered kind)``.
+_RESOURCES = {PosePreprocessor.kind: ("detectors", "detector")}
 
 
 def _kind_of_config(path: str) -> Optional[str]:
@@ -48,23 +57,39 @@ class PreprocessorManager:
         result = {}
         for kind in self._known_kinds():
             entries = self._implementations(kind)
-            if entries:
+            if entries and not self._missing(kind):
                 result[kind] = [name for name, _, _ in entries]
         return result
+
+    def missing(self) -> Dict[str, str]:
+        """Each kind the engine knows that cannot run yet, with what would complete it."""
+        return {
+            kind: f"{reason}; run '{self._option_class(kind).DOWNLOAD}' to fetch it"
+            for kind in self._known_kinds()
+            if (reason := self._missing(kind))
+        }
+
+    def detectors(self) -> List[str]:
+        """The person detectors on disk, which a ``pose`` request picks from."""
+        return sorted(self._paths.get("detector", {}))
 
     def defaults(self) -> Dict[str, str]:
         """Each kind's default implementation: the first one on offer."""
         return {kind: names[0] for kind, names in self.available().items() if names}
 
     def options_for(self, kind: str, **values: Any) -> PreprocessOptions:
-        """The option dataclass of ``kind`` filled from the caller's fields, so a
-        flag-driven caller never has to name a kind's options class. A known kind
-        answers even before its weights are on disk, so the CLI can parse its flags."""
+        """The option dataclass of ``kind`` filled from the caller's fields."""
         return self._option_class(kind).OPTIONS(**values)
 
     def get(self, kind: str, name: str = "") -> Preprocessor:
         """The resident preprocessor for ``kind``, loading it when the resident differs.
         An empty ``name`` is the kind's default; the caller holds the inference lock."""
+        reason = self._missing(kind)
+        if reason:
+            raise ValueError(
+                f"the {kind} preprocessor {reason}; run "
+                f"'{self._option_class(kind).DOWNLOAD}' to fetch it"
+            )
         entries = self._implementations(kind)
         if not entries:
             raise ValueError(
@@ -82,21 +107,19 @@ class PreprocessorManager:
             self.unload()
         if self._resident is None:
             preprocessor = cls()
-            preprocessor.load(self.device, path)
+            preprocessor.load(self.device, path, **self._resources(kind))
             self._resident = preprocessor
         return self._resident
 
     def _implementations(self, kind: str) -> List[Tuple[str, Type[Preprocessor], Optional[str]]]:
-        """``(name, class, weights path)`` for each implementation of ``kind`` that is
-        on offer, in a stable order: the weights-free registry first, then discovered."""
+        """``(name, class, weights path)`` per implementation of ``kind`` on offer."""
         entries = [(cls.name, cls, None) for cls in REGISTRY.get(kind, ())]
         for name, path in self._paths.get(kind, {}).items():
             entries.append((name, _KIND_CLASSES[kind], path))
         return entries
 
     def _option_class(self, kind: str) -> Type[Preprocessor]:
-        """The class behind ``kind`` (registry or discoverable), or a ValueError for
-        a kind the engine does not know."""
+        """The class behind ``kind`` (registry or discoverable), or a ValueError for an unknown kind."""
         classes = REGISTRY.get(kind)
         if classes:
             return classes[0]
@@ -108,13 +131,29 @@ class PreprocessorManager:
             f"available: {', '.join(self.available())}"
         )
 
+    def _missing(self, kind: str) -> str:
+        """What ``kind`` still needs before it can run, or ``""`` when it can: a
+        discoverable one needs its checkpoint, and pose needs a person detector too."""
+        if kind in _KIND_CLASSES and not self._implementations(kind):
+            return "has no checkpoint in the preprocessor directory"
+        if kind == PosePreprocessor.kind and not self.detectors():
+            return "needs a person detector (RT-DETR) beside its keypoint model"
+        return ""
+
+    def _resources(self, kind: str) -> Dict[str, Any]:
+        """The companion checkpoints ``kind`` loads beside its own weights."""
+        companion = _RESOURCES.get(kind)
+        if not companion:
+            return {}
+        keyword, discovered = companion
+        return {keyword: dict(self._paths.get(discovered, {}))}
+
     def _known_kinds(self) -> List[str]:
         """Every kind the engine knows, whether or not a checkpoint is on disk."""
         return sorted(set(REGISTRY) | set(_KIND_CLASSES))
 
     def _discover(self) -> Dict[str, Dict[str, str]]:
-        """``kind -> name -> directory``, from the ``config.json`` of each subdirectory
-        of ``--preprocessor-dir``. A kind with no entry here is simply not on offer."""
+        """``kind -> name -> directory``, from each subdirectory's ``config.json``."""
         paths: Dict[str, Dict[str, str]] = {}
         if not self.preprocessor_dir:
             return paths

@@ -154,29 +154,37 @@ function addRow(grid, label, value, cls) {
   grid.append(dt, dd);
 }
 
-function renderInfo(meta) {
+function renderInfoRows(rows) {
   const grid = $('info_modal_grid');
   grid.innerHTML = '';
+  for (const [label, value, cls] of rows) addRow(grid, label, value, cls);
+}
+
+function renderInfo(meta) {
   if (!meta || typeof meta !== 'object') {
+    const grid = $('info_modal_grid');
+    grid.innerHTML = '';
     const dd = document.createElement('dd');
     dd.className = 'none';
     dd.textContent = 'No metadata found in this image.';
     grid.appendChild(dd);
     return;
   }
+  const rows = [];
   for (const key of ['model','prompt','negative_prompt','width','height','steps','sampler','guidance_scale','seed']) {
-    if (key in meta) addRow(grid, FIELD_LABELS[key], meta[key], key === 'prompt' || key === 'negative_prompt' ? 'prompt' : '');
+    if (key in meta) rows.push([FIELD_LABELS[key], meta[key], key === 'prompt' || key === 'negative_prompt' ? 'prompt' : '']);
   }
-  if ('upscale' in meta) addRow(grid, 'Upscale', meta.upscale);
-  if ('upscale_factor' in meta) addRow(grid, 'Upscale factor', meta.upscale_factor);
-  if ('upscale_type' in meta) addRow(grid, 'Upscale type', meta.upscale_type);
-  if ('pixel_upscaler' in meta && meta.pixel_upscaler) addRow(grid, 'Pixel upscaler', meta.pixel_upscaler);
-  if ('qwen_vae_enhance' in meta) addRow(grid, 'Reduce grid pattern', meta.qwen_vae_enhance);
+  if ('upscale' in meta) rows.push(['Upscale', meta.upscale, '']);
+  if ('upscale_factor' in meta) rows.push(['Upscale factor', meta.upscale_factor, '']);
+  if ('upscale_type' in meta) rows.push(['Upscale type', meta.upscale_type, '']);
+  if ('pixel_upscaler' in meta && meta.pixel_upscaler) rows.push(['Pixel upscaler', meta.pixel_upscaler, '']);
+  if ('qwen_vae_enhance' in meta) rows.push(['Reduce grid pattern', meta.qwen_vae_enhance, '']);
   for (const key of ['film_grain','sharpening','lora_specs']) {
     if (key in meta && (key !== 'film_grain' || meta.film_grain) && (key !== 'sharpening' || meta.sharpening)) {
-      addRow(grid, FIELD_LABELS[key], meta[key], '');
+      rows.push([FIELD_LABELS[key], meta[key], '']);
     }
   }
+  renderInfoRows(rows);
 }
 
 function makeHistory({ containerId, rootId, alt, onSelect }) {
@@ -238,6 +246,25 @@ function showResult(imgId, placeholderId, url) {
   $(imgId).src = url;
   $(imgId).style.display = 'block';
   $(placeholderId).style.display = 'none';
+}
+
+// Show a freshly loaded input image in a single/result split stage.
+function showInputPreview(dataUrl, file, ids) {
+  $(ids.singleImg).src = dataUrl;
+  $(ids.single).classList.remove('hidden');
+  $(ids.result).classList.add('hidden');
+  $(ids.placeholder).style.display = 'none';
+  $(ids.dzName).textContent = file.name;
+  $(ids.dzName).style.display = 'block';
+  $(ids.dzHint).style.display = 'none';
+}
+
+// Swap a split stage from its input preview to its result image.
+function showOutputPreview(singleId, resultId, placeholderId, resultImgId, url) {
+  $(singleId).classList.add('hidden');
+  $(resultId).classList.remove('hidden');
+  $(placeholderId).style.display = 'none';
+  $(resultImgId).src = url;
 }
 
 function seedName(meta, fallback) {

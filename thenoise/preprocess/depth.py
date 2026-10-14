@@ -1,6 +1,5 @@
 """Depth-Anything-V2 depth maps: relative depth (larger = closer), measured at the
-model's own resolution and interpolated back to the input's, then painted by
-:mod:`render` (per-image min-max normalisation, not in the model's bf16).
+model's resolution and interpolated back, then painted per-image min-max.
 """
 from __future__ import annotations
 
@@ -12,12 +11,11 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
-from .base import PreprocessOptions, Preprocessor
-from .render import depth_to_pil
 from thenoise.utils.image_tensor import flatten_alpha
+from .base import PreprocessOptions, Preprocessor, load_processor, require_checkpoint
+from .render import depth_to_pil
 
-#: The colormaps a depth map can be painted with. ``turbo`` needs a vendored LUT and
-#: lands later (M4); keeping the option typed now avoids widening the surface later.
+#: Colormaps a depth map can be painted with; ``turbo`` needs a vendored LUT and lands later.
 _COLORMAPS = ("gray",)
 
 
@@ -44,15 +42,12 @@ class DepthPreprocessor(Preprocessor):
     DTYPE: ClassVar[torch.dtype] = torch.bfloat16
 
     def load(self, device, path: str | None = None) -> None:
-        """Load the checkpoint directory ``path``; its directory name is the name the
-        pool reports it under."""
+        """Load the checkpoint directory ``path``; its name is the pool's name for it."""
         self.device = device
         self.name = os.path.basename(path) if path else self.name
-        from ._hf import load_depth_model, load_depth_processor, require_depth_files
-
-        require_depth_files(path)
-        self._processor = load_depth_processor(path)
-        self._model = load_depth_model(path, self.DTYPE).to(device).eval()
+        require_checkpoint(self, path)
+        self._processor = load_processor(path)
+        self._model = load_model(path, self.DTYPE).to(device).eval()
 
     def unload(self) -> None:
         del self._model
@@ -60,8 +55,7 @@ class DepthPreprocessor(Preprocessor):
 
     def detect(self, image: Image.Image, options: DepthOptions) -> torch.Tensor:
         """The raw fp32 relative-depth field at the input's size, ``[1, H, W]``."""
-        # Control models are RGB: composite any alpha onto white, so the DPT
-        # processor never sees a 4-channel image against a 3-channel mean.
+        # Control models are RGB: composite any alpha onto white before the processor.
         rgb = flatten_alpha(image)
         inputs = self._processor(images=rgb, return_tensors="pt").to(self.device, self.DTYPE)
         with torch.no_grad():
@@ -74,4 +68,15 @@ class DepthPreprocessor(Preprocessor):
         return depth_to_pil(field, **asdict(options or DepthOptions()))
 
 
-__all__ = ["DepthOptions", "DepthPreprocessor"]
+def load_model(path: str, dtype) -> torch.nn.Module:
+    """The Depth-Anything model of a checkpoint directory."""
+    from transformers import AutoModelForDepthEstimation
+
+    return AutoModelForDepthEstimation.from_pretrained(path, dtype=dtype)
+
+
+__all__ = [
+    "DepthOptions",
+    "DepthPreprocessor",
+    "load_model",
+]

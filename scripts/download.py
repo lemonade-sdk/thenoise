@@ -25,6 +25,10 @@ Models:
                   https://huggingface.co/Comfy-Org/Mage-Flow
   esrgan          Real-ESRGAN x4 pixel upscaler (optional, for upscaling)
                   https://huggingface.co/Comfy-Org/Real-ESRGAN_repackaged
+  preprocess      Control-map checkpoints: Depth-Anything-V2 depth, or the ViTPose
+                  keypoint model + RT-DETR person detector pose needs
+                  https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf
+                  https://huggingface.co/usyd-community/vitpose-base-simple
 
 Tokenizer/processor configs are vendored inside the ``thenoise`` package, so no
 tokenizer is ever downloaded; loading is fully offline.
@@ -48,6 +52,8 @@ Usage:
     python scripts/download.py --model mage-flow --variant base
     python scripts/download.py --model mage-flow --int8-convrot --edit-only
     python scripts/download.py --model esrgan
+    python scripts/download.py --model preprocess
+    python scripts/download.py --model preprocess --variant pose
     python scripts/download.py --model krea2 --dry-run
 """
 from __future__ import annotations
@@ -288,13 +294,35 @@ _DEPTH_REPOS = {
     "base": "depth-anything/Depth-Anything-V2-Base-hf",
     "large": "depth-anything/Depth-Anything-V2-Large-hf",
 }
-_DEPTH_FILES = ("config.json", "model.safetensors", "preprocessor_config.json")
+#: Pose is two checkpoints: ViTPose measures the joints of one person crop at a time,
+#: so RT-DETR has to say where the people are first. ``pose`` is the default pair,
+#: ``pose-r50vd`` the more accurate detector for crowded or occluded scenes.
+_POSE_ESTIMATOR = "usyd-community/vitpose-base-simple"
+_POSE_DETECTORS = {
+    "pose": ("rtdetr_r18vd", "PekingU/rtdetr_r18vd_coco_o365"),
+    "pose-r50vd": ("rtdetr_r50vd", "PekingU/rtdetr_r50vd_coco_o365"),
+}
+#: What a transformers checkpoint directory needs to be loadable.
+_CHECKPOINT_FILES = ("config.json", "model.safetensors", "preprocessor_config.json")
+
+
+def _checkpoint(repo: str, directory: str) -> list[Artifact]:
+    """One checkpoint's files, from ``repo`` into ``directory``.
+
+    A preprocessor pool holds one directory per checkpoint, so the label carries it:
+    a label with a slash lands in that subdirectory of the output directory."""
+    return [(f"{directory}/{name}", repo, name) for name in _CHECKPOINT_FILES]
 
 
 def _preprocess_jobs(args: argparse.Namespace) -> list[Artifact]:
-    """Control-map preprocessor: Depth-Anything-V2 (small / base / large)."""
-    repo = _DEPTH_REPOS[args.variant]
-    return [(file, repo, file) for file in _DEPTH_FILES]
+    """Control-map preprocessors: a Depth-Anything-V2 depth model, or the two
+    checkpoints a pose map needs."""
+    if args.variant in _POSE_DETECTORS:
+        detector_dir, detector_repo = _POSE_DETECTORS[args.variant]
+        return _checkpoint(_POSE_ESTIMATOR, "vitpose_base_simple") + _checkpoint(
+            detector_repo, detector_dir
+        )
+    return _checkpoint(_DEPTH_REPOS[args.variant], f"depth_anything_v2_{args.variant}")
 
 
 @dataclass(frozen=True)
@@ -308,8 +336,6 @@ class ModelSpec:
     variant_supported: bool = False
     variant_choices: tuple[str, ...] | None = None
     default_variant: str | None = None
-    #: Whether the output directory gets ``_<variant>`` appended (per-variant dirs).
-    variant_out: bool = False
 
 
 MODELS: dict[str, ModelSpec] = {
@@ -374,14 +400,13 @@ MODELS: dict[str, ModelSpec] = {
         has_int8=False,
     ),
     "preprocess": ModelSpec(
-        "preprocess", "./models/preprocessors/depth_anything_v2_{variant}",
-        "Depth-Anything-V2 depth map (control-map preprocessor)",
+        "preprocess", "./models/preprocessors",
+        "Control-map checkpoints: Depth-Anything-V2 depth, ViTPose + RT-DETR pose",
         _preprocess_jobs,
         has_int8=False,
         variant_supported=True,
-        variant_choices=("small", "base", "large"),
+        variant_choices=("small", "base", "large", "pose", "pose-r50vd"),
         default_variant="small",
-        variant_out=True,
     ),
 }
 
@@ -409,6 +434,7 @@ def _epilog() -> str:
         "  python scripts/download.py --model esrgan",
         "  python scripts/download.py --model preprocess",
         "  python scripts/download.py --model preprocess --variant base",
+        "  python scripts/download.py --model preprocess --variant pose",
     ]
     return "\n".join(lines)
 
@@ -438,7 +464,8 @@ def main() -> None:
             "aesthetic-v1.1) | zimage: turbo | base (default: turbo) | "
             "klein: 4b | 4b-base | 9b | 9b-base (default: 4b) | "
             "qwen-image-2.1: turbo | base (default: turbo) | "
-            "mage-flow: turbo | rl | base (default: turbo)"
+            "mage-flow: turbo | rl | base (default: turbo) | "
+            "preprocess: small | base | large | pose | pose-r50vd (default: small)"
         ),
     )
     ap.add_argument(
@@ -482,16 +509,13 @@ def main() -> None:
         ap.error(f"--int8-convrot is not supported by --model {args.model}")
 
     # ---- download -----------------------------------------------------------
-    if spec.variant_out:
-        out_dir = args.out or spec.default_out.format(variant=args.variant)
-    else:
-        out_dir = args.out or spec.default_out
+    out_dir = args.out or spec.default_out
     jobs = spec.jobs(args)
 
     if args.dry_run:
         print(f"plan for --model {args.model} -> {out_dir}")
         for name, repo, path in jobs:
-            print(f"  {name:14s} {repo} :: {path}")
+            print(f"  {name:34s} {repo} :: {path}")
         return
 
     out = Path(out_dir)
@@ -499,8 +523,13 @@ def main() -> None:
 
     print(f"Downloading {args.model} artifacts -> {out}")
     for name, repo, path in jobs:
-        dest = hf_hub_download(repo, path, local_dir=str(out))
-        print(f"  {name:14s} -> {dest}")
+        # A label naming a directory lands there: a preprocessor pool keeps one
+        # directory per checkpoint, and --out points at the pool.
+        directory, _, _ = name.rpartition("/")
+        destination = out / directory if directory else out
+        destination.mkdir(parents=True, exist_ok=True)
+        dest = hf_hub_download(repo, path, local_dir=str(destination))
+        print(f"  {name:34s} {repo} :: {path} -> {dest}")
     print(f"done: {args.model} ({len(jobs)} artifact(s))")
 
 

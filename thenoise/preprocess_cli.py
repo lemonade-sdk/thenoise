@@ -20,6 +20,10 @@ def run_preprocess(args) -> None:
     if args.list:
         for kind, names in runtime.preprocessors.available().items():
             logger.info("%s: %s", kind, ", ".join(names))
+        # A kind whose weights are only half there is worth naming: it is on disk,
+        # just not runnable, and saying so beats an empty list with no reason.
+        for kind, reason in runtime.preprocessors.missing().items():
+            logger.info("%s: unavailable, %s", kind, reason)
         return
     if not args.input or not args.types:
         raise SystemExit("preprocess: --input and --type are required (or --list)")

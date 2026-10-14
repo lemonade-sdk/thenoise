@@ -49,8 +49,15 @@ def test_the_first_implementation_of_a_kind_is_its_default():
     assert PreprocessorManager(device="cpu").defaults() == {"canny": "canny"}
 
 
-def test_unknown_kind_names_the_available_ones():
-    with pytest.raises(ValueError, match=r"no preprocessor for 'depth'; available: canny"):
+def test_a_kind_the_engine_has_never_heard_of_names_the_available_ones():
+    with pytest.raises(ValueError, match=r"no preprocessor for 'lineart'; available: canny"):
+        PreprocessorManager(device="cpu").get("lineart")
+
+
+def test_a_kind_missing_its_weights_names_the_download_command():
+    """A kind the engine does have, but whose checkpoint does not, is a different
+    answer: the message has to say what to run."""
+    with pytest.raises(ValueError, match=r"the depth preprocessor has no checkpoint"):
         PreprocessorManager(device="cpu").get("depth")
 
 

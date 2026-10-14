@@ -102,25 +102,40 @@ class DepthOptionsModel(BaseModel):
     colormap: str = "gray"
 
 
+class PoseOptionsModel(BaseModel):
+    """The pose request fields, mirroring :class:`PoseOptions` field for field."""
+
+    detector: str = ""
+    threshold: float = 0.5
+    kp_threshold: float = 0.3
+    line_width: int = 4
+    radius: int = 4
+    background: str = "black"
+
+
 class PreprocessRequest(BaseModel):
     """Control-map extraction: image -> canny / depth / pose map, at the input's size.
     ``type`` lists only the kinds the engine implements; adding one widens the list.
     """
 
     image_b64: str
-    type: Literal["canny", "depth"]
+    type: Literal["canny", "depth", "pose"]
     model: Optional[str] = None  # implementation name; null = the kind's default
     canny: Optional[CannyOptionsModel] = None
     depth: Optional[DepthOptionsModel] = None
+    pose: Optional[PoseOptionsModel] = None
     out: Literal["png", "json"] = "png"
 
     def to_options(self) -> "PreprocessOptions":
         """The request as the kind's option dataclass (same field names on both)."""
         from thenoise.preprocess.base import PreprocessOptions
         from thenoise.preprocess.depth import DepthOptions
+        from thenoise.preprocess.pose import PoseOptions
 
         if self.type == "depth":
             return DepthOptions(**(self.depth or DepthOptionsModel()).model_dump())
+        if self.type == "pose":
+            return PoseOptions(**(self.pose or PoseOptionsModel()).model_dump())
         return CannyOptions(**(self.canny or CannyOptionsModel()).model_dump())
 
 
@@ -227,6 +242,8 @@ def create_app(runtime) -> FastAPI:
         return {
             "preprocessors": runtime.preprocessors.available(),
             "defaults": runtime.preprocessors.defaults(),
+            # The person detectors a pose request crops its people with, by name.
+            "detectors": runtime.preprocessors.detectors(),
         }
 
     @app.post("/text2image")

@@ -16,8 +16,7 @@ from .base import PreprocessOptions, Preprocessor
 _LUMA = (0.2126, 0.7152, 0.0722)  # Rec. 709
 _SOBEL_X = torch.tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]])
 _BLUR = (5, 1.2)  # kernel size, sigma
-# Gradient magnitude in 8-bit grey levels, so the conventional 100/200 thresholds
-# land on real edges.
+# Gradient magnitude in 8-bit grey levels, so conventional 100/200 thresholds land on edges.
 _GRAY_SCALE = 255.0
 # The four quantised gradient orientations, as the neighbour offsets they compare with.
 _ORIENTATIONS = ((0, 1), (1, 1), (1, 0), (1, -1))

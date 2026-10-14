@@ -2,6 +2,7 @@
    The wire keeps the technical names; the words shown to the user are the plain ones. */
 
 let preAvailable = {};    // control-map kind -> the methods implementing it
+let preDetectors = [];    // person detectors on disk, for the pose kind to crop with
 let preInputB64 = null;   // base64 (no data: prefix) sent to /preprocess
 let preOutUrl = null;
 let preOutMeta = null;
@@ -14,6 +15,8 @@ const KIND_LABELS = {
 const OPTION_LABELS = {
   low: 'Edge cutoff', high: 'Strong edge cutoff', thickness: 'Line width',
   invert: 'Invert depth',
+  detector: 'Person finder', threshold: 'Person cutoff', kp_threshold: 'Joint cutoff',
+  line_width: 'Line width', radius: 'Joint size', background: 'Canvas',
 };
 
 const kindLabel = kind => KIND_LABELS[kind]
@@ -30,12 +33,17 @@ function showPreOptions() {
   $('p_model_field').classList.toggle('hidden', methods.length <= 1);
   $('p_canny_opts').classList.toggle('hidden', type !== 'canny');
   $('p_depth_opts').classList.toggle('hidden', type !== 'depth');
+  $('p_pose_opts').classList.toggle('hidden', type !== 'pose');
+  // With one detector there is nothing to choose, and the default is that one.
+  $('p_detector_field').classList.toggle('hidden', preDetectors.length <= 1);
 }
 
 async function loadPreprocessors() {
   const data = await fetchJSON('/preprocessors');
   preAvailable = (data && data.preprocessors) || {};
+  preDetectors = (data && data.detectors) || [];
   fillSelect($('p_type'), Object.keys(preAvailable), kindLabel);
+  fillSelect($('p_detector'), preDetectors);
   fillPreModels();
   showPreOptions();
   $('p_run').disabled = preInputB64 === null || !Object.keys(preAvailable).length;
@@ -49,30 +57,27 @@ function loadPreFile(file) {
     if (preOutUrl) { URL.revokeObjectURL(preOutUrl); preOutUrl = null; }
     preOutMeta = null;
     setStageActions($('p_download'), $('p_info_btn'), false);
-    $('p_single_img').src = reader.result;
-    $('p_single').classList.remove('hidden');
-    $('p_result').classList.add('hidden');
-    $('p_placeholder').style.display = 'none';
-    $('p_dz_name').textContent = file.name;
-    $('p_dz_name').style.display = 'block';
-    $('p_dz_hint').style.display = 'none';
+    showInputPreview(reader.result, file, {
+      singleImg: 'p_single_img', single: 'p_single', result: 'p_result',
+      placeholder: 'p_placeholder', dzName: 'p_dz_name', dzHint: 'p_dz_hint',
+    });
     $('p_run').disabled = !Object.keys(preAvailable).length;
   };
   reader.readAsDataURL(file);
 }
 
 function renderPreInfo(meta) {
-  const grid = $('info_modal_grid');
-  grid.innerHTML = '';
+  const rows = [];
   if (!meta || typeof meta !== 'object') {
-    addRow(grid, 'Metadata', null, 'none');
+    renderInfoRows([['Metadata', null, 'none']]);
     return;
   }
-  addRow(grid, 'Detect', kindLabel(meta.type));
-  addRow(grid, 'Method', meta.model);
+  rows.push(['Detect', kindLabel(meta.type), '']);
+  rows.push(['Method', meta.model, '']);
   for (const [key, value] of Object.entries(meta.options || {})) {
-    addRow(grid, OPTION_LABELS[key] || key, value);
+    rows.push([OPTION_LABELS[key] || key, value, '']);
   }
+  renderInfoRows(rows);
 }
 
 function preRequest() {
@@ -93,6 +98,18 @@ function preRequest() {
   if (type === 'depth') {
     body.depth = { invert: $('p_invert').checked, colormap: 'gray' };
   }
+  if (type === 'pose') {
+    body.pose = {
+      // No picker means one detector: let the pool's default apply.
+      detector: $('p_detector_field').classList.contains('hidden')
+        ? '' : $('p_detector').value,
+      threshold: parseFloat($('p_person').value) || 0,
+      kp_threshold: parseFloat($('p_joint').value) || 0,
+      line_width: parseInt($('p_line').value, 10) || 1,
+      radius: parseInt($('p_radius').value, 10) || 1,
+      background: $('p_canvas').value,
+    };
+  }
   return body;
 }
 
@@ -109,10 +126,7 @@ $('p_run').addEventListener('click', () => {
     onSuccess: async (blob) => {
       if (preOutUrl) URL.revokeObjectURL(preOutUrl);
       preOutUrl = URL.createObjectURL(blob);
-      $('p_img').src = preOutUrl;
-      $('p_single').classList.add('hidden');
-      $('p_result').classList.remove('hidden');
-      $('p_placeholder').style.display = 'none';
+      showOutputPreview('p_single', 'p_result', 'p_placeholder', 'p_img', preOutUrl);
       setStageActions($('p_download'), $('p_info_btn'), true);
       preOutMeta = await decodeMeta(blob, 'preprocess_data');
     },

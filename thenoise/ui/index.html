@@ -440,6 +440,46 @@
         class="hint">(near = dark instead of bright)</span></label>
   </div>
 
+  <div class="opts hidden" id="p_pose_opts">
+    <div class="field" id="p_detector_field">
+      <label class="label" for="p_detector">Person finder</label>
+      <select id="p_detector"></select>
+      <span class="hint">finds each person for the joint model to look at</span>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label class="label" for="p_person">Person cutoff</label>
+        <input type="number" id="p_person" min="0" max="1" step="0.05" value="0.5">
+        <span class="hint">doubtful people are left out entirely</span>
+      </div>
+      <div class="field">
+        <label class="label" for="p_joint">Joint cutoff</label>
+        <input type="number" id="p_joint" min="0" max="1" step="0.05" value="0.3">
+        <span class="hint">joints nobody is sure about are left out</span>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label class="label" for="p_line">Line width</label>
+        <input type="number" id="p_line" min="1" step="1" value="4">
+        <span class="hint">bone thickness, in pixels</span>
+      </div>
+      <div class="field">
+        <label class="label" for="p_radius">Joint size</label>
+        <input type="number" id="p_radius" min="1" step="1" value="4">
+        <span class="hint">radius of the joint dots</span>
+      </div>
+    </div>
+    <div class="field">
+      <label class="label" for="p_canvas">Canvas</label>
+      <select id="p_canvas">
+        <option value="black" selected>black</option>
+        <option value="green">green</option>
+      </select>
+      <span class="hint">green is the canvas the original openpose models used</span>
+    </div>
+  </div>
+
   <button class="btn" id="p_run" disabled>Extract</button>
 </aside>
 

@@ -162,6 +162,9 @@ def test_cli_preprocess_parses_its_flags(parse):
         "--model", "depth-anything-v2-base",
         "--canny-low", "30", "--canny-high", "60", "--canny-thickness", "2",
         "--depth-invert", "--depth-colormap", "gray",
+        "--pose-detector", "rtdetr_r50vd", "--pose-threshold", "0.7",
+        "--pose-kp-threshold", "0.4", "--pose-line-width", "6",
+        "--pose-radius", "3", "--pose-background", "green",
         "--preprocessor-dir", "models/preprocessors",
         "--out", "map.png", "--device", "hip",
     ])
@@ -170,6 +173,12 @@ def test_cli_preprocess_parses_its_flags(parse):
     assert args.model == "depth-anything-v2-base"
     assert (args.canny_low, args.canny_high, args.canny_thickness) == (30.0, 60.0, 2)
     assert (args.depth_invert, args.depth_colormap) == (True, "gray")
+    assert (args.pose_detector, args.pose_threshold, args.pose_kp_threshold) == (
+        "rtdetr_r50vd", 0.7, 0.4,
+    )
+    assert (args.pose_line_width, args.pose_radius, args.pose_background) == (
+        6, 3, "green",
+    )
     assert args.preprocessor_dir == "models/preprocessors"
     assert (args.out, args.device, args.list) == ("map.png", "hip", False)
 
@@ -180,7 +189,18 @@ def test_cli_preprocess_defaults(parse):
     assert (args.input, args.types, args.model) == (None, None, "")
     assert (args.canny_low, args.canny_high, args.canny_thickness) == (100.0, 200.0, 1)
     assert (args.depth_invert, args.depth_colormap) == (False, "gray")
+    # No detector named means the pool's first one; black is the modern canvas.
+    assert (args.pose_detector, args.pose_threshold, args.pose_kp_threshold) == (
+        "", 0.5, 0.3,
+    )
+    assert (args.pose_line_width, args.pose_radius, args.pose_background) == (4, 4, "black")
     assert args.out == "out_control.png" and args.list is False
+
+
+def test_cli_preprocess_knows_only_the_canvases_we_can_paint(parse):
+    with pytest.raises(SystemExit):
+        parse(["preprocess", "--input", "i.png", "--type", "pose",
+               "--pose-background", "plaid"])
 
 
 @pytest.mark.parametrize("flag", ["--width", "--height", "--fit"])

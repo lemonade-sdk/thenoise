@@ -33,8 +33,7 @@ TheNoise ships:
 - a built-in 2× refiner-based (SesquiLSR) upscaler - fast and high-quality upscaling without loading extra model files,
 - pixel-space upscalers (Real-ESRGAN) up to 4× - standard ESRGAN-based models,
 - film grain and RCAS sharpening as post-processing,
-- control-map extraction for conditioning workflows - Canny edge maps today, from
-  the CLI, the API or the web UI, with no model loaded,
+- control-map extraction for conditioning workflows - canny edges, depth maps and openpose-style pose skeletons,
 - LoRA support - one or more LoRAs per image, each with its own weight.
 
 ## Supported models

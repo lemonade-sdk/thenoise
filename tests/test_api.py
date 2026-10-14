@@ -444,7 +444,11 @@ def test_upscale_works_without_a_model(client, monkeypatch):
 def test_preprocessors_lists_kinds_and_defaults():
     """Extraction needs no diffusion model, so the UI can always fill its dropdowns."""
     res = _endpoint(create_app(_empty_runtime()), "/preprocessors")()
-    assert res == {"preprocessors": {"canny": ["canny"]}, "defaults": {"canny": "canny"}}
+    assert res == {
+        "preprocessors": {"canny": ["canny"]},
+        "defaults": {"canny": "canny"},
+        "detectors": [],
+    }
 
 
 def test_preprocessors_list_discovered_depth_checkpoints(tmp_path):
@@ -457,7 +461,21 @@ def test_preprocessors_list_discovered_depth_checkpoints(tmp_path):
     assert res == {
         "preprocessors": {"canny": ["canny"], "depth": ["depth_anything_v2_small"]},
         "defaults": {"canny": "canny", "depth": "depth_anything_v2_small"},
+        "detectors": [],
     }
+
+
+def test_preprocessors_list_the_pose_checkpoints(tmp_path):
+    """The UI's person-finder dropdown and its Pose entry both come from here: the
+    detector is listed by name, and pose appears only once both checkpoints are there."""
+    for name, model_type in (("vitpose_base_simple", "vitpose"), ("rtdetr_r18vd", "rt_detr")):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "config.json").write_text(json.dumps({"model_type": model_type}))
+    runtime = Runtime(Settings(preprocessor_dir=str(tmp_path)))
+    res = _endpoint(create_app(runtime), "/preprocessors")()
+    assert res["preprocessors"]["pose"] == ["vitpose_base_simple"]
+    assert res["detectors"] == ["rtdetr_r18vd"]
 
 
 # ------------------------------------------------------------------- /preprocess
@@ -564,6 +582,29 @@ def test_preprocess_missing_depth_weights_names_the_download(client, tmp_path):
     )
     assert res.status_code == 400
     assert "scripts/download.py --model preprocess" in res.text
+
+
+def test_preprocess_a_pose_request_without_checkpoints_names_the_pose_download(client, tmp_path):
+    """The remedy has to be the one that fetches *this* kind, pose being two checkpoints
+    of its own rather than the depth model the default variant downloads."""
+    runtime = Runtime(Settings(preprocessor_dir=str(tmp_path)))
+    res = client(runtime).post(
+        "/preprocess", json={"image_b64": _edged_png_b64(), "type": "pose"}
+    )
+    assert res.status_code == 400
+    assert "--model preprocess --variant pose" in res.text
+
+
+def test_a_pose_request_becomes_the_pose_options():
+    from thenoise.api import PreprocessRequest
+    from thenoise.preprocess.pose import PoseOptions
+
+    request = PreprocessRequest(
+        image_b64="x", type="pose", pose={"radius": 2, "detector": "rtdetr_r50vd"}
+    )
+    assert request.to_options() == PoseOptions(radius=2, detector="rtdetr_r50vd")
+    # A request that names nothing gets the kind's own defaults, detector included.
+    assert PreprocessRequest(image_b64="x", type="pose").to_options() == PoseOptions()
 
 
 def test_preprocess_backend_failure_is_500(client, monkeypatch):

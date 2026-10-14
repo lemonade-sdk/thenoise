@@ -168,6 +168,22 @@ def build_parser() -> argparse.ArgumentParser:
                      help="depth: invert near/far (default: near = bright)")
     pre.add_argument("--depth-colormap", default="gray", choices=["gray"],
                      help="depth colormap (default: gray)")
+    pre.add_argument("--pose-detector", default="",
+                     help="pose: person detector checkpoint to crop with "
+                          "(default: the first one in --preprocessor-dir)")
+    pre.add_argument("--pose-threshold", type=float, default=0.5,
+                     help="pose: minimum detector score for a person to be in the map "
+                          "at all (default: 0.5)")
+    pre.add_argument("--pose-kp-threshold", type=float, default=0.3,
+                     help="pose: minimum confidence for a joint to be drawn "
+                          "(default: 0.3)")
+    pre.add_argument("--pose-line-width", type=int, default=4,
+                     help="pose: skeleton line width in pixels (default: 4)")
+    pre.add_argument("--pose-radius", type=int, default=4,
+                     help="pose: keypoint dot radius in pixels (default: 4)")
+    pre.add_argument("--pose-background", default="black", choices=["black", "green"],
+                     help="pose: canvas colour; green is the original openpose one "
+                          "(default: black)")
     pre.add_argument("--out", default="out_control.png",
                      help="output image path; the map is the size of the input, and "
                           "extra --type values add a _<type> suffix "
