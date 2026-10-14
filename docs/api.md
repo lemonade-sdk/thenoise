@@ -225,14 +225,9 @@ with that same image later - whoever conditions on it does its own resizing.
 A `depth` request needs its checkpoint on disk (``scripts/download.py --model
 preprocess``) and a `pose` request needs both of its own (``scripts/download.py --model
 preprocess --variant pose``); when either is missing the endpoint answers **HTTP 400**
-naming the command that fetches it. A preprocessor is loaded for the request and
-released before the response is sent, so what a map needed is not held against a later
-`/text2image` - and a depth or pose request pays its checkpoint load each time. A type the engine does not implement, an unknown `model` or an
-invalid option value is also **HTTP 400** - each kind's option block is the same
-dataclass the extraction runs on, bounds and all. A body that does not parse, like a
-`type` outside the implemented set or a missing `image_b64`, is a schema error
-(**HTTP 422**). Options sent for a type other than the one requested are refused as
-well, rather than ignored.
+naming the command that fetches it. A type the engine does not implement, an unknown `model` or an
+invalid option value is also **HTTP 400**; a `type` outside the implemented set is a
+schema error (**HTTP 422**).
 
 ### Response
 

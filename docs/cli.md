@@ -166,7 +166,8 @@ see [Control-map extraction](preprocess.md#installing-and-downloading-what-each-
 | `--pose-background` | no | `black` | Pose: `black` or `green` (the canvas SD's original openpose preprocessor used) |
 | `--out` | no | `out_control.png` | Output image path |
 
-The `--<type>-<option>` flags are generated from the same option dataclasses the `/preprocess` endpoint and the web UI form are built from so a flag and a parameter of the map it produces cannot disagree, and a flag you do not pass is not sent as its own default.
+The `--<type>-<option>` flags, the `/preprocess` request fields and the web UI form all
+come from the same declaration.
 
 The map is white edges on black (`--type canny`), dark lines on white
 (`--type lineart`), soft dark edges on white (`--type softedge`), a grey or turbo
