@@ -126,7 +126,7 @@ Pixel-upscales an existing image. Model-free - no `--dit`/`--vae`/
 ## Preprocess a control map
 
 Extracts a conditioning map - Canny edges, a Depth-Anything-V2 depth map or an
-openpose-style pose skeleton - from an existing image. Model-free, like `upscale`:
+openpose-style pose skeleton - from an existing image. Model-free.
 
 ```bash
 ./thenoise.sh preprocess \
