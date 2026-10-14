@@ -25,7 +25,7 @@ TheNoise can be used standalone, from the command line or through a webui or thr
 
 <details id="shot-preprocess">
   <summary>Preprocess</summary>
-  <img width="2048" height="1066" alt="thenoise-preprocessor" src=" />
+  <img width="2048" height="1066" alt="thenoise-preprocessor" src="https://github.com/user-attachments/assets/220af43e-fc3b-4933-8782-24f793c9187f"/>
 </details>
 
 ---
