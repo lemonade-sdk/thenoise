@@ -131,6 +131,13 @@ def test_run_carries_over_the_source_metadata(controller, square):
     assert chunk(out, "generation_data") == '{"seed": 7}'
 
 
+def test_a_run_leaves_nothing_resident(controller, square):
+    """Extraction is one-shot: the room its weights took belongs to whatever runs next."""
+    used = controller._preprocessors.get("canny")
+    controller.run(square, "canny", CannyOptions())
+    assert controller._preprocessors.get("canny") is not used
+
+
 def test_run_reaches_the_kernels_inside_the_inference_boundary(controller, square, monkeypatch):
     seen = {}
     detect = CannyPreprocessor.detect

@@ -4,7 +4,7 @@ model's resolution and interpolated back, then painted per-image min-max.
 from __future__ import annotations
 
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from typing import ClassVar
 
 import torch
@@ -12,33 +12,15 @@ import torch.nn.functional as F
 from PIL import Image
 
 from thenoise.utils.image_tensor import flatten_alpha
-from .base import PreprocessOptions, Preprocessor, load_processor, require_checkpoint
+from .base import Preprocessor, load_processor, require_checkpoint
+from .options import DepthOptions
 from .render import depth_to_pil
-
-#: Colormaps a depth map can be painted with; ``turbo`` needs a vendored LUT.
-_COLORMAPS = ("gray", "turbo")
-
-
-@dataclass
-class DepthOptions(PreprocessOptions):
-    """How the relative-depth field is painted."""
-
-    invert: bool = False
-    colormap: str = "gray"
-
-    def __post_init__(self) -> None:
-        if self.colormap not in _COLORMAPS:
-            raise ValueError(
-                f"unknown depth colormap {self.colormap!r}; expected one of {_COLORMAPS}"
-            )
-
 
 class DepthPreprocessor(Preprocessor):
     """The default depth extractor: Depth-Anything-V2 Small, Apache-2.0."""
 
     name: ClassVar[str] = "depth-anything-v2-small"
     kind: ClassVar[str] = "depth"
-    OPTIONS: ClassVar[type] = DepthOptions
     DTYPE: ClassVar[torch.dtype] = torch.bfloat16
 
     def load(self, device, path: str | None = None) -> None:

@@ -12,6 +12,7 @@ from .base import PreprocessOptions, Preprocessor
 from .canny import CannyPreprocessor
 from .depth import DepthPreprocessor
 from .lineart import LineartPreprocessor
+from .options import OPTIONS_BY_KIND, options_schema
 from .pose import PosePreprocessor
 from .softedge import SoftedgePreprocessor
 
@@ -54,6 +55,7 @@ class PreprocessorManager:
         self.device = device
         self.preprocessor_dir = preprocessor_dir
         self._resident: Optional[Preprocessor] = None
+        self._resident_holds_weights = False
         self._paths = self._discover()
 
     def available(self) -> Dict[str, List[str]]:
@@ -68,7 +70,7 @@ class PreprocessorManager:
     def missing(self) -> Dict[str, str]:
         """Each kind the engine knows that cannot run yet, with what would complete it."""
         return {
-            kind: f"{reason}; run '{self._option_class(kind).DOWNLOAD}' to fetch it"
+            kind: f"{reason}; run '{self._preprocessor_class(kind).DOWNLOAD}' to fetch it"
             for kind in self._known_kinds()
             if (reason := self._missing(kind))
         }
@@ -83,7 +85,16 @@ class PreprocessorManager:
 
     def options_for(self, kind: str, **values: Any) -> PreprocessOptions:
         """The option dataclass of ``kind`` filled from the caller's fields."""
-        return self._option_class(kind).OPTIONS(**values)
+        cls = OPTIONS_BY_KIND.get(kind)
+        if cls is None:
+            raise ValueError(
+                f"no preprocessor for {kind!r}; available: {', '.join(OPTIONS_BY_KIND)}"
+            )
+        return cls(**values)
+
+    def option_schemas(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Each kind's request fields, described for the web UI to build its form from."""
+        return {kind: options_schema(cls) for kind, cls in OPTIONS_BY_KIND.items()}
 
     def get(self, kind: str, name: str = "") -> Preprocessor:
         """The resident preprocessor for ``kind``, loading it when the resident differs.
@@ -92,7 +103,7 @@ class PreprocessorManager:
         if reason:
             raise ValueError(
                 f"the {kind} preprocessor {reason}; run "
-                f"'{self._option_class(kind).DOWNLOAD}' to fetch it"
+                f"'{self._preprocessor_class(kind).DOWNLOAD}' to fetch it"
             )
         entries = self._implementations(kind)
         if not entries:
@@ -113,6 +124,8 @@ class PreprocessorManager:
             preprocessor = cls()
             preprocessor.load(self.device, path, **self._resources(kind))
             self._resident = preprocessor
+            # A weights-free kind has nothing on the device to give back.
+            self._resident_holds_weights = path is not None
         return self._resident
 
     def _implementations(self, kind: str) -> List[Tuple[str, Type[Preprocessor], Optional[str]]]:
@@ -122,7 +135,7 @@ class PreprocessorManager:
             entries.append((name, _KIND_CLASSES[kind], path))
         return entries
 
-    def _option_class(self, kind: str) -> Type[Preprocessor]:
+    def _preprocessor_class(self, kind: str) -> Type[Preprocessor]:
         """The class behind ``kind`` (registry or discoverable), or a ValueError for an unknown kind."""
         classes = REGISTRY.get(kind)
         if classes:
@@ -175,9 +188,12 @@ class PreprocessorManager:
         """Drop the resident preprocessor; a no-op when nothing is loaded."""
         if self._resident is None:
             return
+        had_weights = self._resident_holds_weights
         self._resident.unload()
         self._resident = None
-        release_device_memory(self.device)
+        self._resident_holds_weights = False
+        if had_weights:
+            release_device_memory(self.device)
 
 
 __all__ = ["PreprocessorManager", "REGISTRY"]

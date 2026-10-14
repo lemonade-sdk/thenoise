@@ -2,6 +2,7 @@
    The wire keeps the technical names; the words shown to the user are the plain ones. */
 
 let preAvailable = {};    // control-map kind -> the methods implementing it
+let preOptions = {};      // control-map kind -> the option fields it takes
 let preDetectors = [];    // person detectors on disk, for the pose kind to crop with
 let preInputB64 = null;   // base64 (no data: prefix) sent to /preprocess
 let preOutUrl = null;
@@ -12,15 +13,101 @@ const KIND_LABELS = {
   sketch: 'Sketch lines', depth: 'Depth', normal: 'Normals', pose: 'Pose',
   binary: 'Silhouette',
 };
-const OPTION_LABELS = {
-  low: 'Low edge strength', high: 'High edge strength', thickness: 'Line width',
-  invert: 'Invert (near = dark)', colormap: 'Colormap',
-  detector: 'Person detector', threshold: 'Person confidence', kp_threshold: 'Joint confidence',
-  line_width: 'Bone thickness', radius: 'Joint radius', background: 'Background',
-};
 
 const kindLabel = kind => KIND_LABELS[kind]
   ?? (kind ? kind.charAt(0).toUpperCase() + kind.slice(1) : kind);
+
+// A choice's value is a wire name; the user sees the word with its first letter up.
+const valueLabel = value => value ? value.charAt(0).toUpperCase() + value.slice(1) : value;
+
+const isNumberField = option => option.type === 'number' || option.type === 'integer';
+
+const optionFields = kind => preOptions[kind] || [];
+
+function optionLabel(name) {
+  for (const fields of Object.values(preOptions)) {
+    const field = fields.find(entry => entry.name === name);
+    if (field) return field.label;
+  }
+  return name;
+}
+
+function preCheckbox(option) {
+  const label = document.createElement('label');
+  label.className = 'check';
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.id = 'p_opt_' + option.name;
+  input.checked = option.default === true;
+  label.append(input, document.createTextNode(' ' + option.label));
+  return label;
+}
+
+function preField(option) {
+  const id = 'p_opt_' + option.name;
+  const field = document.createElement('div');
+  field.className = 'field';
+  const label = document.createElement('label');
+  label.className = 'label';
+  label.htmlFor = id;
+  label.textContent = option.label;
+
+  // A `pool` field offers what the server has on disk, named as it is there.
+  const choices = option.pool ? preDetectors : option.choices;
+  let control;
+  if (choices) {
+    control = document.createElement('select');
+    fillSelect(control, choices, option.pool ? undefined : valueLabel);
+    // With one thing to choose there is nothing to choose, and the default is that one.
+    if (option.pool && choices.length <= 1) field.classList.add('hidden');
+  } else {
+    control = document.createElement('input');
+    control.type = option.type === 'string' ? 'text' : 'number';
+    if (option.min !== undefined) control.min = option.min;
+    if (option.max !== undefined) control.max = option.max;
+    if (option.step !== undefined) control.step = option.step;
+    control.value = option.default;
+  }
+  control.id = id;
+  field.append(label, control);
+  return field;
+}
+
+function buildPreOptions(kind) {
+  const box = $('p_options');
+  box.innerHTML = '';
+  let pending = null;   // a numeric field waiting for the one it shares a row with
+  for (const option of optionFields(kind)) {
+    if (!isNumberField(option)) {
+      if (pending) { box.append(pending); pending = null; }
+      box.append(option.type === 'boolean' ? preCheckbox(option) : preField(option));
+      continue;
+    }
+    if (!pending) { pending = preField(option); continue; }
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.append(pending, preField(option));
+    box.append(row);
+    pending = null;
+  }
+  // A field left over at the end takes the full width rather than half a row.
+  if (pending) box.append(pending);
+}
+
+// The chosen kind's options as the wire wants them: only what the form actually holds.
+function preOptionValues(kind) {
+  const values = {};
+  for (const option of optionFields(kind)) {
+    const input = $('p_opt_' + option.name);
+    if (!input || input.closest('.hidden')) continue;
+    if (option.type === 'boolean') values[option.name] = input.checked;
+    else if (isNumberField(option)) {
+      // Clearing a number field asks for the default; it is not the same as a zero.
+      if (input.value !== '') values[option.name] = input.valueAsNumber;
+    } else values[option.name] = input.value;
+  }
+  return values;
+}
 
 function fillPreModels() {
   fillSelect($('p_model'), preAvailable[$('p_type').value] || []);
@@ -31,21 +118,15 @@ function showPreOptions() {
   const methods = preAvailable[type] || [];
   // A kind with one implementation needs no method picker.
   $('p_model_field').classList.toggle('hidden', methods.length <= 1);
-  $('p_canny_opts').classList.toggle('hidden', type !== 'canny');
-  $('p_depth_opts').classList.toggle('hidden', type !== 'depth');
-  $('p_pose_opts').classList.toggle('hidden', type !== 'pose');
-  $('p_lineart_opts').classList.toggle('hidden', type !== 'lineart');
-  $('p_softedge_opts').classList.toggle('hidden', type !== 'softedge');
-  // With one detector there is nothing to choose, and the default is that one.
-  $('p_detector_field').classList.toggle('hidden', preDetectors.length <= 1);
+  buildPreOptions(type);
 }
 
 async function loadPreprocessors() {
   const data = await fetchJSON('/preprocessors');
   preAvailable = (data && data.preprocessors) || {};
+  preOptions = (data && data.options) || {};
   preDetectors = (data && data.detectors) || [];
   fillSelect($('p_type'), Object.keys(preAvailable), kindLabel);
-  fillSelect($('p_detector'), preDetectors);
   fillPreModels();
   showPreOptions();
   $('p_run').disabled = preInputB64 === null || !Object.keys(preAvailable).length;
@@ -77,54 +158,20 @@ function renderPreInfo(meta) {
   rows.push(['Detect', kindLabel(meta.type), '']);
   rows.push(['Method', meta.model, '']);
   for (const [key, value] of Object.entries(meta.options || {})) {
-    rows.push([OPTION_LABELS[key] || key, value, '']);
+    rows.push([optionLabel(key), value, '']);
   }
   renderInfoRows(rows);
 }
 
 function preRequest() {
   const type = $('p_type').value;
-  const body = {
+  return {
     image_b64: preInputB64,
     type: type,
     // One method means there is nothing to choose: let the kind's default apply.
     model: $('p_model_field').classList.contains('hidden') ? null : ($('p_model').value || null),
+    [type]: preOptionValues(type),
   };
-  if (type === 'canny') {
-    body.canny = {
-      low: parseFloat($('p_low').value) || 0,
-      high: parseFloat($('p_high').value) || 0,
-      thickness: parseInt($('p_thickness').value, 10) || 1,
-    };
-  }
-  if (type === 'depth') {
-    body.depth = { invert: $('p_invert').checked, colormap: $('p_colormap').value };
-  }
-  if (type === 'lineart') {
-    body.lineart = {
-      threshold: parseFloat($('p_lineart_threshold').value) || 0.5,
-      thickness: parseInt($('p_lineart_thickness').value, 10) || 1,
-    };
-  }
-  if (type === 'softedge') {
-    body.softedge = {
-      threshold: parseFloat($('p_softedge_threshold').value) || 0.2,
-      blur: parseFloat($('p_softedge_blur').value) || 1.5,
-    };
-  }
-  if (type === 'pose') {
-    body.pose = {
-      // No picker means one detector: let the pool's default apply.
-      detector: $('p_detector_field').classList.contains('hidden')
-        ? '' : $('p_detector').value,
-      threshold: parseFloat($('p_person').value) || 0,
-      kp_threshold: parseFloat($('p_joint').value) || 0,
-      line_width: parseInt($('p_line').value, 10) || 1,
-      radius: parseInt($('p_radius').value, 10) || 1,
-      background: $('p_canvas').value,
-    };
-  }
-  return body;
 }
 
 bindDropzone('p_dropzone', 'p_file', files => loadPreFile(files[0]));

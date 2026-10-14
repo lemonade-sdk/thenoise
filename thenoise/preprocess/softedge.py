@@ -5,32 +5,18 @@ edge keeps its grey gradient instead of being binarised, then optionally blurred
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import ClassVar
 
 import torch
 from PIL import Image
 
 from thenoise.utils.image_tensor import pil_to_pixels
-from .base import PreprocessOptions, Preprocessor
+from .base import Preprocessor
 from .canny import _GRAY_SCALE, _sobel, gaussian_blur, luminance
+from .options import SoftedgeOptions
 
 #: The width of the smooth threshold transition, in normalised magnitude units.
 _SOFTNESS = 0.25
-
-
-@dataclass
-class SoftedgeOptions(PreprocessOptions):
-    """The soft edge cutoff (0-1) and the smoothing blur (sigma, 0 = none)."""
-
-    threshold: float = 0.2
-    blur: float = 1.5
-
-    def __post_init__(self) -> None:
-        if not 0.0 <= self.threshold <= 1.0:
-            raise ValueError(f"threshold must be in [0, 1], got {self.threshold}")
-        if self.blur < 0:
-            raise ValueError(f"blur must be >= 0, got {self.blur}")
 
 
 class SoftedgePreprocessor(Preprocessor):
@@ -38,7 +24,6 @@ class SoftedgePreprocessor(Preprocessor):
 
     name: ClassVar[str] = "softedge"
     kind: ClassVar[str] = "softedge"
-    OPTIONS: ClassVar[type] = SoftedgeOptions
     DTYPE: ClassVar[torch.dtype] = torch.float32
 
     def detect(self, image: Image.Image, options: SoftedgeOptions) -> torch.Tensor:

@@ -23,6 +23,11 @@ TheNoise can be used standalone, from the command line or through a webui or thr
   <img width="2048" height="1066" alt="thenoise-upscaler" src="https://github.com/user-attachments/assets/f7ce89b7-fd25-4ad9-a3e4-d5e367530ab7" />
 </details>
 
+<details id="shot-preprocess">
+  <summary>Preprocess</summary>
+  <img width="2048" height="1066" alt="thenoise-preprocessor" src=" />
+</details>
+
 ---
 ## Features
 
@@ -133,7 +138,7 @@ uv pip install -e ".[scripts]"
 
 | If you want to… | Use |
 |---|---|
-| generate an image from the command line | the [CLI](docs/cli.md) - `generate`, `edit`, `upscale` |
+| generate an image from the command line | the [CLI](docs/cli.md) - `generate`, `edit`, `upscale`, `preprocess` |
 | work through a browser | the web UI at `http://localhost:8000/` when running `serve` |
 | call it from other software | the [HTTP API](docs/api.md) - `/text2image`, `/edit`, `/upscale`, `/preprocess` |
 | extract a control map from an image | `preprocess` - the [CLI](docs/cli.md#preprocess-a-control-map), the `/preprocess` endpoint or the web UI's Preprocess tab |

@@ -20,6 +20,7 @@ from thenoise.api import (
     _UI_DIR,
     create_app,
 )
+from thenoise.preprocess.options import OPTIONS_BY_KIND
 from thenoise.runtime import Runtime, Settings
 
 
@@ -444,6 +445,9 @@ def test_upscale_works_without_a_model(client, monkeypatch):
 def test_preprocessors_lists_kinds_and_defaults():
     """Extraction needs no diffusion model, so the UI can always fill its dropdowns."""
     res = _endpoint(create_app(_empty_runtime()), "/preprocessors")()
+    # The option schemas are the fields each kind takes; asserted on their own below.
+    assert set(res["options"]) == set(OPTIONS_BY_KIND)
+    del res["options"]
     assert res == {
         "preprocessors": {
             "canny": ["canny"],
@@ -459,6 +463,25 @@ def test_preprocessors_lists_kinds_and_defaults():
     }
 
 
+def test_preprocessors_describe_the_options_of_every_kind():
+    """The form, the CLI flags and the request schema come from this payload."""
+    res = _endpoint(create_app(_empty_runtime()), "/preprocessors")()
+    assert res["options"]["canny"] == [
+        {"name": "low", "label": "Low edge strength", "type": "number",
+         "default": 100.0, "min": 0, "step": 1},
+        {"name": "high", "label": "High edge strength", "type": "number",
+         "default": 200.0, "min": 0, "step": 1},
+        {"name": "thickness", "label": "Line width", "type": "integer",
+         "default": 1, "min": 1, "step": 1},
+    ]
+    # A field whose choices only the server knows names the list to fill it from.
+    assert res["options"]["pose"][0]["name"] == "detector"
+    assert res["options"]["pose"][0]["pool"] == "detectors"
+    person = res["options"]["pose"][1]
+    assert (person["min"], person["max"], person["default"]) == (0, 1, 0.5)
+    assert [c["default"] for c in res["options"]["depth"]] == [False, "gray"]
+
+
 def test_preprocessors_list_discovered_depth_checkpoints(tmp_path):
     """A preprocessor dir on disk widens what the dropdowns offer."""
     directory = tmp_path / "depth_anything_v2_small"
@@ -466,6 +489,7 @@ def test_preprocessors_list_discovered_depth_checkpoints(tmp_path):
     (directory / "config.json").write_text('{"model_type": "depth_anything"}')
     runtime = Runtime(Settings(preprocessor_dir=str(tmp_path)))
     res = _endpoint(create_app(runtime), "/preprocessors")()
+    del res["options"]
     assert res == {
         "preprocessors": {
             "canny": ["canny"],

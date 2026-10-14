@@ -3,7 +3,6 @@ A third-party CV package cannot be installed here without overwriting the ROCm t
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import ClassVar
 
 import torch
@@ -11,7 +10,8 @@ import torch.nn.functional as F
 from PIL import Image
 
 from thenoise.utils.image_tensor import pil_to_pixels
-from .base import PreprocessOptions, Preprocessor
+from .base import Preprocessor
+from .options import CannyOptions
 
 _LUMA = (0.2126, 0.7152, 0.0722)  # Rec. 709
 _SOBEL_X = torch.tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]])
@@ -22,25 +22,6 @@ _GRAY_SCALE = 255.0
 _ORIENTATIONS = ((0, 1), (1, 1), (1, 0), (1, -1))
 # Weak pixels are absorbed one chain-pixel per pass; this only bounds pathological runs.
 _MAX_GROW = 2048
-
-
-@dataclass
-class CannyOptions(PreprocessOptions):
-    """Edge thresholds (Sobel magnitude, 8-bit units) and rendered line thickness."""
-
-    low: float = 100.0
-    high: float = 200.0
-    thickness: int = 1
-
-    def __post_init__(self) -> None:
-        if self.low < 0 or self.high < 0:
-            raise ValueError(f"thresholds must be >= 0, got {self.low}/{self.high}")
-        if self.low > self.high:
-            raise ValueError(
-                f"low threshold {self.low} exceeds high threshold {self.high}"
-            )
-        if self.thickness < 1:
-            raise ValueError(f"thickness must be >= 1, got {self.thickness}")
 
 
 def luminance(rgb: torch.Tensor) -> torch.Tensor:
@@ -139,7 +120,6 @@ class CannyPreprocessor(Preprocessor):
 
     name: ClassVar[str] = "canny"
     kind: ClassVar[str] = "canny"
-    OPTIONS: ClassVar[type] = CannyOptions
     DTYPE: ClassVar[torch.dtype] = torch.float32
 
     def detect(self, image: Image.Image, options: CannyOptions) -> torch.Tensor:

@@ -44,7 +44,7 @@ class NotLoadedError(RuntimeError):
 
 class Runtime:
     def __init__(self, settings):
-        from .preprocess import PreprocessorManager
+        from .preprocess.manager import PreprocessorManager
         from .preprocess_controller import PreprocessController
         from .upscale.pixel import PixelUpscalerManager
         from .upscale_controller import PixelUpscaleController

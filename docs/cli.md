@@ -156,7 +156,7 @@ see [Control-map extraction](preprocess.md#installing-and-downloading-what-each-
 | `--lineart-thickness` | no | `1` | Line-art: line thickness in pixels |
 | `--softedge-threshold` | no | `0.2` | Soft-edge: where the gradient starts to count, 0-1 |
 | `--softedge-blur` | no | `1.5` | Soft-edge: smoothing sigma in pixels, 0 = none |
-| `--depth-invert` | no | `false` | Depth: swap near/far (near is bright by default) |
+| `--depth-invert` / `--no-depth-invert` | no | `false` | Depth: swap near/far (near is bright by default) |
 | `--depth-colormap` | no | `gray` | Depth: `gray` or `turbo` (a vivid rainbow) |
 | `--pose-detector` | no | first found | Pose: which RT-DETR checkpoint to crop people with |
 | `--pose-threshold` | no | `0.5` | Pose: minimum detector score for a person to be in the map at all |
@@ -165,6 +165,8 @@ see [Control-map extraction](preprocess.md#installing-and-downloading-what-each-
 | `--pose-radius` | no | `4` | Pose: radius of the joint dots |
 | `--pose-background` | no | `black` | Pose: `black` or `green` (the canvas SD's original openpose preprocessor used) |
 | `--out` | no | `out_control.png` | Output image path |
+
+The `--<type>-<option>` flags are generated from the same option dataclasses the `/preprocess` endpoint and the web UI form are built from so a flag and a parameter of the map it produces cannot disagree, and a flag you do not pass is not sent as its own default.
 
 The map is white edges on black (`--type canny`), dark lines on white
 (`--type lineart`), soft dark edges on white (`--type softedge`), a grey or turbo

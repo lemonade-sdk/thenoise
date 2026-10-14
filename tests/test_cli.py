@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from thenoise.cli import build_parser
+from thenoise.preprocess.options import OPTIONS_BY_KIND
 
 # The checkpoints every generation subcommand needs (``upscale`` is model-free).
 PATHS = ["--dit", "d.safetensors", "--vae", "v.safetensors", "--text-encoder", "t.safetensors"]
@@ -191,16 +192,9 @@ def test_cli_preprocess_defaults(parse):
     """A bare ``preprocess`` parses: ``--list`` needs no input and no type."""
     args = parse(["preprocess"])
     assert (args.input, args.types, args.model) == (None, None, "")
-    assert (args.canny_low, args.canny_high, args.canny_thickness) == (100.0, 200.0, 1)
-    assert (args.depth_invert, args.depth_colormap) == (False, "gray")
-    assert (args.lineart_threshold, args.lineart_thickness) == (0.5, 1)
-    assert (args.softedge_threshold, args.softedge_blur) == (0.2, 1.5)
-    # No detector named means the pool's first one; black is the modern canvas.
-    assert (args.pose_detector, args.pose_threshold, args.pose_kp_threshold) == (
-        "", 0.5, 0.3,
-    )
-    assert (args.pose_line_width, args.pose_radius, args.pose_background) == (4, 4, "black")
     assert args.out == "out_control.png" and args.list is False
+    # No flag passed, no option in the namespace: the dataclass owns the default.
+    assert not [name for name in vars(args) if name.split("_")[0] in OPTIONS_BY_KIND]
 
 
 def test_cli_preprocess_knows_only_the_canvases_we_can_paint(parse):

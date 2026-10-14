@@ -11,7 +11,7 @@ from PIL import Image
 from thenoise.__main__ import _serve, main
 from thenoise.cli import build_parser
 from thenoise.generate import run_edit, run_generate
-from thenoise.preprocess import PreprocessorManager
+from thenoise.preprocess.manager import PreprocessorManager
 from thenoise.preprocess_cli import run_preprocess
 from thenoise.runtime import ModelPaths, Settings
 from thenoise.upscale_cli import run_upscale

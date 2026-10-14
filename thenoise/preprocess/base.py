@@ -1,20 +1,16 @@
-"""The preprocessor contract and its request options: *detect* a control signal, then
-*render* it, so a vector signal (a skeleton) is drawn rather than stretched.
+"""The preprocessor contract: *detect* a control signal, then *render* it, so a vector
+signal (a skeleton) is drawn rather than stretched.
 """
 from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import torch
 from PIL import Image
 
-
-@dataclass
-class PreprocessOptions:
-    """What a request asks of a kind. A kind with nothing to ask uses this as-is."""
+from .options import PreprocessOptions
 
 
 def scale_field(field: torch.Tensor) -> torch.Tensor:
@@ -48,8 +44,6 @@ class Preprocessor(ABC):
 
     name: ClassVar[str] = ""
     kind: ClassVar[str] = ""
-    # The options dataclass requests for this kind carry.
-    OPTIONS: ClassVar[type] = PreprocessOptions
     # The dtype its weights run in; not every auxiliary network is happy in BF16.
     DTYPE: ClassVar[torch.dtype]
     #: The command that fetches its checkpoints, quoted when they are missing.

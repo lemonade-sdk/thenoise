@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 
+from thenoise.preprocess.options import OPTIONS_BY_KIND, add_option_args
+
 
 def _add_model_paths(p: argparse.ArgumentParser, required: bool = True) -> None:
     p.add_argument("--dit", required=required, metavar="PATH",
@@ -34,6 +36,12 @@ def _add_preprocessor_args(p: argparse.ArgumentParser) -> None:
                    help="directory containing control-map preprocessor checkpoints "
                         "(e.g. Depth-Anything-V2); each subdirectory's config.json "
                         "declares the kind it implements")
+
+
+def _add_preprocessor_option_args(p: argparse.ArgumentParser) -> None:
+    """One ``--<kind>-<option>`` flag per option, defaulted from the dataclass."""
+    for kind, options in OPTIONS_BY_KIND.items():
+        add_option_args(p, kind, options)
 
 
 def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png") -> None:
@@ -158,40 +166,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_preprocessor_args(pre)
     pre.add_argument("--list", action="store_true",
                      help="list the available control-map types and exit")
-    pre.add_argument("--canny-low", type=float, default=100.0,
-                     help="Canny low threshold, Sobel magnitude units (default: 100)")
-    pre.add_argument("--canny-high", type=float, default=200.0,
-                     help="Canny high threshold (default: 200)")
-    pre.add_argument("--canny-thickness", type=int, default=1,
-                     help="Canny line thickness in pixels (default: 1)")
-    pre.add_argument("--depth-invert", action="store_true",
-                     help="depth: invert near/far (default: near = bright)")
-    pre.add_argument("--depth-colormap", default="gray", choices=["gray", "turbo"],
-                     help="depth colormap: grayscale or turbo (default: gray)")
-    pre.add_argument("--lineart-threshold", type=float, default=0.5,
-                     help="lineart: line intensity threshold, 0-1 (default: 0.5)")
-    pre.add_argument("--lineart-thickness", type=int, default=1,
-                     help="lineart: line thickness in pixels (default: 1)")
-    pre.add_argument("--softedge-threshold", type=float, default=0.2,
-                     help="softedge: soft edge cutoff, 0-1 (default: 0.2)")
-    pre.add_argument("--softedge-blur", type=float, default=1.5,
-                     help="softedge: smoothing sigma in pixels, 0 = none (default: 1.5)")
-    pre.add_argument("--pose-detector", default="",
-                     help="pose: person detector checkpoint to crop with "
-                          "(default: the first one in --preprocessor-dir)")
-    pre.add_argument("--pose-threshold", type=float, default=0.5,
-                     help="pose: minimum detector score for a person to be in the map "
-                          "at all (default: 0.5)")
-    pre.add_argument("--pose-kp-threshold", type=float, default=0.3,
-                     help="pose: minimum confidence for a joint to be drawn "
-                          "(default: 0.3)")
-    pre.add_argument("--pose-line-width", type=int, default=4,
-                     help="pose: skeleton line width in pixels (default: 4)")
-    pre.add_argument("--pose-radius", type=int, default=4,
-                     help="pose: keypoint dot radius in pixels (default: 4)")
-    pre.add_argument("--pose-background", default="black", choices=["black", "green"],
-                     help="pose: canvas colour; green is the original openpose one "
-                          "(default: black)")
+    _add_preprocessor_option_args(pre)
     pre.add_argument("--out", default="out_control.png",
                      help="output image path; the map is the size of the input, and "
                           "extra --type values add a _<type> suffix "

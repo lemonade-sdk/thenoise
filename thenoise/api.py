@@ -10,11 +10,21 @@ import os
 import base64
 from typing import List, Literal, Optional, Union
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import HTMLResponse, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
-from thenoise.preprocess.canny import CannyOptions
+from thenoise.preprocess.options import (
+    OPTIONS_BY_KIND,
+    CannyOptions,
+    DepthOptions,
+    LineartOptions,
+    PoseOptions,
+    PreprocessOptions,
+    SoftedgeOptions,
+)
 from thenoise.utils.image_tensor import load_image
 from thenoise.utils.png import pnginfo_of
 
@@ -87,79 +97,38 @@ class UpscaleRequest(BaseModel):
     out: Literal["png", "json"] = "png"
 
 
-class CannyOptionsModel(BaseModel):
-    """The canny request fields, mirroring :class:`CannyOptions` field for field."""
-
-    low: float = 100.0
-    high: float = 200.0
-    thickness: int = 1
-
-
-class LineartOptionsModel(BaseModel):
-    """The lineart request fields, mirroring :class:`LineartOptions` field for field."""
-
-    threshold: float = 0.5
-    thickness: int = 1
-
-
-class SoftedgeOptionsModel(BaseModel):
-    """The softedge request fields, mirroring :class:`SoftedgeOptions` field for field."""
-
-    threshold: float = 0.2
-    blur: float = 1.5
-
-
-class DepthOptionsModel(BaseModel):
-    """The depth request fields, mirroring :class:`DepthOptions` field for field."""
-
-    invert: bool = False
-    colormap: str = "gray"
-
-
-class PoseOptionsModel(BaseModel):
-    """The pose request fields, mirroring :class:`PoseOptions` field for field."""
-
-    detector: str = ""
-    threshold: float = 0.5
-    kp_threshold: float = 0.3
-    line_width: int = 4
-    radius: int = 4
-    background: str = "black"
-
-
 class PreprocessRequest(BaseModel):
-    """Control-map extraction: image -> canny / depth / pose / lineart / softedge map, at the
-    input's size. ``type`` lists only the kinds the engine implements; adding one widens
-    the list.
-    """
+    """Extract a control map, at the size of the image it was measured on."""
 
     image_b64: str
-    type: Literal["canny", "depth", "pose", "lineart", "softedge"]
+    # Off the option registry, so a new kind widens flags and UI with it.
+    type: Literal[tuple(OPTIONS_BY_KIND)]
     model: Optional[str] = None  # implementation name; null = the kind's default
-    canny: Optional[CannyOptionsModel] = None
-    depth: Optional[DepthOptionsModel] = None
-    pose: Optional[PoseOptionsModel] = None
-    lineart: Optional[LineartOptionsModel] = None
-    softedge: Optional[SoftedgeOptionsModel] = None
+    canny: Optional[CannyOptions] = None
+    depth: Optional[DepthOptions] = None
+    pose: Optional[PoseOptions] = None
+    lineart: Optional[LineartOptions] = None
+    softedge: Optional[SoftedgeOptions] = None
     out: Literal["png", "json"] = "png"
 
-    def to_options(self) -> "PreprocessOptions":
-        """The request as the kind's option dataclass (same field names on both)."""
-        from thenoise.preprocess.base import PreprocessOptions
-        from thenoise.preprocess.depth import DepthOptions
-        from thenoise.preprocess.lineart import LineartOptions
-        from thenoise.preprocess.pose import PoseOptions
-        from thenoise.preprocess.softedge import SoftedgeOptions
+    @model_validator(mode="after")
+    def _only_the_chosen_kind(self) -> "PreprocessRequest":
+        """Options for another kind are a mistake, not something to quietly ignore."""
+        stray = [
+            kind
+            for kind in OPTIONS_BY_KIND
+            if kind != self.type and getattr(self, kind) is not None
+        ]
+        if stray:
+            raise ValueError(
+                f"{', '.join(stray)} options need type "
+                f"{' or '.join(repr(kind) for kind in stray)}, not {self.type!r}"
+            )
+        return self
 
-        if self.type == "depth":
-            return DepthOptions(**(self.depth or DepthOptionsModel()).model_dump())
-        if self.type == "pose":
-            return PoseOptions(**(self.pose or PoseOptionsModel()).model_dump())
-        if self.type == "lineart":
-            return LineartOptions(**(self.lineart or LineartOptionsModel()).model_dump())
-        if self.type == "softedge":
-            return SoftedgeOptions(**(self.softedge or SoftedgeOptionsModel()).model_dump())
-        return CannyOptions(**(self.canny or CannyOptionsModel()).model_dump())
+    def to_options(self) -> PreprocessOptions:
+        """The kind's options, or its defaults when the request named none."""
+        return getattr(self, self.type) or OPTIONS_BY_KIND[self.type]()
 
 
 class EditRequest(Text2ImageRequest):
@@ -180,6 +149,12 @@ class EditRequest(Text2ImageRequest):
         req: GenerateRequest = self.to_request()
         req.image = images[0] if len(images) == 1 else images
         return req
+
+
+def _is_options_problem(error: dict) -> bool:
+    """Whether a validation error is about a kind's options rather than the body."""
+    where = error["loc"][1:] if error["loc"][:1] == ("body",) else list(error["loc"])
+    return not where or where[0] in OPTIONS_BY_KIND
 
 
 def create_app(runtime) -> FastAPI:
@@ -205,6 +180,14 @@ def create_app(runtime) -> FastAPI:
             logger.exception("%s failed", failure)
             return Response(status_code=500, content=f"{failure} failed: {e}")
         return image_response(image, out)
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request: Request, exc: RequestValidationError):
+        """Bad option values are the request's fault (400); unparseable bodies stay 422."""
+        problems = [error for error in exc.errors() if _is_options_problem(error)]
+        if not problems:
+            return await request_validation_exception_handler(request, exc)
+        return Response(status_code=400, content="; ".join(e["msg"] for e in problems))
 
     @app.get("/", response_class=HTMLResponse)
     def ui():
@@ -261,12 +244,13 @@ def create_app(runtime) -> FastAPI:
 
     @app.get("/preprocessors")
     def preprocessors():
-        """Control-map kinds and the implementations of each (works with no model)."""
+        """Control-map kinds, their implementations, and the fields each one takes."""
         return {
             "preprocessors": runtime.preprocessors.available(),
             "defaults": runtime.preprocessors.defaults(),
             # The person detectors a pose request crops its people with, by name.
             "detectors": runtime.preprocessors.detectors(),
+            "options": runtime.preprocessors.option_schemas(),
         }
 
     @app.post("/text2image")

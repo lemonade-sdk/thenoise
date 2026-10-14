@@ -172,12 +172,29 @@ curl -s localhost:8000/upscale \
 ## `GET /preprocessors`
 
 ```json
-{"preprocessors": {"canny": ["canny"]}, "defaults": {"canny": "canny"}, "detectors": []}
+{
+  "preprocessors": {"canny": ["canny"]},
+  "defaults": {"canny": "canny"},
+  "detectors": [],
+  "options": {
+    "canny": [
+      {"name": "low", "label": "Low edge strength", "type": "number", "default": 100.0, "min": 0, "step": 1},
+      {"name": "high", "label": "High edge strength", "type": "number", "default": 200.0, "min": 0, "step": 1},
+      {"name": "thickness", "label": "Line width", "type": "integer", "default": 1, "min": 1, "step": 1}
+    ]
+  }
+}
 ```
 
 `preprocessors` maps each control-map type to the implementations it can choose
 between, `defaults` to the one used when a request does not name one. Both are
 empty when nothing is implemented, and no diffusion model is needed to list them.
+
+`options` describes the request fields of every kind the engine knows - label,
+control type, default, bounds - and `pool` names the list a field is filled from
+(`detectors`, above). It is generated from the option dataclasses the extraction
+itself runs on, which is also where the CLI flags and the web UI form come from, so
+none of the three can show a default the engine would not use.
 
 `detectors` lists the person detectors on disk that a `pose` request crops its people
 with, by name. `pose` appears in `preprocessors` only once both its checkpoints - the
@@ -208,9 +225,14 @@ with that same image later - whoever conditions on it does its own resizing.
 A `depth` request needs its checkpoint on disk (``scripts/download.py --model
 preprocess``) and a `pose` request needs both of its own (``scripts/download.py --model
 preprocess --variant pose``); when either is missing the endpoint answers **HTTP 400**
-naming the command that fetches it. A type the engine does not implement, an unknown `model` or an
-invalid option value is also **HTTP 400**; a `type` outside the implemented set is a
-schema error (**HTTP 422**).
+naming the command that fetches it. A preprocessor is loaded for the request and
+released before the response is sent, so what a map needed is not held against a later
+`/text2image` - and a depth or pose request pays its checkpoint load each time. A type the engine does not implement, an unknown `model` or an
+invalid option value is also **HTTP 400** - each kind's option block is the same
+dataclass the extraction runs on, bounds and all. A body that does not parse, like a
+`type` outside the implemented set or a missing `image_b64`, is a schema error
+(**HTTP 422**). Options sent for a type other than the one requested are refused as
+well, rather than ignored.
 
 ### Response
 

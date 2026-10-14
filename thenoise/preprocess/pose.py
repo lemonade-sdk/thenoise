@@ -12,9 +12,10 @@ import torch
 from PIL import Image
 
 from thenoise.utils.image_tensor import flatten_alpha
-from .base import PreprocessOptions, Preprocessor, require_checkpoint
+from .base import Preprocessor, require_checkpoint
+from .options import PoseOptions
 from .pose_ops import PoseProcessor
-from .render import CANVASES, skeleton_to_pil
+from .render import skeleton_to_pil
 
 #: RT-DETR's ``person`` is class 0 in both COCO checkpoints.
 PERSON_CLASS = 0
@@ -36,39 +37,11 @@ class Pose:
     people: List[Person]
 
 
-@dataclass
-class PoseOptions(PreprocessOptions):
-    """Which person detector to crop with, and how the skeleton is painted."""
-
-    detector: str = ""  # a detector from the pool; "" is the first one
-    threshold: float = 0.5
-    kp_threshold: float = 0.3
-    line_width: int = 4
-    radius: int = 4
-    background: str = "black"
-
-    def __post_init__(self) -> None:
-        for name in ("threshold", "kp_threshold"):
-            score = getattr(self, name)
-            if not 0.0 <= score <= 1.0:
-                raise ValueError(f"{name} must be in [0, 1], got {score}")
-        if self.line_width < 1:
-            raise ValueError(f"line_width must be >= 1, got {self.line_width}")
-        if self.radius < 1:
-            raise ValueError(f"radius must be >= 1, got {self.radius}")
-        if self.background not in CANVASES:
-            raise ValueError(
-                f"unknown pose background {self.background!r}; "
-                f"expected one of {tuple(CANVASES)}"
-            )
-
-
 class PosePreprocessor(Preprocessor):
     """ViTPose's COCO-17 joints over RT-DETR's person boxes, painted as COCO-18."""
 
     name: ClassVar[str] = "vitpose-base-simple"
     kind: ClassVar[str] = "pose"
-    OPTIONS: ClassVar[type] = PoseOptions
     DTYPE: ClassVar[torch.dtype] = torch.bfloat16
     #: Deformable attention and the topk that picks the boxes are less happy reduced.
     DETECTOR_DTYPE: ClassVar[torch.dtype] = torch.float32

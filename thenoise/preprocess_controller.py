@@ -29,11 +29,17 @@ class PreprocessController:
         name: str = "",
     ) -> Image.Image:
         """Extract the ``kind`` control map from a PIL image, at the image's own size.
-        ``options`` is the kind's own option dataclass, ``name`` its implementation."""
+        ``options`` is the kind's own option dataclass, ``name`` its implementation.
+        The weights it needed are released on the way out, failed run included.
+        """
         with inference():
             with self._lock:
-                preprocessor: Preprocessor = self._preprocessors.get(kind, name)
-                out = preprocessor.run(image, options)
+                try:
+                    preprocessor: Preprocessor = self._preprocessors.get(kind, name)
+                    out = preprocessor.run(image, options)
+                finally:
+                    # One map, not a session: whatever runs next may need this room.
+                    self._preprocessors.unload()
 
         out._pnginfo = build_preprocess_pnginfo(
             image, kind, preprocessor.name, _options_dict(options)

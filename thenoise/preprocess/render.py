@@ -9,6 +9,7 @@ import torch
 from PIL import Image, ImageDraw
 
 from .base import scale_field, uint8_to_pil
+from .options import CANVAS_NAMES
 
 #: Limb colours in edge order — the ViTPose demo palette the ControlNets were trained on.
 COCO_POSE_PALETTE: Tuple[Tuple[int, int, int], ...] = (
@@ -19,8 +20,11 @@ COCO_POSE_PALETTE: Tuple[Tuple[int, int, int], ...] = (
     (200, 255, 0), (100, 0, 255),
 )
 
-#: Canvas colours: SD's openpose used green, the newer ControlNets black.
-CANVASES = {"black": (0, 0, 0), "green": (36, 255, 12)}
+#: SD's openpose used green, the newer ControlNets black.
+_CANVAS_COLOURS = {"black": (0, 0, 0), "green": (36, 255, 12)}
+
+#: Painted from the option's own names, so a canvas can never be declared but unpainted.
+CANVASES = {name: _CANVAS_COLOURS[name] for name in CANVAS_NAMES}
 
 #: The ``turbo`` colormap as its anchor colours (Google's turbo, sampled): dark blue ->
 #: green -> dark red. Interpolated linearly, so the LUT is smooth and monotonic.

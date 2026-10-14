@@ -5,29 +5,15 @@ hysteresis) and the conventional inverted palette (dark lines, white background)
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import ClassVar
 
 import torch
 from PIL import Image
 
 from thenoise.utils.image_tensor import pil_to_pixels
-from .base import PreprocessOptions, Preprocessor
+from .base import Preprocessor
 from .canny import _GRAY_SCALE, _blur, _sobel, _suppress, luminance, thicken
-
-
-@dataclass
-class LineartOptions(PreprocessOptions):
-    """Line intensity threshold (0-1) and rendered line thickness."""
-
-    threshold: float = 0.5
-    thickness: int = 1
-
-    def __post_init__(self) -> None:
-        if not 0.0 <= self.threshold <= 1.0:
-            raise ValueError(f"threshold must be in [0, 1], got {self.threshold}")
-        if self.thickness < 1:
-            raise ValueError(f"thickness must be >= 1, got {self.thickness}")
+from .options import LineartOptions
 
 
 class LineartPreprocessor(Preprocessor):
@@ -35,7 +21,6 @@ class LineartPreprocessor(Preprocessor):
 
     name: ClassVar[str] = "lineart"
     kind: ClassVar[str] = "lineart"
-    OPTIONS: ClassVar[type] = LineartOptions
     DTYPE: ClassVar[torch.dtype] = torch.float32
 
     def detect(self, image: Image.Image, options: LineartOptions) -> torch.Tensor:

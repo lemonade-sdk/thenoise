@@ -129,5 +129,5 @@ def test_thresholds_are_validated():
         CannyOptions(low=200, high=100)
     with pytest.raises(ValueError, match="thickness must be >= 1"):
         CannyOptions(thickness=0)
-    with pytest.raises(ValueError, match="thresholds must be >= 0"):
+    with pytest.raises(ValueError, match="low must be >= 0"):
         CannyOptions(low=-1)
