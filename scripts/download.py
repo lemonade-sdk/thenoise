@@ -25,7 +25,7 @@ Models:
                   https://huggingface.co/Comfy-Org/Mage-Flow
   esrgan          Real-ESRGAN x4 pixel upscaler (optional, for upscaling)
                   https://huggingface.co/Comfy-Org/Real-ESRGAN_repackaged
-  preprocess      Control-map checkpoints: Depth-Anything-V2 depth, or the ViTPose
+  controlmap      Control-map checkpoints: Depth-Anything-V2 depth, or the ViTPose
                   keypoint model + RT-DETR person detector pose needs
                   https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf
                   https://huggingface.co/usyd-community/vitpose-base-simple
@@ -52,8 +52,8 @@ Usage:
     python scripts/download.py --model mage-flow --variant base
     python scripts/download.py --model mage-flow --int8-convrot --edit-only
     python scripts/download.py --model esrgan
-    python scripts/download.py --model preprocess
-    python scripts/download.py --model preprocess --variant pose
+    python scripts/download.py --model controlmap
+    python scripts/download.py --model controlmap --variant pose
     python scripts/download.py --model krea2 --dry-run
 """
 from __future__ import annotations
@@ -287,7 +287,7 @@ def _esrgan_jobs(args: argparse.Namespace) -> list[Artifact]:
     ]
 
 
-#: Depth-Anything-V2: (variant) -> huggingface repo, with the files a preprocessor dir
+#: Depth-Anything-V2: (variant) -> huggingface repo, with the files a control-map dir
 #: needs (config + weights + processor config).
 _DEPTH_REPOS = {
     "small": "depth-anything/Depth-Anything-V2-Small-hf",
@@ -309,13 +309,13 @@ _CHECKPOINT_FILES = ("config.json", "model.safetensors", "preprocessor_config.js
 def _checkpoint(repo: str, directory: str) -> list[Artifact]:
     """One checkpoint's files, from ``repo`` into ``directory``.
 
-    A preprocessor pool holds one directory per checkpoint, so the label carries it:
+    A control-map pool holds one directory per checkpoint, so the label carries it:
     a label with a slash lands in that subdirectory of the output directory."""
     return [(f"{directory}/{name}", repo, name) for name in _CHECKPOINT_FILES]
 
 
-def _preprocess_jobs(args: argparse.Namespace) -> list[Artifact]:
-    """Control-map preprocessors: a Depth-Anything-V2 depth model, or the two
+def _controlmap_jobs(args: argparse.Namespace) -> list[Artifact]:
+    """Control-map checkpoints: a Depth-Anything-V2 depth model, or the two
     checkpoints a pose map needs."""
     if args.variant in _POSE_DETECTORS:
         detector_dir, detector_repo = _POSE_DETECTORS[args.variant]
@@ -399,10 +399,10 @@ MODELS: dict[str, ModelSpec] = {
         _esrgan_jobs,
         has_int8=False,
     ),
-    "preprocess": ModelSpec(
-        "preprocess", "./models/preprocessors",
+    "controlmap": ModelSpec(
+        "controlmap", "./models/controlmaps",
         "Control-map checkpoints: Depth-Anything-V2 depth, ViTPose + RT-DETR pose",
-        _preprocess_jobs,
+        _controlmap_jobs,
         has_int8=False,
         variant_supported=True,
         variant_choices=("small", "base", "large", "pose", "pose-r50vd"),
@@ -432,9 +432,9 @@ def _epilog() -> str:
         "  python scripts/download.py --model mage-flow --variant base",
         "  python scripts/download.py --model mage-flow --int8-convrot --edit-only",
         "  python scripts/download.py --model esrgan",
-        "  python scripts/download.py --model preprocess",
-        "  python scripts/download.py --model preprocess --variant base",
-        "  python scripts/download.py --model preprocess --variant pose",
+        "  python scripts/download.py --model controlmap",
+        "  python scripts/download.py --model controlmap --variant base",
+        "  python scripts/download.py --model controlmap --variant pose",
     ]
     return "\n".join(lines)
 
@@ -465,7 +465,7 @@ def main() -> None:
             "klein: 4b | 4b-base | 9b | 9b-base (default: 4b) | "
             "qwen-image-2.1: turbo | base (default: turbo) | "
             "mage-flow: turbo | rl | base (default: turbo) | "
-            "preprocess: small | base | large | pose | pose-r50vd (default: small)"
+            "controlmap: small | base | large | pose | pose-r50vd (default: small)"
         ),
     )
     ap.add_argument(
@@ -523,7 +523,7 @@ def main() -> None:
 
     print(f"Downloading {args.model} artifacts -> {out}")
     for name, repo, path in jobs:
-        # A label naming a directory lands there: a preprocessor pool keeps one
+        # A label naming a directory lands there: a control-map pool keeps one
         # directory per checkpoint, and --out points at the pool.
         directory, _, _ = name.rpartition("/")
         destination = out / directory if directory else out

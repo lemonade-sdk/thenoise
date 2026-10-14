@@ -11,12 +11,12 @@ import torch
 from PIL import Image
 
 from thenoise.utils.image_tensor import pil_to_pixels
-from .base import Preprocessor
+from .base import ControlMap
 from .canny import _GRAY_SCALE, _blur, _sobel, _suppress, luminance, thicken
 from .options import LineartOptions
 
 
-class LineartPreprocessor(Preprocessor):
+class LineartControlMap(ControlMap):
     """White canvas, dark line-art — the ControlNet ``lineart`` conditioning input."""
 
     name: ClassVar[str] = "lineart"
@@ -37,4 +37,4 @@ class LineartPreprocessor(Preprocessor):
         return 1.0 - lines
 
 
-__all__ = ["LineartOptions", "LineartPreprocessor"]
+__all__ = ["LineartOptions", "LineartControlMap"]

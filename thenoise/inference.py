@@ -13,7 +13,7 @@ Two orthogonal knobs, one primitive each:
 
 The mode is set at exactly four boundaries, one per public entry point:
 ``PipelineController.generate`` / ``.edit``, ``PixelUpscaleController.upscale``,
-``PreprocessController.run`` and ``Runtime.load``. Anything else runs inside one of them
+``ControlMapController.run`` and ``Runtime.load``. Anything else runs inside one of them
 and inherits the mode — including the pipeline cache, whose inference tensors are written
 and read inside the same boundary. The two helpers that mutate weights in place
 (``utils.lora``, ``upscale.sesqui_net``) open their own boundary.

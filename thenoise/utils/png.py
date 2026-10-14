@@ -134,16 +134,16 @@ def build_upscale_pnginfo(
     })
 
 
-def build_preprocess_pnginfo(
+def build_controlmap_pnginfo(
     source: "PIL.Image.Image",
     control_type: str,
     model: str,
     options: dict,
 ) -> PngInfo:
-    """The source's chunks plus this extraction's ``preprocess_data`` record. The map
+    """The source's chunks plus this extraction's ``controlmap_data`` record. The map
     is its input's size, so the PNG header already states the geometry.
     """
-    return _provenance(source, "preprocess_data", {
+    return _provenance(source, "controlmap_data", {
         "type": control_type,
         "model": model,
         "options": options,

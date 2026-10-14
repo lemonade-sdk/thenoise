@@ -11,10 +11,10 @@ import pytest
 import torch
 from PIL import Image, ImageDraw
 
-from thenoise.preprocess.base import PreprocessOptions
-from thenoise.preprocess.canny import CannyOptions, CannyPreprocessor
-from thenoise.preprocess.manager import PreprocessorManager
-from thenoise.preprocess_controller import PreprocessController
+from thenoise.controlmap.base import ControlMapOptions
+from thenoise.controlmap.canny import CannyOptions, CannyControlMap
+from thenoise.controlmap.manager import ControlMapManager
+from thenoise.controlmap_controller import ControlMapController
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ def square():
 
 @pytest.fixture
 def controller():
-    return PreprocessController(PreprocessorManager(device="cpu"))
+    return ControlMapController(ControlMapManager(device="cpu"))
 
 
 def chunk(image, keyword):
@@ -41,7 +41,7 @@ def chunk(image, keyword):
 
 
 def test_pool_offers_the_registered_kinds():
-    assert PreprocessorManager(device="cpu").available() == {
+    assert ControlMapManager(device="cpu").available() == {
         "canny": ["canny"],
         "lineart": ["lineart"],
         "softedge": ["softedge"],
@@ -49,8 +49,8 @@ def test_pool_offers_the_registered_kinds():
 
 
 def test_the_first_implementation_of_a_kind_is_its_default():
-    """What ``get()`` falls back to, and what ``/preprocessors`` reports as such."""
-    assert PreprocessorManager(device="cpu").defaults() == {
+    """What ``get()`` falls back to, and what ``/controlmaps`` reports as such."""
+    assert ControlMapManager(device="cpu").defaults() == {
         "canny": "canny",
         "lineart": "lineart",
         "softedge": "softedge",
@@ -59,47 +59,47 @@ def test_the_first_implementation_of_a_kind_is_its_default():
 
 def test_a_kind_the_engine_has_never_heard_of_names_the_available_ones():
     with pytest.raises(
-        ValueError, match=r"no preprocessor for 'normals'; available: canny, lineart, softedge"
+        ValueError, match=r"no control map for 'normals'; available: canny, lineart, softedge"
     ):
-        PreprocessorManager(device="cpu").get("normals")
+        ControlMapManager(device="cpu").get("normals")
 
 
 def test_a_kind_missing_its_weights_names_the_download_command():
     """A kind the engine does have, but whose checkpoint does not, is a different
     answer: the message has to say what to run."""
-    with pytest.raises(ValueError, match=r"the depth preprocessor has no checkpoint"):
-        PreprocessorManager(device="cpu").get("depth")
+    with pytest.raises(ValueError, match=r"the depth control map has no checkpoint"):
+        ControlMapManager(device="cpu").get("depth")
 
 
 def test_unknown_name_names_the_kind_implementations():
-    with pytest.raises(ValueError, match="no canny preprocessor named 'canny-xl'"):
-        PreprocessorManager(device="cpu").get("canny", "canny-xl")
+    with pytest.raises(ValueError, match="no canny control map named 'canny-xl'"):
+        ControlMapManager(device="cpu").get("canny", "canny-xl")
 
 
-def test_the_resident_preprocessor_is_reused():
-    manager = PreprocessorManager(device="cpu")
+def test_the_resident_controlmap_is_reused():
+    manager = ControlMapManager(device="cpu")
     assert manager.get("canny") is manager.get("canny")
 
 
 def test_unload_forces_a_fresh_instance():
-    manager = PreprocessorManager(device="cpu")
+    manager = ControlMapManager(device="cpu")
     first = manager.get("canny")
     manager.unload()
     assert manager.get("canny") is not first
 
 
 def test_unload_without_anything_resident_is_a_no_op():
-    PreprocessorManager(device="cpu").unload()
+    ControlMapManager(device="cpu").unload()
 
 
 def test_options_are_built_from_the_kinds_own_dataclass():
-    manager = PreprocessorManager(device="cpu")
+    manager = ControlMapManager(device="cpu")
     assert manager.options_for("canny", low=30) == CannyOptions(low=30)
 
 
 def test_a_request_carries_no_geometry():
     """A map is always its image's size, so a kind with nothing to ask has no fields."""
-    assert fields(PreprocessOptions) == ()
+    assert fields(ControlMapOptions) == ()
 
 
 # ---------------------------------------------------------------- controller
@@ -112,7 +112,7 @@ def test_run_paints_a_greyscale_map_at_the_input_size(controller, square):
 
 def test_run_records_the_request_in_a_png_chunk(controller, square):
     out = controller.run(square, "canny", CannyOptions(low=30, high=120))
-    assert json.loads(chunk(out, "preprocess_data")) == {
+    assert json.loads(chunk(out, "controlmap_data")) == {
         "type": "canny",
         "model": "canny",
         "options": {"low": 30, "high": 120},
@@ -122,7 +122,7 @@ def test_run_records_the_request_in_a_png_chunk(controller, square):
 def test_run_records_only_the_options_that_changed(controller, square):
     """Defaults are the boring case, so the chunk states just the intent."""
     out = controller.run(square, "canny", CannyOptions())
-    assert json.loads(chunk(out, "preprocess_data"))["options"] == {}
+    assert json.loads(chunk(out, "controlmap_data"))["options"] == {}
 
 
 def test_run_carries_over_the_source_metadata(controller, square):
@@ -133,21 +133,21 @@ def test_run_carries_over_the_source_metadata(controller, square):
 
 def test_a_run_leaves_nothing_resident(controller, square):
     """Extraction is one-shot: the room its weights took belongs to whatever runs next."""
-    used = controller._preprocessors.get("canny")
+    used = controller._controlmaps.get("canny")
     controller.run(square, "canny", CannyOptions())
-    assert controller._preprocessors.get("canny") is not used
+    assert controller._controlmaps.get("canny") is not used
 
 
 def test_run_reaches_the_kernels_inside_the_inference_boundary(controller, square, monkeypatch):
     seen = {}
-    detect = CannyPreprocessor.detect
+    detect = CannyControlMap.detect
 
     def spy(self, image, options):
         found = detect(self, image, options)
         seen["inference"] = bool(torch.is_inference(found))
         return found
 
-    monkeypatch.setattr(CannyPreprocessor, "detect", spy)
+    monkeypatch.setattr(CannyControlMap, "detect", spy)
     controller.run(square, "canny", CannyOptions())
     assert seen["inference"]
 

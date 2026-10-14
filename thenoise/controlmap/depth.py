@@ -12,11 +12,11 @@ import torch.nn.functional as F
 from PIL import Image
 
 from thenoise.utils.image_tensor import flatten_alpha
-from .base import Preprocessor, load_processor, require_checkpoint
+from .base import ControlMap, load_processor, require_checkpoint
 from .options import DepthOptions
 from .render import depth_to_pil
 
-class DepthPreprocessor(Preprocessor):
+class DepthControlMap(ControlMap):
     """The default depth extractor: Depth-Anything-V2 Small, Apache-2.0."""
 
     name: ClassVar[str] = "depth-anything-v2-small"
@@ -59,6 +59,6 @@ def load_model(path: str, dtype) -> torch.nn.Module:
 
 __all__ = [
     "DepthOptions",
-    "DepthPreprocessor",
+    "DepthControlMap",
     "load_model",
 ]

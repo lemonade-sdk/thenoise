@@ -11,7 +11,7 @@ import torch
 from PIL import Image
 
 from thenoise.utils.image_tensor import pil_to_pixels
-from .base import Preprocessor
+from .base import ControlMap
 from .canny import _GRAY_SCALE, _sobel, gaussian_blur, luminance
 from .options import SoftedgeOptions
 
@@ -19,7 +19,7 @@ from .options import SoftedgeOptions
 _SOFTNESS = 0.25
 
 
-class SoftedgePreprocessor(Preprocessor):
+class SoftedgeControlMap(ControlMap):
     """White canvas, soft dark edges — the ControlNet ``softedge`` conditioning input."""
 
     name: ClassVar[str] = "softedge"
@@ -49,4 +49,4 @@ def _smoothstep(x: torch.Tensor, edge0: float, edge1: float) -> torch.Tensor:
     return t * t * (3.0 - 2.0 * t)
 
 
-__all__ = ["SoftedgeOptions", "SoftedgePreprocessor"]
+__all__ = ["SoftedgeOptions", "SoftedgeControlMap"]

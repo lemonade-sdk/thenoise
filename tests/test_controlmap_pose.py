@@ -17,11 +17,11 @@ import torch
 from PIL import Image
 from transformers import BatchFeature
 
-from thenoise.preprocess import pose as pose_module
-from thenoise.preprocess.manager import PreprocessorManager
-from thenoise.preprocess.pose import Person, PoseOptions, PosePreprocessor
-from thenoise.preprocess.render import COCO_POSE_PALETTE, skeleton_edges, skeleton_to_pil
-from thenoise.preprocess_controller import PreprocessController
+from thenoise.controlmap import pose as pose_module
+from thenoise.controlmap.manager import ControlMapManager
+from thenoise.controlmap.pose import Person, PoseOptions, PoseControlMap
+from thenoise.controlmap.render import COCO_POSE_PALETTE, skeleton_edges, skeleton_to_pil
+from thenoise.controlmap_controller import ControlMapController
 
 #: The COCO-17 skeleton exactly as the ViTPose checkpoints declare it in their
 #: ``config.json``, so the renderer is tested against the real topology.
@@ -138,7 +138,7 @@ def test_the_map_is_the_size_of_the_image_it_was_measured_on():
 
 
 def test_the_canvas_colour_is_a_choice():
-    """SD's original openpose preprocessor painted the green canvas; everything newer,
+    """SD's original openpose controlmap painted the green canvas; everything newer,
     black. The map has to match whichever ControlNet consumes it."""
     def canvas(background):
         return skeleton_to_pil(
@@ -310,7 +310,7 @@ def checkpoint_dir(tmp_path, name, model_type):
 
 
 def pose_pool(tmp_path, monkeypatch, boxes=None, labels=None, detectors=("rtdetr_r18vd",)):
-    """A preprocessor pool holding a ViTPose estimator and ``detectors``, with the
+    """A controlmap pool holding a ViTPose estimator and ``detectors``, with the
     loaders replaced by fakes. Returns the pool plus what the fakes recorded."""
     estimator = FakePoseProcessor()
     detector = FakeDetectorProcessor(
@@ -337,13 +337,13 @@ def pose_pool(tmp_path, monkeypatch, boxes=None, labels=None, detectors=("rtdetr
     for name in detectors:
         checkpoint_dir(tmp_path, name, "rt_detr")
 
-    manager = PreprocessorManager(device="cpu", preprocessor_dir=str(tmp_path))
+    manager = ControlMapManager(device="cpu", controlmap_dir=str(tmp_path))
     return type(
         "Rig",
         (),
         {
             "manager": manager,
-            "preprocessor": manager.get("pose"),
+            "controlmap": manager.get("pose"),
             "estimator": estimator,
             "detector": detector,
             "model": model,
@@ -355,7 +355,7 @@ def pose_pool(tmp_path, monkeypatch, boxes=None, labels=None, detectors=("rtdetr
 def test_a_pose_map_is_painted_at_the_input_size(tmp_path, monkeypatch):
     rig = pose_pool(tmp_path, monkeypatch)
     image = Image.new("RGB", (64, 40), "black")
-    out = rig.preprocessor.run(image, PoseOptions())
+    out = rig.controlmap.run(image, PoseOptions())
     assert (out.mode, out.size) == ("RGB", image.size)
 
 
@@ -363,7 +363,7 @@ def test_the_detector_answers_the_pose_model_in_coco_boxes(tmp_path, monkeypatch
     """RT-DETR returns corners; ViTPose wants a corner and a size — and both halves of
     the keypoint model have to be handed the very same box."""
     rig = pose_pool(tmp_path, monkeypatch)
-    rig.preprocessor.detect(Image.new("RGB", (64, 40), "black"), PoseOptions())
+    rig.controlmap.detect(Image.new("RGB", (64, 40), "black"), PoseOptions())
     assert rig.estimator.crop_boxes[0].tolist() == [[10, 5, 30, 20], [40, 10, 20, 25]]
     assert rig.estimator.post_boxes[0] is rig.estimator.crop_boxes[0]
     assert rig.detector.target_sizes == [(40, 64)]  # (height, width) of the input
@@ -374,7 +374,7 @@ def test_only_people_get_a_skeleton(tmp_path, monkeypatch):
     """Class 2 is a bicycle, and a bicycle has no skeleton: drawing one would paint a
     person where none is standing."""
     rig = pose_pool(tmp_path, monkeypatch, boxes=[[10, 5, 40, 25]], labels=[2])
-    detected = rig.preprocessor.detect(
+    detected = rig.controlmap.detect(
         Image.new("RGB", (64, 40), "black"), PoseOptions()
     )
     assert detected.people == []
@@ -383,7 +383,7 @@ def test_only_people_get_a_skeleton(tmp_path, monkeypatch):
 def test_no_people_is_a_blank_canvas_of_the_input_size(tmp_path, monkeypatch):
     rig = pose_pool(tmp_path, monkeypatch, boxes=[], labels=[])
     image = Image.new("RGB", (16, 12), "black")
-    blank = rig.preprocessor.run(image, PoseOptions(background="green"))
+    blank = rig.controlmap.run(image, PoseOptions(background="green"))
     assert blank.size == image.size
     assert drawn_pixels(blank) == {(36, 255, 12)}
 
@@ -392,7 +392,7 @@ def test_joints_are_normalised_into_the_image(tmp_path, monkeypatch):
     """A map is drawn at whatever size it is painted at, so what is measured has to be a
     fraction of the image rather than a pixel in it."""
     rig = pose_pool(tmp_path, monkeypatch)
-    detected = rig.preprocessor.detect(
+    detected = rig.controlmap.detect(
         Image.new("RGB", (64, 40), "black"), PoseOptions()
     )
     assert detected.size == (64, 40)
@@ -404,7 +404,7 @@ def test_a_faint_joint_is_silenced_rather_than_removed(tmp_path, monkeypatch):
     """Index 5 is the left shoulder whatever else happened, so a joint the model was not
     sure about keeps its place with a score of 0."""
     rig = pose_pool(tmp_path, monkeypatch)
-    detected = rig.preprocessor.detect(
+    detected = rig.controlmap.detect(
         Image.new("RGB", (64, 40), "black"), PoseOptions()
     )
     assert [float(one.scores[0]) for one in detected.people] == pytest.approx([0.9, 0.0])
@@ -414,7 +414,7 @@ def test_a_faint_joint_is_silenced_rather_than_removed(tmp_path, monkeypatch):
 def test_the_joint_cutoff_is_the_request_s(tmp_path, monkeypatch):
     rig = pose_pool(tmp_path, monkeypatch)
     image = Image.new("RGB", (64, 40), "black")
-    strict = rig.preprocessor.detect(image, PoseOptions(kp_threshold=0.95))
+    strict = rig.controlmap.detect(image, PoseOptions(kp_threshold=0.95))
     assert [float(one.scores[0]) for one in strict.people] == [0.0, 0.0]
 
 
@@ -422,7 +422,7 @@ def test_the_heatmaps_are_handed_over_in_fp32(tmp_path, monkeypatch):
     """The joint refinement that follows is numpy work and numpy has no bf16, so the
     model's dtype must not be allowed to leak into it."""
     rig = pose_pool(tmp_path, monkeypatch)
-    rig.preprocessor.detect(Image.new("RGB", (64, 40), "black"), PoseOptions())
+    rig.controlmap.detect(Image.new("RGB", (64, 40), "black"), PoseOptions())
     assert rig.model.crop_dtype == torch.bfloat16  # the model itself still runs reduced
     assert rig.estimator.heatmaps.dtype == torch.float32
 
@@ -433,20 +433,20 @@ def test_the_person_detector_is_loaded_once_and_swapped_when_another_is_asked_fo
     rig = pose_pool(tmp_path, monkeypatch, detectors=("rtdetr_r18vd", "rtdetr_r50vd"))
     image = Image.new("RGB", (64, 40), "black")
     assert rig.detectors_loaded == []  # loading the estimator is not loading a detector
-    rig.preprocessor.detect(image, PoseOptions())
+    rig.controlmap.detect(image, PoseOptions())
     assert rig.detectors_loaded == [str(tmp_path / "rtdetr_r18vd")]  # the first one
-    rig.preprocessor.detect(image, PoseOptions())
+    rig.controlmap.detect(image, PoseOptions())
     assert len(rig.detectors_loaded) == 1  # and it stays resident between runs
-    rig.preprocessor.detect(image, PoseOptions(detector="rtdetr_r50vd"))
+    rig.controlmap.detect(image, PoseOptions(detector="rtdetr_r50vd"))
     assert rig.detectors_loaded[-1] == str(tmp_path / "rtdetr_r50vd")
     with pytest.raises(ValueError, match="no person detector named 'rtdetr_none'"):
-        rig.preprocessor.detect(image, PoseOptions(detector="rtdetr_none"))
+        rig.controlmap.detect(image, PoseOptions(detector="rtdetr_none"))
 
 
 def test_a_pose_map_is_self_describing(tmp_path, monkeypatch):
     """The PNG has to say what made it, like every other map."""
     rig = pose_pool(tmp_path, monkeypatch)
-    controller = PreprocessController(rig.manager)
+    controller = ControlMapController(rig.manager)
     out = controller.run(
         Image.new("RGB", (64, 40), "black"),
         "pose",
@@ -456,7 +456,7 @@ def test_a_pose_map_is_self_describing(tmp_path, monkeypatch):
     buffer = io.BytesIO()
     out.save(buffer, format="PNG", pnginfo=out._pnginfo)
     buffer.seek(0)
-    record = json.loads(Image.open(buffer).info["preprocess_data"])
+    record = json.loads(Image.open(buffer).info["controlmap_data"])
     assert record == {
         "type": "pose",
         "model": "vitpose_base_simple",
@@ -475,7 +475,7 @@ def test_a_pose_map_is_self_describing(tmp_path, monkeypatch):
 
 @pytest.fixture
 def vitpose_processor():
-    from thenoise.preprocess.pose_ops import PoseProcessor
+    from thenoise.controlmap.pose_ops import PoseProcessor
 
     return PoseProcessor()
 
@@ -504,7 +504,7 @@ def test_a_box_is_cropped_around_its_own_centre(vitpose_processor):
 def test_a_joint_at_the_centre_of_a_crop_is_the_centre_of_its_box(vitpose_processor):
     """The way back: the peak of a crop's heatmaps is the centre of that box, in the
     input image's pixels — which is what the runner then normalises."""
-    from thenoise.preprocess.pose_ops import PoseProcessor
+    from thenoise.controlmap.pose_ops import PoseProcessor
 
     boxes = [[230.0, 40.0, 40.0, 60.0], [10.0, 100.0, 30.0, 50.0]]
     rows, columns = torch.meshgrid(torch.arange(64.0), torch.arange(48.0), indexing="ij")
@@ -541,7 +541,7 @@ def test_the_two_stages_compose_into_joints_where_the_people_are(
     from transformers.models.rt_detr.image_processing_pil_rt_detr import (
         RTDetrImageProcessorPil,
     )
-    from thenoise.preprocess.pose_ops import PoseProcessor
+    from thenoise.controlmap.pose_ops import PoseProcessor
 
     width, height = 320, 200
     corners = [[20.0, 30.0, 100.0, 190.0], [200.0, 40.0, 300.0, 160.0]]
@@ -600,7 +600,7 @@ def test_the_two_stages_compose_into_joints_where_the_people_are(
     monkeypatch.setattr(pose_module, "load_model", lambda path, dtype: Estimator())
     monkeypatch.setattr(pose_module, "load_detector", lambda path, dtype: Detector())
 
-    pre = PosePreprocessor()
+    pre = PoseControlMap()
     pre.load(
         "cpu",
         str(tmp_path / "vitpose_base_simple"),

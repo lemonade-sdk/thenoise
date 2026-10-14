@@ -20,7 +20,7 @@ from thenoise.api import (
     _UI_DIR,
     create_app,
 )
-from thenoise.preprocess.options import OPTIONS_BY_KIND
+from thenoise.controlmap.options import OPTIONS_BY_KIND
 from thenoise.runtime import Runtime, Settings
 
 
@@ -439,17 +439,17 @@ def test_upscale_works_without_a_model(client, monkeypatch):
     assert res.status_code == 200
 
 
-# ---------------------------------------------------------------- /preprocessors
+# ---------------------------------------------------------------- /controlmaps
 
 
-def test_preprocessors_lists_kinds_and_defaults():
+def test_controlmaps_lists_kinds_and_defaults():
     """Extraction needs no diffusion model, so the UI can always fill its dropdowns."""
-    res = _endpoint(create_app(_empty_runtime()), "/preprocessors")()
+    res = _endpoint(create_app(_empty_runtime()), "/controlmaps")()
     # The option schemas are the fields each kind takes; asserted on their own below.
     assert set(res["options"]) == set(OPTIONS_BY_KIND)
     del res["options"]
     assert res == {
-        "preprocessors": {
+        "controlmaps": {
             "canny": ["canny"],
             "lineart": ["lineart"],
             "softedge": ["softedge"],
@@ -463,9 +463,9 @@ def test_preprocessors_lists_kinds_and_defaults():
     }
 
 
-def test_preprocessors_describe_the_options_of_every_kind():
+def test_controlmaps_describe_the_options_of_every_kind():
     """The form, the CLI flags and the request schema come from this payload."""
-    res = _endpoint(create_app(_empty_runtime()), "/preprocessors")()
+    res = _endpoint(create_app(_empty_runtime()), "/controlmaps")()
     assert res["options"]["canny"] == [
         {"name": "low", "label": "Low edge strength", "type": "number",
          "default": 100.0, "min": 0, "step": 1},
@@ -482,16 +482,16 @@ def test_preprocessors_describe_the_options_of_every_kind():
     assert [c["default"] for c in res["options"]["depth"]] == [False, "gray"]
 
 
-def test_preprocessors_list_discovered_depth_checkpoints(tmp_path):
-    """A preprocessor dir on disk widens what the dropdowns offer."""
+def test_controlmaps_list_discovered_depth_checkpoints(tmp_path):
+    """A controlmap dir on disk widens what the dropdowns offer."""
     directory = tmp_path / "depth_anything_v2_small"
     directory.mkdir()
     (directory / "config.json").write_text('{"model_type": "depth_anything"}')
-    runtime = Runtime(Settings(preprocessor_dir=str(tmp_path)))
-    res = _endpoint(create_app(runtime), "/preprocessors")()
+    runtime = Runtime(Settings(controlmap_dir=str(tmp_path)))
+    res = _endpoint(create_app(runtime), "/controlmaps")()
     del res["options"]
     assert res == {
-        "preprocessors": {
+        "controlmaps": {
             "canny": ["canny"],
             "lineart": ["lineart"],
             "softedge": ["softedge"],
@@ -507,20 +507,20 @@ def test_preprocessors_list_discovered_depth_checkpoints(tmp_path):
     }
 
 
-def test_preprocessors_list_the_pose_checkpoints(tmp_path):
+def test_controlmaps_list_the_pose_checkpoints(tmp_path):
     """The UI's person-finder dropdown and its Pose entry both come from here: the
     detector is listed by name, and pose appears only once both checkpoints are there."""
     for name, model_type in (("vitpose_base_simple", "vitpose"), ("rtdetr_r18vd", "rt_detr")):
         directory = tmp_path / name
         directory.mkdir()
         (directory / "config.json").write_text(json.dumps({"model_type": model_type}))
-    runtime = Runtime(Settings(preprocessor_dir=str(tmp_path)))
-    res = _endpoint(create_app(runtime), "/preprocessors")()
-    assert res["preprocessors"]["pose"] == ["vitpose_base_simple"]
+    runtime = Runtime(Settings(controlmap_dir=str(tmp_path)))
+    res = _endpoint(create_app(runtime), "/controlmaps")()
+    assert res["controlmaps"]["pose"] == ["vitpose_base_simple"]
     assert res["detectors"] == ["rtdetr_r18vd"]
 
 
-# ------------------------------------------------------------------- /preprocess
+# ------------------------------------------------------------------- /controlmap
 
 
 def _edged_png_b64(size=(16, 8)) -> str:
@@ -533,9 +533,9 @@ def _edged_png_b64(size=(16, 8)) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def test_preprocess_extracts_a_map_with_no_model_loaded(client):
+def test_controlmap_extracts_a_map_with_no_model_loaded(client):
     res = client(_cpu_runtime()).post(
-        "/preprocess", json={"image_b64": _edged_png_b64(), "type": "canny"}
+        "/controlmap", json={"image_b64": _edged_png_b64(), "type": "canny"}
     )
     assert res.status_code == 200
     assert res.headers["content-type"] == "image/png"
@@ -545,22 +545,22 @@ def test_preprocess_extracts_a_map_with_no_model_loaded(client):
     image = Image.open(io.BytesIO(res.content))
     assert (image.mode, image.size) == ("L", (16, 8))
     assert set(image.get_flattened_data()) == {0, 255}  # a real map, not a blank one
-    assert json.loads(image.info["preprocess_data"])["model"] == "canny"
+    assert json.loads(image.info["controlmap_data"])["model"] == "canny"
 
 
-def test_preprocess_answers_at_the_input_size(client):
+def test_controlmap_answers_at_the_input_size(client):
     """A control map is paired with the image it was extracted from."""
     from PIL import Image
 
     res = client(_cpu_runtime()).post(
-        "/preprocess", json={"image_b64": _edged_png_b64((30, 11)), "type": "canny"}
+        "/controlmap", json={"image_b64": _edged_png_b64((30, 11)), "type": "canny"}
     )
     assert Image.open(io.BytesIO(res.content)).size == (30, 11)
 
 
-def test_preprocess_applies_the_requested_options(client):
+def test_controlmap_applies_the_requested_options(client):
     res = client(_cpu_runtime()).post(
-        "/preprocess",
+        "/controlmap",
         json={
             "image_b64": _edged_png_b64(), "type": "canny",
             "canny": {"low": 30, "high": 60, "thickness": 3},
@@ -572,112 +572,112 @@ def test_preprocess_applies_the_requested_options(client):
 
     image = Image.open(io.BytesIO(res.content))
     assert image.size == (16, 8)
-    assert json.loads(image.info["preprocess_data"]) == {
+    assert json.loads(image.info["controlmap_data"]) == {
         "type": "canny",
         "model": "canny",
         "options": {"low": 30.0, "high": 60.0, "thickness": 3},
     }
 
 
-def test_preprocess_json_returns_decodable_b64(client):
+def test_controlmap_json_returns_decodable_b64(client):
     res = client(_cpu_runtime()).post(
-        "/preprocess",
+        "/controlmap",
         json={"image_b64": _edged_png_b64(), "type": "canny", "out": "json"},
     )
     assert set(res.json()) == {"b64_json"}
     assert base64.b64decode(res.json()["b64_json"]).startswith(b"\x89PNG")
 
 
-def test_preprocess_rejects_an_unknown_implementation(client):
+def test_controlmap_rejects_an_unknown_implementation(client):
     res = client(_cpu_runtime()).post(
-        "/preprocess", json={"image_b64": _edged_png_b64(), "type": "canny", "model": "canny-xl"}
+        "/controlmap", json={"image_b64": _edged_png_b64(), "type": "canny", "model": "canny-xl"}
     )
     assert res.status_code == 400
     assert "available: canny" in res.text
 
 
-def test_preprocess_returns_400_for_invalid_options(client):
+def test_controlmap_returns_400_for_invalid_options(client):
     """Thresholds are validated by the request's own options dataclass."""
     res = client(_cpu_runtime()).post(
-        "/preprocess",
+        "/controlmap",
         json={"image_b64": _edged_png_b64(), "type": "canny", "canny": {"low": 200, "high": 100}},
     )
     assert res.status_code == 400
     assert "exceeds high threshold" in res.text
 
 
-def test_preprocess_returns_400_for_undecodable_image(client):
+def test_controlmap_returns_400_for_undecodable_image(client):
     res = client(_cpu_runtime()).post(
-        "/preprocess", json={"image_b64": "not base64 @@", "type": "canny"}
+        "/controlmap", json={"image_b64": "not base64 @@", "type": "canny"}
     )
     assert res.status_code == 400
 
 
-def test_preprocess_missing_depth_weights_names_the_download(client, tmp_path):
+def test_controlmap_missing_depth_weights_names_the_download(client, tmp_path):
     """A discovered kind whose checkpoint is incomplete answers 400 with the remedy."""
     directory = tmp_path / "depth_anything_v2_small"
     directory.mkdir()
     (directory / "config.json").write_text('{"model_type": "depth_anything"}')
-    runtime = Runtime(Settings(preprocessor_dir=str(tmp_path)))
+    runtime = Runtime(Settings(controlmap_dir=str(tmp_path)))
     res = client(runtime).post(
-        "/preprocess", json={"image_b64": _edged_png_b64(), "type": "depth"}
+        "/controlmap", json={"image_b64": _edged_png_b64(), "type": "depth"}
     )
     assert res.status_code == 400
-    assert "scripts/download.py --model preprocess" in res.text
+    assert "scripts/download.py --model controlmap" in res.text
 
 
-def test_preprocess_a_pose_request_without_checkpoints_names_the_pose_download(client, tmp_path):
+def test_controlmap_a_pose_request_without_checkpoints_names_the_pose_download(client, tmp_path):
     """The remedy has to be the one that fetches *this* kind, pose being two checkpoints
     of its own rather than the depth model the default variant downloads."""
-    runtime = Runtime(Settings(preprocessor_dir=str(tmp_path)))
+    runtime = Runtime(Settings(controlmap_dir=str(tmp_path)))
     res = client(runtime).post(
-        "/preprocess", json={"image_b64": _edged_png_b64(), "type": "pose"}
+        "/controlmap", json={"image_b64": _edged_png_b64(), "type": "pose"}
     )
     assert res.status_code == 400
-    assert "--model preprocess --variant pose" in res.text
+    assert "--model controlmap --variant pose" in res.text
 
 
 def test_a_pose_request_becomes_the_pose_options():
-    from thenoise.api import PreprocessRequest
-    from thenoise.preprocess.pose import PoseOptions
+    from thenoise.api import ControlMapRequest
+    from thenoise.controlmap.pose import PoseOptions
 
-    request = PreprocessRequest(
+    request = ControlMapRequest(
         image_b64="x", type="pose", pose={"radius": 2, "detector": "rtdetr_r50vd"}
     )
     assert request.to_options() == PoseOptions(radius=2, detector="rtdetr_r50vd")
     # A request that names nothing gets the kind's own defaults, detector included.
-    assert PreprocessRequest(image_b64="x", type="pose").to_options() == PoseOptions()
+    assert ControlMapRequest(image_b64="x", type="pose").to_options() == PoseOptions()
 
 
 def test_lineart_and_softedge_requests_become_their_options():
-    from thenoise.api import PreprocessRequest
-    from thenoise.preprocess.lineart import LineartOptions
-    from thenoise.preprocess.softedge import SoftedgeOptions
+    from thenoise.api import ControlMapRequest
+    from thenoise.controlmap.lineart import LineartOptions
+    from thenoise.controlmap.softedge import SoftedgeOptions
 
-    request = PreprocessRequest(
+    request = ControlMapRequest(
         image_b64="x", type="lineart", lineart={"threshold": 0.8, "thickness": 3}
     )
     assert request.to_options() == LineartOptions(threshold=0.8, thickness=3)
-    assert PreprocessRequest(image_b64="x", type="lineart").to_options() == LineartOptions()
-    assert PreprocessRequest(
+    assert ControlMapRequest(image_b64="x", type="lineart").to_options() == LineartOptions()
+    assert ControlMapRequest(
         image_b64="x", type="softedge", softedge={"threshold": 0.1, "blur": 3.0}
     ).to_options() == SoftedgeOptions(threshold=0.1, blur=3.0)
-    assert PreprocessRequest(image_b64="x", type="softedge").to_options() == SoftedgeOptions()
+    assert ControlMapRequest(image_b64="x", type="softedge").to_options() == SoftedgeOptions()
 
 
 
-def test_preprocess_backend_failure_is_500(client, monkeypatch):
+def test_controlmap_backend_failure_is_500(client, monkeypatch):
     runtime = _cpu_runtime()
 
     def boom(kind, name=""):
         raise RuntimeError("out of memory")
 
-    monkeypatch.setattr(runtime.preprocessors, "get", boom)
+    monkeypatch.setattr(runtime.controlmaps, "get", boom)
     res = client(runtime).post(
-        "/preprocess", json={"image_b64": _edged_png_b64(), "type": "canny"}
+        "/controlmap", json={"image_b64": _edged_png_b64(), "type": "canny"}
     )
     assert res.status_code == 500
-    assert "preprocess failed" in res.text
+    assert "controlmap failed" in res.text
 
 
 # ------------------------------------------------------------- validation (422)
@@ -697,10 +697,10 @@ def test_preprocess_backend_failure_is_500(client, monkeypatch):
         # ``sigmas`` is a list of numbers, not a ComfyUI string.
         ("/text2image", {"prompt": "x", "sigmas": "1.0, 0.5"}),
         ("/text2image", {"prompt": "x", "sigmas": ["abc"]}),
-        # ``image_b64`` is required on /preprocess.
-        ("/preprocess", {"type": "canny"}),
+        # ``image_b64`` is required on /controlmap.
+        ("/controlmap", {"type": "canny"}),
         # ``type`` only accepts the implemented control-map kinds.
-        ("/preprocess", {"image_b64": "abc", "type": "normals"}),
+        ("/controlmap", {"image_b64": "abc", "type": "normals"}),
     ],
     ids=["bad-out", "missing-prompt", "missing-upscaler", "missing-image",
          "sigmas-string", "sigmas-not-numbers", "missing-map-image", "unknown-map-type"],

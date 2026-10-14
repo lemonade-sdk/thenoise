@@ -1,12 +1,12 @@
-/* preprocess.js — the Preprocess tab: image -> extracted map (plain global script).
+/* controlmap.js — the Control Maps tab: image -> extracted map (plain global script).
    The wire keeps the technical names; the words shown to the user are the plain ones. */
 
-let preAvailable = {};    // control-map kind -> the methods implementing it
-let preOptions = {};      // control-map kind -> the option fields it takes
-let preDetectors = [];    // person detectors on disk, for the pose kind to crop with
-let preInputB64 = null;   // base64 (no data: prefix) sent to /preprocess
-let preOutUrl = null;
-let preOutMeta = null;
+let cmAvailable = {};    // control-map kind -> the methods implementing it
+let cmOptions = {};      // control-map kind -> the option fields it takes
+let cmDetectors = [];    // person detectors on disk, for the pose kind to crop with
+let cmInputB64 = null;   // base64 (no data: prefix) sent to /controlmap
+let cmOutUrl = null;
+let cmOutMeta = null;
 
 const KIND_LABELS = {
   canny: 'Edges', hed: 'Soft edges', softedge: 'Soft edges', lineart: 'Line drawing',
@@ -22,29 +22,29 @@ const valueLabel = value => value ? value.charAt(0).toUpperCase() + value.slice(
 
 const isNumberField = option => option.type === 'number' || option.type === 'integer';
 
-const optionFields = kind => preOptions[kind] || [];
+const optionFields = kind => cmOptions[kind] || [];
 
 function optionLabel(name) {
-  for (const fields of Object.values(preOptions)) {
+  for (const fields of Object.values(cmOptions)) {
     const field = fields.find(entry => entry.name === name);
     if (field) return field.label;
   }
   return name;
 }
 
-function preCheckbox(option) {
+function cmCheckbox(option) {
   const label = document.createElement('label');
   label.className = 'check';
   const input = document.createElement('input');
   input.type = 'checkbox';
-  input.id = 'p_opt_' + option.name;
+  input.id = 'cm_opt_' + option.name;
   input.checked = option.default === true;
   label.append(input, document.createTextNode(' ' + option.label));
   return label;
 }
 
-function preField(option) {
-  const id = 'p_opt_' + option.name;
+function cmField(option) {
+  const id = 'cm_opt_' + option.name;
   const field = document.createElement('div');
   field.className = 'field';
   const label = document.createElement('label');
@@ -53,7 +53,7 @@ function preField(option) {
   label.textContent = option.label;
 
   // A `pool` field offers what the server has on disk, named as it is there.
-  const choices = option.pool ? preDetectors : option.choices;
+  const choices = option.pool ? cmDetectors : option.choices;
   let control;
   if (choices) {
     control = document.createElement('select');
@@ -73,20 +73,20 @@ function preField(option) {
   return field;
 }
 
-function buildPreOptions(kind) {
-  const box = $('p_options');
+function buildCmOptions(kind) {
+  const box = $('cm_options');
   box.innerHTML = '';
   let pending = null;   // a numeric field waiting for the one it shares a row with
   for (const option of optionFields(kind)) {
     if (!isNumberField(option)) {
       if (pending) { box.append(pending); pending = null; }
-      box.append(option.type === 'boolean' ? preCheckbox(option) : preField(option));
+      box.append(option.type === 'boolean' ? cmCheckbox(option) : cmField(option));
       continue;
     }
-    if (!pending) { pending = preField(option); continue; }
+    if (!pending) { pending = cmField(option); continue; }
     const row = document.createElement('div');
     row.className = 'row';
-    row.append(pending, preField(option));
+    row.append(pending, cmField(option));
     box.append(row);
     pending = null;
   }
@@ -95,10 +95,10 @@ function buildPreOptions(kind) {
 }
 
 // The chosen kind's options as the wire wants them: only what the form actually holds.
-function preOptionValues(kind) {
+function cmOptionValues(kind) {
   const values = {};
   for (const option of optionFields(kind)) {
-    const input = $('p_opt_' + option.name);
+    const input = $('cm_opt_' + option.name);
     if (!input || input.closest('.hidden')) continue;
     if (option.type === 'boolean') values[option.name] = input.checked;
     else if (isNumberField(option)) {
@@ -109,47 +109,47 @@ function preOptionValues(kind) {
   return values;
 }
 
-function fillPreModels() {
-  fillSelect($('p_model'), preAvailable[$('p_type').value] || []);
+function fillCmModels() {
+  fillSelect($('cm_model'), cmAvailable[$('cm_type').value] || []);
 }
 
-function showPreOptions() {
-  const type = $('p_type').value;
-  const methods = preAvailable[type] || [];
+function showCmOptions() {
+  const type = $('cm_type').value;
+  const methods = cmAvailable[type] || [];
   // A kind with one implementation needs no method picker.
-  $('p_model_field').classList.toggle('hidden', methods.length <= 1);
-  buildPreOptions(type);
+  $('cm_model_field').classList.toggle('hidden', methods.length <= 1);
+  buildCmOptions(type);
 }
 
-async function loadPreprocessors() {
-  const data = await fetchJSON('/preprocessors');
-  preAvailable = (data && data.preprocessors) || {};
-  preOptions = (data && data.options) || {};
-  preDetectors = (data && data.detectors) || [];
-  fillSelect($('p_type'), Object.keys(preAvailable), kindLabel);
-  fillPreModels();
-  showPreOptions();
-  $('p_run').disabled = preInputB64 === null || !Object.keys(preAvailable).length;
+async function loadControlmaps() {
+  const data = await fetchJSON('/controlmaps');
+  cmAvailable = (data && data.controlmaps) || {};
+  cmOptions = (data && data.options) || {};
+  cmDetectors = (data && data.detectors) || [];
+  fillSelect($('cm_type'), Object.keys(cmAvailable), kindLabel);
+  fillCmModels();
+  showCmOptions();
+  $('cm_run').disabled = cmInputB64 === null || !Object.keys(cmAvailable).length;
 }
 
-function loadPreFile(file) {
+function loadCmFile(file) {
   if (!file || !file.type.startsWith('image/')) return;
   const reader = new FileReader();
   reader.onload = () => {
-    preInputB64 = reader.result.split(',')[1];
-    if (preOutUrl) { URL.revokeObjectURL(preOutUrl); preOutUrl = null; }
-    preOutMeta = null;
-    setStageActions($('p_download'), $('p_info_btn'), false);
+    cmInputB64 = reader.result.split(',')[1];
+    if (cmOutUrl) { URL.revokeObjectURL(cmOutUrl); cmOutUrl = null; }
+    cmOutMeta = null;
+    setStageActions($('cm_download'), $('cm_info_btn'), false);
     showInputPreview(reader.result, file, {
-      singleImg: 'p_single_img', single: 'p_single', result: 'p_result',
-      placeholder: 'p_placeholder', dzName: 'p_dz_name', dzHint: 'p_dz_hint',
+      singleImg: 'cm_single_img', single: 'cm_single', result: 'cm_result',
+      placeholder: 'cm_placeholder', dzName: 'cm_dz_name', dzHint: 'cm_dz_hint',
     });
-    $('p_run').disabled = !Object.keys(preAvailable).length;
+    $('cm_run').disabled = !Object.keys(cmAvailable).length;
   };
   reader.readAsDataURL(file);
 }
 
-function renderPreInfo(meta) {
+function renderCmInfo(meta) {
   const rows = [];
   if (!meta || typeof meta !== 'object') {
     renderInfoRows([['Metadata', null, 'none']]);
@@ -163,40 +163,40 @@ function renderPreInfo(meta) {
   renderInfoRows(rows);
 }
 
-function preRequest() {
-  const type = $('p_type').value;
+function cmRequest() {
+  const type = $('cm_type').value;
   return {
-    image_b64: preInputB64,
+    image_b64: cmInputB64,
     type: type,
     // One method means there is nothing to choose: let the kind's default apply.
-    model: $('p_model_field').classList.contains('hidden') ? null : ($('p_model').value || null),
-    [type]: preOptionValues(type),
+    model: $('cm_model_field').classList.contains('hidden') ? null : ($('cm_model').value || null),
+    [type]: cmOptionValues(type),
   };
 }
 
-bindDropzone('p_dropzone', 'p_file', files => loadPreFile(files[0]));
-$('p_type').addEventListener('change', () => { fillPreModels(); showPreOptions(); });
+bindDropzone('cm_dropzone', 'cm_file', files => loadCmFile(files[0]));
+$('cm_type').addEventListener('change', () => { fillCmModels(); showCmOptions(); });
 
-$('p_run').addEventListener('click', () => {
+$('cm_run').addEventListener('click', () => {
   runWithBusy({
-    btn: $('p_run'),
-    overlay: $('p_overlay'),
-    timerEl: 'p_timer',
-    timerTextEl: 'p_timer_text',
-    request: () => postJSON('/preprocess', preRequest()),
+    btn: $('cm_run'),
+    overlay: $('cm_overlay'),
+    timerEl: 'cm_timer',
+    timerTextEl: 'cm_timer_text',
+    request: () => postJSON('/controlmap', cmRequest()),
     onSuccess: async (blob) => {
-      if (preOutUrl) URL.revokeObjectURL(preOutUrl);
-      preOutUrl = URL.createObjectURL(blob);
-      showOutputPreview('p_single', 'p_result', 'p_placeholder', 'p_img', preOutUrl);
-      setStageActions($('p_download'), $('p_info_btn'), true);
-      preOutMeta = await decodeMeta(blob, 'preprocess_data');
+      if (cmOutUrl) URL.revokeObjectURL(cmOutUrl);
+      cmOutUrl = URL.createObjectURL(blob);
+      showOutputPreview('cm_single', 'cm_result', 'cm_placeholder', 'cm_img', cmOutUrl);
+      setStageActions($('cm_download'), $('cm_info_btn'), true);
+      cmOutMeta = await decodeMeta(blob, 'controlmap_data');
     },
   });
 });
 
-$('p_download').addEventListener('click', () =>
-  download(preOutUrl, ($('p_type').value || 'map') + '.png'));
-$('p_info_btn').addEventListener('click', () =>
-  openInfo('Extraction info', () => renderPreInfo(preOutMeta)));
+$('cm_download').addEventListener('click', () =>
+  download(cmOutUrl, ($('cm_type').value || 'map') + '.png'));
+$('cm_info_btn').addEventListener('click', () =>
+  openInfo('Extraction info', () => renderCmInfo(cmOutMeta)));
 
-loadPreprocessors();
+loadControlmaps();

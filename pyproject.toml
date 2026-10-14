@@ -48,7 +48,7 @@ packages = [
     "thenoise.dit.flux2",
     "thenoise.models",
     "thenoise.postprocess",
-    "thenoise.preprocess",
+    "thenoise.controlmap",
     "thenoise.samplers",
     "thenoise.text_encoders",
     "thenoise.ui",

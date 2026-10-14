@@ -1,4 +1,4 @@
-"""The preprocessor contract: *detect* a control signal, then *render* it, so a vector
+"""The control-map contract: *detect* a control signal, then *render* it, so a vector
 signal (a skeleton) is drawn rather than stretched.
 """
 from __future__ import annotations
@@ -10,7 +10,7 @@ from typing import Any, ClassVar
 import torch
 from PIL import Image
 
-from .options import PreprocessOptions
+from .options import ControlMapOptions
 
 
 def scale_field(field: torch.Tensor) -> torch.Tensor:
@@ -39,7 +39,7 @@ def load_processor(path: str):
     return AutoImageProcessor.from_pretrained(path, backend="pil")
 
 
-class Preprocessor(ABC):
+class ControlMap(ABC):
     """One control-map extractor: :meth:`detect` measures, :meth:`render` paints."""
 
     name: ClassVar[str] = ""
@@ -47,7 +47,7 @@ class Preprocessor(ABC):
     # The dtype its weights run in; not every auxiliary network is happy in BF16.
     DTYPE: ClassVar[torch.dtype]
     #: The command that fetches its checkpoints, quoted when they are missing.
-    DOWNLOAD: ClassVar[str] = "scripts/download.py --model preprocess"
+    DOWNLOAD: ClassVar[str] = "scripts/download.py --model controlmap"
 
     def __init__(self) -> None:
         self.device: Any = "cpu"
@@ -61,18 +61,18 @@ class Preprocessor(ABC):
         """Drop anything resident on the device."""
 
     @abstractmethod
-    def detect(self, image: Image.Image, options: PreprocessOptions) -> Any:
+    def detect(self, image: Image.Image, options: ControlMapOptions) -> Any:
         """Measure the control signal on the input image."""
 
-    def render(self, found: Any, options: PreprocessOptions | None = None) -> Image.Image:
+    def render(self, found: Any, options: ControlMapOptions | None = None) -> Image.Image:
         """Paint what :meth:`detect` measured."""
         return field_to_pil(found)
 
-    def run(self, image: Image.Image, options: PreprocessOptions) -> Image.Image:
+    def run(self, image: Image.Image, options: ControlMapOptions) -> Image.Image:
         return self.render(self.detect(image, options), options)
 
 
-def require_checkpoint(preprocessor: Preprocessor, path: str | None) -> None:
+def require_checkpoint(controlmap: ControlMap, path: str | None) -> None:
     """Raise with the remedy when a checkpoint directory is incomplete."""
     missing = [
         name
@@ -81,14 +81,14 @@ def require_checkpoint(preprocessor: Preprocessor, path: str | None) -> None:
     ]
     if missing:
         raise ValueError(
-            f"{preprocessor.kind} preprocessor at {path} is missing {', '.join(missing)}; "
-            f"run '{preprocessor.DOWNLOAD}' to fetch them"
+            f"{controlmap.kind} control map at {path} is missing {', '.join(missing)}; "
+            f"run '{controlmap.DOWNLOAD}' to fetch them"
         )
 
 
 __all__ = [
-    "PreprocessOptions",
-    "Preprocessor",
+    "ControlMapOptions",
+    "ControlMap",
     "field_to_pil",
     "load_processor",
     "require_checkpoint",

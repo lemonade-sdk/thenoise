@@ -12,7 +12,7 @@ import torch
 from PIL import Image
 
 from thenoise.utils.image_tensor import flatten_alpha
-from .base import Preprocessor, require_checkpoint
+from .base import ControlMap, require_checkpoint
 from .options import PoseOptions
 from .pose_ops import PoseProcessor
 from .render import skeleton_to_pil
@@ -37,7 +37,7 @@ class Pose:
     people: List[Person]
 
 
-class PosePreprocessor(Preprocessor):
+class PoseControlMap(ControlMap):
     """ViTPose's COCO-17 joints over RT-DETR's person boxes, painted as COCO-18."""
 
     name: ClassVar[str] = "vitpose-base-simple"
@@ -45,7 +45,7 @@ class PosePreprocessor(Preprocessor):
     DTYPE: ClassVar[torch.dtype] = torch.bfloat16
     #: Deformable attention and the topk that picks the boxes are less happy reduced.
     DETECTOR_DTYPE: ClassVar[torch.dtype] = torch.float32
-    DOWNLOAD: ClassVar[str] = "scripts/download.py --model preprocess --variant pose"
+    DOWNLOAD: ClassVar[str] = "scripts/download.py --model controlmap --variant pose"
 
     def __init__(self) -> None:
         super().__init__()
@@ -139,7 +139,7 @@ class PosePreprocessor(Preprocessor):
         if not self._detectors:
             raise ValueError(
                 "pose needs a person detector beside the keypoint model; put one in the "
-                f"preprocessor directory and run '{self.DOWNLOAD}' to fetch it"
+                f"control-map directory and run '{self.DOWNLOAD}' to fetch it"
             )
         available = sorted(self._detectors)
         name = wanted or available[0]
@@ -197,7 +197,7 @@ __all__ = [
     "Person",
     "Pose",
     "PoseOptions",
-    "PosePreprocessor",
+    "PoseControlMap",
     "load_detector",
     "load_model",
     "load_processor",

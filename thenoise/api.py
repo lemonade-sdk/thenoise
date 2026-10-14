@@ -16,13 +16,13 @@ from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel, model_validator
 
-from thenoise.preprocess.options import (
+from thenoise.controlmap.options import (
     OPTIONS_BY_KIND,
     CannyOptions,
     DepthOptions,
     LineartOptions,
     PoseOptions,
-    PreprocessOptions,
+    ControlMapOptions,
     SoftedgeOptions,
 )
 from thenoise.utils.image_tensor import load_image
@@ -97,7 +97,7 @@ class UpscaleRequest(BaseModel):
     out: Literal["png", "json"] = "png"
 
 
-class PreprocessRequest(BaseModel):
+class ControlMapRequest(BaseModel):
     """Extract a control map, at the size of the image it was measured on."""
 
     image_b64: str
@@ -112,7 +112,7 @@ class PreprocessRequest(BaseModel):
     out: Literal["png", "json"] = "png"
 
     @model_validator(mode="after")
-    def _only_the_chosen_kind(self) -> "PreprocessRequest":
+    def _only_the_chosen_kind(self) -> "ControlMapRequest":
         """Options for another kind are a mistake, not something to quietly ignore."""
         stray = [
             kind
@@ -126,7 +126,7 @@ class PreprocessRequest(BaseModel):
             )
         return self
 
-    def to_options(self) -> PreprocessOptions:
+    def to_options(self) -> ControlMapOptions:
         """The kind's options, or its defaults when the request named none."""
         return getattr(self, self.type) or OPTIONS_BY_KIND[self.type]()
 
@@ -242,15 +242,15 @@ def create_app(runtime) -> FastAPI:
                 scales[name] = 0
         return {"upscalers": names, "scales": scales}
 
-    @app.get("/preprocessors")
-    def preprocessors():
+    @app.get("/controlmaps")
+    def controlmaps():
         """Control-map kinds, their implementations, and the fields each one takes."""
         return {
-            "preprocessors": runtime.preprocessors.available(),
-            "defaults": runtime.preprocessors.defaults(),
+            "controlmaps": runtime.controlmaps.available(),
+            "defaults": runtime.controlmaps.defaults(),
             # The person detectors a pose request crops its people with, by name.
-            "detectors": runtime.preprocessors.detectors(),
-            "options": runtime.preprocessors.option_schemas(),
+            "detectors": runtime.controlmaps.detectors(),
+            "options": runtime.controlmaps.option_schemas(),
         }
 
     @app.post("/text2image")
@@ -286,12 +286,12 @@ def create_app(runtime) -> FastAPI:
             req.out,
         )
 
-    @app.post("/preprocess")
-    def preprocess(req: PreprocessRequest):
+    @app.post("/controlmap")
+    def controlmap(req: ControlMapRequest):
         """Extract a control map from an input image, with no model loaded."""
         return image_job(
-            "preprocess",
-            lambda: runtime.preprocess.run(
+            "controlmap",
+            lambda: runtime.controlmap.run(
                 decode_image(req.image_b64),
                 req.type,
                 req.to_options(),

@@ -23,7 +23,7 @@ class Settings:
     host: str = "127.0.0.1"
     port: int = 8000
     upscaler_dir: str = ""     # directory of pixel-domain upscaler models
-    preprocessor_dir: str = ""  # directory of control-map preprocessor checkpoints
+    controlmap_dir: str = ""  # directory of control-map checkpoints
 
 
 @dataclass
@@ -44,8 +44,8 @@ class NotLoadedError(RuntimeError):
 
 class Runtime:
     def __init__(self, settings):
-        from .preprocess.manager import PreprocessorManager
-        from .preprocess_controller import PreprocessController
+        from .controlmap.manager import ControlMapManager
+        from .controlmap_controller import ControlMapController
         from .upscale.pixel import PixelUpscalerManager
         from .upscale_controller import PixelUpscaleController
 
@@ -57,11 +57,11 @@ class Runtime:
             upscaler_dir=settings.upscaler_dir, device=settings.device
         )
         self._upscaler = PixelUpscaleController(self._pixel_upscalers)
-        # Control-map preprocessors: model-free too, and independent of the upscalers.
-        self._preprocessors = PreprocessorManager(
-            device=settings.device, preprocessor_dir=settings.preprocessor_dir
+        # Control-map checkpoints: model-free too, and independent of the upscalers.
+        self._controlmaps = ControlMapManager(
+            device=settings.device, controlmap_dir=settings.controlmap_dir
         )
-        self._preprocess = PreprocessController(self._preprocessors)
+        self._controlmap = ControlMapController(self._controlmaps)
         self._pipeline = None
 
     def load(self, paths: ModelPaths) -> None:
@@ -119,14 +119,14 @@ class Runtime:
         return self._upscaler
 
     @property
-    def preprocessors(self):
-        """The control-map preprocessor pool (available without a model)."""
-        return self._preprocessors
+    def controlmaps(self):
+        """The control-map pool (available without a model)."""
+        return self._controlmaps
 
     @property
-    def preprocess(self):
+    def controlmap(self):
         """Standalone control-map controller (model-free, always available)."""
-        return self._preprocess
+        return self._controlmap
 
     @property
     def model_name(self) -> str:

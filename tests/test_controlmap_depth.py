@@ -1,6 +1,6 @@
 """Depth-Anything-V2 runner and painter: fake weights, no GPU, no network.
 
-The preprocessor loads through the module's ``load_model`` / ``load_processor``, so
+The controlmap loads through the module's ``load_model`` / ``load_processor``, so
 monkeypatching those two exercises the whole run path with a fixed ``predicted_depth``.
 """
 from __future__ import annotations
@@ -14,9 +14,9 @@ from PIL import Image
 
 from transformers import BatchFeature
 
-from thenoise.preprocess import depth
-from thenoise.preprocess.depth import DepthOptions, DepthPreprocessor
-from thenoise.preprocess.render import turbo_lut
+from thenoise.controlmap import depth
+from thenoise.controlmap.depth import DepthOptions, DepthControlMap
+from thenoise.controlmap.render import turbo_lut
 
 
 class FakeProcessor:
@@ -44,7 +44,7 @@ class FakeDepthModel(torch.nn.Module):
 
 
 def fake_checkpoint(tmp_path, monkeypatch, shape=(8, 8)):
-    """Install the fakes and return (preprocessor, model, processor)."""
+    """Install the fakes and return (controlmap, model, processor)."""
     model = FakeDepthModel(shape)
     processor = FakeProcessor()
     directory = tmp_path / "depth_anything_v2_small"
@@ -55,7 +55,7 @@ def fake_checkpoint(tmp_path, monkeypatch, shape=(8, 8)):
 
     monkeypatch.setattr(depth, "load_processor", lambda path: processor)
     monkeypatch.setattr(depth, "load_model", lambda path, dtype: model)
-    pre = DepthPreprocessor()
+    pre = DepthControlMap()
     pre.load("cpu", str(directory))
     return pre, model, processor
 
@@ -146,12 +146,12 @@ def test_missing_weights_names_the_download_command(tmp_path):
     directory = tmp_path / "depth_anything_v2_small"
     directory.mkdir()
     (directory / "config.json").write_text('{"model_type": "depth_anything"}')
-    pre = DepthPreprocessor()
-    with pytest.raises(ValueError, match="scripts/download.py --model preprocess"):
+    pre = DepthControlMap()
+    with pytest.raises(ValueError, match="scripts/download.py --model controlmap"):
         pre.load("cpu", str(directory))
 
 
 def test_load_is_lazy_until_weights_are_needed():
-    """A fresh preprocessor has no model resident; only load() brings the weights."""
-    pre = DepthPreprocessor()
+    """A fresh controlmap has no model resident; only load() brings the weights."""
+    pre = DepthControlMap()
     assert not hasattr(pre, "_model")

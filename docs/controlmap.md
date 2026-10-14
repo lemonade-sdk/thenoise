@@ -1,4 +1,4 @@
-# Preprocess: control-map extraction
+# Control maps: control-map extraction
 
 `thenoise` can extract **control maps** from a plain image — the pictures that
 ControlNet-style pipelines condition on. It works exactly like `/upscale`: image in, map
@@ -7,7 +7,7 @@ from.
 
 Five kinds ship today: **canny**, **lineart** and **softedge** need nothing extra, while
 **depth** and **pose** need a small download each. Every one of them is available from
-the CLI (`preprocess`), the web UI's Preprocess tab and the `/preprocess` endpoint, with
+the CLI (`controlmap`), the web UI's Control Maps tab and the `/controlmap` endpoint, with
 the same options.
 
 | Input | Canny Edge | Depth map | Pose | Lineart | Soft-edged map | 
@@ -19,22 +19,22 @@ the same options.
 Canny, lineart and softedge work out of the box. Depth and pose need checkpoints:
 
 ```bash
-python scripts/download.py --model preprocess                 # depth (small)
-python scripts/download.py --model preprocess --variant base  # depth, crisper
-python scripts/download.py --model preprocess --variant large # depth, crispest
-python scripts/download.py --model preprocess --variant pose       # pose + person detector
-python scripts/download.py --model preprocess --variant pose-r50vd # the better detector
+python scripts/download.py --model controlmap                 # depth (small)
+python scripts/download.py --model controlmap --variant base  # depth, crisper
+python scripts/download.py --model controlmap --variant large # depth, crispest
+python scripts/download.py --model controlmap --variant pose       # pose + person detector
+python scripts/download.py --model controlmap --variant pose-r50vd # the better detector
 ```
 
-Everything lands in `./models/preprocessors`, one directory per checkpoint. Point
-`--preprocessor-dir` at that directory and the engine works out which checkpoint is
+Everything lands in `./models/controlmaps`, one directory per checkpoint. Point
+`--controlmap-dir` at that directory and the engine works out which checkpoint is
 which:
 
 ```bash
-./thenoise.sh preprocess --input photo.jpg --type depth \
-  --preprocessor-dir ./models/preprocessors --out depth.png
-./thenoise.sh preprocess --input photo.jpg --type pose \
-  --preprocessor-dir ./models/preprocessors --out pose.png
+./thenoise.sh controlmap --input photo.jpg --type depth \
+  --controlmap-dir ./models/controlmaps --out depth.png
+./thenoise.sh controlmap --input photo.jpg --type pose \
+  --controlmap-dir ./models/controlmaps --out pose.png
 ```
 
 Pose needs **both** of its checkpoints: one finds the people, the other measures their
@@ -42,7 +42,7 @@ joints. With only one in the directory `pose` is not offered, and `--list` says 
 missing rather than staying quiet about it:
 
 ```bash
-./thenoise.sh preprocess --list --preprocessor-dir ./models/preprocessors
+./thenoise.sh controlmap --list --controlmap-dir ./models/controlmaps
 ```
 
 Ask for more than one `--type` and each map gets its own file (`map_canny.png`,
@@ -109,7 +109,7 @@ generation to keep soft shading rather than snap to outlines.
 
 ## What the map remembers
 
-Every map is saved with a `preprocess_data` chunk recording its type, the model that made
+Every map is saved with a `controlmap_data` chunk recording its type, the model that made
 it and any option you changed, next to whatever metadata the input image already carried.
 A map therefore says where it came from later on — on disk and in the web UI's info
 dialog.

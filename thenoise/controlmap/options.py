@@ -1,14 +1,14 @@
-"""Every ``preprocess`` parameter, declared once — flags, request schema and UI form."""
+"""Every control-map parameter, declared once — flags, request schema and UI form."""
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field, fields
 from typing import Any, ClassVar, Dict, List, Optional, Sequence, get_type_hints
 
-#: Names a list of the ``/preprocessors`` payload a field takes its choices from.
+#: Names a list of the ``/controlmaps`` payload a field takes its choices from.
 DETECTOR_POOL = "detectors"
 
-#: The pose canvases; :data:`thenoise.preprocess.render.CANVASES` holds their colours.
+#: The pose canvases; :data:`thenoise.controlmap.render.CANVASES` holds their colours.
 CANVAS_NAMES = ("black", "green")
 
 #: The palettes a depth map can be painted with; ``turbo`` is the vendored lookup table.
@@ -44,7 +44,7 @@ def option(
     return field(default=default, metadata=meta)
 
 
-def validate(options: "PreprocessOptions") -> None:
+def validate(options: "ControlMapOptions") -> None:
     """Reject a value outside ``ge``/``le``, or a choice that is not offered."""
     kind = getattr(options, "kind", "")
     for entry in fields(options):
@@ -107,7 +107,7 @@ def add_option_args(parser: argparse.ArgumentParser, kind: str, cls: type) -> No
 
 
 @dataclass
-class PreprocessOptions:
+class ControlMapOptions:
     """What a request asks of a kind; fields are validated here, not in each kind."""
 
     def __post_init__(self) -> None:
@@ -115,7 +115,7 @@ class PreprocessOptions:
 
 
 @dataclass
-class CannyOptions(PreprocessOptions):
+class CannyOptions(ControlMapOptions):
     """Edge thresholds (Sobel magnitude, 8-bit units) and rendered line thickness."""
 
     kind: ClassVar[str] = "canny"
@@ -138,7 +138,7 @@ class CannyOptions(PreprocessOptions):
 
 
 @dataclass
-class LineartOptions(PreprocessOptions):
+class LineartOptions(ControlMapOptions):
     """Line intensity threshold (0-1) and rendered line thickness."""
 
     kind: ClassVar[str] = "lineart"
@@ -151,7 +151,7 @@ class LineartOptions(PreprocessOptions):
 
 
 @dataclass
-class SoftedgeOptions(PreprocessOptions):
+class SoftedgeOptions(ControlMapOptions):
     """The soft edge cutoff (0-1) and the smoothing blur (sigma, 0 = none)."""
 
     kind: ClassVar[str] = "softedge"
@@ -165,7 +165,7 @@ class SoftedgeOptions(PreprocessOptions):
 
 
 @dataclass
-class DepthOptions(PreprocessOptions):
+class DepthOptions(ControlMapOptions):
     """How the relative-depth field is painted."""
 
     kind: ClassVar[str] = "depth"
@@ -177,7 +177,7 @@ class DepthOptions(PreprocessOptions):
 
 
 @dataclass
-class PoseOptions(PreprocessOptions):
+class PoseOptions(ControlMapOptions):
     """Which person detector to crop with, and how the skeleton is painted."""
 
     kind: ClassVar[str] = "pose"
@@ -214,7 +214,7 @@ __all__ = [
     "LineartOptions",
     "OPTIONS_BY_KIND",
     "PoseOptions",
-    "PreprocessOptions",
+    "ControlMapOptions",
     "SoftedgeOptions",
     "add_option_args",
     "option",

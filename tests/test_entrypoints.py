@@ -11,8 +11,8 @@ from PIL import Image
 from thenoise.__main__ import _serve, main
 from thenoise.cli import build_parser
 from thenoise.generate import run_edit, run_generate
-from thenoise.preprocess.manager import PreprocessorManager
-from thenoise.preprocess_cli import run_preprocess
+from thenoise.controlmap.manager import ControlMapManager
+from thenoise.controlmap_cli import run_controlmap
 from thenoise.runtime import ModelPaths, Settings
 from thenoise.upscale_cli import run_upscale
 from thenoise.utils.paths import ensure_png_extension
@@ -58,7 +58,7 @@ class _FakeUpscaler:
         return _FakeImage(factor=factor)
 
 
-class _FakePreprocess:
+class _FakeControlMap:
     def __init__(self):
         self.calls = []
         self.images = []
@@ -77,8 +77,8 @@ class _FakeRuntime:
         self.pipeline = _FakePipeline()
         self.upscaler = _FakeUpscaler()
         # Weight-free and I/O-free, so options/availability stay the real ones.
-        self.preprocessors = PreprocessorManager(device="cpu")
-        self.preprocess = _FakePreprocess()
+        self.controlmaps = ControlMapManager(device="cpu")
+        self.controlmap = _FakeControlMap()
         self.model_name = "stub"
 
     def load(self, paths):
@@ -290,16 +290,16 @@ def test_upscale_is_model_free_and_splits_the_path(fake_runtime, tmp_path):
     assert name == "realesrgan"
 
 
-# ---------------------------------------------------------------- preprocess
+# ---------------------------------------------------------------- controlmap
 
 
-def test_preprocess_is_model_free_and_maps_the_flags(fake_runtime, tmp_path):
+def test_controlmap_is_model_free_and_maps_the_flags(fake_runtime, tmp_path):
     img_path = tmp_path / "in.png"
     Image.new("RGB", (64, 64)).save(img_path)
-    run_preprocess(
+    run_controlmap(
         _parse(
             [
-                "preprocess",
+                "controlmap",
                 "--input", str(img_path),
                 "--type", "canny",
                 "--canny-low", "30",
@@ -314,53 +314,53 @@ def test_preprocess_is_model_free_and_maps_the_flags(fake_runtime, tmp_path):
     assert rt.settings.device == "cpu"
     assert rt.loaded is None  # model-free: no load() call
 
-    image, kind, options, name = rt.preprocess.calls[0]
+    image, kind, options, name = rt.controlmap.calls[0]
     assert (image.size, kind, name) == ((64, 64), "canny", "")
     # The kind's own flags lose their namespace on the way in.
     assert (options.low, options.high, options.thickness) == (30.0, 60.0, 2)
-    assert rt.preprocess.images[0].saved_path == ensure_png_extension("map")
+    assert rt.controlmap.images[0].saved_path == ensure_png_extension("map")
 
 
 def test_each_type_gets_its_own_file(fake_runtime, tmp_path):
     """With more than one map requested every output is named after its type."""
     img_path = tmp_path / "in.png"
     Image.new("RGB", (64, 64)).save(img_path)
-    run_preprocess(
-        _parse(["preprocess", "--input", str(img_path), "--type", "canny",
+    run_controlmap(
+        _parse(["controlmap", "--input", str(img_path), "--type", "canny",
                 "--type", "depth", "--out", "map"])
     )
-    assert [i.saved_path for i in fake_runtime[0].preprocess.images] == [
+    assert [i.saved_path for i in fake_runtime[0].controlmap.images] == [
         "map_canny.png",
         "map_depth.png",
     ]
 
 
-def test_preprocess_list_reports_the_available_types(fake_runtime, caplog):
+def test_controlmap_list_reports_the_available_types(fake_runtime, caplog):
     with caplog.at_level(logging.INFO):
-        run_preprocess(_parse(["preprocess", "--list"]))
+        run_controlmap(_parse(["controlmap", "--list"]))
     assert fake_runtime[0].loaded is None
     assert "canny: canny" in caplog.text
 
 
-def test_preprocess_list_says_what_is_missing(fake_runtime, caplog):
+def test_controlmap_list_says_what_is_missing(fake_runtime, caplog):
     """A kind the engine has but whose weights have not been downloaded is worth naming:
     an empty list alone leaves the user guessing whether the feature exists at all."""
     with caplog.at_level(logging.INFO):
-        run_preprocess(_parse(["preprocess", "--list"]))
+        run_controlmap(_parse(["controlmap", "--list"]))
     assert "pose: unavailable, has no checkpoint" in caplog.text
-    assert "scripts/download.py --model preprocess --variant pose" in caplog.text
+    assert "scripts/download.py --model controlmap --variant pose" in caplog.text
 
 
-def test_preprocess_without_input_or_type_explains_itself(fake_runtime):
+def test_controlmap_without_input_or_type_explains_itself(fake_runtime):
     with pytest.raises(SystemExit, match="--input and --type are required"):
-        run_preprocess(_parse(["preprocess"]))
+        run_controlmap(_parse(["controlmap"]))
 
 
-def test_preprocess_reports_an_unknown_type_as_an_exit(fake_runtime, tmp_path):
+def test_controlmap_reports_an_unknown_type_as_an_exit(fake_runtime, tmp_path):
     img_path = tmp_path / "in.png"
     Image.new("RGB", (64, 64)).save(img_path)
-    with pytest.raises(SystemExit, match="no preprocessor for 'normals'"):
-        run_preprocess(_parse(["preprocess", "--input", str(img_path), "--type", "normals"]))
+    with pytest.raises(SystemExit, match="no control map for 'normals'"):
+        run_controlmap(_parse(["controlmap", "--input", str(img_path), "--type", "normals"]))
 
 
 # ---------------------------------------------------------------- dispatch
@@ -372,13 +372,13 @@ def test_main_dispatches_to_the_correct_handler(monkeypatch):
     monkeypatch.setattr("thenoise.generate.run_edit", lambda args: calls.append("edit"))
     monkeypatch.setattr("thenoise.upscale_cli.run_upscale", lambda args: calls.append("upscale"))
     monkeypatch.setattr(
-        "thenoise.preprocess_cli.run_preprocess", lambda args: calls.append("preprocess")
+        "thenoise.controlmap_cli.run_controlmap", lambda args: calls.append("controlmap")
     )
     monkeypatch.setattr("thenoise.__main__._serve", lambda args: calls.append("serve"))
 
     main(["generate", "--dit", "d", "--vae", "v", "--text-encoder", "t", "--prompt", "x"])
     main(["edit", "--dit", "d", "--vae", "v", "--text-encoder", "t", "--prompt", "x", "--image", "i.png"])
     main(["upscale", "--pixel-upscaler", "u.safetensors", "--input", "i.png"])
-    main(["preprocess", "--input", "i.png", "--type", "canny"])
+    main(["controlmap", "--input", "i.png", "--type", "canny"])
     main(["serve"])
-    assert calls == ["generate", "edit", "upscale", "preprocess", "serve"]
+    assert calls == ["generate", "edit", "upscale", "controlmap", "serve"]

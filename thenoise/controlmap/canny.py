@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from PIL import Image
 
 from thenoise.utils.image_tensor import pil_to_pixels
-from .base import Preprocessor
+from .base import ControlMap
 from .options import CannyOptions
 
 _LUMA = (0.2126, 0.7152, 0.0722)  # Rec. 709
@@ -53,7 +53,7 @@ def _gauss1d(size: int, sigma: float) -> torch.Tensor:
 
 
 def _blur(gray: torch.Tensor) -> torch.Tensor:
-    """The preprocessor's default blur: separable 5x5 Gaussian, sigma 1.2."""
+    """The control map's default blur: separable 5x5 Gaussian, sigma 1.2."""
     size, sigma = _BLUR
     return gaussian_blur(gray, size, sigma)
 
@@ -115,7 +115,7 @@ def _hysteresis(suppressed: torch.Tensor, low: float, high: float) -> torch.Tens
     return edges
 
 
-class CannyPreprocessor(Preprocessor):
+class CannyControlMap(ControlMap):
     """Black canvas, white edges — the ControlNet ``canny`` conditioning input."""
 
     name: ClassVar[str] = "canny"
@@ -131,7 +131,7 @@ class CannyPreprocessor(Preprocessor):
 
 __all__ = [
     "CannyOptions",
-    "CannyPreprocessor",
+    "CannyControlMap",
     "edge_mask",
     "gaussian_blur",
     "luminance",

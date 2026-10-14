@@ -7,14 +7,14 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 
-from thenoise.preprocess.lineart import LineartOptions, LineartPreprocessor
+from thenoise.controlmap.lineart import LineartOptions, LineartControlMap
 
 
 @pytest.fixture
 def lineart():
-    preprocessor = LineartPreprocessor()
-    preprocessor.load("cpu")
-    return preprocessor
+    controlmap = LineartControlMap()
+    controlmap.load("cpu")
+    return controlmap
 
 
 def map_of(lineart, image, **options) -> np.ndarray:

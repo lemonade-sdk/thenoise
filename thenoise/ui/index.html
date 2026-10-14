@@ -15,7 +15,7 @@
   <button class="tab ctrl active" data-tab="generate">Generate</button>
   <button class="tab ctrl" data-tab="edit">Edit</button>
   <button class="tab ctrl" data-tab="upscale">Upscale</button>
-  <button class="tab ctrl" data-tab="preprocess">Preprocess</button>
+  <button class="tab ctrl" data-tab="controlmap">Control Maps</button>
   <div class="tabs-prefs">
     <button class="pref-btn ctrl" id="sidebar_toggle" title="Move the sidebar to the other side"
       aria-label="Move the sidebar to the other side">
@@ -392,54 +392,54 @@
 </main>
 </div><!-- /view-upscale -->
 
-<div class="view hidden" id="view-preprocess">
+<div class="view hidden" id="view-controlmap">
 <aside class="sidebar">
   <div class="field">
-    <label class="label" for="p_file">Input image</label>
-    <div class="dropzone" id="p_dropzone">
-      <input type="file" id="p_file" accept="image/*" hidden>
-      <div class="dz-hint" id="p_dz_hint">Drag &amp; drop an image here or <span class="kbd">click to browse</span></div>
-      <div class="dz-name" id="p_dz_name" style="display:none"></div>
+    <label class="label" for="cm_file">Input image</label>
+    <div class="dropzone" id="cm_dropzone">
+      <input type="file" id="cm_file" accept="image/*" hidden>
+      <div class="dz-hint" id="cm_dz_hint">Drag &amp; drop an image here or <span class="kbd">click to browse</span></div>
+      <div class="dz-name" id="cm_dz_name" style="display:none"></div>
     </div>
   </div>
 
   <div class="field">
-    <label class="label" for="p_type">Detect</label>
-    <select id="p_type"></select>
+    <label class="label" for="cm_type">Detect</label>
+    <select id="cm_type"></select>
   </div>
 
-  <div class="field" id="p_model_field">
-    <label class="label" for="p_model">Method</label>
-    <select id="p_model"></select>
+  <div class="field" id="cm_model_field">
+    <label class="label" for="cm_model">Method</label>
+    <select id="cm_model"></select>
   </div>
 
   <div class="divider"></div>
 
   <!-- Built at runtime from the chosen kind's field descriptions. -->
-  <div class="opts" id="p_options"></div>
+  <div class="opts" id="cm_options"></div>
 
-  <button class="btn" id="p_run" disabled>Extract</button>
+  <button class="btn" id="cm_run" disabled>Extract</button>
 </aside>
 
 <main class="main">
-  <div class="stage" id="pstage">
-    <div class="placeholder" id="p_placeholder">Drop an image and click <span class="kbd">Extract</span></div>
-    <div class="single hidden" id="p_single">
-      <img id="p_single_img" alt="input image">
+  <div class="stage" id="cm_stage">
+    <div class="placeholder" id="cm_placeholder">Drop an image and click <span class="kbd">Extract</span></div>
+    <div class="single hidden" id="cm_single">
+      <img id="cm_single_img" alt="input image">
     </div>
-    <div class="result hidden" id="p_result">
-      <img id="p_img" alt="extracted map">
+    <div class="result hidden" id="cm_result">
+      <img id="cm_img" alt="extracted map">
     </div>
     <div class="actions">
-      <button class="dl ctrl" id="p_download" disabled title="Download PNG">&#8595; Download</button>
-      <button class="info ctrl" id="p_info_btn" disabled title="Extraction info" aria-label="Extraction info">&#9432;</button>
+      <button class="dl ctrl" id="cm_download" disabled title="Download PNG">&#8595; Download</button>
+      <button class="info ctrl" id="cm_info_btn" disabled title="Extraction info" aria-label="Extraction info">&#9432;</button>
     </div>
-    <div class="overlay hidden" id="p_overlay"><div class="spinner"></div></div>
+    <div class="overlay hidden" id="cm_overlay"><div class="spinner"></div></div>
   </div>
 
-  <div class="timer" id="p_timer"><span class="dot"></span><span id="p_timer_text">idle</span></div>
+  <div class="timer" id="cm_timer"><span class="dot"></span><span id="cm_timer_text">idle</span></div>
 </main>
-</div><!-- /view-preprocess -->
+</div><!-- /view-controlmap -->
 </div><!-- /views -->
 
 <div class="modal hidden" id="info_modal">
@@ -455,6 +455,6 @@
 
 <script src="static/js/helpers.js"></script>
 <script src="static/js/app.js"></script>
-<script src="static/js/preprocess.js"></script>
+<script src="static/js/controlmap.js"></script>
 </body>
 </html>

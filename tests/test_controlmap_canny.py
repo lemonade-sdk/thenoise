@@ -7,15 +7,15 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 
-from thenoise.preprocess.canny import CannyOptions, CannyPreprocessor, luminance
+from thenoise.controlmap.canny import CannyOptions, CannyControlMap, luminance
 from thenoise.utils.image_tensor import pil_to_pixels
 
 
 @pytest.fixture
 def canny():
-    preprocessor = CannyPreprocessor()
-    preprocessor.load("cpu")
-    return preprocessor
+    controlmap = CannyControlMap()
+    controlmap.load("cpu")
+    return controlmap
 
 
 def map_of(canny, image, **options) -> np.ndarray:

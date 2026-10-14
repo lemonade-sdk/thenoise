@@ -68,7 +68,7 @@ All models and options (variants, `--int8-convrot`, ...):
 | Qwen-Image 2.1 | `--model qwen-image-2.1` | ~32 GB | [model page](models/qwen-image-2.1.md) |
 | Mage-Flow / Turbo | `--model mage-flow` | 18–25 GB | [model page](models/mage-flow.md) |
 | Real-ESRGAN x4 *(optional, upscaling)* | `--model esrgan` | ~0.7 GB | [CLI: upscaling](cli.md#upscaling) |
-| Control-map checkpoints *(optional, preprocessing)* | `--model preprocess` | 99 MB – 425 MB | [CLI: control maps](cli.md#preprocess-a-control-map) |
+| Control-map checkpoints *(optional, control-map extraction)* | `--model controlmap` | 99 MB – 425 MB | [CLI: control maps](cli.md#control-map-a-control-map) |
 
 Canny, line-art and soft-edge maps need **no** download — they are pure `torch`. Depth
 and pose are the two kinds that pull checkpoints.

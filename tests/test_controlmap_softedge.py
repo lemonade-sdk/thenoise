@@ -7,14 +7,14 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 
-from thenoise.preprocess.softedge import SoftedgeOptions, SoftedgePreprocessor
+from thenoise.controlmap.softedge import SoftedgeOptions, SoftedgeControlMap
 
 
 @pytest.fixture
 def softedge():
-    preprocessor = SoftedgePreprocessor()
-    preprocessor.load("cpu")
-    return preprocessor
+    controlmap = SoftedgeControlMap()
+    controlmap.load("cpu")
+    return controlmap
 
 
 def map_of(softedge, image, **options) -> np.ndarray:
