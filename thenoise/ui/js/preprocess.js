@@ -13,10 +13,10 @@ const KIND_LABELS = {
   binary: 'Silhouette',
 };
 const OPTION_LABELS = {
-  low: 'Edge cutoff', high: 'Strong edge cutoff', thickness: 'Line width',
-  invert: 'Invert depth',
-  detector: 'Person finder', threshold: 'Person cutoff', kp_threshold: 'Joint cutoff',
-  line_width: 'Line width', radius: 'Joint size', background: 'Canvas',
+  low: 'Low edge strength', high: 'High edge strength', thickness: 'Line width',
+  invert: 'Invert (near = dark)',
+  detector: 'Person detector', threshold: 'Person confidence', kp_threshold: 'Joint confidence',
+  line_width: 'Bone thickness', radius: 'Joint radius', background: 'Background',
 };
 
 const kindLabel = kind => KIND_LABELS[kind]

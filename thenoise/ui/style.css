@@ -321,6 +321,7 @@ body.sidebar-right .sidebar {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: .7rem;
+  padding: .7rem 0;
 }
 
 .hint {
