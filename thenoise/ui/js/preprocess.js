@@ -14,7 +14,7 @@ const KIND_LABELS = {
 };
 const OPTION_LABELS = {
   low: 'Low edge strength', high: 'High edge strength', thickness: 'Line width',
-  invert: 'Invert (near = dark)',
+  invert: 'Invert (near = dark)', colormap: 'Colormap',
   detector: 'Person detector', threshold: 'Person confidence', kp_threshold: 'Joint confidence',
   line_width: 'Bone thickness', radius: 'Joint radius', background: 'Background',
 };
@@ -34,6 +34,8 @@ function showPreOptions() {
   $('p_canny_opts').classList.toggle('hidden', type !== 'canny');
   $('p_depth_opts').classList.toggle('hidden', type !== 'depth');
   $('p_pose_opts').classList.toggle('hidden', type !== 'pose');
+  $('p_lineart_opts').classList.toggle('hidden', type !== 'lineart');
+  $('p_softedge_opts').classList.toggle('hidden', type !== 'softedge');
   // With one detector there is nothing to choose, and the default is that one.
   $('p_detector_field').classList.toggle('hidden', preDetectors.length <= 1);
 }
@@ -96,7 +98,19 @@ function preRequest() {
     };
   }
   if (type === 'depth') {
-    body.depth = { invert: $('p_invert').checked, colormap: 'gray' };
+    body.depth = { invert: $('p_invert').checked, colormap: $('p_colormap').value };
+  }
+  if (type === 'lineart') {
+    body.lineart = {
+      threshold: parseFloat($('p_lineart_threshold').value) || 0.5,
+      thickness: parseInt($('p_lineart_thickness').value, 10) || 1,
+    };
+  }
+  if (type === 'softedge') {
+    body.softedge = {
+      threshold: parseFloat($('p_softedge_threshold').value) || 0.2,
+      blur: parseFloat($('p_softedge_blur').value) || 1.5,
+    };
   }
   if (type === 'pose') {
     body.pose = {

@@ -445,8 +445,16 @@ def test_preprocessors_lists_kinds_and_defaults():
     """Extraction needs no diffusion model, so the UI can always fill its dropdowns."""
     res = _endpoint(create_app(_empty_runtime()), "/preprocessors")()
     assert res == {
-        "preprocessors": {"canny": ["canny"]},
-        "defaults": {"canny": "canny"},
+        "preprocessors": {
+            "canny": ["canny"],
+            "lineart": ["lineart"],
+            "softedge": ["softedge"],
+        },
+        "defaults": {
+            "canny": "canny",
+            "lineart": "lineart",
+            "softedge": "softedge",
+        },
         "detectors": [],
     }
 
@@ -459,8 +467,18 @@ def test_preprocessors_list_discovered_depth_checkpoints(tmp_path):
     runtime = Runtime(Settings(preprocessor_dir=str(tmp_path)))
     res = _endpoint(create_app(runtime), "/preprocessors")()
     assert res == {
-        "preprocessors": {"canny": ["canny"], "depth": ["depth_anything_v2_small"]},
-        "defaults": {"canny": "canny", "depth": "depth_anything_v2_small"},
+        "preprocessors": {
+            "canny": ["canny"],
+            "lineart": ["lineart"],
+            "softedge": ["softedge"],
+            "depth": ["depth_anything_v2_small"],
+        },
+        "defaults": {
+            "canny": "canny",
+            "lineart": "lineart",
+            "softedge": "softedge",
+            "depth": "depth_anything_v2_small",
+        },
         "detectors": [],
     }
 
@@ -607,6 +625,23 @@ def test_a_pose_request_becomes_the_pose_options():
     assert PreprocessRequest(image_b64="x", type="pose").to_options() == PoseOptions()
 
 
+def test_lineart_and_softedge_requests_become_their_options():
+    from thenoise.api import PreprocessRequest
+    from thenoise.preprocess.lineart import LineartOptions
+    from thenoise.preprocess.softedge import SoftedgeOptions
+
+    request = PreprocessRequest(
+        image_b64="x", type="lineart", lineart={"threshold": 0.8, "thickness": 3}
+    )
+    assert request.to_options() == LineartOptions(threshold=0.8, thickness=3)
+    assert PreprocessRequest(image_b64="x", type="lineart").to_options() == LineartOptions()
+    assert PreprocessRequest(
+        image_b64="x", type="softedge", softedge={"threshold": 0.1, "blur": 3.0}
+    ).to_options() == SoftedgeOptions(threshold=0.1, blur=3.0)
+    assert PreprocessRequest(image_b64="x", type="softedge").to_options() == SoftedgeOptions()
+
+
+
 def test_preprocess_backend_failure_is_500(client, monkeypatch):
     runtime = _cpu_runtime()
 
@@ -641,7 +676,7 @@ def test_preprocess_backend_failure_is_500(client, monkeypatch):
         # ``image_b64`` is required on /preprocess.
         ("/preprocess", {"type": "canny"}),
         # ``type`` only accepts the implemented control-map kinds.
-        ("/preprocess", {"image_b64": "abc", "type": "lineart"}),
+        ("/preprocess", {"image_b64": "abc", "type": "normals"}),
     ],
     ids=["bad-out", "missing-prompt", "missing-upscaler", "missing-image",
          "sigmas-string", "sigmas-not-numbers", "missing-map-image", "unknown-map-type"],

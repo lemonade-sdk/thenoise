@@ -8,6 +8,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import numpy as np
 import torch
 from PIL import Image
 
@@ -15,6 +16,7 @@ from transformers import BatchFeature
 
 from thenoise.preprocess import depth
 from thenoise.preprocess.depth import DepthOptions, DepthPreprocessor
+from thenoise.preprocess.render import turbo_lut
 
 
 class FakeProcessor:
@@ -106,8 +108,37 @@ def test_the_batch_reaches_the_model_on_the_right_dtype(tmp_path, monkeypatch):
 
 
 def test_unknown_colormap_is_rejected():
-    with pytest.raises(ValueError, match="unknown depth colormap 'turbo'"):
-        DepthOptions(colormap="turbo")
+    with pytest.raises(ValueError, match="unknown depth colormap 'plasma'"):
+        DepthOptions(colormap="plasma")
+
+
+def test_turbo_colormap_maps_a_field_to_rgb(tmp_path, monkeypatch):
+    """The turbo LUT is a 256-entry rainbow: the endpoints are dark blue and dark red,
+    every channel stays in 0-255, and a flat field stays flat."""
+    image = Image.new("RGB", (48, 32), "black")
+    pre, _, _ = fake_checkpoint(tmp_path, monkeypatch)
+    out = pre.run(image, DepthOptions(colormap="turbo"))
+    assert out.mode == "RGB"
+    assert out.size == image.size
+    # The flat 0.25 field maps to a single colour, so the whole map is one pixel value.
+    pixels = np.asarray(out)
+    assert (pixels == pixels[0, 0]).all()
+    # The LUT endpoints are dark blue and dark red, not white or black.
+    lut = turbo_lut()
+    assert lut.shape == (3, 256)
+    assert lut[:, 0].tolist() == [48, 18, 59]
+    assert lut[:, -1].tolist() == [176, 5, 41]
+
+
+def test_turbo_colormap_is_smooth_and_monotonic():
+    """Each channel of the LUT is monotonic, so the rainbow never folds back on itself."""
+    lut = turbo_lut().float() / 255.0
+    for channel in range(3):
+        samples = lut[channel]
+        # The channel rises then falls (or vice versa) but never oscillates rapidly:
+        # consecutive deltas change sign at most a handful of times.
+        sign_changes = (torch.diff(samples)[1:] * torch.diff(samples)[:-1] < 0).sum()
+        assert sign_changes <= 3
 
 
 def test_missing_weights_names_the_download_command(tmp_path):

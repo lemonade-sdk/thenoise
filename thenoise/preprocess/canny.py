@@ -72,8 +72,13 @@ def _gauss1d(size: int, sigma: float) -> torch.Tensor:
 
 
 def _blur(gray: torch.Tensor) -> torch.Tensor:
-    """Separable Gaussian, each pass padding only the axis it walks."""
+    """The preprocessor's default blur: separable 5x5 Gaussian, sigma 1.2."""
     size, sigma = _BLUR
+    return gaussian_blur(gray, size, sigma)
+
+
+def gaussian_blur(gray: torch.Tensor, size: int, sigma: float) -> torch.Tensor:
+    """Separable Gaussian, each pass padding only the axis it walks."""
     edge = size // 2
     kernel = _gauss1d(size, sigma).to(gray)
     along_rows = F.conv2d(
@@ -144,4 +149,11 @@ class CannyPreprocessor(Preprocessor):
         return thicken(mask, options.thickness)
 
 
-__all__ = ["CannyOptions", "CannyPreprocessor", "edge_mask", "luminance", "thicken"]
+__all__ = [
+    "CannyOptions",
+    "CannyPreprocessor",
+    "edge_mask",
+    "gaussian_blur",
+    "luminance",
+    "thicken",
+]

@@ -17,7 +17,7 @@ thenoise/                  the package
   vae/                     VAE loaders (Qwen-Image, Flux, Flux.2, Wan 2.2, Mage)
   samplers/                denoising solvers (euler, er_sde)
   upscale/                 latent + pixel upscalers
-  preprocess/              control-map extractors (canny today, depth + pose to come)
+  preprocess/              control-map extractors (canny, lineart, softedge, depth, pose)
   postprocess/             grain, sharpening, Qwen-VAE enhance
   ui/                      web UI served by `serve`
   api.py / cli.py          HTTP API and CLI entry points

@@ -125,8 +125,8 @@ Pixel-upscales an existing image. Model-free - no `--dit`/`--vae`/
 
 ## Preprocess a control map
 
-Extracts a conditioning map - Canny edges or a Depth-Anything-V2 depth map - from an
-existing image. Model-free, like `upscale`:
+Extracts a conditioning map - Canny edges, a Depth-Anything-V2 depth map or an
+openpose-style pose skeleton - from an existing image. Model-free, like `upscale`:
 
 ```bash
 ./thenoise.sh preprocess \
@@ -134,7 +134,13 @@ existing image. Model-free, like `upscale`:
 ./thenoise.sh preprocess \
   --input /tmp/photo.jpg --type depth --out /tmp/photo_depth.png \
   --preprocessor-dir ./models/preprocessors
+./thenoise.sh preprocess \
+  --input /tmp/photo.jpg --type pose --out /tmp/photo_pose.png \
+  --preprocessor-dir ./models/preprocessors
 ```
+
+Depth needs its checkpoint and pose needs two (a keypoint model and a person detector):
+see [Control-map extraction](preprocess.md#installing-and-downloading-what-each-kind-needs).
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
@@ -142,19 +148,31 @@ existing image. Model-free, like `upscale`:
 | `--type` | yes* | — | Control map to extract; repeatable, each extra type writes its own `<out>_<type>.png` |
 | `--model` | no | type default | Implementation to use for that type |
 | `--preprocessor-dir` | no | — | Directory of control-map checkpoints (e.g. `./models/preprocessors`); each subdirectory's `config.json` declares the kind it implements |
-| `--list` | no | — | List the available control-map types and exit |
+| `--list` | no | — | List the available control-map types, and what a half-installed kind still needs, then exit |
 | `--canny-low` | no | `100` | Canny low threshold, in Sobel magnitude units |
 | `--canny-high` | no | `200` | Canny high threshold; weak edges connected to a strong one are kept |
 | `--canny-thickness` | no | `1` | Rendered edge thickness in pixels |
+| `--lineart-threshold` | no | `0.5` | Line-art: line intensity threshold, 0-1 |
+| `--lineart-thickness` | no | `1` | Line-art: line thickness in pixels |
+| `--softedge-threshold` | no | `0.2` | Soft-edge: where the gradient starts to count, 0-1 |
+| `--softedge-blur` | no | `1.5` | Soft-edge: smoothing sigma in pixels, 0 = none |
 | `--depth-invert` | no | `false` | Depth: swap near/far (near is bright by default) |
-| `--depth-colormap` | no | `gray` | Depth colormap (only `gray` today) |
+| `--depth-colormap` | no | `gray` | Depth: `gray` or `turbo` (a vivid rainbow) |
+| `--pose-detector` | no | first found | Pose: which RT-DETR checkpoint to crop people with |
+| `--pose-threshold` | no | `0.5` | Pose: minimum detector score for a person to be in the map at all |
+| `--pose-kp-threshold` | no | `0.3` | Pose: minimum confidence for a joint to be drawn |
+| `--pose-line-width` | no | `4` | Pose: skeleton bone thickness in pixels |
+| `--pose-radius` | no | `4` | Pose: radius of the joint dots |
+| `--pose-background` | no | `black` | Pose: `black` or `green` (the canvas SD's original openpose preprocessor used) |
 | `--out` | no | `out_control.png` | Output image path |
 
-The map is white edges on black (`--type canny`) or a grey depth field (`--type
-depth`), at the size of the image it was extracted from, so it can be paired with
-that image later. It is written as a PNG with a `preprocess_data` text chunk
-recording the type, the model and every option that differed from its default,
-alongside whatever metadata the input already carried.
+The map is white edges on black (`--type canny`), dark lines on white
+(`--type lineart`), soft dark edges on white (`--type softedge`), a grey or turbo
+rainbow depth field (`--type depth`) or a coloured skeleton (`--type pose`), at the
+size of the image it was extracted from, so it can be paired with that image later. It
+is written as a PNG with a `preprocess_data` text chunk recording the type, the model
+and every option that differed from its default, alongside whatever metadata the input
+already carried.
 
 ## Upscaling
 

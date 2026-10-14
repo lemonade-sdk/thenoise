@@ -95,6 +95,20 @@ class CannyOptionsModel(BaseModel):
     thickness: int = 1
 
 
+class LineartOptionsModel(BaseModel):
+    """The lineart request fields, mirroring :class:`LineartOptions` field for field."""
+
+    threshold: float = 0.5
+    thickness: int = 1
+
+
+class SoftedgeOptionsModel(BaseModel):
+    """The softedge request fields, mirroring :class:`SoftedgeOptions` field for field."""
+
+    threshold: float = 0.2
+    blur: float = 1.5
+
+
 class DepthOptionsModel(BaseModel):
     """The depth request fields, mirroring :class:`DepthOptions` field for field."""
 
@@ -114,28 +128,37 @@ class PoseOptionsModel(BaseModel):
 
 
 class PreprocessRequest(BaseModel):
-    """Control-map extraction: image -> canny / depth / pose map, at the input's size.
-    ``type`` lists only the kinds the engine implements; adding one widens the list.
+    """Control-map extraction: image -> canny / depth / pose / lineart / softedge map, at the
+    input's size. ``type`` lists only the kinds the engine implements; adding one widens
+    the list.
     """
 
     image_b64: str
-    type: Literal["canny", "depth", "pose"]
+    type: Literal["canny", "depth", "pose", "lineart", "softedge"]
     model: Optional[str] = None  # implementation name; null = the kind's default
     canny: Optional[CannyOptionsModel] = None
     depth: Optional[DepthOptionsModel] = None
     pose: Optional[PoseOptionsModel] = None
+    lineart: Optional[LineartOptionsModel] = None
+    softedge: Optional[SoftedgeOptionsModel] = None
     out: Literal["png", "json"] = "png"
 
     def to_options(self) -> "PreprocessOptions":
         """The request as the kind's option dataclass (same field names on both)."""
         from thenoise.preprocess.base import PreprocessOptions
         from thenoise.preprocess.depth import DepthOptions
+        from thenoise.preprocess.lineart import LineartOptions
         from thenoise.preprocess.pose import PoseOptions
+        from thenoise.preprocess.softedge import SoftedgeOptions
 
         if self.type == "depth":
             return DepthOptions(**(self.depth or DepthOptionsModel()).model_dump())
         if self.type == "pose":
             return PoseOptions(**(self.pose or PoseOptionsModel()).model_dump())
+        if self.type == "lineart":
+            return LineartOptions(**(self.lineart or LineartOptionsModel()).model_dump())
+        if self.type == "softedge":
+            return SoftedgeOptions(**(self.softedge or SoftedgeOptionsModel()).model_dump())
         return CannyOptions(**(self.canny or CannyOptionsModel()).model_dump())
 
 

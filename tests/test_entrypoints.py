@@ -359,8 +359,8 @@ def test_preprocess_without_input_or_type_explains_itself(fake_runtime):
 def test_preprocess_reports_an_unknown_type_as_an_exit(fake_runtime, tmp_path):
     img_path = tmp_path / "in.png"
     Image.new("RGB", (64, 64)).save(img_path)
-    with pytest.raises(SystemExit, match="no preprocessor for 'lineart'"):
-        run_preprocess(_parse(["preprocess", "--input", str(img_path), "--type", "lineart"]))
+    with pytest.raises(SystemExit, match="no preprocessor for 'normals'"):
+        run_preprocess(_parse(["preprocess", "--input", str(img_path), "--type", "normals"]))
 
 
 # ---------------------------------------------------------------- dispatch

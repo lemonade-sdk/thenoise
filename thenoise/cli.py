@@ -166,8 +166,16 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Canny line thickness in pixels (default: 1)")
     pre.add_argument("--depth-invert", action="store_true",
                      help="depth: invert near/far (default: near = bright)")
-    pre.add_argument("--depth-colormap", default="gray", choices=["gray"],
-                     help="depth colormap (default: gray)")
+    pre.add_argument("--depth-colormap", default="gray", choices=["gray", "turbo"],
+                     help="depth colormap: grayscale or turbo (default: gray)")
+    pre.add_argument("--lineart-threshold", type=float, default=0.5,
+                     help="lineart: line intensity threshold, 0-1 (default: 0.5)")
+    pre.add_argument("--lineart-thickness", type=int, default=1,
+                     help="lineart: line thickness in pixels (default: 1)")
+    pre.add_argument("--softedge-threshold", type=float, default=0.2,
+                     help="softedge: soft edge cutoff, 0-1 (default: 0.2)")
+    pre.add_argument("--softedge-blur", type=float, default=1.5,
+                     help="softedge: smoothing sigma in pixels, 0 = none (default: 1.5)")
     pre.add_argument("--pose-detector", default="",
                      help="pose: person detector checkpoint to crop with "
                           "(default: the first one in --preprocessor-dir)")

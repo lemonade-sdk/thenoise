@@ -37,6 +37,8 @@ def test_discovery_maps_model_type_to_kind(tmp_path):
     manager = PreprocessorManager(device="cpu", preprocessor_dir=str(tmp_path))
     assert manager.available() == {
         "canny": ["canny"],
+        "lineart": ["lineart"],
+        "softedge": ["softedge"],
         "depth": ["depth_anything_v2_small"],
         "pose": ["vitpose_base_simple"],
     }
@@ -48,7 +50,11 @@ def test_a_non_preprocessor_directory_is_ignored(tmp_path):
     (tmp_path / "not_a_preprocessor").mkdir()
     (tmp_path / "not_a_preprocessor" / "config.json").write_text('{"model_type": "gpt2"}')
     manager = PreprocessorManager(device="cpu", preprocessor_dir=str(tmp_path))
-    assert manager.available() == {"canny": ["canny"]}
+    assert manager.available() == {
+        "canny": ["canny"],
+        "lineart": ["lineart"],
+        "softedge": ["softedge"],
+    }
 
 
 def test_pose_is_offered_only_with_both_of_its_checkpoints(tmp_path):
@@ -74,7 +80,11 @@ def test_a_kind_with_no_checkpoint_at_all_is_simply_not_on_offer(tmp_path):
     """Nothing half-installed: a kind with no checkpoint is absent, and ``--list``
     explains what would complete it."""
     manager = PreprocessorManager(device="cpu", preprocessor_dir=str(tmp_path))
-    assert manager.available() == {"canny": ["canny"]}
+    assert manager.available() == {
+        "canny": ["canny"],
+        "lineart": ["lineart"],
+        "softedge": ["softedge"],
+    }
     assert manager.missing() == {
         "depth": "has no checkpoint in the preprocessor directory; run "
         "'scripts/download.py --model preprocess' to fetch it",

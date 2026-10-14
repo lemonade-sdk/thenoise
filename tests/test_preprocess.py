@@ -41,17 +41,27 @@ def chunk(image, keyword):
 
 
 def test_pool_offers_the_registered_kinds():
-    assert PreprocessorManager(device="cpu").available() == {"canny": ["canny"]}
+    assert PreprocessorManager(device="cpu").available() == {
+        "canny": ["canny"],
+        "lineart": ["lineart"],
+        "softedge": ["softedge"],
+    }
 
 
 def test_the_first_implementation_of_a_kind_is_its_default():
     """What ``get()`` falls back to, and what ``/preprocessors`` reports as such."""
-    assert PreprocessorManager(device="cpu").defaults() == {"canny": "canny"}
+    assert PreprocessorManager(device="cpu").defaults() == {
+        "canny": "canny",
+        "lineart": "lineart",
+        "softedge": "softedge",
+    }
 
 
 def test_a_kind_the_engine_has_never_heard_of_names_the_available_ones():
-    with pytest.raises(ValueError, match=r"no preprocessor for 'lineart'; available: canny"):
-        PreprocessorManager(device="cpu").get("lineart")
+    with pytest.raises(
+        ValueError, match=r"no preprocessor for 'normals'; available: canny, lineart, softedge"
+    ):
+        PreprocessorManager(device="cpu").get("normals")
 
 
 def test_a_kind_missing_its_weights_names_the_download_command():

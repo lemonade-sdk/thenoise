@@ -11,11 +11,15 @@ from thenoise.utils.device import release_device_memory
 from .base import PreprocessOptions, Preprocessor
 from .canny import CannyPreprocessor
 from .depth import DepthPreprocessor
+from .lineart import LineartPreprocessor
 from .pose import PosePreprocessor
+from .softedge import SoftedgePreprocessor
 
 #: Control-map kind -> the weights-free implementations it always has; the rest come from discovery.
 REGISTRY: Dict[str, List[Type[Preprocessor]]] = {
-    CannyPreprocessor.kind: [CannyPreprocessor]
+    CannyPreprocessor.kind: [CannyPreprocessor],
+    LineartPreprocessor.kind: [LineartPreprocessor],
+    SoftedgePreprocessor.kind: [SoftedgePreprocessor],
 }
 
 #: A checkpoint's ``model_type`` -> what it is for, by reading ``config.json`` rather

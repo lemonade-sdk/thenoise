@@ -4,6 +4,7 @@ a skeleton is drawn at its painted size rather than stretched.
 from __future__ import annotations
 
 from typing import Any, Iterable, List, Sequence, Tuple
+import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
@@ -21,9 +22,43 @@ COCO_POSE_PALETTE: Tuple[Tuple[int, int, int], ...] = (
 #: Canvas colours: SD's openpose used green, the newer ControlNets black.
 CANVASES = {"black": (0, 0, 0), "green": (36, 255, 12)}
 
+#: The ``turbo`` colormap as its anchor colours (Google's turbo, sampled): dark blue ->
+#: green -> dark red. Interpolated linearly, so the LUT is smooth and monotonic.
+_TURBO_ANCHORS: Tuple[Tuple[float, Tuple[float, float, float]], ...] = (
+    (0.00, (0.189, 0.071, 0.232)),
+    (0.10, (0.192, 0.203, 0.468)),
+    (0.20, (0.111, 0.310, 0.654)),
+    (0.30, (0.125, 0.438, 0.707)),
+    (0.40, (0.103, 0.576, 0.648)),
+    (0.50, (0.168, 0.679, 0.459)),
+    (0.60, (0.361, 0.745, 0.266)),
+    (0.70, (0.620, 0.755, 0.153)),
+    (0.80, (0.877, 0.708, 0.098)),
+    (0.90, (0.958, 0.557, 0.109)),
+    (1.00, (0.690, 0.020, 0.160)),
+)
+
+#: The cached ``[3, 256]`` uint8 turbo lookup table, built once on first use.
+_TURBO_LUT: torch.Tensor | None = None
+
 #: COCO-18 derives the neck at the shoulder midpoint; these are its label names.
 _NECK_PARENTS = ("L_Shoulder", "R_Shoulder")
 _HEAD = "Nose"
+
+
+def turbo_lut() -> torch.Tensor:
+    """The ``turbo`` colormap as a ``[3, 256]`` uint8 LUT (built once, cached)."""
+    global _TURBO_LUT
+    if _TURBO_LUT is None:
+        stops = np.array([pos for pos, _ in _TURBO_ANCHORS], dtype=np.float64)
+        colors = np.array([rgb for _, rgb in _TURBO_ANCHORS], dtype=np.float64)
+        positions = np.linspace(0.0, 1.0, 256)
+        lut = np.stack(
+            [np.interp(positions, stops, colors[:, c]) for c in range(3)]
+        )
+        _TURBO_LUT = (torch.tensor(lut) * 255.0).round().to(torch.uint8)
+    return _TURBO_LUT
+
 
 
 def normalize(field: torch.Tensor) -> torch.Tensor:
@@ -43,7 +78,12 @@ def depth_to_pil(
         x = 1.0 - x
     if colormap == "gray":
         return uint8_to_pil(scale_field(x))
-    raise ValueError(f"colormap {colormap!r} is not available yet")
+    if colormap == "turbo":
+        index = scale_field(x)[0].long()  # [H, W]
+        # The LUT is tiny; put it on the field's device so indexing never crosses one.
+        rgb = turbo_lut().t().to(index.device)[index]  # [H, W, 3]
+        return Image.fromarray(rgb.cpu().numpy(), mode="RGB")
+    raise ValueError(f"colormap {colormap!r} is not available")
 
 
 def skeleton_edges(
@@ -131,4 +171,5 @@ __all__ = [
     "normalize",
     "skeleton_edges",
     "skeleton_to_pil",
+    "turbo_lut",
 ]

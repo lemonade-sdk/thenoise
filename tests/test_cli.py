@@ -161,7 +161,9 @@ def test_cli_preprocess_parses_its_flags(parse):
         "--input", "in.png", "--type", "canny", "--type", "depth",
         "--model", "depth-anything-v2-base",
         "--canny-low", "30", "--canny-high", "60", "--canny-thickness", "2",
-        "--depth-invert", "--depth-colormap", "gray",
+        "--depth-invert", "--depth-colormap", "turbo",
+        "--lineart-threshold", "0.7", "--lineart-thickness", "3",
+        "--softedge-threshold", "0.1", "--softedge-blur", "2.0",
         "--pose-detector", "rtdetr_r50vd", "--pose-threshold", "0.7",
         "--pose-kp-threshold", "0.4", "--pose-line-width", "6",
         "--pose-radius", "3", "--pose-background", "green",
@@ -172,7 +174,9 @@ def test_cli_preprocess_parses_its_flags(parse):
     assert (args.input, args.types) == ("in.png", ["canny", "depth"])
     assert args.model == "depth-anything-v2-base"
     assert (args.canny_low, args.canny_high, args.canny_thickness) == (30.0, 60.0, 2)
-    assert (args.depth_invert, args.depth_colormap) == (True, "gray")
+    assert (args.depth_invert, args.depth_colormap) == (True, "turbo")
+    assert (args.lineart_threshold, args.lineart_thickness) == (0.7, 3)
+    assert (args.softedge_threshold, args.softedge_blur) == (0.1, 2.0)
     assert (args.pose_detector, args.pose_threshold, args.pose_kp_threshold) == (
         "rtdetr_r50vd", 0.7, 0.4,
     )
@@ -189,6 +193,8 @@ def test_cli_preprocess_defaults(parse):
     assert (args.input, args.types, args.model) == (None, None, "")
     assert (args.canny_low, args.canny_high, args.canny_thickness) == (100.0, 200.0, 1)
     assert (args.depth_invert, args.depth_colormap) == (False, "gray")
+    assert (args.lineart_threshold, args.lineart_thickness) == (0.5, 1)
+    assert (args.softedge_threshold, args.softedge_blur) == (0.2, 1.5)
     # No detector named means the pool's first one; black is the modern canvas.
     assert (args.pose_detector, args.pose_threshold, args.pose_kp_threshold) == (
         "", 0.5, 0.3,

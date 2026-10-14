@@ -15,8 +15,8 @@ from thenoise.utils.image_tensor import flatten_alpha
 from .base import PreprocessOptions, Preprocessor, load_processor, require_checkpoint
 from .render import depth_to_pil
 
-#: Colormaps a depth map can be painted with; ``turbo`` needs a vendored LUT and lands later.
-_COLORMAPS = ("gray",)
+#: Colormaps a depth map can be painted with; ``turbo`` needs a vendored LUT.
+_COLORMAPS = ("gray", "turbo")
 
 
 @dataclass

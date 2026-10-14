@@ -172,17 +172,23 @@ curl -s localhost:8000/upscale \
 ## `GET /preprocessors`
 
 ```json
-{"preprocessors": {"canny": ["canny"]}, "defaults": {"canny": "canny"}}
+{"preprocessors": {"canny": ["canny"]}, "defaults": {"canny": "canny"}, "detectors": []}
 ```
 
 `preprocessors` maps each control-map type to the implementations it can choose
 between, `defaults` to the one used when a request does not name one. Both are
 empty when nothing is implemented, and no diffusion model is needed to list them.
 
+`detectors` lists the person detectors on disk that a `pose` request crops its people
+with, by name. `pose` appears in `preprocessors` only once both its checkpoints - the
+keypoint model *and* a detector - are in the directory: an estimator with nothing to
+crop with measures nothing.
+
 ## `POST /preprocess`
 
-Extracts a conditioning map from an image - Canny edges or a Depth-Anything-V2 depth
-map. Like `/upscale`, this needs no diffusion model loaded.
+Extracts a conditioning map - Canny or line-art edges, a soft edge field, a
+Depth-Anything-V2 depth map or an openpose-style pose skeleton. Like `/upscale`, this
+needs no diffusion model loaded.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -190,17 +196,21 @@ map. Like `/upscale`, this needs no diffusion model loaded.
 | `type` | `string` | *(required)* | Control-map type, one of those listed by `/preprocessors` |
 | `model` | `string` | type default | Implementation to use for that type |
 | `canny` | `object` | defaults | `low` (100), `high` (200) thresholds in Sobel magnitude units, `thickness` (1) in pixels |
-| `depth` | `object` | defaults | `invert` (false: near is bright), `colormap` (`gray`) |
+| `lineart` | `object` | defaults | `threshold` (0.5) line intensity, `thickness` (1) in pixels |
+| `softedge` | `object` | defaults | `threshold` (0.2) soft edge cutoff, `blur` (1.5) smoothing sigma |
+| `depth` | `object` | defaults | `invert` (false: near is bright), `colormap` (`gray` or `turbo`) |
+| `pose` | `object` | defaults | `detector` ("": the first one listed by `/preprocessors`), `threshold` (0.5) for a person to count, `kp_threshold` (0.3) for a joint to be drawn, `line_width` (4), `radius` (4), `background` (`black`, or `green` for the original openpose canvas) |
 | `out` | `string` | `png` | `png` (returns an image) or `json` (returns `b64_json`) |
 
 The map comes back the size of the image it was extracted from, so it can be paired
 with that same image later - whoever conditions on it does its own resizing.
 
 A `depth` request needs its checkpoint on disk (``scripts/download.py --model
-preprocess``); when it is missing the endpoint answers **HTTP 400** naming that
-command. A type the engine does not implement, an unknown `model` or an invalid
-option value is also **HTTP 400**; a `type` outside the implemented set is a schema
-error (**HTTP 422**).
+preprocess``) and a `pose` request needs both of its own (``scripts/download.py --model
+preprocess --variant pose``); when either is missing the endpoint answers **HTTP 400**
+naming the command that fetches it. A type the engine does not implement, an unknown `model` or an
+invalid option value is also **HTTP 400**; a `type` outside the implemented set is a
+schema error (**HTTP 422**).
 
 ### Response
 
@@ -215,6 +225,11 @@ curl -s localhost:8000/preprocess \
   -H 'content-type: application/json' \
   -d '{"image_b64":"<base64 png>","type":"canny","canny":{"low":30,"high":60}}' \
   --output /tmp/fox_canny.png
+
+curl -s localhost:8000/preprocess \
+  -H 'content-type: application/json' \
+  -d '{"image_b64":"<base64 png>","type":"pose","pose":{"kp_threshold":0.4}}' \
+  --output /tmp/fox_pose.png
 ```
 
 ## Using it from Python
