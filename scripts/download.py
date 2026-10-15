@@ -25,8 +25,9 @@ Models:
                   https://huggingface.co/Comfy-Org/Mage-Flow
   esrgan          Real-ESRGAN x4 pixel upscaler (optional, for upscaling)
                   https://huggingface.co/Comfy-Org/Real-ESRGAN_repackaged
-  controlmap      Control-map checkpoints: Depth-Anything-V2 depth, or the ViTPose
-                  keypoint model + RT-DETR person detector pose needs
+  controlmaps      Control-map checkpoints: a Depth-Anything-V2 depth model, or the
+                  ViTPose keypoint model + RT-DETR person detector pose needs.
+                  Default: both kinds' defaults, so depth and pose both work
                   https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf
                   https://huggingface.co/usyd-community/vitpose-base-simple
 
@@ -52,8 +53,8 @@ Usage:
     python scripts/download.py --model mage-flow --variant base
     python scripts/download.py --model mage-flow --int8-convrot --edit-only
     python scripts/download.py --model esrgan
-    python scripts/download.py --model controlmap
-    python scripts/download.py --model controlmap --variant pose
+    python scripts/download.py --model controlmaps
+    python scripts/download.py --model controlmaps --variant pose
     python scripts/download.py --model krea2 --dry-run
 """
 from __future__ import annotations
@@ -304,6 +305,10 @@ _POSE_DETECTORS = {
 }
 #: What a transformers checkpoint directory needs to be loadable.
 _CHECKPOINT_FILES = ("config.json", "model.safetensors", "preprocessor_config.json")
+#: The variant that fetches what every control-map kind can run with: the smallest depth
+#: model plus both pose checkpoints. Depth and pose are separate downloads otherwise,
+#: and a pool with only one of them silently offers only half of what the engine has.
+_ALL = "all"
 
 
 def _checkpoint(repo: str, directory: str) -> list[Artifact]:
@@ -314,15 +319,28 @@ def _checkpoint(repo: str, directory: str) -> list[Artifact]:
     return [(f"{directory}/{name}", repo, name) for name in _CHECKPOINT_FILES]
 
 
-def _controlmap_jobs(args: argparse.Namespace) -> list[Artifact]:
-    """Control-map checkpoints: a Depth-Anything-V2 depth model, or the two
-    checkpoints a pose map needs."""
+def _depth_jobs(variant: str) -> list[Artifact]:
+    """One Depth-Anything-V2 checkpoint, as ``variant`` names it."""
+    return _checkpoint(_DEPTH_REPOS[variant], f"depth_anything_v2_{variant}")
+
+
+def _pose_jobs(variant: str) -> list[Artifact]:
+    """Both checkpoints a pose map needs: the ViTPose estimator and ``variant``'s
+    RT-DETR person detector to crop with."""
+    detector_dir, detector_repo = _POSE_DETECTORS[variant]
+    return _checkpoint(_POSE_ESTIMATOR, "vitpose_base_simple") + _checkpoint(
+        detector_repo, detector_dir
+    )
+
+
+def _controlmaps_jobs(args: argparse.Namespace) -> list[Artifact]:
+    """Control-map checkpoints: a depth model, the two checkpoints a pose map needs,
+    or the default of each."""
+    if args.variant == _ALL:
+        return _depth_jobs("small") + _pose_jobs("pose")
     if args.variant in _POSE_DETECTORS:
-        detector_dir, detector_repo = _POSE_DETECTORS[args.variant]
-        return _checkpoint(_POSE_ESTIMATOR, "vitpose_base_simple") + _checkpoint(
-            detector_repo, detector_dir
-        )
-    return _checkpoint(_DEPTH_REPOS[args.variant], f"depth_anything_v2_{args.variant}")
+        return _pose_jobs(args.variant)
+    return _depth_jobs(args.variant)
 
 
 @dataclass(frozen=True)
@@ -399,14 +417,14 @@ MODELS: dict[str, ModelSpec] = {
         _esrgan_jobs,
         has_int8=False,
     ),
-    "controlmap": ModelSpec(
-        "controlmap", "./models/controlmaps",
+    "controlmaps": ModelSpec(
+        "controlmaps", "./models/controlmaps",
         "Control-map checkpoints: Depth-Anything-V2 depth, ViTPose + RT-DETR pose",
-        _controlmap_jobs,
+        _controlmaps_jobs,
         has_int8=False,
         variant_supported=True,
-        variant_choices=("small", "base", "large", "pose", "pose-r50vd"),
-        default_variant="small",
+        variant_choices=(_ALL, "small", "base", "large", "pose", "pose-r50vd"),
+        default_variant=_ALL,
     ),
 }
 
@@ -432,9 +450,9 @@ def _epilog() -> str:
         "  python scripts/download.py --model mage-flow --variant base",
         "  python scripts/download.py --model mage-flow --int8-convrot --edit-only",
         "  python scripts/download.py --model esrgan",
-        "  python scripts/download.py --model controlmap",
-        "  python scripts/download.py --model controlmap --variant base",
-        "  python scripts/download.py --model controlmap --variant pose",
+        "  python scripts/download.py --model controlmaps            # depth + pose",
+        "  python scripts/download.py --model controlmaps --variant base",
+        "  python scripts/download.py --model controlmaps --variant pose",
     ]
     return "\n".join(lines)
 
@@ -465,7 +483,8 @@ def main() -> None:
             "klein: 4b | 4b-base | 9b | 9b-base (default: 4b) | "
             "qwen-image-2.1: turbo | base (default: turbo) | "
             "mage-flow: turbo | rl | base (default: turbo) | "
-            "controlmap: small | base | large | pose | pose-r50vd (default: small)"
+            "controlmaps: all | small | base | large | pose | pose-r50vd "
+            "(default: all, the depth model and both pose checkpoints)"
         ),
     )
     ap.add_argument(

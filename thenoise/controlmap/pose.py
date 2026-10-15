@@ -45,7 +45,7 @@ class PoseControlMap(ControlMap):
     DTYPE: ClassVar[torch.dtype] = torch.bfloat16
     #: Deformable attention and the topk that picks the boxes are less happy reduced.
     DETECTOR_DTYPE: ClassVar[torch.dtype] = torch.float32
-    DOWNLOAD: ClassVar[str] = "scripts/download.py --model controlmap --variant pose"
+    DOWNLOAD: ClassVar[str] = "scripts/download.py --model controlmaps --variant pose"
 
     def __init__(self) -> None:
         super().__init__()

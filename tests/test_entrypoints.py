@@ -348,7 +348,7 @@ def test_controlmap_list_says_what_is_missing(fake_runtime, caplog):
     with caplog.at_level(logging.INFO):
         run_controlmap(_parse(["controlmap", "--list"]))
     assert "pose: unavailable, has no checkpoint" in caplog.text
-    assert "scripts/download.py --model controlmap --variant pose" in caplog.text
+    assert "scripts/download.py --model controlmaps --variant pose" in caplog.text
 
 
 def test_controlmap_without_input_or_type_explains_itself(fake_runtime):

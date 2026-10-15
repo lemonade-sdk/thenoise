@@ -47,7 +47,7 @@ class ControlMap(ABC):
     # The dtype its weights run in; not every auxiliary network is happy in BF16.
     DTYPE: ClassVar[torch.dtype]
     #: The command that fetches its checkpoints, quoted when they are missing.
-    DOWNLOAD: ClassVar[str] = "scripts/download.py --model controlmap"
+    DOWNLOAD: ClassVar[str] = "scripts/download.py --model controlmaps"
 
     def __init__(self) -> None:
         self.device: Any = "cpu"

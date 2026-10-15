@@ -147,7 +147,7 @@ def test_missing_weights_names_the_download_command(tmp_path):
     directory.mkdir()
     (directory / "config.json").write_text('{"model_type": "depth_anything"}')
     pre = DepthControlMap()
-    with pytest.raises(ValueError, match="scripts/download.py --model controlmap"):
+    with pytest.raises(ValueError, match="scripts/download.py --model controlmaps"):
         pre.load("cpu", str(directory))
 
 

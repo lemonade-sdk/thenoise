@@ -65,7 +65,7 @@ def test_pose_is_offered_only_with_both_of_its_checkpoints(tmp_path):
     assert "pose" not in manager.available()
     assert manager.missing()["pose"] == (
         "needs a person detector (RT-DETR) beside its keypoint model; run "
-        "'scripts/download.py --model controlmap --variant pose' to fetch it"
+        "'scripts/download.py --model controlmaps --variant pose' to fetch it"
     )
     with pytest.raises(ValueError, match="needs a person detector"):
         manager.get("pose")
@@ -87,9 +87,9 @@ def test_a_kind_with_no_checkpoint_at_all_is_simply_not_on_offer(tmp_path):
     }
     assert manager.missing() == {
         "depth": "has no checkpoint in the control-map directory; run "
-        "'scripts/download.py --model controlmap' to fetch it",
+        "'scripts/download.py --model controlmaps' to fetch it",
         "pose": "has no checkpoint in the control-map directory; run "
-        "'scripts/download.py --model controlmap --variant pose' to fetch it",
+        "'scripts/download.py --model controlmaps --variant pose' to fetch it",
     }
 
 

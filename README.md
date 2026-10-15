@@ -25,7 +25,7 @@ TheNoise can be used standalone, from the command line or through a webui or thr
 
 <details id="shot-controlmap">
   <summary>Control Maps</summary>
-  <img width="2048" height="1066" alt="Screenshot From 2026-10-14 21-52-46" src="https://github.com/user-attachments/assets/c5ce6c59-f975-498a-a1e5-f9af2259a63d" />
+  <img width="2048" height="1066" alt="thenoise-control-maps" src="https://github.com/user-attachments/assets/c5ce6c59-f975-498a-a1e5-f9af2259a63d" />
 </details>
 
 ---

@@ -623,7 +623,7 @@ def test_controlmap_missing_depth_weights_names_the_download(client, tmp_path):
         "/controlmap", json={"image_b64": _edged_png_b64(), "type": "depth"}
     )
     assert res.status_code == 400
-    assert "scripts/download.py --model controlmap" in res.text
+    assert "scripts/download.py --model controlmaps" in res.text
 
 
 def test_controlmap_a_pose_request_without_checkpoints_names_the_pose_download(client, tmp_path):
@@ -634,7 +634,7 @@ def test_controlmap_a_pose_request_without_checkpoints_names_the_pose_download(c
         "/controlmap", json={"image_b64": _edged_png_b64(), "type": "pose"}
     )
     assert res.status_code == 400
-    assert "--model controlmap --variant pose" in res.text
+    assert "--model controlmaps --variant pose" in res.text
 
 
 def test_a_pose_request_becomes_the_pose_options():
