@@ -822,6 +822,93 @@ def register_flux2() -> None:
 
 register_flux2()
 
+def _flux3_pe(ctx: Ctx, params, mode: str, side: int, nref: int) -> torch.Tensor:
+    """The block's rotary frequencies, from the model's own id builders."""
+    from thenoise.dit.flux3.models import image_ids, ref_ids, text_ids
+
+    if mode == "txt":
+        ids = text_ids(ctx.txt, device=ctx.tdev)
+    else:
+        ids = image_ids(side, side, device=ctx.tdev)
+        if mode == "joint":
+            if nref:
+                ids = torch.cat([ids, ref_ids([(side, side)] * nref, device=ctx.tdev)], dim=1)
+            ids = torch.cat([ids, text_ids(ctx.txt, device=ctx.tdev)], dim=1)
+    return pe_one(ctx, params.axes_dim, params.theta, ids)
+
+
+def _flux3_case(ctx: Ctx, mode: str, tokens: int, scenario: str) -> Case:
+    """One Flux.3 block, at the released ``f3-image-small`` width, over ``mode``.
+
+    The three modes are the three shapes that block is ever called with:
+
+      * ``joint`` — ``[target, references, text]``, the 28 blocks of every step. Each
+        mode is modulated and gated by its own row, so this is also the case that pays
+        for the per-span slicing of ``_modulate``/``_gated``: ``plain`` gives it two
+        spans, ``edit`` three;
+      * ``image`` — a target-mode *early* block, the target alone under one span (5 per
+        mode, and the reference early block is this same class at ``refs`` times the
+        length, so its per-token cost is this row's);
+      * ``txt`` — a text-mode early block, whose length follows ``--txt`` and not the
+        ladder.
+    """
+    from thenoise.dit.flux3.models import Block, Flux3Params, ModOut, Span
+    from thenoise.utils.dynamo import mark_token_axis
+
+    params = Flux3Params()
+    name = f"flux3/{mode}"
+    heads, dim = params.num_heads, params.hidden_size
+    side = grid_side(tokens)
+    tokens = side * side
+
+    nref = n_refs(ctx, scenario) if mode == "joint" else 0
+    if mode == "joint":
+        segments = [("img", tokens), ("refs", nref * tokens), ("txt", ctx.txt)]
+    elif mode == "image":
+        segments = [("img", tokens)]
+    else:
+        segments = [("txt", ctx.txt)]
+    seq = sum(length for _, length in segments)
+
+    blk = new_block(ctx, name, Block, dim, heads, mlp_ratio=params.mlp_ratio)
+    seed_inputs(name, scenario, tokens)
+    x = randn(ctx, 1, seq, dim)
+    pe = _flux3_pe(ctx, params, mode, side, nref)
+
+    spans, start = [], 0
+    for _, length in segments:
+        if not length:
+            continue
+        triplet = ModOut(*tuple(randn(ctx, 1, 1, dim) for _ in range(3)))
+        spans.append(Span(start, start + length, triplet))
+        start += length
+
+    def run():
+        mark_token_axis(x, pe)
+        return blk(x, spans, pe)
+
+    flops = gemm_flops((gemm_params(blk), seq)) + attn_flops(heads, dim // heads, ((seq, seq),))
+    detail = " ".join(f"{label}={length}" for label, length in segments if length)
+    return Case(run, flops, seq, detail=f"{detail} spans={len(spans)}")
+
+
+@fixture("flux3", "joint", ("plain", "edit"))
+def flux3_joint(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """The joint block over ``[target, references, text]``: full attention, one row per mode."""
+    return _flux3_case(ctx, "joint", tokens, scenario)
+
+
+@fixture("flux3", "early_image")
+def flux3_early_image(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """A target-mode early block: the mode's own tokens, one span."""
+    return _flux3_case(ctx, "image", tokens, scenario)
+
+
+@fixture("flux3", "early_txt", fixed_seq=True)
+def flux3_early_txt(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """A text-mode early block at ``--txt`` tokens, including the prompt's padding."""
+    return _flux3_case(ctx, "txt", tokens, scenario)
+
 
 # ------------------------------------------------------------------ measurement
 @dataclass
@@ -1000,7 +1087,8 @@ def main() -> None:
                     help="image-token ladder (default %(default)s)")
     ap.add_argument("--txt", type=int, default=512, help="text / context tokens")
     ap.add_argument("--refs", type=int, default=1,
-                    help="reference images per editing case; 0 drops fill and read")
+                    help="reference images per editing case; 0 drops the reference "
+                         "scenarios (fill, read, edit)")
     ap.add_argument("--weights", default=",".join(WEIGHT_MODES),
                     help="weight formats to photograph, comma separated: bf16, and "
                          "int8 (INT8 + ConvRot, what an int8-convrot checkpoint "
