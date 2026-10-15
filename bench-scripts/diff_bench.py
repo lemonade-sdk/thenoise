@@ -1,9 +1,11 @@
 #!/usr/bin/env python
-"""Say what actually moved between two ``block_bench`` snapshots.
+"""Say what actually moved between two bench snapshots.
 
-``block_bench.py`` photographs; this develops a pair of photographs and hands back the
-rows that changed. Nothing is measured here, so it runs anywhere, in seconds, on two
-JSON files.
+``block_bench.py`` and ``vae_bench.py`` photograph; this develops a pair of photographs
+and hands back the rows that changed. Nothing is measured here, so it runs anywhere, in
+seconds, on two JSON files, and it takes either tool's snapshots — they record the same
+fields per case, so one diff reads DiT blocks and one reads VAE codecs. What it will not
+do is compare a snapshot of one tool against the other.
 
 The design is all about noise. Every case carries its own scatter (``groups``, or
 ``cov_pct`` in a schema-1 snapshot), so a row only counts as slower or faster when the
@@ -35,6 +37,7 @@ import sys
 
 SIGMA_FLOOR = 0.005          # a groups set with zero scatter would flag a 1 ns change
 MIN_COV_FLOOR = 0.1          # ditto for a snapshot that recorded cov_pct == 0.0
+TOOLS = ("block_bench", "vae_bench")     # the snapshot layouts this can read
 
 
 def load(path: str) -> dict:
@@ -43,8 +46,8 @@ def load(path: str) -> dict:
             snap = json.load(fh)
     except (OSError, ValueError) as exc:
         raise SystemExit(f"{path}: {exc}")
-    if snap.get("tool") != "block_bench" or not isinstance(snap.get("cases"), list):
-        raise SystemExit(f"{path}: not a block_bench snapshot")
+    if snap.get("tool") not in TOOLS or not isinstance(snap.get("cases"), list):
+        raise SystemExit(f"{path}: not a {' or '.join(TOOLS)} snapshot")
     return snap
 
 
@@ -91,8 +94,14 @@ def floor_pct(a: dict, b: dict, k: float) -> float:
     return max(k * max(a.get("cov_pct", 0.0), b.get("cov_pct", 0.0)), MIN_COV_FLOOR)
 
 
+def tfl(case: dict) -> str:
+    """TFLOPS as a fixed-width cell; a vae case whose flop count failed has none."""
+    value = case.get("tflops")
+    return f"{value:6.1f}" if value else "     -"
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Diff two block_bench snapshots.")
+    ap = argparse.ArgumentParser(description="Diff two bench snapshots.")
     ap.add_argument("before")
     ap.add_argument("after")
     ap.add_argument("--min", type=float, default=3.0, dest="sigma", metavar="K",
@@ -105,6 +114,9 @@ def main() -> None:
     args = ap.parse_args()
 
     a, b = load(args.before), load(args.after)
+    if a["tool"] != b["tool"]:
+        raise SystemExit(f"{args.before} is a {a['tool']} snapshot and {args.after} a "
+                         f"{b['tool']} one — those are different machines, not a diff")
     diffs = header_diff(a, b)
     if diffs:
         print("these snapshots were taken differently:")
@@ -134,7 +146,7 @@ def main() -> None:
 
     def line(delta: float, noise: float, key: str, ra: dict, rb: dict, mark: str = "") -> None:
         print(f"  {key:44s} {ra['ms']:9.2f} {rb['ms']:9.2f} {delta:+8.1f} {noise:5.1f} "
-              f"{ra['tflops']:6.1f} -> {rb['tflops']:<6.1f} "
+              f"{tfl(ra)} -> {tfl(rb):<6s} "
               f"{ra['peak_gib']:5.2f} -> {rb['peak_gib']:<5.2f} {mark}".rstrip())
 
     def header() -> None:

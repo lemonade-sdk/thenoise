@@ -94,7 +94,7 @@ class Wan22RMSNorm(nn.Module):
         self.gamma = nn.Parameter(torch.ones(dim, 1, 1))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.normalize(x, dim=1) * self.scale * self.gamma
+        return F.normalize(x, dim=1) * (self.scale * self.gamma)
 
 
 class Wan22ResidualBlock(nn.Module):

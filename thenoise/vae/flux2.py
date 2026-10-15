@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 def swish(x: torch.Tensor) -> torch.Tensor:
-    return x * torch.sigmoid(x)
+    return F.silu(x)
 
 
 def _patchify(z: torch.Tensor) -> torch.Tensor:

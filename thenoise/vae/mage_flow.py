@@ -52,8 +52,10 @@ def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch
     """AdaLN modulation, broadcast over space for a 4D tensor and over tokens for 3D."""
     if x.dim() == 4:
         b, c = x.shape[:2]
-        return x * (1 + scale.view(b, c, 1, 1)) + shift.view(b, c, 1, 1)
-    return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+        gain, bias = (1 + scale).view(b, c, 1, 1), shift.view(b, c, 1, 1)
+    else:
+        gain, bias = (1 + scale).unsqueeze(1), shift.unsqueeze(1)
+    return torch.addcmul(bias, x, gain)
 
 
 def _attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
