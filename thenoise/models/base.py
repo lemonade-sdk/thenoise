@@ -265,6 +265,15 @@ class DiffusionModel(ABC):
     def schedule(self, params: SamplingParams) -> list[Step]:
         """Build the model's denoising schedule (one ``Step`` per iteration)."""
 
+    def begin_sampling(self, schedule: list[Step]) -> None:
+        """Called once per denoise pass with the schedule the solver is about to run.
+
+        ``schedule()`` builds a model's *own* grid, but the pipeline may substitute an
+        explicit sigma grid and the refine runs a short one of its own: this is where a
+        kernel that needs the whole grid — a flow-map DiT embeds the timestep each step
+        jumps to — learns the one it will actually be stepped through.
+        """
+
     @abstractmethod
     def denoise_step(
         self,

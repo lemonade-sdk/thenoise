@@ -46,6 +46,7 @@ packages = [
     "thenoise.dit.anima",
     "thenoise.dit.zimage",
     "thenoise.dit.flux2",
+    "thenoise.dit.flux3",
     "thenoise.models",
     "thenoise.postprocess",
     "thenoise.controlmap",
