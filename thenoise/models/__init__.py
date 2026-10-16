@@ -14,6 +14,7 @@ from .flux3 import Flux3Model
 from .krea2 import Krea2Model
 from .mage_flow import MageFlowModel
 from .ming_image import MingImageModel
+from .moss_image import MossImageModel
 from .zimage import ZImageModel
 from .qwen_image import QwenImageModel
 from .qwen_image21 import QwenImage21Model
@@ -28,6 +29,7 @@ MODEL_CATALOG: List[Type[DiffusionModel]] = [
     MageFlowModel,
     QwenImageModel,
     QwenImage21Model,
+    MossImageModel,
 ]
 
 

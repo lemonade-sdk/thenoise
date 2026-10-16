@@ -26,6 +26,7 @@ from thenoise.models import (
     Krea2Model,
     MageFlowModel,
     MingImageModel,
+    MossImageModel,
     QwenImageModel,
     QwenImage21Model,
     ZImageModel,
@@ -73,6 +74,7 @@ BARE = {
     "ming_image": {"vae": _vae(16, 8, pixel_channels=4), "dit": SimpleNamespace(patch_size=2)},
     "flux_klein": {"vae": _vae(128, 16)},
     "flux3": {"vae": _vae(128, 16)},
+    "moss_image": {"vae": _vae(128, 16)},
     "mage_flow": {"vae": _vae(128, 16), "dit": SimpleNamespace(patch_size=1)},
     "qwen_image": {"vae": _vae(16, 8), "dit": SimpleNamespace(patch_size=2)},
     "qwen_image21": {"vae": _vae(64, 16, pixel_channels=4)},
@@ -162,6 +164,7 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
         (MageFlowModel, True, False),
         (QwenImageModel, True, True),
         (QwenImage21Model, True, True),
+        (MossImageModel, False, False),
     ],
     ids=CATALOG_IDS,
 )

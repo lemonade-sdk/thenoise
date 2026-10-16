@@ -910,6 +910,68 @@ def flux3_early_txt(ctx: Ctx, tokens: int, scenario: str) -> Case:
     return _flux3_case(ctx, "txt", tokens, scenario)
 
 
+def _moss_pe(ctx: Ctx, side: int, txt: int):
+    """Rotary tables for the joint ``[image, prompt]`` run and the text-only one."""
+    from thenoise.dit.moss_image.models import joint_positions
+    from thenoise.utils.rope import split_half_rope_4d
+
+    build = split_half_rope_4d(128, 10000.0)      # MossImageParams defaults
+    ids = joint_positions(side, side, txt, device=ctx.tdev)
+    joint = tuple(t.to(ctx.dtype) for t in build(ids))
+    text = tuple(t.to(ctx.dtype) for t in build(ids[side * side:]))
+    return joint, text
+
+
+@fixture("moss_image", "joint")
+def moss_image_joint(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """The MOSS-Image joint block: prompt and image tokens in one attention."""
+    from thenoise.dit.moss_image.models import Block, MossImageParams
+    from thenoise.utils.dynamo import mark_token_axis
+
+    params = MossImageParams()
+    name = "moss_image/joint"
+    heads, dim = params.num_heads, params.dim
+    side = grid_side(tokens)
+    tokens = side * side
+    seq = tokens + ctx.txt
+
+    blk = new_block(ctx, name, Block, dim, params.ffn_dim, heads)
+    seed_inputs(name, scenario, tokens)
+    x = randn(ctx, 1, seq, dim)
+    # The rows are computed once per step from the timestep and shared by all blocks.
+    mod = tuple(randn(ctx, 1, 1, dim) for _ in range(6))
+    pe, _ = _moss_pe(ctx, side, ctx.txt)
+
+    def run():
+        mark_token_axis(x, *pe)
+        return blk(x, mod, pe)
+
+    flops = gemm_flops((gemm_params(blk), seq)) + attn_flops(heads, dim // heads, ((seq, seq),))
+    return Case(run, flops, seq, detail=f"img={tokens} txt={ctx.txt}")
+
+
+@fixture("moss_image", "text_block", fixed_seq=True)
+def moss_image_text_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """A MOSS-Image front-end block: the prompt alone, once per run rather than per step."""
+    from thenoise.dit.moss_image.models import MossImageParams, TextBlock
+
+    params = MossImageParams()
+    name = "moss_image/text_block"
+    heads, dim = params.num_heads, params.dim
+
+    blk = new_block(ctx, name, TextBlock, dim, params.ffn_dim, heads)
+    seed_inputs(name, scenario, ctx.txt)
+    x = randn(ctx, 1, ctx.txt, dim)
+    _, pe = _moss_pe(ctx, 1, ctx.txt)              # its own positions, no image tokens
+
+    def run():
+        return blk(x, pe)
+
+    flops = gemm_flops((gemm_params(blk), ctx.txt))
+    flops += attn_flops(heads, dim // heads, ((ctx.txt, ctx.txt),))
+    return Case(run, flops, ctx.txt, detail=f"txt={ctx.txt}")
+
+
 # ------------------------------------------------------------------ measurement
 @dataclass
 class Timing:

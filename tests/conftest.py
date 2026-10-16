@@ -36,6 +36,7 @@ from thenoise.models import (  # noqa: E402
     Krea2Model,
     MageFlowModel,
     MingImageModel,
+    MossImageModel,
     QwenImageModel,
     QwenImage21Model,
     ZImageModel,
@@ -404,6 +405,34 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "model.diffusion_model.single_stream_modulations.txt.lin.weight",
             "model.diffusion_model.emb_in.image.weight",
             "model.diffusion_model.final_layer.image.linear.weight",
+        ],
+    ),
+    # MOSS-Image runs one joint stream, so its shared block modulation and its fused
+    # up/gate FFN are the whole fingerprint.
+    "moss_image": (
+        MossImageModel,
+        [
+            "video_embedder.weight",
+            "text_embedder.proj.weight",
+            "text_embedder.blocks.1.qkv.weight",
+            "time_embedding.0.weight",
+            "shared_block_modulation.weight",
+            "layers.0.proj.qkv.weight",
+            "layers.0.proj.ffn_up_gate.weight",
+            "layers.41.proj.ffn_down.weight",
+            "final_norm_video.weight",
+            "final_linear_video.weight",
+            "video_head_modulation.weight",
+        ],
+    ),
+    "moss_image_wrapped": (
+        MossImageModel,
+        [
+            "model.diffusion_model.video_embedder.weight",
+            "model.diffusion_model.shared_block_modulation.weight",
+            "model.diffusion_model.layers.0.proj.ffn_up_gate.weight",
+            "model.diffusion_model.layers.41.proj.qkv.weight",
+            "model.diffusion_model.final_linear_video.weight",
         ],
     ),
     "qwen_image": (

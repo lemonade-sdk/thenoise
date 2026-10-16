@@ -54,6 +54,7 @@ TheNoise ships:
 | **Ming-Image 0.1**, RGBA output with real transparency | ✓ | — | [ming-image](docs/models/ming-image.md) |
 | **Mage-Flow / Turbo**, the fastest model, with editing | ✓ | ✓ | [mage-flow](docs/models/mage-flow.md) |
 | **Flux.3**, 15 steps with editing | ✓ | ✓ | [flux3](docs/models/flux3.md) |
+| **MOSS-Image**, joint-stream DiT with a Qwen3.5 conditioner | ✓ | — | [moss-image](docs/models/moss-image.md) |
 
 New models are added over time. PRs adding model support are welcome.
 

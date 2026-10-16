@@ -46,6 +46,8 @@ Usage:
     python scripts/download.py --model klein --small-decoder
     python scripts/download.py --model ming-image
     python scripts/download.py --model ming-image --int8-convrot
+    python scripts/download.py --model moss-image
+    python scripts/download.py --model moss-image --variant base --small-decoder
     python scripts/download.py --model qwen-image --edit-only
     python scripts/download.py --model qwen-image-2.1
     python scripts/download.py --model qwen-image-2.1 --variant base
@@ -190,6 +192,25 @@ def _ming_image_jobs(args: argparse.Namespace) -> list[Artifact]:
         ("text_encoder", repo, f"text_encoders/ming_image_0.1_ling_mini_2.0_{suffix}.safetensors"),
         ("vae", repo, "vae/ming_image_vae_bf16.safetensors"),
     ]
+
+
+def _moss_image_jobs(args: argparse.Namespace) -> list[Artifact]:
+    """MOSS-Image: SFT (default) or base DiT + Qwen3.5-9B TE + Flux.2 AE.
+
+    The text encoder ships only int8-convrot, so ``--int8-convrot`` selects the DiT
+    alone.
+    """
+    repo = "Comfy-Org/MOSS-Image"
+    stem = "moss_image_base" if args.variant == "base" else "moss_image_sft"
+    suffix = "int8_convrot_attn" if args.int8_convrot else "bf16"
+    jobs = [
+        ("dit", repo, f"diffusion_models/{stem}_{suffix}.safetensors"),
+        ("text_encoder", repo, "text_encoders/qwen3.5_9b_int8_convrot.safetensors"),
+        ("vae", repo, "vae/flux2-vae.safetensors"),
+    ]
+    if args.small_decoder:
+        jobs.append(("vae (small decoder)", *_SMALL_DECODER_VAE))
+    return jobs
 
 
 def _qwen_image_jobs(args: argparse.Namespace) -> list[Artifact]:
@@ -398,6 +419,14 @@ MODELS: dict[str, ModelSpec] = {
         "Ming-Image 0.1 (Design)",
         _ming_image_jobs,
     ),
+    "moss-image": ModelSpec(
+        "moss-image", "./models/moss-image",
+        "MOSS-Image text-to-image (SFT, or base)",
+        _moss_image_jobs,
+        variant_supported=True,
+        variant_choices=("sft", "base"),
+        default_variant="sft",
+    ),
     "qwen-image": ModelSpec(
         "qwen-image", "./models/qwen_image",
         "Qwen-Image / Qwen-Image-Edit (latest dated checkpoints)",
@@ -453,6 +482,8 @@ def _epilog() -> str:
         "  python scripts/download.py --model klein --small-decoder",
         "  python scripts/download.py --model ming-image",
         "  python scripts/download.py --model ming-image --int8-convrot",
+        "  python scripts/download.py --model moss-image",
+        "  python scripts/download.py --model moss-image --variant base --small-decoder",
         "  python scripts/download.py --model qwen-image --edit-only",
         "  python scripts/download.py --model qwen-image-2.1 --variant base --int8-convrot",
         "  python scripts/download.py --model mage-flow",
@@ -503,8 +534,8 @@ def main() -> None:
     ap.add_argument(
         "--small-decoder", action="store_true",
         help=(
-            "klein: also download BFL's small-decoder Flux.2 VAE, a drop-in --vae that "
-            "decodes ~1.4x faster and needs less room at decode time"
+            "klein / moss-image: also download BFL's small-decoder Flux.2 VAE, a drop-in "
+            "--vae that decodes ~1.4x faster and needs less room at decode time"
         ),
     )
     ap.add_argument(
@@ -536,8 +567,8 @@ def main() -> None:
             )
     if args.include_raw and args.model != "krea2":
         ap.error("--include-raw is only supported by --model krea2")
-    if args.small_decoder and args.model != "klein":
-        ap.error("--small-decoder is only supported by --model klein")
+    if args.small_decoder and args.model not in ("klein", "moss-image"):
+        ap.error("--small-decoder is only supported by --model klein, moss-image")
     if (args.image_only or args.edit_only) and args.model not in ("qwen-image", "mage-flow"):
         ap.error("--image-only / --edit-only are only supported by --model mage-flow, qwen-image")
     if args.image_only and args.edit_only:
