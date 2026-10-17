@@ -14,7 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.responses import HTMLResponse, Response
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, create_model, model_validator
 
 from thenoise.controlmap.options import (
     OPTIONS_BY_KIND,
@@ -31,7 +31,7 @@ from thenoise.postprocess.options import (
     flat_options,
 )
 from thenoise.utils.image_tensor import load_image
-from thenoise.utils.options import option_meta, options_schema
+from thenoise.utils.options import options_schema, wire_fields
 from thenoise.utils.png import pnginfo_of
 
 logger = logging.getLogger(__name__)
@@ -46,19 +46,13 @@ def decode_image(encoded: str) -> "PIL.Image.Image":
     return load_image(io.BytesIO(base64.b64decode(encoded)))
 
 
-def wire_field(name: str):
-    """One post-decode knob as a wire field, taken from its declaration: the default,
-    the bounds the request accepts, and the words the API docs show for it.
+class _Text2ImageBody(BaseModel):
+    """Everything a generation asks for, except the post-decode chain.
+
+    :data:`Text2ImageRequest` is this body plus the knobs of ``PostprocessOptions``,
+    which are appended to it as flat wire fields.
     """
-    meta = option_meta(PostprocessOptions, name)
-    return Field(
-        default=getattr(PostprocessOptions, name),
-        **{key: meta[key] for key in ("ge", "le") if key in meta},
-        description=meta.get("help", ""),
-    )
 
-
-class Text2ImageRequest(BaseModel):
     prompt: str
     negative_prompt: str = ""
     width: Optional[int] = None
@@ -72,15 +66,6 @@ class Text2ImageRequest(BaseModel):
     upscale_factor: float = 1.0
     upscale_type: str = "refined"
     sampler: Optional[str] = None
-    # The post-decode knobs, flat on the wire, every one of them from the one
-    # declaration in ``PostprocessOptions``.
-    qwen_vae_enhance: bool = wire_field("qwen_vae_enhance")
-    saturation: float = wire_field("saturation")
-    vibrance: float = wire_field("vibrance")
-    temperature: float = wire_field("temperature")
-    tint: float = wire_field("tint")
-    sharpening: float = wire_field("sharpening")
-    film_grain: float = wire_field("film_grain")
     lora_specs: Optional[List[str]] = None  # ["filename.safetensors:0.8", ...]
     pixel_upscaler: Optional[str] = None  # name (no .safetensors) in upscaler_dir
     kv_cache: Optional[bool] = None  # reference-latent KV cache (edit only; null = auto)
@@ -110,6 +95,10 @@ class Text2ImageRequest(BaseModel):
             kv_cache=self.kv_cache,
             ref_method=self.ref_method,
         )
+
+Text2ImageRequest = create_model(
+    "Text2ImageRequest", __base__=_Text2ImageBody, **wire_fields(PostprocessOptions)
+)
 
 
 class UpscaleRequest(BaseModel):

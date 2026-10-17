@@ -85,6 +85,7 @@ function checkControl(prefix, option) {
   input.type = 'checkbox';
   input.id = prefix + option.name;
   input.checked = option.default === true;
+  input.addEventListener('change', refreshPostprocessNotes);
   label.append(input, document.createTextNode(' ' + option.label));
   if (option.hint) label.append(hintSpan(option.hint));
   return label;
@@ -116,7 +117,10 @@ function rangeControl(prefix, option) {
     else if (option[key] !== undefined) input[attr] = option[key];
   }
   input.value = option.default;
-  input.addEventListener('input', () => showRangeValue(prefix, option.name));
+  input.addEventListener('input', () => {
+    showRangeValue(prefix, option.name);
+    refreshPostprocessNotes();
+  });
 
   box.append(head, input);
   return box;
@@ -129,6 +133,32 @@ function buildPostprocessControls(prefix) {
   for (const option of postprocessOptions) {
     box.append(option.type === 'boolean'
       ? checkControl(prefix, option) : rangeControl(prefix, option));
+  }
+}
+
+// "Saturation 0.30 · Film grain 0.50" — what the collapsed section would otherwise hide.
+function postprocessNote(prefix) {
+  const active = [];
+  for (const option of postprocessOptions) {
+    const input = $(prefix + option.name);
+    if (!input) continue;
+    if (option.type === 'boolean') {
+      if (input.checked !== option.default) active.push(option.label);
+      continue;
+    }
+    const value = input.valueAsNumber;
+    if (Number.isFinite(value) && value !== option.default) {
+      active.push(option.label + ' ' + value.toFixed(2));
+    }
+  }
+  return active.join(' · ');
+}
+
+// Both panes carry the controls, so both headers are kept truthful.
+function refreshPostprocessNotes() {
+  for (const p of ['', 'edit_']) {
+    const note = $(p + 'postprocess_note');
+    if (note) note.textContent = postprocessNote(p);
   }
 }
 
@@ -159,6 +189,7 @@ function restorePostprocess(prefix, meta) {
       showRangeValue(prefix, option.name);
     }
   }
+  refreshPostprocessNotes();
 }
 
 // One row per knob the image was actually made with; a default is not worth showing.
@@ -177,7 +208,39 @@ async function loadPostprocess() {
   for (const p of ['', 'edit_']) {
     buildPostprocessControls(p);
   }
+  refreshPostprocessNotes();
 }
+
+/* ---------- collapsible sidebar sections ----------
+
+Sections sharing a ``data-pref`` open and close together, and remember it: both
+panes carry the same controls, and a user who opened one means the other too.
+*/
+function collapsibles(pref) {
+  return Array.from(document.querySelectorAll(`details.collapse[data-pref="${pref}"]`));
+}
+
+function initCollapses() {
+  const prefKeys = new Set(
+    Array.from(document.querySelectorAll('details.collapse[data-pref]'))
+      .map(box => box.dataset.pref)
+  );
+  for (const pref of prefKeys) {
+    const boxes = collapsibles(pref);
+    const open = localStorage.getItem(pref) === '1';
+    for (const box of boxes) {
+      box.open = open;
+      box.addEventListener('toggle', () => {
+        localStorage.setItem(pref, box.open ? '1' : '0');
+        for (const other of collapsibles(pref)) {
+          if (other !== box) other.open = box.open;
+        }
+      });
+    }
+  }
+}
+
+initCollapses();
 
 function bindRange(sliderId, valId, digits = 2) {
   $(sliderId).addEventListener('input', e =>

@@ -96,6 +96,62 @@ def option_meta(cls: type, name: str) -> Dict[str, Any]:
     raise KeyError(f"{cls.__name__} declares no knob {name!r}")
 
 
+def declared_knobs(source: type):
+    """A class decorator appending another class's declared knobs as ordinary fields.
+
+    The target gains a real field per knob — same name, annotation and default — so a
+    request object can carry the knobs flat without restating any of them:
+
+    .. code-block:: python
+
+        @dataclass
+        @declared_knobs(PostprocessOptions)
+        class GenerateRequest:
+            prompt: str
+
+    ``@dataclass`` must sit *above* it, so the fields exist by the time the dataclass
+    collects them.
+    """
+    hints = get_type_hints(source)
+
+    def decorate(target):
+        declared = dict(getattr(target, "__annotations__", {}))
+        for entry in fields(source):
+            if entry.name in declared:
+                raise ValueError(
+                    f"{target.__name__} already declares {entry.name}, which "
+                    f"{source.__name__} declares too"
+                )
+            declared[entry.name] = hints[entry.name]
+            setattr(target, entry.name, entry.default)
+        target.__annotations__ = declared
+        return target
+
+    return decorate
+
+
+def wire_fields(source: type) -> Dict[str, Any]:
+    """A declaration as ``pydantic.create_model`` field specs: the same flat wire name,
+    the declared default, the bounds the request accepts and the words the API docs
+    show for it.
+    """
+    from pydantic import Field  # imported here: the CLI reads declarations, not models
+
+    hints = get_type_hints(source)
+    specs: Dict[str, Any] = {}
+    for entry in fields(source):
+        meta = entry.metadata
+        specs[entry.name] = (
+            hints[entry.name],
+            Field(
+                default=entry.default,
+                **{key: meta[key] for key in ("ge", "le") if key in meta},
+                description=meta.get("help", ""),
+            ),
+        )
+    return specs
+
+
 def validate(options) -> None:
     """Reject a value outside ``ge``/``le``, or a choice that is not offered."""
     kind = getattr(options, "kind", "")
@@ -201,10 +257,12 @@ def add_flags(
 
 __all__ = [
     "add_flags",
+    "declared_knobs",
     "option",
     "option_meta",
     "option_names",
     "option_values",
     "options_schema",
     "validate",
+    "wire_fields",
 ]

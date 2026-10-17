@@ -93,8 +93,13 @@
 
   <div class="divider"></div>
 
-  <!-- Post-decode controls, filled from the server's declaration (/postprocess). -->
-  <div class="group" id="postprocess_controls"></div>
+  <!-- Post-decode controls, filled from the server's declaration (/postprocess).
+       Collapsed by default: it is finishing polish rather than the common path, and
+       the header names whatever is switched on, so nothing hides behind it. -->
+  <details class="collapse" data-pref="thenoise-postprocess-open">
+    <summary class="label">Post-processing <span class="collapse-note" id="postprocess_note"></span></summary>
+    <div class="group" id="postprocess_controls"></div>
+  </details>
 
   <div class="field">
     <label class="label" for="upscale_type">Upscale type</label>
@@ -248,7 +253,10 @@
   <div class="divider"></div>
 
   <!-- Post-decode controls, filled from the server's declaration (/postprocess). -->
-  <div class="group" id="edit_postprocess_controls"></div>
+  <details class="collapse" data-pref="thenoise-postprocess-open">
+    <summary class="label">Post-processing <span class="collapse-note" id="edit_postprocess_note"></span></summary>
+    <div class="group" id="edit_postprocess_controls"></div>
+  </details>
 
   <div class="field">
     <label class="label" for="edit_upscale_type">Upscale type</label>

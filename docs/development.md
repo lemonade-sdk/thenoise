@@ -157,38 +157,6 @@ touches:
 5. **`tests/`** — detection/loading tests that run without real weights
 6. **`pyproject.toml`** — the new `thenoise.dit.<name>` package (if any)
 
-### Adding a control-map kind
-
-A kind is an extractor in `thenoise/controlmap/` plus its options in
-`thenoise/controlmap/options.py`. An options dataclass field declares its default,
-bound and the words shown for it, and everything downstream is generated from that:
-the `--<kind>-<option>` CLI flags, the `/controlmap` request fields (the request
-carries the dataclass itself, so the bounds checked are the bounds used), and the
-option fields the web UI builds from `GET /controlmaps`. Ranges and choices are
-validated from the same declaration, so a kind's own `__post_init__` holds only what
-relates two of its fields - and nothing needs a second copy of a default.
-
-### Adding a post-decode knob
-
-A filter is a function in `thenoise/postprocess/` taking and returning `[C, H, W]`
-fp32 pixels in `[-1, 1]` - leaving any channel past the first three alone, so an RGBA
-matte survives - plus one `option(...)` field per knob in
-`thenoise/postprocess/options.py`, plus its name in the `FILTERS` registry in
-`chain.py`. The declaration carries the default, the bounds, the step, the words the
-UI and `--help` show, the filter the knob belongs to and the stage it runs in, and
-**field order is chain order**.
-
-Everything downstream reads that declaration: the `--<knob>` flags (and their range
-checking), the `/text2image` and `/edit` request fields, the `generation_data` PNG
-record, the `GET /postprocess` payload the web UI builds its sliders, request body and
-info rows from, and the order the filters are applied in. Two rules make the chain
-free when it is not asked for: every knob's default is *off*, and a filter whose knobs
-all still hold their default is skipped - so an untouched generation gets the very
-tensor it was handed back.
-
-Knobs grouped under one `filter` are handed to that filter together, in one pass, so a
-colour correction that needs four numbers costs one round trip over the pixels rather
-than four.
 
 General rules:
 

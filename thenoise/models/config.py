@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Union
 
 from thenoise.postprocess.options import PostprocessOptions, options_from
+from thenoise.utils.options import declared_knobs
 
 if TYPE_CHECKING:  # pragma: no cover - only for annotations
     from PIL import Image
@@ -45,8 +46,13 @@ class EncodePromptArgs:
 
 
 @dataclass
+@declared_knobs(PostprocessOptions)
 class GenerateRequest:
-    """The complete user-facing generation request, mirroring the HTTP API and CLI."""
+    """The complete user-facing generation request, mirroring the HTTP API and CLI.
+
+    The post-decode knobs are appended as ordinary flat fields by ``declared_knobs``, 
+    so a new filter needs no new line here.
+    """
 
     prompt: str
     negative_prompt: str = ""
@@ -60,15 +66,6 @@ class GenerateRequest:
     upscale_factor: float = 1.0
     upscale_type: str = "refined"
     sampler: Optional[str] = None
-    # The post-decode knobs: names, defaults and order as declared in
-    # ``PostprocessOptions``, so a new filter needs no new line here.
-    qwen_vae_enhance: bool = PostprocessOptions.qwen_vae_enhance
-    saturation: float = PostprocessOptions.saturation
-    vibrance: float = PostprocessOptions.vibrance
-    temperature: float = PostprocessOptions.temperature
-    tint: float = PostprocessOptions.tint
-    sharpening: float = PostprocessOptions.sharpening
-    film_grain: float = PostprocessOptions.film_grain
     lora_specs: Optional[List[str]] = None
     pixel_upscaler: Optional[str] = None
     image: Optional[Union[Image.Image, List[Image.Image]]] = None
