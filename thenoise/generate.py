@@ -8,6 +8,7 @@ import os
 import random
 import sys
 
+from .postprocess.options import flat_options
 from .utils.png import save_output
 
 logging.basicConfig(level=logging.INFO)
@@ -72,9 +73,7 @@ def run_generate(args) -> None:
         upscale_factor=args.upscale_factor,
         upscale_type=args.upscale_type,
         sampler=args.sampler,
-        qwen_vae_enhance=args.qwen_vae_enhance,
-        film_grain=args.film_grain,
-        sharpening=args.sharpening,
+        **flat_options(args),
         lora_specs=args.lora or None,
         pixel_upscaler=pixel_upscaler,
         kv_cache=args.kv_cache,
@@ -108,9 +107,7 @@ def run_edit(args) -> None:
         upscale_factor=args.upscale_factor,
         upscale_type=args.upscale_type,
         sampler=args.sampler,
-        qwen_vae_enhance=args.qwen_vae_enhance,
-        film_grain=args.film_grain,
-        sharpening=args.sharpening,
+        **flat_options(args),
         lora_specs=args.lora or None,
         pixel_upscaler=pixel_upscaler,
         kv_cache=args.kv_cache,

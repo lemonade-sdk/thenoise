@@ -21,6 +21,7 @@ Start the server with [`serve`](cli.md#serve-a-model-over-http) and TheNoise exp
 | `GET` | `/health` | Server status, loaded model and its capabilities (see below) |
 | `GET` | `/lora` | List available LoRA names |
 | `GET` | `/upscalers` | List available pixel upscaler names (works even with no model loaded) |
+| `GET` | `/postprocess` | Describe the post-decode knobs, in the order their filters run (works even with no model loaded) |
 | `POST` | `/upscale` | Pixel-upscale an input image (works even with no model loaded) |
 | `GET` | `/controlmaps` | List the extractable control-map types (works even with no model loaded) |
 | `POST` | `/controlmap` | Extract a control map from an input image (works even with no model loaded) |
@@ -65,8 +66,12 @@ index_timestep_zero` (see [`/edit`](#post-edit)).
 | `pixel_upscaler` | `string` | `null` | Pixel upscaler name (no `.safetensors` suffix) from `--upscaler-dir` |
 | `sampler` | `string` | model default | Denoising solver: `euler` or `er_sde` |
 | `qwen_vae_enhance` | `bool` | `false` | Nyquist notch post-filter (removes 2px grid artifacts) |
-| `film_grain` | `float` | `0.0` | Film grain strength, 0.0–10.0 |
+| `saturation` | `float` | `0.0` | Colour saturation around neutral `0.0`: -1.0 greyscales, 1.0 doubles |
+| `vibrance` | `float` | `0.0` | Saturation that lifts washed-out pixels and leaves vivid ones alone |
+| `temperature` | `float` | `0.0` | White balance around neutral `0.0`: -1.0 cools to blue, 1.0 warms to amber |
+| `tint` | `float` | `0.0` | White balance across the green–magenta axis: -1.0 greens, 1.0 magentas |
 | `sharpening` | `float` | `0.0` | RCAS sharpening strength, 0.0–1.0 |
+| `film_grain` | `float` | `0.0` | Film grain strength, 0.0–10.0 |
 | `lora_specs` | `string[]` | `null` | LoRA specs, e.g. `["style:0.8"]` |
 
 ### Response
@@ -167,6 +172,19 @@ curl -s localhost:8000/upscale \
   -H 'content-type: application/json' \
   -d '{"image_b64":"<base64 png>","pixel_upscaler":"RealESRGAN_x4plus","upscale_factor":4}' \
   --output /tmp/fox_4x.png
+```
+
+## `GET /postprocess`
+
+```json
+{
+  "options": [
+    {"name": "qwen_vae_enhance", "label": "Reduce grid pattern", "type": "boolean",
+     "default": false, "hint": "enable when needed"},
+    {"name": "saturation", "label": "Saturation", "type": "number",
+     "default": 0.0, "min": -1.0, "max": 1.0, "step": 0.05}
+  ]
+}
 ```
 
 ## `GET /controlmaps`

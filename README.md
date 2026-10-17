@@ -37,7 +37,8 @@ TheNoise ships:
 - [Lemonade Server](https://lemonade-server.ai) integration - TheNoise ships as its `thenoise` backend, see [Using TheNoise with Lemonade Server](docs/lemonade.md),
 - a built-in 2× refiner-based (SesquiLSR) upscaler - fast and high-quality upscaling without loading extra model files,
 - pixel-space upscalers (Real-ESRGAN) up to 4× - standard ESRGAN-based models,
-- film grain and RCAS sharpening as post-processing,
+- post-processing in the decode tail - colour grading (saturation, vibrance and a
+  white-balance pair), RCAS sharpening and film grain,
 - control-map extraction for conditioning workflows - canny edges, line-art and soft-edge maps, depth maps and openpose-style pose skeletons,
 - LoRA support - one or more LoRAs per image, each with its own weight.
 

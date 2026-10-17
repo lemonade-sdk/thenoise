@@ -1,9 +1,21 @@
-"""Every control-map parameter, declared once — flags, request schema and UI form."""
+"""Every control-map parameter, declared once — flags, request schema and UI form.
+
+The knob plumbing (``option``, its validation, its schema and its flags) is shared
+with the post-decode chain and lives in :mod:`thenoise.utils.options`; what is
+declared here is what a control-map request can ask of a kind.
+"""
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass, field, fields
-from typing import Any, ClassVar, Dict, List, Optional, Sequence, get_type_hints
+from dataclasses import dataclass
+from typing import ClassVar, Dict
+
+from thenoise.utils.options import (
+    add_flags,
+    option,
+    options_schema,
+    validate,
+)
 
 #: Names a list of the ``/controlmaps`` payload a field takes its choices from.
 DETECTOR_POOL = "detectors"
@@ -14,96 +26,10 @@ CANVAS_NAMES = ("black", "green")
 #: The palettes a depth map can be painted with; ``turbo`` is the vendored lookup table.
 COLORMAPS = ("gray", "turbo")
 
-#: The JSON type the web UI builds each field's control from.
-_JSON_TYPE = {bool: "boolean", int: "integer", float: "number", str: "string"}
-
-#: ``dataclasses`` metadata key -> the word the UI and the schema use for it.
-_WIRE_KEYS = (("ge", "min"), ("le", "max"), ("step", "step"), ("choices", "choices"),
-              ("pool", "pool"))
-
-
-def option(
-    default,
-    *,
-    label: str,
-    help: str = "",
-    ge: Optional[float] = None,
-    le: Optional[float] = None,
-    step: Optional[float] = None,
-    choices: Optional[Sequence[str]] = None,
-    pool: Optional[str] = None,
-):
-    """One tunable: its default, the words shown for it, and what it accepts."""
-    meta: Dict[str, Any] = {"label": label}
-    if help:
-        meta["help"] = help
-    for key, value in (("ge", ge), ("le", le), ("step", step), ("choices", choices),
-                       ("pool", pool)):
-        if value is not None:
-            meta[key] = value
-    return field(default=default, metadata=meta)
-
-
-def validate(options: "ControlMapOptions") -> None:
-    """Reject a value outside ``ge``/``le``, or a choice that is not offered."""
-    kind = getattr(options, "kind", "")
-    for entry in fields(options):
-        meta, value = entry.metadata, getattr(options, entry.name)
-        low, high = meta.get("ge"), meta.get("le")
-        if (low is not None and value < low) or (high is not None and value > high):
-            bound = (
-                f">= {low}" if high is None
-                else f"<= {high}" if low is None
-                else f"in [{low}, {high}]"
-            )
-            raise ValueError(f"{entry.name} must be {bound}, got {value}")
-        choices = meta.get("choices")
-        if choices is not None and value not in choices:
-            named = f"{kind} " if kind else ""
-            raise ValueError(
-                f"unknown {named}{entry.name} {value!r}; expected one of {tuple(choices)}"
-            )
-
-
-def options_schema(cls: type) -> List[Dict[str, Any]]:
-    """One kind's options as a form description: label, control, default, bounds."""
-    hints = get_type_hints(cls)
-    described = []
-    for entry in fields(cls):
-        meta = entry.metadata
-        item: Dict[str, Any] = {
-            "name": entry.name,
-            "label": meta.get("label", entry.name),
-            "type": _JSON_TYPE[hints[entry.name]],
-            "default": entry.default,
-        }
-        for key, wire in _WIRE_KEYS:
-            if key in meta:
-                item[wire] = tuple(meta[key]) if key == "choices" else meta[key]
-        described.append(item)
-    return described
-
 
 def add_option_args(parser: argparse.ArgumentParser, kind: str, cls: type) -> None:
-    """One ``--<kind>-<field>`` flag per option; a flag nobody passes stays unset."""
-    hints = get_type_hints(cls)
-    for entry in fields(cls):
-        meta = entry.metadata
-        flag = f"--{kind}-{entry.name.replace('_', '-')}"
-        help = f"{meta.get('help', '')} (default: {entry.default})".strip()
-        if hints[entry.name] is bool:
-            parser.add_argument(
-                flag, dest=f"{kind}_{entry.name}", action=argparse.BooleanOptionalAction,
-                default=argparse.SUPPRESS, help=help,
-            )
-            continue
-        kwargs: Dict[str, Any] = {
-            "dest": f"{kind}_{entry.name}", "type": hints[entry.name],
-            "default": argparse.SUPPRESS, "help": help,
-        }
-        if meta.get("choices"):
-            kwargs["choices"] = list(meta["choices"])
-        parser.add_argument(flag, **kwargs)
+    """One ``--<kind>-<option>`` flag per option; a flag nobody passes stays unset."""
+    add_flags(parser, cls, prefix=kind, dest_prefix=f"{kind}_", suppress_unset=True)
 
 
 @dataclass

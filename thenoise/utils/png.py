@@ -9,6 +9,8 @@ from typing import List, Optional
 
 from PIL.PngImagePlugin import PngInfo, iTXt
 
+from thenoise.postprocess.options import PostprocessOptions
+from thenoise.utils.options import option_values
 from thenoise.utils.paths import ensure_png_extension
 
 
@@ -26,9 +28,7 @@ def build_pnginfo(
     upscale_factor: float,
     upscale_type: str,
     sampler: str,
-    qwen_vae_enhance: bool,
-    film_grain: float,
-    sharpening: float,
+    postprocess: PostprocessOptions,
     lora_specs: Optional[List[str]],
     pixel_upscaler: Optional[str],
     sigmas: Optional[List[float]] = None,
@@ -53,9 +53,8 @@ def build_pnginfo(
         "upscale_factor": upscale_factor,
         "upscale_type": upscale_type,
         "sampler": sampler,
-        "qwen_vae_enhance": qwen_vae_enhance,
-        "film_grain": film_grain,
-        "sharpening": sharpening,
+        # Every post-decode knob, flat and by its declared name.
+        **option_values(postprocess),
         "lora_specs": lora_specs,
         "pixel_upscaler": pixel_upscaler,
         "sigmas": sigmas,

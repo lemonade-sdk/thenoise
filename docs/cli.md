@@ -73,8 +73,12 @@ Then open <http://localhost:8000/> for the web UI. Full endpoint reference:
 | `--upscale-factor` | no | `1.0` | Upscale factor (> 0.0; max depends on the pixel upscaler scale, see [Upscaling](#upscaling)) |
 | `--sampler` | no | model default | Solver: `euler` or `er_sde` |
 | `--qwen-vae-enhance` | no | off | Nyquist notch post-filter (removes 2px grid artifacts) |
-| `--film-grain` | no | `0.0` | Film grain strength (0.0–10.0) |
+| `--saturation` | no | `0.0` | Colour saturation around neutral: -1.0 greyscales, 1.0 doubles (-1.0–1.0) |
+| `--vibrance` | no | `0.0` | Saturation that lifts washed-out pixels and leaves vivid ones alone (-1.0–1.0) |
+| `--temperature` | no | `0.0` | White balance: -1.0 cools to blue, 1.0 warms to amber (-1.0–1.0) |
+| `--tint` | no | `0.0` | White balance across the green–magenta axis: -1.0 greens, 1.0 magentas (-1.0–1.0) |
 | `--sharpening` | no | `0.0` | RCAS sharpening strength (0.0–1.0) |
+| `--film-grain` | no | `0.0` | Film grain strength (0.0–10.0) |
 | `--kv-cache` / `--no-kv-cache` | no | auto | Reference-latent KV cache (edit only): freeze the reference tokens' K/V across denoise steps for faster editing. Auto = on for `index_timestep_zero` reference conditioning on models implementing the cache. `--kv-cache` also selects that method when `--ref-method` is left unset |
 | `--ref-method` | no | auto | Reference conditioning for editing: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index`. The cache default follows it |
 

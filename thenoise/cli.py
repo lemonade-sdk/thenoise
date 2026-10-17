@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 
 from thenoise.controlmap.options import OPTIONS_BY_KIND, add_option_args
+from thenoise.postprocess.options import PostprocessOptions
+from thenoise.utils.options import add_flags
 
 
 def _add_model_paths(p: argparse.ArgumentParser, required: bool = True) -> None:
@@ -42,6 +44,11 @@ def _add_controlmap_option_args(p: argparse.ArgumentParser) -> None:
     """One ``--<kind>-<option>`` flag per option, defaulted from the dataclass."""
     for kind, options in OPTIONS_BY_KIND.items():
         add_option_args(p, kind, options)
+
+
+def _add_postprocess_args(p: argparse.ArgumentParser) -> None:
+    """One flag per post-decode knob, defaulted and bounded from the declaration."""
+    add_flags(p, PostprocessOptions, bounds=True)
 
 
 def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png") -> None:
@@ -92,13 +99,7 @@ def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png
                         "detected from the checkpoint marker, else 'index'); "
                         "'index_timestep_zero' conditions reference tokens at "
                         "timestep zero, which is what makes the KV cache valid")
-    p.add_argument("--qwen-vae-enhance", action="store_true",
-                   help="apply the Nyquist Notch post filter to decoded pixels "
-                        "(removes 2px grid artifacts)")
-    p.add_argument("--film-grain", type=float, default=0.0,
-                   help="film-grain strength 0.0–10.0. Reasonable values are <= 1.0 (default: 0.0)")
-    p.add_argument("--sharpening", type=float, default=0.0,
-                   help="RCAS sharpening strength 0.0–1.0 (contrast-adaptive, default: 0.0 / off)")
+    _add_postprocess_args(p)
     p.add_argument("--device", default="cuda",
                    help="inference device; ROCm aliases cuda -> hip (default: cuda)")
 

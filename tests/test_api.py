@@ -21,6 +21,7 @@ from thenoise.api import (
     create_app,
 )
 from thenoise.controlmap.options import OPTIONS_BY_KIND
+from thenoise.postprocess import POSTPROCESS_NAMES, PostprocessOptions
 from thenoise.runtime import Runtime, Settings
 
 
@@ -218,6 +219,24 @@ def test_upscalers_available_without_model():
     assert res["upscalers"] == []
 
 
+# ------------------------------------------------------------------- /postprocess
+
+
+def test_postprocess_describes_every_knob_of_the_chain():
+    """The UI's post-decode controls, its request body and the info rows all come from
+    this payload, which is the declaration itself."""
+    res = _endpoint(create_app(_empty_runtime()), "/postprocess")()
+    described = {entry["name"]: entry for entry in res["options"]}
+
+    assert set(described) == set(POSTPROCESS_NAMES)
+    grain = described["film_grain"]
+    assert grain["label"] == "Film grain"
+    # What the server accepts (0-10) is wider than what a slider is worth offering (0-1).
+    assert (grain["min"], grain["max"], grain["ui_max"], grain["step"]) == (0.0, 10.0, 1.0, 0.1)
+    grid = described["qwen_vae_enhance"]
+    assert (grid["type"], grid["default"], grid["hint"]) == ("boolean", False, "enable when needed")
+
+
 # ----------------------------------------------------------------- /text2image
 
 
@@ -236,6 +255,28 @@ def test_text2image_passes_the_request_through(client, tmp_path):
     assert (request.width, request.height) == (512, 512)
     assert request.pixel_upscaler == "RealESRGAN_x4"
     assert request.sigmas == [1.0, 0.5, 0.2]
+
+
+def test_text2image_passes_every_post_decode_knob_through(client):
+    """The knobs stay flat on the wire and reach the chain under the same names."""
+    runtime = _runtime()
+    res = client(runtime).post(
+        "/text2image",
+        json={"prompt": "a fox", "qwen_vae_enhance": True, "sharpening": 0.2, "film_grain": 0.5},
+    )
+
+    assert res.status_code == 200
+    assert runtime._pipeline.requests[-1].postprocess_options() == PostprocessOptions(
+        qwen_vae_enhance=True, sharpening=0.2, film_grain=0.5
+    )
+
+
+def test_text2image_returns_400_for_a_knob_outside_its_bounds(client):
+    """An out-of-range knob is the caller's mistake, not a 422 or a crash downstream."""
+    res = client(_runtime()).post("/text2image", json={"prompt": "x", "sharpening": 42})
+
+    assert res.status_code == 400
+    assert "sharpening" in res.text
 
 
 def test_edit_passes_sigmas_through():

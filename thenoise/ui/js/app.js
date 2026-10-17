@@ -4,11 +4,6 @@
 let currentUrl = null;
 let currentMeta = null;
 
-bindRange('film_grain', 'film_grain_val');
-bindRange('sharpening', 'sharpening_val');
-bindRange('edit_film_grain', 'edit_film_grain_val');
-bindRange('edit_sharpening', 'edit_sharpening_val');
-
 function updateFinalRes(prefix) {
   if (prefix === 'edit_') { updateEditFinalRes(); return; }
   const w = parseInt($('width').value, 10);
@@ -98,9 +93,7 @@ function applySettings(prefix, meta) {
     $(p + 'upscale_type').value = 'refined';
   }
   if (meta.upscale_type) $(p + 'upscale_type').value = meta.upscale_type;
-  if (meta.qwen_vae_enhance != null) $(p + 'qwen_vae_enhance').checked = meta.qwen_vae_enhance;
-  if (meta.film_grain != null) setRange(p + 'film_grain', p + 'film_grain_val', meta.film_grain);
-  if (meta.sharpening != null) setRange(p + 'sharpening', p + 'sharpening_val', meta.sharpening);
+  restorePostprocess(p, meta);
   if (Array.isArray(meta.lora_specs)) {
     $(p + 'lora_specs').value = meta.lora_specs.join('\n');
   }
@@ -256,6 +249,7 @@ document.addEventListener('click', e => {
 
 loadLoras();
 loadUpscalers();
+loadPostprocess();
 updateUpscaleMax('');
 updateUpscaleMax('edit_');
 

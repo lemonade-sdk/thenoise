@@ -14,6 +14,7 @@ import torch
 
 from conftest import StubLatentUpscaler, StubModel
 from thenoise.models.config import GenerateRequest, SamplingParams
+from thenoise.postprocess import FILTERS, POSTPROCESS_NAMES, PostprocessOptions
 from thenoise.pipeline import (
     PipelineController,
     _normalize_sigmas,
@@ -576,34 +577,38 @@ def test_generate_without_upscale_never_touches_the_upscaler():
 
 
 def test_postprocess_dispatches_only_what_is_requested(monkeypatch):
+    """The chain runs a filter only when a knob of its own was asked for."""
     controller = _controller()
     calls = []
-    monkeypatch.setattr(
-        "thenoise.pipeline.rcas",
-        lambda pixels, strength: calls.append(("rcas", strength)) or pixels,
+    monkeypatch.setitem(
+        FILTERS, "rcas",
+        lambda pixels, *, sharpening: calls.append(("rcas", sharpening)) or pixels,
     )
-    monkeypatch.setattr(
-        "thenoise.pipeline.film_grain",
-        lambda pixels, strength: calls.append(("film", strength)) or pixels,
+    monkeypatch.setitem(
+        FILTERS, "film_grain",
+        lambda pixels, *, film_grain: calls.append(("film", film_grain)) or pixels,
     )
     pixels = torch.zeros(3, 4, 4)
 
-    # Both off -> the input object is returned untouched.
-    assert controller.postprocess(pixels) is pixels
+    # Nothing asked for -> no filter runs, and the input object comes back untouched.
+    assert controller.postprocess(pixels, PostprocessOptions()) is pixels
     assert calls == []
 
-    out = controller.postprocess(pixels, film_grain_strength=2.0, sharpening=0.5)
+    out = controller.postprocess(
+        pixels, PostprocessOptions(film_grain=2.0, sharpening=0.5)
+    )
     assert out is pixels
-    # film_grain is requested on a 0-10 scale and scaled /10 for the filter.
-    assert calls == [("rcas", 0.5), ("film", 0.2)]
+    # Chain order: sharpen first, then grain, each seeing the value as the request
+    # stated it (the grain adapter is what turns the 0-10 scale into the filter's 0-1).
+    assert calls == [("rcas", 0.5), ("film", 2.0)]
 
 
 def test_finalize_applies_the_notch_filter_only_when_asked(monkeypatch):
     controller = _controller()
     seen = []
-    monkeypatch.setattr(
-        "thenoise.pipeline.nyquist_notch",
-        lambda pixels: seen.append(1) or pixels,
+    monkeypatch.setitem(
+        FILTERS, "nyquist_notch",
+        lambda pixels, **_switch: seen.append(1) or pixels,
     )
     pixels = torch.zeros(3, 8, 8)
 
@@ -668,9 +673,7 @@ def _parameters(**overrides) -> str:
         upscale_factor=1.0,
         upscale_type="refined",
         sampler="euler",
-        qwen_vae_enhance=False,
-        film_grain=0.0,
-        sharpening=0.0,
+        postprocess=PostprocessOptions(),
         lora_specs=None,
         pixel_upscaler=None,
         sigmas=None,
@@ -695,8 +698,12 @@ def test_pnginfo_json_block_covers_every_field():
     info = build_pnginfo(
         model="anima", prompt="p", negative_prompt="n", width=512, height=256,
         steps=8, guidance_scale=1.5, seed=3, upscale=True, upscale_factor=2.0,
-        upscale_type="no-refiner", sampler="er_sde", qwen_vae_enhance=True,
-        film_grain=0.5, sharpening=0.2, lora_specs=["a:1.0"], pixel_upscaler="x4",
+        upscale_type="no-refiner", sampler="er_sde",
+        postprocess=PostprocessOptions(
+            qwen_vae_enhance=True, saturation=0.4, vibrance=-0.2, temperature=0.3,
+            tint=-0.1, sharpening=0.2, film_grain=0.5,
+        ),
+        lora_specs=["a:1.0"], pixel_upscaler="x4",
         sigmas=[1.0, 0.5, 0.0], ref_method="index_timestep_zero", kv_cache=True,
     )
     data = json.loads(_chunk_text(info, "generation_data"))
@@ -704,11 +711,25 @@ def test_pnginfo_json_block_covers_every_field():
         "model": "anima", "prompt": "p", "negative_prompt": "n",
         "width": 512, "height": 256, "steps": 8, "guidance_scale": 1.5, "seed": 3,
         "upscale": True, "upscale_factor": 2.0, "upscale_type": "no-refiner",
-        "sampler": "er_sde", "qwen_vae_enhance": True, "film_grain": 0.5,
-        "sharpening": 0.2, "lora_specs": ["a:1.0"], "pixel_upscaler": "x4",
+        "sampler": "er_sde", "qwen_vae_enhance": True, "saturation": 0.4,
+        "vibrance": -0.2, "temperature": 0.3, "tint": -0.1,
+        "sharpening": 0.2, "film_grain": 0.5,
+        "lora_specs": ["a:1.0"], "pixel_upscaler": "x4",
         "sigmas": [1.0, 0.5, 0.0], "ref_method": "index_timestep_zero",
         "kv_cache": True,
     }
+
+
+def test_generation_data_carries_every_post_decode_knob():
+    """A knob is recorded flat, under its declared name, whatever the chain does with it."""
+    info = build_pnginfo(
+        model="anima", prompt="p", negative_prompt="", width=64, height=64,
+        steps=4, guidance_scale=1.0, seed=1, upscale=False, upscale_factor=1.0,
+        upscale_type="refined", sampler="euler", postprocess=PostprocessOptions(),
+        lora_specs=None, pixel_upscaler=None,
+    )
+
+    assert set(POSTPROCESS_NAMES) <= set(json.loads(_chunk_text(info, "generation_data")))
 
 
 def test_pnginfo_keeps_the_reference_flags_out_of_the_a1111_text():

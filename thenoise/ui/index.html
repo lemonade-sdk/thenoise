@@ -93,21 +93,8 @@
 
   <div class="divider"></div>
 
-  <div class="range">
-    <div class="range-head">
-      <label class="label" for="film_grain">Film grain</label>
-      <span class="val" id="film_grain_val">0.00</span>
-    </div>
-    <input type="range" id="film_grain" min="0" max="1" step="0.1" value="0">
-  </div>
-
-  <div class="range">
-    <div class="range-head">
-      <label class="label" for="sharpening">Sharpening</label>
-      <span class="val" id="sharpening_val">0.00</span>
-    </div>
-    <input type="range" id="sharpening" min="0" max="1" step="0.05" value="0">
-  </div>
+  <!-- Post-decode controls, filled from the server's declaration (/postprocess). -->
+  <div class="group" id="postprocess_controls"></div>
 
   <div class="field">
     <label class="label" for="upscale_type">Upscale type</label>
@@ -132,9 +119,6 @@
     <input type="range" id="upscale_factor" min="1" max="8" step="0.25" value="1">
     <span class="final-res" id="final_res"></span>
   </div>
-
-  <label class="check"><input type="checkbox" id="qwen_vae_enhance"> Reduce grid pattern <span
-      class="hint">(enable when needed)</span></label>
 
   <div class="divider"></div>
 
@@ -263,21 +247,8 @@
 
   <div class="divider"></div>
 
-  <div class="range">
-    <div class="range-head">
-      <label class="label" for="edit_film_grain">Film grain</label>
-      <span class="val" id="edit_film_grain_val">0.00</span>
-    </div>
-    <input type="range" id="edit_film_grain" min="0" max="1" step="0.1" value="0">
-  </div>
-
-  <div class="range">
-    <div class="range-head">
-      <label class="label" for="edit_sharpening">Sharpening</label>
-      <span class="val" id="edit_sharpening_val">0.00</span>
-    </div>
-    <input type="range" id="edit_sharpening" min="0" max="1" step="0.05" value="0">
-  </div>
+  <!-- Post-decode controls, filled from the server's declaration (/postprocess). -->
+  <div class="group" id="edit_postprocess_controls"></div>
 
   <div class="field">
     <label class="label" for="edit_upscale_type">Upscale type</label>
@@ -302,9 +273,6 @@
     <input type="range" id="edit_upscale_factor" min="1" max="8" step="0.25" value="1">
     <span class="final-res" id="edit_final_res"></span>
   </div>
-
-  <label class="check"><input type="checkbox" id="edit_qwen_vae_enhance"> Reduce grid pattern <span
-      class="hint">(enable when needed)</span></label>
 
   <div class="divider"></div>
 

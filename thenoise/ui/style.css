@@ -317,6 +317,14 @@ body.sidebar-right .sidebar {
   gap: .4rem;
 }
 
+/* A run of controls the UI fills in from a server-side declaration. The group is a
+   single child of the sidebar, so it repeats the sidebar's own rhythm inside itself. */
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
 .row {
   display: grid;
   grid-template-columns: 1fr 1fr;

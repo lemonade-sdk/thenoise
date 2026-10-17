@@ -38,9 +38,7 @@ from thenoise.utils.image_tensor import (
     pixels_to_pil,
     resize_to_target,
 )
-from thenoise.postprocess.film_grain import film_grain
-from thenoise.postprocess.nyquist import nyquist_notch
-from thenoise.postprocess.rcas import rcas
+from thenoise.postprocess import DECODE, PostprocessOptions, apply_stage
 from thenoise.utils.png import build_pnginfo
 
 logger = logging.getLogger(__name__)
@@ -529,15 +527,15 @@ class PipelineController:
     ) -> Image.Image:
         """Decoded pixels -> final PIL image (shared tail of generate/edit).
 
-        Notch filter -> pixel upscaler -> resize -> postprocess -> PIL -> crop ->
-        PNG metadata.
+        Decode-stage filters -> pixel upscaler -> resize -> final filters -> PIL ->
+        crop -> PNG metadata.
         """
         model = self.model
+        postprocess = request.postprocess_options()
 
-        # The notch filter runs at the native decoded resolution, before any
+        # The decode-stage filters run at the native decoded resolution, before any
         # pixel-domain upscaling.
-        if request.qwen_vae_enhance:
-            pixels = nyquist_notch(pixels)
+        pixels = apply_stage(pixels, postprocess, DECODE)
 
         # Pixel-domain upscaler + GPU resize to target size.
         pixels = self._pixel_upscalers.apply(
@@ -546,11 +544,7 @@ class PipelineController:
         pixels = resize_to_target(pixels, r.target_width, r.target_height)
 
         # Stage 5: postprocess
-        pixels = self.postprocess(
-            pixels,
-            film_grain_strength=request.film_grain,
-            sharpening=request.sharpening,
-        )
+        pixels = self.postprocess(pixels, postprocess)
         image = pixels_to_pil(pixels)
 
         if (image.width, image.height) != (r.target_width, r.target_height):
@@ -570,9 +564,7 @@ class PipelineController:
             upscale_factor=r.factor,
             upscale_type=r.upscale_type,
             sampler=r.effective_sampler,
-            qwen_vae_enhance=request.qwen_vae_enhance,
-            film_grain=request.film_grain,
-            sharpening=request.sharpening,
+            postprocess=postprocess,
             lora_specs=request.lora_specs,
             pixel_upscaler=r.pixel_upscaler,
             sigmas=list(r.sigmas) if r.sigmas else None,
@@ -716,16 +708,16 @@ class PipelineController:
     def postprocess(
         self,
         pixels: torch.Tensor,
-        *,
-        film_grain_strength: float = 0.0,
-        sharpening: float = 0.0,
+        options: Optional[PostprocessOptions] = None,
     ) -> torch.Tensor:
-        """Tensor post-processing hook. Runs on the fp32 GPU pixels."""
-        if sharpening > 0.0:
-            pixels = rcas(pixels, strength=sharpening)
-        if film_grain_strength > 0.0:
-            pixels = film_grain(pixels, strength=film_grain_strength / 10.0)
-        return pixels
+        """Tensor post-processing hook. Runs on the fp32 GPU pixels.
+
+        The final stage of the declared chain, in declaration order; nothing asked
+        for leaves the tensor itself untouched.
+        """
+        return apply_stage(
+            pixels, options if options is not None else PostprocessOptions()
+        )
 
 
 __all__ = ["PipelineController"]
