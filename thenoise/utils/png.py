@@ -14,6 +14,20 @@ from thenoise.utils.options import option_values
 from thenoise.utils.paths import ensure_png_extension
 
 
+def _provenance(image, keyword: str, data: dict) -> PngInfo:
+    """A :class:`PngInfo` of ``image``'s own text chunks plus ``data`` under ``keyword``.
+    The chunk about to be written is dropped, so repeated operations replace it.
+    """
+    pnginfo = PngInfo()
+    for key, value in getattr(image, "info", {}).items():
+        if not isinstance(key, str) or key == keyword:
+            continue
+        if isinstance(value, str) or isinstance(value, iTXt):
+            pnginfo.add_text(key, value)
+    pnginfo.add_text(keyword, json.dumps(data))
+    return pnginfo
+
+
 def build_pnginfo(
     *,
     model: str,
@@ -34,13 +48,12 @@ def build_pnginfo(
     sigmas: Optional[List[float]] = None,
     ref_method: Optional[str] = None,
     kv_cache: Optional[bool] = None,
+    source: Optional["PIL.Image.Image"] = None,
 ) -> PngInfo:
     """A ``generation_data`` JSON chunk of every resolved parameter, plus a
     human-readable ``parameters`` chunk (A1111-compatible: prompt lines then pairs).
     """
-    pnginfo = PngInfo()
-
-    gen_data = json.dumps({
+    record = {
         "model": model,
         "prompt": prompt,
         "negative_prompt": negative_prompt,
@@ -60,8 +73,12 @@ def build_pnginfo(
         "sigmas": sigmas,
         "ref_method": ref_method,
         "kv_cache": kv_cache,
-    })
-    pnginfo.add_text("generation_data", gen_data)
+    }
+    if source is not None:
+        return _provenance(source, "edit_data", record)
+
+    pnginfo = PngInfo()
+    pnginfo.add_text("generation_data", json.dumps(record))
 
     # Human-readable "parameters" text (A1111-compatible): prompt lines, optional
     # "Negative prompt: " line, then one line of comma-separated "Key: value" pairs.
@@ -90,20 +107,6 @@ def build_pnginfo(
     parts.append(", ".join(meta_parts))
     pnginfo.add_text("parameters", "\n".join(parts))
 
-    return pnginfo
-
-
-def _provenance(image, keyword: str, data: dict) -> PngInfo:
-    """A :class:`PngInfo` of ``image``'s own text chunks plus ``data`` under ``keyword``.
-    The chunk about to be written is dropped, so repeated operations replace it.
-    """
-    pnginfo = PngInfo()
-    for key, value in getattr(image, "info", {}).items():
-        if not isinstance(key, str) or key == keyword:
-            continue
-        if isinstance(value, str) or isinstance(value, iTXt):
-            pnginfo.add_text(key, value)
-    pnginfo.add_text(keyword, json.dumps(data))
     return pnginfo
 
 

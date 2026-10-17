@@ -279,7 +279,7 @@ class PipelineController:
         with inference():
             return self._finalize(
                 self._run(local, r, ref_key=ref_key, ref_method=r.ref_method),
-                local, r,
+                local, r, source=images[0],
             )
 
     def _edit_images(self, request: GenerateRequest) -> list[Image.Image]:
@@ -524,6 +524,8 @@ class PipelineController:
         pixels: torch.Tensor,
         request: GenerateRequest,
         r: _ResolvedRequest,
+        *,
+        source: Optional[Image.Image] = None,
     ) -> Image.Image:
         """Decoded pixels -> final PIL image (shared tail of generate/edit).
 
@@ -570,6 +572,7 @@ class PipelineController:
             sigmas=list(r.sigmas) if r.sigmas else None,
             ref_method=r.ref_method,
             kv_cache=r.kv_cache,
+            source=source,
         )
         image._pnginfo = pnginfo
         return image

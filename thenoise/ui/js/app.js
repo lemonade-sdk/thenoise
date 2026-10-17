@@ -538,7 +538,7 @@ $('edit_btn').addEventListener('click', () => {
       eOutUrl = URL.createObjectURL(blob);
       showResult('e_img', 'eplaceholder', eOutUrl);
       setStageActions($('edownload'), $('einfo_btn'), true);
-      eOutMeta = await decodeMeta(blob, 'generation_data');
+      eOutMeta = await decodeMeta(blob, 'edit_data');
       renderInfo(eOutMeta);
       editHist.add(eOutUrl, eOutMeta);
     },

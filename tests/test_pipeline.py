@@ -647,6 +647,38 @@ def test_finalize_attaches_png_metadata():
     assert json.loads(_text_chunk(image, "generation_data"))["seed"] == 5
 
 
+def test_edit_keeps_the_input_metadata_and_records_itself_separately():
+    """An edit lands in ``edit_data`` next to the input's chunks, never over them."""
+    from PIL import Image
+
+    from conftest import EditingStubModel
+
+    controller = _controller(EditingStubModel())
+    source = Image.new("RGB", (64, 64), "white")
+    source.info["generation_data"] = '{"prompt": "a fox", "seed": 111}'
+    source.info["parameters"] = "a fox\nModel: stub, Steps: 9, Seed: 111"
+    source.info["Software"] = "whatever wrote the input"
+    source.info["edit_data"] = '{"prompt": "an earlier edit"}'  # replaced, not appended
+
+    image = controller.edit(
+        _request(image=source, prompt="a fox with a scarf", steps=1, seed=5)
+    )
+
+    texts = _all_texts(image._pnginfo)
+    assert json.loads(texts["generation_data"]) == {"prompt": "a fox", "seed": 111}
+    assert texts["parameters"] == "a fox\nModel: stub, Steps: 9, Seed: 111"
+    assert texts["Software"] == "whatever wrote the input"
+
+    edit = json.loads(texts["edit_data"])
+    assert (edit["prompt"], edit["steps"], edit["seed"]) == (
+        "a fox with a scarf",
+        1,
+        5,
+    )
+    # The chunks really survive the save, as every other section does.
+    assert json.loads(_text_chunk(image, "edit_data"))["seed"] == 5
+
+
 def _text_chunk(image, keyword: str) -> str:
     """Read a text chunk back from the image by saving and re-opening it."""
     from PIL import Image
