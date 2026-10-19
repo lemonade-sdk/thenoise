@@ -1,10 +1,31 @@
-"""PNG metadata helpers for generation images."""
+"""PNG metadata helpers for the images the engine writes.
+
+Controllers attach a :class:`PngInfo` to their result; the writers here keep it on disk.
+"""
 from __future__ import annotations
 
 import json
 from typing import List, Optional
 
 from PIL.PngImagePlugin import PngInfo, iTXt
+
+from thenoise.postprocess.options import PostprocessOptions
+from thenoise.utils.options import option_values
+from thenoise.utils.paths import ensure_png_extension
+
+
+def _provenance(image, keyword: str, data: dict) -> PngInfo:
+    """A :class:`PngInfo` of ``image``'s own text chunks plus ``data`` under ``keyword``.
+    The chunk about to be written is dropped, so repeated operations replace it.
+    """
+    pnginfo = PngInfo()
+    for key, value in getattr(image, "info", {}).items():
+        if not isinstance(key, str) or key == keyword:
+            continue
+        if isinstance(value, str) or isinstance(value, iTXt):
+            pnginfo.add_text(key, value)
+    pnginfo.add_text(keyword, json.dumps(data))
+    return pnginfo
 
 
 def build_pnginfo(
@@ -21,21 +42,18 @@ def build_pnginfo(
     upscale_factor: float,
     upscale_type: str,
     sampler: str,
-    qwen_vae_enhance: bool,
-    film_grain: float,
-    sharpening: float,
+    postprocess: PostprocessOptions,
     lora_specs: Optional[List[str]],
     pixel_upscaler: Optional[str],
     sigmas: Optional[List[float]] = None,
+    ref_method: Optional[str] = None,
+    kv_cache: Optional[bool] = None,
+    source: Optional["PIL.Image.Image"] = None,
 ) -> PngInfo:
-    """Build a PngInfo object with generation metadata (JSON + human-readable).
-
-    Writes a ``generation_data`` chunk with the full JSON of all resolved
-    parameters and a ``parameters`` chunk of human-readable text.
+    """A ``generation_data`` JSON chunk of every resolved parameter, plus a
+    human-readable ``parameters`` chunk (A1111-compatible: prompt lines then pairs).
     """
-    pnginfo = PngInfo()
-
-    gen_data = json.dumps({
+    record = {
         "model": model,
         "prompt": prompt,
         "negative_prompt": negative_prompt,
@@ -48,14 +66,19 @@ def build_pnginfo(
         "upscale_factor": upscale_factor,
         "upscale_type": upscale_type,
         "sampler": sampler,
-        "qwen_vae_enhance": qwen_vae_enhance,
-        "film_grain": film_grain,
-        "sharpening": sharpening,
+        # Every post-decode knob, flat and by its declared name.
+        **option_values(postprocess),
         "lora_specs": lora_specs,
         "pixel_upscaler": pixel_upscaler,
         "sigmas": sigmas,
-    })
-    pnginfo.add_text("generation_data", gen_data)
+        "ref_method": ref_method,
+        "kv_cache": kv_cache,
+    }
+    if source is not None:
+        return _provenance(source, "edit_data", record)
+
+    pnginfo = PngInfo()
+    pnginfo.add_text("generation_data", json.dumps(record))
 
     # Human-readable "parameters" text (A1111-compatible): prompt lines, optional
     # "Negative prompt: " line, then one line of comma-separated "Key: value" pairs.
@@ -87,34 +110,43 @@ def build_pnginfo(
     return pnginfo
 
 
+def pnginfo_of(image) -> Optional[PngInfo]:
+    """The provenance a controller attached to ``image``, or ``None`` if it attached none."""
+    return getattr(image, "_pnginfo", None)
+
+
+def save_output(image, path: str) -> str:
+    """Write a controller's image, keeping the chunks it attached; a name with no
+    extension becomes ``.png``, and the path written comes back for the caller to log.
+    """
+    path = ensure_png_extension(path)
+    image.save(path, pnginfo=pnginfo_of(image))
+    return path
+
+
 def build_upscale_pnginfo(
     image: "PIL.Image.Image",
     upscaler_model: str,
     upscale_factor: float,
 ) -> PngInfo:
-    """Build a PngInfo carrying over pre-existing text chunks + upscale metadata.
+    """The source image's chunks plus this upscale's ``upscale_data`` record."""
+    return _provenance(image, "upscale_data", {
+        "upscaler_model": upscaler_model,
+        "upscale_factor": upscale_factor,
+    })
 
-    Copies the text chunks already present on ``image`` (tEXt, zTXt, iTXt) into a
-    fresh :class:`PngInfo`, then adds an ``upscale_data`` JSON chunk. An existing
-    ``upscale_data`` chunk is replaced rather than copied, so repeated upscales do
-    not accumulate records.
+
+def build_controlmap_pnginfo(
+    source: "PIL.Image.Image",
+    control_type: str,
+    model: str,
+    options: dict,
+) -> PngInfo:
+    """The source's chunks plus this extraction's ``controlmap_data`` record. The map
+    is its input's size, so the PNG header already states the geometry.
     """
-    pnginfo = PngInfo()
-
-    for key, value in getattr(image, "info", {}).items():
-        if not isinstance(key, str):
-            continue
-        if key == "upscale_data":
-            continue
-        if isinstance(value, str) or isinstance(value, iTXt):
-            pnginfo.add_text(key, value)
-
-    pnginfo.add_text(
-        "upscale_data",
-        json.dumps({
-            "upscaler_model": upscaler_model,
-            "upscale_factor": upscale_factor,
-        }),
-    )
-
-    return pnginfo
+    return _provenance(source, "controlmap_data", {
+        "type": control_type,
+        "model": model,
+        "options": options,
+    })

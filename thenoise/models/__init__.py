@@ -10,9 +10,11 @@ from typing import List, Type
 from .base import DiffusionModel
 from .anima import AnimaModel
 from .flux_klein import FluxKleinModel
+from .flux3 import Flux3Model
 from .krea2 import Krea2Model
 from .mage_flow import MageFlowModel
 from .ming_image import MingImageModel
+from .moss_image import MossImageModel
 from .zimage import ZImageModel
 from .qwen_image import QwenImageModel
 from .qwen_image21 import QwenImage21Model
@@ -23,9 +25,11 @@ MODEL_CATALOG: List[Type[DiffusionModel]] = [
     ZImageModel,
     MingImageModel,
     FluxKleinModel,
+    Flux3Model,
     MageFlowModel,
     QwenImageModel,
     QwenImage21Model,
+    MossImageModel,
 ]
 
 

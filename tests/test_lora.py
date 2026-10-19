@@ -360,6 +360,56 @@ def test_fuse_qkv_is_a_noop_without_qkv_and_does_not_mutate():
     assert sd == snapshot
 
 
+def test_an_already_fused_projection_is_not_stacked_onto_itself():
+    """``...proj.qkv.lora_A`` is not part ``v`` under prefix ``...proj.qk``.
+
+    A spec whose parts are single letters (MOSS-Image's ``q``/``k``/``v``) makes the
+    fused name end in a part name; matching parts as substrings re-fused an
+    already-fused LoRA into ``...proj.qkqkv``, which no module answers, so attention
+    came out untouched while the rest of the LoRA applied.
+    """
+    sd = {
+        "layers.6.proj.qkv.lora_A.weight": torch.ones(2, 4),
+        "layers.6.proj.qkv.lora_B.weight": torch.ones(18, 2),
+    }
+    fused = _fuse(sd, {"qkv": ("q", "k", "v")})
+
+    assert set(fused) == set(sd)
+    assert fused["layers.6.proj.qkv.lora_B.weight"].shape == (18, 2)
+    assert _match_lora_keys("layers.6.proj.qkv.weight", set(fused)) is not None
+
+
+def test_fusion_reads_parts_at_underscore_boundaries_too():
+    """sd-scripts spells the parts out with the whole path underscored."""
+    sd = {}
+    for i, which in enumerate("qkv"):
+        sd[f"lora_unet_layers_6_proj_{which}.lora_A.weight"] = torch.ones(2, 4) * i
+        sd[f"lora_unet_layers_6_proj_{which}.lora_B.weight"] = torch.ones(6, 2) * i
+
+    fused = _fuse(sd, {"qkv": ("q", "k", "v")})
+
+    assert set(fused) == {
+        "lora_unet_layers_6_proj_qkv.lora_A.weight",
+        "lora_unet_layers_6_proj_qkv.lora_B.weight",
+    }
+    assert _match_lora_keys("layers.6.proj.qkv.weight", set(fused)) is not None
+    # The three parts are stacked, not summed: A is rank 3 x in, B is 3 x out tall.
+    assert fused["lora_unet_layers_6_proj_qkv.lora_A.weight"].shape == (6, 4)
+    assert fused["lora_unet_layers_6_proj_qkv.lora_B.weight"].shape == (18, 6)
+
+
+def test_a_lora_carrying_both_spellings_of_a_stacking_is_left_alone(caplog):
+    """Split *and* fused factors together: restacking one onto the other is a guess."""
+    sd = _qkv_lora()
+    sd["blocks.0.attn.qkv.lora_A.weight"] = torch.ones(2, 4)
+    sd["blocks.0.attn.qkv.lora_B.weight"] = torch.ones(18, 2)
+
+    fused = _fuse(sd, FUSE_QKV)
+
+    assert set(fused) == set(sd)
+    assert "skipping qkv fusion" in caplog.text
+
+
 # ------------------------------------------------------- SwiGLU gate/up fusion
 
 
@@ -590,6 +640,44 @@ def test_an_undeclared_fusion_is_not_applied(caplog):
     assert result["targets"] == {}
     assert torch.equal(model.blocks[0].img_mlp.gate_up.weight, original)
     assert "unused keys" in caplog.text
+
+
+class _FusedQkvNet(nn.Module):
+    """The MOSS-Image block layout: a ``ModuleDict`` holding one already-fused qkv."""
+
+    def __init__(self):
+        super().__init__()
+        self.layers = nn.ModuleList([nn.Module()])
+        self.layers[0].proj = nn.ModuleDict({"qkv": QuantizedLinear(4, 12, bias=False)})
+        with torch.no_grad():
+            self.layers[0].proj["qkv"].weight.fill_(1.0)
+
+
+def test_a_lora_naming_the_fused_projection_lands_on_it(caplog):
+    """``proj.qkv`` factors plus a ``q``/``k``/``v`` spec must not be restacked.
+
+    The end-to-end form of the bug: the fused name ends in part ``v``, so the parts
+    matched inside it and the factors were re-stacked under ``proj.qkqkv``, which no
+    module answers — attention silently kept its base weights while the rest of the
+    LoRA applied.
+    """
+    model = _FusedQkvNet()
+    original = model.layers[0].proj["qkv"].weight.clone()
+    lora = {
+        "diffusion_model.layers.0.proj.qkv.lora_A.weight": torch.ones(2, 4),
+        "diffusion_model.layers.0.proj.qkv.lora_B.weight": torch.ones(12, 2),
+    }
+
+    result = apply_lora_to_model(model, [lora], [1.0], fusions={"qkv": ("q", "k", "v")})
+
+    assert set(result["targets"]) == {"layers.0.proj.qkv"}
+    assert torch.equal(
+        model.layers[0].proj["qkv"].weight, original + 2 * torch.ones(12, 4)
+    )
+    assert "unused keys" not in caplog.text
+
+    undo_lora_on_model(model, result)
+    assert torch.equal(model.layers[0].proj["qkv"].weight, original)
 
 
 def test_switch_loras_uses_the_model_fusion_spec(tmp_path):

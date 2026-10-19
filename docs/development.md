@@ -13,10 +13,11 @@ thenoise/                  the package
   models/                  per-model adapters (detect + DEFAULT_PREFS + sampling)
   dit/                     per-model DiT code (lumina — the shared S3-DiT core behind
                            zimage and ming_image; krea2, qwen_image, qwen_image21,
-                           anima, flux2, mage_flow)
+                           anima, flux2, flux3, mage_flow, moss_image)
   vae/                     VAE loaders (Qwen-Image, Flux, Flux.2, Wan 2.2, Mage)
   samplers/                denoising solvers (euler, er_sde)
   upscale/                 latent + pixel upscalers
+  controlmap/              control-map extractors (canny, lineart, softedge, depth, pose)
   postprocess/             grain, sharpening, Qwen-VAE enhance
   ui/                      web UI served by `serve`
   api.py / cli.py          HTTP API and CLI entry points
@@ -155,6 +156,7 @@ touches:
    usage instructions
 5. **`tests/`** — detection/loading tests that run without real weights
 6. **`pyproject.toml`** — the new `thenoise.dit.<name>` package (if any)
+
 
 General rules:
 

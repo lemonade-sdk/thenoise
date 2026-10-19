@@ -21,6 +21,7 @@ class EulerSampler(Sampler):
         desc: str = "sampling",
     ) -> torch.Tensor:
         dtype = x.dtype
+        self.model.begin_sampling(schedule)
         for i, step in tqdm(enumerate(schedule), total=len(schedule), desc=desc):
             v = self.model.denoise_step(x, step.t, cond, guidance_scale, i)
             x = x.float() - step.delta * v.float()

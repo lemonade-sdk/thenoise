@@ -10,6 +10,7 @@ of the transparent pixels, which is garbage.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import Optional, Tuple, Union
 
 import numpy as np
@@ -114,19 +115,6 @@ def center_crop(image: Image.Image, width: int, height: int) -> Image.Image:
     return image.crop((left, top, left + width, top + height))
 
 
-def resize_to_cover_center_crop(
-    image: Image.Image, width: int, height: int
-) -> Image.Image:
-    """Scale to cover ``(width, height)``, then center-crop (no padding)."""
-    if (image.width, image.height) == (width, height):
-        return image
-    scale = max(width / image.width, height / image.height)
-    new_w = round(image.width * scale)
-    new_h = round(image.height * scale)
-    scaled = image.resize((new_w, new_h), Image.LANCZOS)
-    return center_crop(scaled, width, height)
-
-
 def resize_to_area(image: Image.Image, area: int = 384 * 384) -> Image.Image:
     """Scale a PIL image to ``area`` (area-based, aspect-preserving).
 
@@ -158,8 +146,72 @@ def resize_to_long_edge(image: Image.Image, long_edge: int) -> Image.Image:
     return image.resize((new_w, new_h), Image.LANCZOS)
 
 
+def align_down(value: int, multiple: int, minimum: int = 0) -> int:
+    """Largest multiple of ``multiple`` not above ``value``, clamped to ``minimum``."""
+    if multiple < 1:
+        raise ValueError(f"multiple must be positive, got {multiple}")
+    return max(minimum, (int(value) // multiple) * multiple)
+
+
+# The fitting rules ReferenceSizing accepts.
+REF_FITS = ("area", "long_edge")
+
+
+@dataclass(frozen=True)
+class ReferenceSizing:
+    """How an editing model fits one reference image before encoding it.
+
+    Aspect is always preserved and nothing is ever cropped, so the references of a
+    multi-reference edit keep the shape they arrived in. ``fit`` gives the single
+    ``cap`` its meaning: a pixel **area** to scale to, or a **longest side** to cap
+    without enlarging. The result is floored to ``align`` pixels, which keeps a
+    reference on whole latent cells and inside the cap.
+    """
+
+    fit: str = "area"
+    cap: int = 1024 * 1024
+    align: int = 16
+
+    def __post_init__(self) -> None:
+        if self.fit not in REF_FITS:
+            raise ValueError(
+                f"unknown reference sizing fit {self.fit!r}; expected one of {REF_FITS}"
+            )
+        if self.align < 1:
+            raise ValueError(f"align must be positive, got {self.align}")
+        minimum = self.align * self.align if self.fit == "area" else self.align
+        if self.cap < minimum:
+            raise ValueError(
+                f"{self.fit} cap of {self.cap} cannot hold one {self.align}px cell "
+                f"(needs at least {minimum})"
+            )
+
+    def target_size(self, width: int, height: int) -> Tuple[int, int]:
+        """The size :meth:`apply` produces for a ``width`` x ``height`` reference."""
+        if width < 1 or height < 1:
+            raise ValueError(f"invalid reference size {width}x{height}")
+        if self.fit == "long_edge":
+            scale = min(1.0, self.cap / max(width, height))
+        else:
+            scale = (self.cap / (width * height)) ** 0.5
+        return (
+            align_down(round(width * scale), self.align, self.align),
+            align_down(round(height * scale), self.align, self.align),
+        )
+
+    def apply(self, image: Image.Image) -> Image.Image:
+        """Fit ``image`` to :meth:`target_size`; the input itself when it matches."""
+        size = self.target_size(image.width, image.height)
+        if size == image.size:
+            return image
+        return image.resize(size, Image.LANCZOS)
+
+
 __all__ = [
     "ALPHA_BACKGROUND",
+    "REF_FITS",
+    "ReferenceSizing",
+    "align_down",
     "has_alpha",
     "flatten_alpha",
     "load_image",
@@ -167,7 +219,6 @@ __all__ = [
     "pixels_to_pil",
     "resize_to_target",
     "center_crop",
-    "resize_to_cover_center_crop",
     "resize_to_area",
     "resize_to_long_edge",
 ]

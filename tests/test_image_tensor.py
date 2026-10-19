@@ -13,6 +13,8 @@ from PIL import Image
 
 from thenoise.utils.image_tensor import (
     ALPHA_BACKGROUND,
+    ReferenceSizing,
+    align_down,
     flatten_alpha,
     has_alpha,
     load_image,
@@ -158,3 +160,55 @@ def test_long_edge_cap_keeps_the_dominant_dimension():
     small = Image.new("RGB", (300, 300))
     assert resize_to_long_edge(small, 384) is small
     assert resize_to_long_edge(Image.new("RGB", (384, 20)), 384).size == (384, 20)
+
+
+# ---------------------------------------------------------------- reference sizing
+
+
+def test_align_down_floors_to_the_multiple_and_honours_the_minimum():
+    assert align_down(100, 16) == 96
+    assert align_down(96, 16) == 96
+    assert align_down(3999, 32) == 3968
+    assert align_down(15, 16) == 0
+    assert align_down(15, 16, minimum=16) == 16  # the one-cell floor
+    with pytest.raises(ValueError, match="multiple must be positive"):
+        align_down(10, 0)
+
+
+def test_the_area_fit_scales_to_the_cap_and_keeps_the_aspect():
+    """It scales, it never cuts: the floor keeps the result inside the cap."""
+    sizing = ReferenceSizing(cap=1024 * 1024, align=16)
+
+    assert sizing.target_size(4000, 1000) == (2048, 512)
+    w, h = sizing.target_size(3000, 700)
+    assert w * h <= 1024 * 1024
+    assert abs((w / h) / (3000 / 700) - 1.0) < 0.05
+
+
+def test_the_long_edge_fit_caps_the_long_side_and_never_enlarges():
+    sizing = ReferenceSizing(fit="long_edge", cap=1024, align=16)
+
+    assert sizing.target_size(4096, 1024) == (1024, 256)
+    assert sizing.target_size(900, 700) == (896, 688)  # under the cap: only aligned
+
+
+def test_an_elongated_reference_is_never_aligned_away_entirely():
+    """Rounding a 6px-high fit down would land on zero cells: clamp to one."""
+    assert ReferenceSizing(cap=4096, align=16).target_size(200, 2) == (640, 16)
+
+
+def test_apply_resizes_only_when_the_size_changes():
+    sizing = ReferenceSizing(cap=64 * 64, align=16)
+    exact = Image.new("RGB", (64, 64), "red")
+
+    assert sizing.apply(exact) is exact
+    assert sizing.apply(Image.new("RGB", (100, 100), "red")).size == (64, 64)
+
+
+def test_a_sizing_policy_that_cannot_hold_one_cell_is_rejected():
+    with pytest.raises(ValueError, match="unknown reference sizing fit"):
+        ReferenceSizing(fit="cover")
+    with pytest.raises(ValueError, match="cannot hold one 16px cell"):
+        ReferenceSizing(cap=64, align=16)  # an area of 64 px^2 is a quarter of a cell
+    with pytest.raises(ValueError, match="cannot hold one 16px cell"):
+        ReferenceSizing(fit="long_edge", cap=8, align=16)

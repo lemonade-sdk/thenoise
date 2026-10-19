@@ -31,10 +31,12 @@ from thenoise.dit.quantized import QuantizedLinear  # noqa: E402
 from thenoise.models import (  # noqa: E402
     MODEL_CATALOG,
     AnimaModel,
+    Flux3Model,
     FluxKleinModel,
     Krea2Model,
     MageFlowModel,
     MingImageModel,
+    MossImageModel,
     QwenImageModel,
     QwenImage21Model,
     ZImageModel,
@@ -373,6 +375,64 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "model.diffusion_model.single_stream_modulation.lin.weight",
             "model.diffusion_model.img_in.weight",
             "model.diffusion_model.final_layer.adaLN_modulation.1.weight",
+        ],
+    ),
+    # Flux.3: the per-mode blocks and modulations are its own, and the flow-map
+    # ``ref_time_in`` / split q/k/v variants change nothing about that fingerprint.
+    "flux3": (
+        Flux3Model,
+        [
+            "content_mode_blocks.image.0.attn_out.weight",
+            "content_mode_blocks.image.0.qkv.weight",
+            "content_mode_blocks.image_cond.0.qkv.weight",
+            "txt_mode_blocks.0.mlp_in.weight",
+            "single_blocks.0.qkv.weight",
+            "early_stream_modulations.image_cond.lin.weight",
+            "single_stream_modulations.txt.lin.weight",
+            "emb_in.image.weight",
+            "emb_in.image_cond.weight",
+            "time_in.in_layer.weight",
+            "ref_time_in.in_layer.weight",
+            "txt_in.weight",
+            "final_layer.image.linear.weight",
+        ],
+    ),
+    "flux3_wrapped": (
+        Flux3Model,
+        [
+            "model.diffusion_model.content_mode_blocks.image.0.attn_out.weight",
+            "model.diffusion_model.single_blocks.0.qkv.weight",
+            "model.diffusion_model.single_stream_modulations.txt.lin.weight",
+            "model.diffusion_model.emb_in.image.weight",
+            "model.diffusion_model.final_layer.image.linear.weight",
+        ],
+    ),
+    # MOSS-Image runs one joint stream, so its shared block modulation and its fused
+    # up/gate FFN are the whole fingerprint.
+    "moss_image": (
+        MossImageModel,
+        [
+            "video_embedder.weight",
+            "text_embedder.proj.weight",
+            "text_embedder.blocks.1.qkv.weight",
+            "time_embedding.0.weight",
+            "shared_block_modulation.weight",
+            "layers.0.proj.qkv.weight",
+            "layers.0.proj.ffn_up_gate.weight",
+            "layers.41.proj.ffn_down.weight",
+            "final_norm_video.weight",
+            "final_linear_video.weight",
+            "video_head_modulation.weight",
+        ],
+    ),
+    "moss_image_wrapped": (
+        MossImageModel,
+        [
+            "model.diffusion_model.video_embedder.weight",
+            "model.diffusion_model.shared_block_modulation.weight",
+            "model.diffusion_model.layers.0.proj.ffn_up_gate.weight",
+            "model.diffusion_model.layers.41.proj.qkv.weight",
+            "model.diffusion_model.final_linear_video.weight",
         ],
     ),
     "qwen_image": (

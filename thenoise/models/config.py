@@ -11,6 +11,9 @@ import torch
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Union
 
+from thenoise.postprocess.options import PostprocessOptions, options_from
+from thenoise.utils.options import declared_knobs
+
 if TYPE_CHECKING:  # pragma: no cover - only for annotations
     from PIL import Image
 
@@ -40,13 +43,16 @@ class EncodePromptArgs:
     negative_prompt: str = ""
     guidance_scale: float = 0.0
     image: Optional[Union[Image.Image, List[Image.Image]]] = None
-    width: Optional[int] = None
-    height: Optional[int] = None
 
 
 @dataclass
+@declared_knobs(PostprocessOptions)
 class GenerateRequest:
-    """The complete user-facing generation request, mirroring the HTTP API and CLI."""
+    """The complete user-facing generation request, mirroring the HTTP API and CLI.
+
+    The post-decode knobs are appended as ordinary flat fields by ``declared_knobs``, 
+    so a new filter needs no new line here.
+    """
 
     prompt: str
     negative_prompt: str = ""
@@ -60,9 +66,6 @@ class GenerateRequest:
     upscale_factor: float = 1.0
     upscale_type: str = "refined"
     sampler: Optional[str] = None
-    qwen_vae_enhance: bool = False
-    film_grain: float = 0.0
-    sharpening: float = 0.0
     lora_specs: Optional[List[str]] = None
     pixel_upscaler: Optional[str] = None
     image: Optional[Union[Image.Image, List[Image.Image]]] = None
@@ -70,6 +73,10 @@ class GenerateRequest:
     kv_cache: Optional[bool] = None
     # Reference conditioning method for editing (edit only); None = auto.
     ref_method: Optional[str] = None
+
+    def postprocess_options(self) -> PostprocessOptions:
+        """The post-decode knobs, as the filter chain wants them."""
+        return options_from(self)
 
 
 @dataclass(frozen=True)

@@ -88,6 +88,79 @@ QWEN3_8B_CONFIG = {
     "vocab_size": 151936,
 }
 
+# --------------------------------------------------------------------------- Qwen3.5
+
+# The 9B hybrid: three gated-deltanet layers per full-attention layer
+# (``full_attention_interval`` derives ``layer_types``), a partial (25%) rotary
+# factor, and its own 248k vocabulary.
+QWEN35_9B_CONFIG = {
+    "architectures": ["Qwen3_5ForConditionalGeneration"],
+    "image_token_id": 248056,
+    "model_type": "qwen3_5",
+    "text_config": {
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "attn_output_gate": True,
+        "bos_token_id": None,
+        "dtype": "bfloat16",
+        "eos_token_id": 248044,
+        "full_attention_interval": 4,
+        "head_dim": 256,
+        "hidden_act": "silu",
+        "hidden_size": 4096,
+        "initializer_range": 0.02,
+        "intermediate_size": 12288,
+        "linear_conv_kernel_dim": 4,
+        "linear_key_head_dim": 128,
+        "linear_num_key_heads": 16,
+        "linear_num_value_heads": 32,
+        "linear_value_head_dim": 128,
+        "mamba_ssm_dtype": "float32",
+        "max_position_embeddings": 262144,
+        "mlp_only_layers": [],
+        "model_type": "qwen3_5_text",
+        "mtp_num_hidden_layers": 1,
+        "mtp_use_dedicated_embeddings": False,
+        "num_attention_heads": 16,
+        "num_hidden_layers": 32,
+        "num_key_value_heads": 4,
+        "pad_token_id": None,
+        "partial_rotary_factor": 0.25,
+        "rms_norm_eps": 1e-06,
+        "rope_parameters": {
+            "mrope_interleaved": True,
+            "mrope_section": [11, 11, 10],
+            "partial_rotary_factor": 0.25,
+            "rope_theta": 10000000,
+            "rope_type": "default",
+        },
+        "tie_word_embeddings": False,
+        "use_cache": True,
+        "vocab_size": 248320,
+    },
+    "tie_word_embeddings": False,
+    "video_token_id": 248057,
+    "vision_config": {
+        "deepstack_visual_indexes": [],
+        "depth": 27,
+        "dtype": "bfloat16",
+        "hidden_act": "gelu_pytorch_tanh",
+        "hidden_size": 1152,
+        "in_channels": 3,
+        "initializer_range": 0.02,
+        "intermediate_size": 4304,
+        "model_type": "qwen3_5_vision",
+        "num_heads": 16,
+        "num_position_embeddings": 2304,
+        "out_hidden_size": 4096,
+        "patch_size": 16,
+        "spatial_merge_size": 2,
+        "temporal_patch_size": 2,
+    },
+    "vision_end_token_id": 248054,
+    "vision_start_token_id": 248053,
+}
+
 # --------------------------------------------------------------------------- Qwen3-VL
 
 QWEN3_VL_4B_INSTRUCT_CONFIG = {
@@ -271,6 +344,7 @@ __all__ = [
     "QWEN3_0_6B_CONFIG",
     "QWEN3_4B_CONFIG",
     "QWEN3_8B_CONFIG",
+    "QWEN35_9B_CONFIG",
     "QWEN3_VL_4B_INSTRUCT_CONFIG",
     "QWEN3_VL_8B_INSTRUCT_CONFIG",
     "QWEN3_VL_PREPROCESSOR_CONFIG",

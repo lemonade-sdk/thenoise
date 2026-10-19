@@ -1,11 +1,9 @@
-"""Entrypoint wiring tests: arg -> ``Settings``/``ModelPaths``/``Runtime``.
-
-CLI *parsing* is covered in ``test_cli.py``. Here we call the dispatch functions
-(``_serve``, ``run_generate``, ``run_edit``, ``run_upscale``) with a faked
-``Runtime`` and assert the constructed ``Settings``/``ModelPaths`` and the chosen
-controller method — without touching torch devices or loading any weights.
+"""Entrypoint wiring tests: arg -> ``Settings``/``ModelPaths``/``Runtime``/controller.
+``test_cli.py`` covers parsing; here a faked ``Runtime`` shows what each handler calls.
 """
 from __future__ import annotations
+
+import logging
 
 import pytest
 from PIL import Image
@@ -13,6 +11,8 @@ from PIL import Image
 from thenoise.__main__ import _serve, main
 from thenoise.cli import build_parser
 from thenoise.generate import run_edit, run_generate
+from thenoise.controlmap.manager import ControlMapManager
+from thenoise.controlmap_cli import run_controlmap
 from thenoise.runtime import ModelPaths, Settings
 from thenoise.upscale_cli import run_upscale
 from thenoise.utils.paths import ensure_png_extension
@@ -58,12 +58,27 @@ class _FakeUpscaler:
         return _FakeImage(factor=factor)
 
 
+class _FakeControlMap:
+    def __init__(self):
+        self.calls = []
+        self.images = []
+
+    def run(self, image, kind, options, name=""):
+        self.calls.append((image, kind, options, name))
+        image = _FakeImage()
+        self.images.append(image)
+        return image
+
+
 class _FakeRuntime:
     def __init__(self, settings):
         self.settings = settings
         self.loaded = None
         self.pipeline = _FakePipeline()
         self.upscaler = _FakeUpscaler()
+        # Weight-free and I/O-free, so options/availability stay the real ones.
+        self.controlmaps = ControlMapManager(device="cpu")
+        self.controlmap = _FakeControlMap()
         self.model_name = "stub"
 
     def load(self, paths):
@@ -212,9 +227,7 @@ def test_generate_resolves_seed_when_not_given(monkeypatch, fake_runtime):
 @pytest.mark.parametrize("name,value", [("width", 5000), ("height", -1), ("width", 0)])
 def test_generate_rejects_out_of_range_dimensions(capsys, name, value):
     """A dimension is a size, not a flag: 0 is rejected, omission means "auto".
-
-    The pipeline resolves an omitted field from the model's preference defaults, so
-    accepting 0 here would silently mean "0 pixels" instead.
+    The pipeline resolves an omitted field from the model, so 0 would mean 0 pixels.
     """
     argv = ["generate", "--dit", "d", "--vae", "v", "--text-encoder", "t", "--prompt", "x"]
     argv += [f"--{name}", str(value)]
@@ -277,6 +290,79 @@ def test_upscale_is_model_free_and_splits_the_path(fake_runtime, tmp_path):
     assert name == "realesrgan"
 
 
+# ---------------------------------------------------------------- controlmap
+
+
+def test_controlmap_is_model_free_and_maps_the_flags(fake_runtime, tmp_path):
+    img_path = tmp_path / "in.png"
+    Image.new("RGB", (64, 64)).save(img_path)
+    run_controlmap(
+        _parse(
+            [
+                "controlmap",
+                "--input", str(img_path),
+                "--type", "canny",
+                "--canny-low", "30",
+                "--canny-high", "60",
+                "--canny-thickness", "2",
+                "--out", "map",
+                "--device", "cpu",
+            ]
+        )
+    )
+    rt = fake_runtime[0]
+    assert rt.settings.device == "cpu"
+    assert rt.loaded is None  # model-free: no load() call
+
+    image, kind, options, name = rt.controlmap.calls[0]
+    assert (image.size, kind, name) == ((64, 64), "canny", "")
+    # The kind's own flags lose their namespace on the way in.
+    assert (options.low, options.high, options.thickness) == (30.0, 60.0, 2)
+    assert rt.controlmap.images[0].saved_path == ensure_png_extension("map")
+
+
+def test_each_type_gets_its_own_file(fake_runtime, tmp_path):
+    """With more than one map requested every output is named after its type."""
+    img_path = tmp_path / "in.png"
+    Image.new("RGB", (64, 64)).save(img_path)
+    run_controlmap(
+        _parse(["controlmap", "--input", str(img_path), "--type", "canny",
+                "--type", "depth", "--out", "map"])
+    )
+    assert [i.saved_path for i in fake_runtime[0].controlmap.images] == [
+        "map_canny.png",
+        "map_depth.png",
+    ]
+
+
+def test_controlmap_list_reports_the_available_types(fake_runtime, caplog):
+    with caplog.at_level(logging.INFO):
+        run_controlmap(_parse(["controlmap", "--list"]))
+    assert fake_runtime[0].loaded is None
+    assert "canny: canny" in caplog.text
+
+
+def test_controlmap_list_says_what_is_missing(fake_runtime, caplog):
+    """A kind the engine has but whose weights have not been downloaded is worth naming:
+    an empty list alone leaves the user guessing whether the feature exists at all."""
+    with caplog.at_level(logging.INFO):
+        run_controlmap(_parse(["controlmap", "--list"]))
+    assert "pose: unavailable, has no checkpoint" in caplog.text
+    assert "scripts/download.py --model controlmaps --variant pose" in caplog.text
+
+
+def test_controlmap_without_input_or_type_explains_itself(fake_runtime):
+    with pytest.raises(SystemExit, match="--input and --type are required"):
+        run_controlmap(_parse(["controlmap"]))
+
+
+def test_controlmap_reports_an_unknown_type_as_an_exit(fake_runtime, tmp_path):
+    img_path = tmp_path / "in.png"
+    Image.new("RGB", (64, 64)).save(img_path)
+    with pytest.raises(SystemExit, match="no control map for 'normals'"):
+        run_controlmap(_parse(["controlmap", "--input", str(img_path), "--type", "normals"]))
+
+
 # ---------------------------------------------------------------- dispatch
 
 
@@ -285,10 +371,14 @@ def test_main_dispatches_to_the_correct_handler(monkeypatch):
     monkeypatch.setattr("thenoise.generate.run_generate", lambda args: calls.append("generate"))
     monkeypatch.setattr("thenoise.generate.run_edit", lambda args: calls.append("edit"))
     monkeypatch.setattr("thenoise.upscale_cli.run_upscale", lambda args: calls.append("upscale"))
+    monkeypatch.setattr(
+        "thenoise.controlmap_cli.run_controlmap", lambda args: calls.append("controlmap")
+    )
     monkeypatch.setattr("thenoise.__main__._serve", lambda args: calls.append("serve"))
 
     main(["generate", "--dit", "d", "--vae", "v", "--text-encoder", "t", "--prompt", "x"])
     main(["edit", "--dit", "d", "--vae", "v", "--text-encoder", "t", "--prompt", "x", "--image", "i.png"])
     main(["upscale", "--pixel-upscaler", "u.safetensors", "--input", "i.png"])
+    main(["controlmap", "--input", "i.png", "--type", "canny"])
     main(["serve"])
-    assert calls == ["generate", "edit", "upscale", "serve"]
+    assert calls == ["generate", "edit", "upscale", "controlmap", "serve"]

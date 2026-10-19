@@ -37,11 +37,8 @@ from thenoise.utils.image_tensor import (
     pil_to_pixels,
     pixels_to_pil,
     resize_to_target,
-    resize_to_cover_center_crop,
 )
-from thenoise.postprocess.film_grain import film_grain
-from thenoise.postprocess.nyquist import nyquist_notch
-from thenoise.postprocess.rcas import rcas
+from thenoise.postprocess import DECODE, PostprocessOptions, apply_stage
 from thenoise.utils.png import build_pnginfo
 
 logger = logging.getLogger(__name__)
@@ -79,19 +76,24 @@ class _ResolvedRequest:
     ref_method: str
 
 
-def _normalize_sigmas(values: Sequence[float]) -> Tuple[float, ...]:
-    """Validate a user sigma list, returning the full grid (terminal 0 included).
+def _normalize_sigmas(
+    values: Optional[Sequence[float]],
+) -> Optional[Tuple[float, ...]]:
+    """Validate a sigma grid, returning the full grid (terminal 0 included).
 
-    The values decrease from 1.0 toward 0.0 and the trailing 0.0 is implied, so
-    ``len(grid) - 1`` is the step count. Strictly decreasing keeps the ER-SDE
-    solver's ``logit(sigma)`` and ``1/(1-sigma)`` finite.
+    ``None`` and ``[]`` both mean "no grid": the model's own schedule runs. Values
+    decrease toward 0.0 and the trailing 0.0 is implied, so ``len(grid) - 1`` is the
+    step count. Strictly decreasing keeps the ER-SDE solver's ``logit(sigma)`` and
+    ``1/(1-sigma)`` finite.
     """
-    if not values:
-        raise ValueError("sigmas must not be empty")
+    if values is None:
+        return None
     try:
         grid = [float(s) for s in values]
     except (TypeError, ValueError):
         raise ValueError("sigmas must be a list of numbers") from None
+    if not grid:
+        return None
     for s in grid:
         if not math.isfinite(s) or not 0.0 <= s <= 1.0:
             raise ValueError(f"sigmas must be finite values in [0.0, 1.0], got {s!r}")
@@ -180,22 +182,17 @@ class PipelineController:
             return ("prompt",) + base
         return ("prompt_edit",) + base + (ref_key,)
 
-    def _cache_key_reference(
-        self,
-        images: list[Image.Image],
-        width: int,
-        height: int,
-    ) -> Tuple:
+    def _cache_key_reference(self, images: list[Image.Image]) -> Tuple:
         """Cache key for the encoded reference latent(s) (edit path).
 
         Hashes each image's normalized pixel bytes (RGBA when it carries
-        transparency) in order, plus the target size, since refs are resized and
-        center-cropped to the working resolution.
+        transparency) in order, plus the sizing policy that decided the size each one
+        was encoded at.
         """
         digests = tuple(
             hashlib.md5(load_image(img).tobytes()).hexdigest() for img in images
         )
-        return ("reference", width, height, digests)
+        return ("reference", self.model.REFERENCE_SIZING, digests)
 
     def _cache_key_sampling(
         self,
@@ -244,7 +241,7 @@ class PipelineController:
     # ------------------------------------------------------------ pipeline
     def generate(self, request: GenerateRequest) -> Image.Image:
         """Text-to-image pipeline. Returns a single PIL image."""
-        r = self._resolve_pipeline(request)
+        r = self._resolve_pipeline(request, is_edit=False)
         with inference():
             return self._finalize(self._run(request, r), request, r)
 
@@ -277,12 +274,12 @@ class PipelineController:
                 w = round(iw * target / ih)
             local = replace(request, width=w, height=h)
 
-        r = self._resolve_pipeline(local)
-        ref_key = self._cache_key_reference(images, r.width, r.height)
+        r = self._resolve_pipeline(local, is_edit=True)
+        ref_key = self._cache_key_reference(images)
         with inference():
             return self._finalize(
                 self._run(local, r, ref_key=ref_key, ref_method=r.ref_method),
-                local, r,
+                local, r, source=images[0],
             )
 
     def _edit_images(self, request: GenerateRequest) -> list[Image.Image]:
@@ -338,10 +335,8 @@ class PipelineController:
                 else:
                     ref_latents = []
                     for img in self._edit_images(request):
-                        # Scale each ref to cover the working size, center-cropping
-                        # when the aspect ratio differs.
-                        cover = resize_to_cover_center_crop(img, r.width, r.height)
-                        pixels = pil_to_pixels(cover, model.pixel_channels)
+                        fitted = model.prepare_reference(img)
+                        pixels = pil_to_pixels(fitted, model.pixel_channels)
                         ref_latents.append(model.encode_reference(pixels))  # [1,C,H,W]
                     self._cache.reference_store(ref_key, ref_latents)
 
@@ -356,8 +351,6 @@ class PipelineController:
                         negative_prompt=request.negative_prompt,
                         guidance_scale=r.guidance_scale,
                         image=request.image if is_edit else None,
-                        width=r.width,
-                        height=r.height,
                     )
                 )
                 memory.offload("text_encoder")
@@ -433,7 +426,9 @@ class PipelineController:
         return model.finalize_latent(x, params)
 
     # ------------------------------------------------------------- resolution
-    def _resolve_pipeline(self, request: GenerateRequest) -> _ResolvedRequest:
+    def _resolve_pipeline(
+        self, request: GenerateRequest, *, is_edit: bool
+    ) -> _ResolvedRequest:
         """Resolve request defaults into concrete pipeline values.
 
         Shared by ``generate`` and ``edit`` so both use identical resolution
@@ -447,21 +442,34 @@ class PipelineController:
         guidance_scale = model.pref("guidance_scale", request.guidance_scale)
         effective_sampler = model.pref("sampler", request.sampler)
         ref_method = model.pref("ref_method", request.ref_method)
-        kv_cache = model.pref("kv_cache", request.kv_cache)
 
-        sigmas: Optional[Tuple[float, ...]] = None
-        if request.sigmas is not None:
-            sigmas = _normalize_sigmas(request.sigmas)
-            steps = len(sigmas) - 1
-            if request.steps is not None and request.steps != steps:
+        sigmas = _normalize_sigmas(model.pref("sigmas", request.sigmas))
+        if sigmas is not None:
+            sigma_steps = len(sigmas) - 1
+            if request.steps is None or request.steps == sigma_steps:
+                steps = sigma_steps
+            elif request.sigmas is not None:
                 logger.warning(
                     "sigmas=%s overrides steps=%s: running %d steps",
-                    sigmas, request.steps, steps,
+                    sigmas, request.steps, sigma_steps,
                 )
+                steps = sigma_steps
+            else:
+                logger.info(
+                    "steps=%s drops the inherited %d-step sigma grid: running the "
+                    "model schedule",
+                    request.steps, sigma_steps,
+                )
+                sigmas = None
 
-        # kv_cache only makes sense on an edit request.
-        if request.kv_cache is None and request.image is None:
-            kv_cache = False
+        if request.kv_cache is None:
+            kv_cache = bool(
+                is_edit
+                and ref_method == "index_timestep_zero"
+                and model.capability("kv_cache")
+            )
+        else:
+            kv_cache = request.kv_cache
 
         pixel_upscaler = request.pixel_upscaler
         if pixel_upscaler and self._pixel_upscalers.upscaler_dir:
@@ -486,10 +494,8 @@ class PipelineController:
             factor, upscale_type, pixel_upscaler
         )
 
-        # The KV cache freezes the reference K/V, which is only valid when those
-        # tokens are conditioned at timestep zero. With the method left on auto,
-        # pick the one that makes it valid; an explicit ``index`` stays explicit and
-        # is rejected below.
+        # An explicit cache with the method on auto picks the method that makes it
+        # valid; an explicit ``index`` stays explicit and is rejected below.
         if kv_cache and request.ref_method is None:
             ref_method = "index_timestep_zero"
         if kv_cache and ref_method != "index_timestep_zero":
@@ -518,18 +524,20 @@ class PipelineController:
         pixels: torch.Tensor,
         request: GenerateRequest,
         r: _ResolvedRequest,
+        *,
+        source: Optional[Image.Image] = None,
     ) -> Image.Image:
         """Decoded pixels -> final PIL image (shared tail of generate/edit).
 
-        Notch filter -> pixel upscaler -> resize -> postprocess -> PIL -> crop ->
-        PNG metadata.
+        Decode-stage filters -> pixel upscaler -> resize -> final filters -> PIL ->
+        crop -> PNG metadata.
         """
         model = self.model
+        postprocess = request.postprocess_options()
 
-        # The notch filter runs at the native decoded resolution, before any
+        # The decode-stage filters run at the native decoded resolution, before any
         # pixel-domain upscaling.
-        if request.qwen_vae_enhance:
-            pixels = nyquist_notch(pixels)
+        pixels = apply_stage(pixels, postprocess, DECODE)
 
         # Pixel-domain upscaler + GPU resize to target size.
         pixels = self._pixel_upscalers.apply(
@@ -538,11 +546,7 @@ class PipelineController:
         pixels = resize_to_target(pixels, r.target_width, r.target_height)
 
         # Stage 5: postprocess
-        pixels = self.postprocess(
-            pixels,
-            film_grain_strength=request.film_grain,
-            sharpening=request.sharpening,
-        )
+        pixels = self.postprocess(pixels, postprocess)
         image = pixels_to_pil(pixels)
 
         if (image.width, image.height) != (r.target_width, r.target_height):
@@ -562,12 +566,13 @@ class PipelineController:
             upscale_factor=r.factor,
             upscale_type=r.upscale_type,
             sampler=r.effective_sampler,
-            qwen_vae_enhance=request.qwen_vae_enhance,
-            film_grain=request.film_grain,
-            sharpening=request.sharpening,
+            postprocess=postprocess,
             lora_specs=request.lora_specs,
             pixel_upscaler=r.pixel_upscaler,
             sigmas=list(r.sigmas) if r.sigmas else None,
+            ref_method=r.ref_method,
+            kv_cache=r.kv_cache,
+            source=source,
         )
         image._pnginfo = pnginfo
         return image
@@ -706,16 +711,16 @@ class PipelineController:
     def postprocess(
         self,
         pixels: torch.Tensor,
-        *,
-        film_grain_strength: float = 0.0,
-        sharpening: float = 0.0,
+        options: Optional[PostprocessOptions] = None,
     ) -> torch.Tensor:
-        """Tensor post-processing hook. Runs on the fp32 GPU pixels."""
-        if sharpening > 0.0:
-            pixels = rcas(pixels, strength=sharpening)
-        if film_grain_strength > 0.0:
-            pixels = film_grain(pixels, strength=film_grain_strength / 10.0)
-        return pixels
+        """Tensor post-processing hook. Runs on the fp32 GPU pixels.
+
+        The final stage of the declared chain, in declaration order; nothing asked
+        for leaves the tensor itself untouched.
+        """
+        return apply_stage(
+            pixels, options if options is not None else PostprocessOptions()
+        )
 
 
 __all__ = ["PipelineController"]

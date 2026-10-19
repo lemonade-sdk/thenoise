@@ -1,13 +1,13 @@
-"""Command-line interface for thenoise.
-
-Subcommands: ``serve`` (HTTP server), ``generate``, ``edit`` and ``upscale``.
-Model checkpoints are passed to ``serve``/``generate``/``edit`` as ``--dit`` /
-``--vae`` / ``--text-encoder``, and the model type is detected from the ``--dit``
-checkpoint. Every option is on the command line (there is no config file).
+"""CLI subcommands: serve, generate, edit, upscale, controlmap — the first three take
+model paths, the last two are model-free. No config file: everything is a flag.
 """
 from __future__ import annotations
 
 import argparse
+
+from thenoise.controlmap.options import OPTIONS_BY_KIND, add_option_args
+from thenoise.postprocess.options import PostprocessOptions
+from thenoise.utils.options import add_flags
 
 
 def _add_model_paths(p: argparse.ArgumentParser, required: bool = True) -> None:
@@ -23,15 +23,32 @@ def _add_model_paths(p: argparse.ArgumentParser, required: bool = True) -> None:
 
 
 def _add_upscaler_args(p: argparse.ArgumentParser) -> None:
-    """Add the pixel-upscaler flags for a subcommand.
-
-    ``serve`` takes ``--upscaler-dir``, with the upscaler selected per request via
-    the ``pixel_upscaler`` API field.
-    """
+    """Pixel-upscaler flags for a subcommand: ``serve`` takes ``--upscaler-dir``, the
+    upscaler itself being selected per request through the ``pixel_upscaler`` API field."""
     p.add_argument("--upscaler-dir", default="", metavar="PATH",
                    help="directory containing pixel upscaler .safetensors files "
                         "(e.g. Real-ESRGAN); selected per-request via the "
                         "'pixel_upscaler' API field")
+
+
+def _add_controlmap_args(p: argparse.ArgumentParser) -> None:
+    """Control-map flags for a subcommand: ``--controlmap-dir`` is server/one-shot
+    configuration, the control map being selected per request through ``--model``."""
+    p.add_argument("--controlmap-dir", default="", metavar="PATH",
+                   help="directory containing control-map checkpoints "
+                        "(e.g. Depth-Anything-V2); each subdirectory's config.json "
+                        "declares the kind it implements")
+
+
+def _add_controlmap_option_args(p: argparse.ArgumentParser) -> None:
+    """One ``--<kind>-<option>`` flag per option, defaulted from the dataclass."""
+    for kind, options in OPTIONS_BY_KIND.items():
+        add_option_args(p, kind, options)
+
+
+def _add_postprocess_args(p: argparse.ArgumentParser) -> None:
+    """One flag per post-decode knob, defaulted and bounded from the declaration."""
+    add_flags(p, PostprocessOptions, bounds=True)
 
 
 def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png") -> None:
@@ -73,7 +90,8 @@ def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png
                         "tokens' K/V across denoise steps for faster editing "
                         "(implies --ref-method index_timestep_zero unless given)")
     p.add_argument("--no-kv-cache", dest="kv_cache", action="store_false",
-                   help="disable the reference-latent KV cache (default)")
+                   help="disable the reference-latent KV cache (auto: on for "
+                        "'index_timestep_zero' reference conditioning)")
     p.set_defaults(kv_cache=None)
     p.add_argument("--ref-method", choices=["index", "index_timestep_zero"],
                    default=None,
@@ -81,13 +99,7 @@ def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png
                         "detected from the checkpoint marker, else 'index'); "
                         "'index_timestep_zero' conditions reference tokens at "
                         "timestep zero, which is what makes the KV cache valid")
-    p.add_argument("--qwen-vae-enhance", action="store_true",
-                   help="apply the Nyquist Notch post filter to decoded pixels "
-                        "(removes 2px grid artifacts)")
-    p.add_argument("--film-grain", type=float, default=0.0,
-                   help="film-grain strength 0.0–10.0. Reasonable values are <= 1.0 (default: 0.0)")
-    p.add_argument("--sharpening", type=float, default=0.0,
-                   help="RCAS sharpening strength 0.0–1.0 (contrast-adaptive, default: 0.0 / off)")
+    _add_postprocess_args(p)
     p.add_argument("--device", default="cuda",
                    help="inference device; ROCm aliases cuda -> hip (default: cuda)")
 
@@ -101,6 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve = sub.add_parser("serve", help="run the FastAPI HTTP server")
     _add_model_paths(serve, required=False)
     _add_upscaler_args(serve)
+    _add_controlmap_args(serve)
     serve.add_argument("--host", default="127.0.0.1",
                        help="bind host (default: 127.0.0.1)")
     serve.add_argument("--port", type=int, default=8000,
@@ -139,5 +152,27 @@ def build_parser() -> argparse.ArgumentParser:
                     help="output image path (default: out_upscaled.png)")
     up.add_argument("--device", default="cuda",
                     help="inference device; ROCm aliases cuda -> hip (default: cuda)")
+
+    # controlmap: extract a control map; needs no diffusion model either
+    pre = sub.add_parser("controlmap",
+                         help="extract a control map (canny / depth / pose) from an "
+                              "image (no model needed)")
+    pre.add_argument("--input", metavar="PATH", help="image to extract from")
+    pre.add_argument("--type", dest="types", action="append", metavar="KIND",
+                     help="control map to extract, repeatable "
+                          "(see --list for what is available)")
+    pre.add_argument("--model", default="",
+                     help="implementation to use for the chosen type "
+                          "(default: the type's own)")
+    _add_controlmap_args(pre)
+    pre.add_argument("--list", action="store_true",
+                     help="list the available control-map types and exit")
+    _add_controlmap_option_args(pre)
+    pre.add_argument("--out", default="out_control.png",
+                     help="output image path; the map is the size of the input, and "
+                          "extra --type values add a _<type> suffix "
+                          "(default: out_control.png)")
+    pre.add_argument("--device", default="cuda",
+                     help="inference device; ROCm aliases cuda -> hip (default: cuda)")
 
     return parser

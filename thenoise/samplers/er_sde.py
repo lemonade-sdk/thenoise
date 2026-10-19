@@ -27,6 +27,7 @@ class ErSdeSampler(Sampler):
         model = self.model
         dtype = x.dtype
         s_noise = 1.0
+        model.begin_sampling(schedule)
 
         def noise_scaler(t):
             return t * (torch.exp(t ** 0.3) + 10.0)

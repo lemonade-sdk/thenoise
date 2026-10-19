@@ -3,7 +3,8 @@
 Each type is its own module, exported here for the models to pick. Loading one is
 always ``load_<name>_vae(path, device, dtype)``; where a model accepts more than
 one codec, ``load_<name>_family_vae`` reads the checkpoint header and dispatches
-to the right one.
+to the right one. Variants of ONE codec — the Flux.2 AE's full or small decoder —
+are read off the weights inside that codec's own loader, so they need no choice.
 """
 from .qwen_image import (
     AutoencoderKLQwenImage,

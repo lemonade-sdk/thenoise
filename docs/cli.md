@@ -13,6 +13,7 @@ DiT checkpoint.
 | `generate` | Generate one image from a text prompt | yes |
 | `edit` | Edit an image from an instruction (image + prompt → edited image) | editing-capable model |
 | `upscale` | Pixel-upscale an existing image | no (upscaler only) |
+| `controlmap` | Extract a control map (canny / depth / pose) from an image | no |
 | `serve` | Serve a model over HTTP: JSON API + web UI at <http://localhost:8000/> | yes (lazily) |
 
 ## Shared flags (`serve`, `generate`, `edit`)
@@ -72,10 +73,14 @@ Then open <http://localhost:8000/> for the web UI. Full endpoint reference:
 | `--upscale-factor` | no | `1.0` | Upscale factor (> 0.0; max depends on the pixel upscaler scale, see [Upscaling](#upscaling)) |
 | `--sampler` | no | model default | Solver: `euler` or `er_sde` |
 | `--qwen-vae-enhance` | no | off | Nyquist notch post-filter (removes 2px grid artifacts) |
-| `--film-grain` | no | `0.0` | Film grain strength (0.0–10.0) |
+| `--saturation` | no | `0.0` | Colour saturation around neutral: -1.0 greyscales, 1.0 doubles (-1.0–1.0) |
+| `--vibrance` | no | `0.0` | Saturation that lifts washed-out pixels and leaves vivid ones alone (-1.0–1.0) |
+| `--temperature` | no | `0.0` | White balance: -1.0 cools to blue, 1.0 warms to amber (-1.0–1.0) |
+| `--tint` | no | `0.0` | White balance across the green–magenta axis: -1.0 greens, 1.0 magentas (-1.0–1.0) |
 | `--sharpening` | no | `0.0` | RCAS sharpening strength (0.0–1.0) |
-| `--kv-cache` / `--no-kv-cache` | no | auto (off) | Reference-latent KV cache (edit only): freeze the reference tokens' K/V across denoise steps for faster editing. Implies `--ref-method index_timestep_zero` unless one is given explicitly |
-| `--ref-method` | no | auto | Reference conditioning for editing: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index` |
+| `--film-grain` | no | `0.0` | Film grain strength (0.0–10.0) |
+| `--kv-cache` / `--no-kv-cache` | no | auto | Reference-latent KV cache (edit only): freeze the reference tokens' K/V across denoise steps for faster editing. Auto = on for `index_timestep_zero` reference conditioning on models implementing the cache. `--kv-cache` also selects that method when `--ref-method` is left unset |
+| `--ref-method` | no | auto | Reference conditioning for editing: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index`. The cache default follows it |
 
 > **Note:** `--kv-cache` is a reference-latent optimization and only applies to
 > `edit` (it needs a reference image). On `generate` it raises an error.
@@ -85,9 +90,8 @@ Then open <http://localhost:8000/> for the web UI. Full endpoint reference:
 Edits an existing image from an instruction (image + prompt → edited image).
 Requires an editing-capable model and shares all generation flags with `generate`.
 
-`--image` is repeatable: the **first** image is resized to 1024 on its largest
-side (aspect preserved) and sets the output size; the rest are used as
-additional references.
+`--image` is repeatable. The **first** image sets the output size when
+`--width`/`--height` are omitted: 1024 on its largest side, aspect preserved.
 
 ```bash
 ./thenoise.sh edit \
@@ -122,6 +126,60 @@ Pixel-upscales an existing image. Model-free - no `--dit`/`--vae`/
 | `--input` | yes | — | Input image to upscale |
 | `--upscale-factor` | no | `0.0` | Upscale factor (`0.0` = the model's detected scale; must be in [1, that scale]; larger values are rejected) |
 | `--out` | no | `out_upscaled.png` | Output image path |
+
+## Control-map a control map
+
+Extracts a conditioning map - Canny edges, a Depth-Anything-V2 depth map or an
+openpose-style pose skeleton - from an existing image. Model-free.
+
+```bash
+./thenoise.sh controlmap \
+  --input /tmp/photo.jpg --type canny --out /tmp/photo_canny.png
+./thenoise.sh controlmap \
+  --input /tmp/photo.jpg --type depth --out /tmp/photo_depth.png \
+  --controlmap-dir ./models/controlmaps
+./thenoise.sh controlmap \
+  --input /tmp/photo.jpg --type pose --out /tmp/photo_pose.png \
+  --controlmap-dir ./models/controlmaps
+```
+
+Depth needs its checkpoint and pose needs two (a keypoint model and a person detector):
+see [Control-map extraction](controlmap.md#installing-and-downloading-what-each-kind-needs).
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--input` | yes* | — | Input image to extract from (*unless `--list`) |
+| `--type` | yes* | — | Control map to extract; repeatable, each extra type writes its own `<out>_<type>.png` |
+| `--model` | no | type default | Implementation to use for that type |
+| `--controlmap-dir` | no | — | Directory of control-map checkpoints (e.g. `./models/controlmaps`); each subdirectory's `config.json` declares the kind it implements |
+| `--list` | no | — | List the available control-map types, and what a half-installed kind still needs, then exit |
+| `--canny-low` | no | `100` | Canny low threshold, in Sobel magnitude units |
+| `--canny-high` | no | `200` | Canny high threshold; weak edges connected to a strong one are kept |
+| `--canny-thickness` | no | `1` | Rendered edge thickness in pixels |
+| `--lineart-threshold` | no | `0.5` | Line-art: line intensity threshold, 0-1 |
+| `--lineart-thickness` | no | `1` | Line-art: line thickness in pixels |
+| `--softedge-threshold` | no | `0.2` | Soft-edge: where the gradient starts to count, 0-1 |
+| `--softedge-blur` | no | `1.5` | Soft-edge: smoothing sigma in pixels, 0 = none |
+| `--depth-invert` / `--no-depth-invert` | no | `false` | Depth: swap near/far (near is bright by default) |
+| `--depth-colormap` | no | `gray` | Depth: `gray` or `turbo` (a vivid rainbow) |
+| `--pose-detector` | no | first found | Pose: which RT-DETR checkpoint to crop people with |
+| `--pose-threshold` | no | `0.5` | Pose: minimum detector score for a person to be in the map at all |
+| `--pose-kp-threshold` | no | `0.3` | Pose: minimum confidence for a joint to be drawn |
+| `--pose-line-width` | no | `4` | Pose: skeleton bone thickness in pixels |
+| `--pose-radius` | no | `4` | Pose: radius of the joint dots |
+| `--pose-background` | no | `black` | Pose: `black` or `green` (the canvas SD's original openpose map used) |
+| `--out` | no | `out_control.png` | Output image path |
+
+The `--<type>-<option>` flags, the `/controlmap` request fields and the web UI form all
+come from the same declaration.
+
+The map is white edges on black (`--type canny`), dark lines on white
+(`--type lineart`), soft dark edges on white (`--type softedge`), a grey or turbo
+rainbow depth field (`--type depth`) or a coloured skeleton (`--type pose`), at the
+size of the image it was extracted from, so it can be paired with that image later. It
+is written as a PNG with a `controlmap_data` text chunk recording the type, the model
+and every option that differed from its default, alongside whatever metadata the input
+already carried.
 
 ## Upscaling
 

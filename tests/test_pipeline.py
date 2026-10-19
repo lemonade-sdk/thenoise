@@ -14,6 +14,7 @@ import torch
 
 from conftest import StubLatentUpscaler, StubModel
 from thenoise.models.config import GenerateRequest, SamplingParams
+from thenoise.postprocess import FILTERS, POSTPROCESS_NAMES, PostprocessOptions
 from thenoise.pipeline import (
     PipelineController,
     _normalize_sigmas,
@@ -41,7 +42,7 @@ def _request(**kwargs) -> GenerateRequest:
 def test_resolve_falls_back_to_model_defaults():
     """Every ``None`` request field takes the model's own default."""
     model = StubModel()
-    r = _controller(model)._resolve_pipeline(GenerateRequest(prompt="p"))
+    r = _controller(model)._resolve_pipeline(GenerateRequest(prompt="p"), is_edit=False)
 
     defaults = model.DEFAULT_PREFS
     assert (r.width, r.height) == (defaults["width"], defaults["height"])
@@ -57,7 +58,8 @@ def test_resolve_falls_back_to_model_defaults():
 
 def test_resolve_explicit_request_wins_over_defaults():
     r = _controller()._resolve_pipeline(
-        _request(width=128, height=64, steps=5, guidance_scale=3.5, sampler="er_sde")
+        _request(width=128, height=64, steps=5, guidance_scale=3.5, sampler="er_sde"),
+        is_edit=False,
     )
     assert (r.width, r.height, r.steps) == (128, 64, 5)
     assert r.guidance_scale == 3.5
@@ -67,7 +69,7 @@ def test_resolve_explicit_request_wins_over_defaults():
 def test_resolve_upscale_flag_without_factor_uses_the_latent_scale():
     """``upscale=True`` with the 1.0 default factor means "the model's 2x"."""
     model = StubModel()
-    r = _controller(model)._resolve_pipeline(_request(upscale=True))
+    r = _controller(model)._resolve_pipeline(_request(upscale=True), is_edit=False)
     assert r.factor == float(model.UPSCALE_SCALE)
     assert r.refined is True
     assert (r.target_width, r.target_height) == (
@@ -77,7 +79,7 @@ def test_resolve_upscale_flag_without_factor_uses_the_latent_scale():
 
 
 def test_resolve_target_size_is_the_rounded_factor():
-    r = _controller()._resolve_pipeline(_request(upscale_factor=1.5, upscale=True))
+    r = _controller()._resolve_pipeline(_request(upscale_factor=1.5, upscale=True), is_edit=False)
     assert (r.target_width, r.target_height) == (
         round(r.width * 1.5),
         round(r.height * 1.5),
@@ -92,7 +94,7 @@ def test_resolve_drops_pixel_upscaler_when_no_dir_is_configured(tmp_path):
     would hard-fail for every user who left the directory unset.
     """
     r = _controller()._resolve_pipeline(
-        _request(pixel_upscaler="RealESRGAN_x4", upscale=True)
+        _request(pixel_upscaler="RealESRGAN_x4", upscale=True), is_edit=False
     )
     assert r.pixel_upscaler is None
     assert r.pixel_scale == 0
@@ -102,7 +104,8 @@ def test_resolve_drops_pixel_upscaler_when_no_dir_is_configured(tmp_path):
     (tmp_path / "RealESRGAN_x4.safetensors").write_text("x")
     keep = _controller(upscaler_dir=str(tmp_path), upscaler_scales={"RealESRGAN_x4": 4})
     r2 = keep._resolve_pipeline(
-        _request(pixel_upscaler="RealESRGAN_x4", upscale_factor=4.0, upscale=True)
+        _request(pixel_upscaler="RealESRGAN_x4", upscale_factor=4.0, upscale=True),
+        is_edit=False,
     )
     assert r2.pixel_upscaler == "RealESRGAN_x4"
     assert r2.pixel_scale == 4
@@ -110,12 +113,16 @@ def test_resolve_drops_pixel_upscaler_when_no_dir_is_configured(tmp_path):
 
 @pytest.mark.parametrize("seed", [None, -1])
 def test_resolve_randomizes_negative_and_missing_seed(seed):
-    seen = {_controller()._resolve_pipeline(GenerateRequest(prompt="p", seed=seed)).seed
-            for _ in range(4)}
+    seen = {
+        _controller()._resolve_pipeline(
+            GenerateRequest(prompt="p", seed=seed), is_edit=False
+        ).seed
+        for _ in range(4)
+    }
     assert all(isinstance(s, int) and 0 <= s < 2**32 for s in seen)
     assert len(seen) > 1  # "random" really is random, not a fixed sentinel
 
-    assert _controller()._resolve_pipeline(_request(seed=42)).seed == 42
+    assert _controller()._resolve_pipeline(_request(seed=42), is_edit=False).seed == 42
 
 
 # ------------------------------------------------------------------ generate path
@@ -342,10 +349,15 @@ def test_normalize_sigmas_returns_the_full_grid(values, grid):
     assert _normalize_sigmas(values) == grid
 
 
+def test_normalize_sigmas_none_or_empty_is_no_grid():
+    """``None`` is "unset", ``[]`` is "switch the grid off"."""
+    assert _normalize_sigmas(None) is None
+    assert _normalize_sigmas([]) is None
+
+
 @pytest.mark.parametrize(
     "values",
     [
-        [],
         [0.0],
         [0.25, 0.75],
         [0.5, 0.5],
@@ -358,7 +370,7 @@ def test_normalize_sigmas_returns_the_full_grid(values, grid):
         "1.0, 0.5",
     ],
     ids=[
-        "empty", "only-zero", "ascending", "repeat", "repeat-one", "above-one",
+        "only-zero", "ascending", "repeat", "repeat-one", "above-one",
         "negative", "nan", "inf", "non-numeric", "string-not-list",
     ],
 )
@@ -380,7 +392,7 @@ def test_sigma_steps_walk_the_grid_verbatim():
 def test_resolve_sigmas_set_the_step_count():
     model = StubModel()
     model.checkpoint_prefs = {"steps": 6}  # a marker is overridden too
-    r = _controller(model)._resolve_pipeline(_request(sigmas=[1.0, 0.5]))
+    r = _controller(model)._resolve_pipeline(_request(sigmas=[1.0, 0.5]), is_edit=False)
 
     assert r.sigmas == (1.0, 0.5, 0.0)
     assert r.steps == 2
@@ -388,7 +400,7 @@ def test_resolve_sigmas_set_the_step_count():
 
 def test_resolve_sigmas_override_steps_with_a_warning(caplog):
     caplog.set_level(logging.WARNING, logger="thenoise.pipeline")
-    r = _controller()._resolve_pipeline(_request(steps=8, sigmas=[1.0, 0.5]))
+    r = _controller()._resolve_pipeline(_request(steps=8, sigmas=[1.0, 0.5]), is_edit=False)
 
     assert r.steps == 2
     assert "overrides steps=8" in caplog.text
@@ -396,8 +408,65 @@ def test_resolve_sigmas_override_steps_with_a_warning(caplog):
 
 def test_resolve_sigmas_agreeing_with_steps_stay_quiet(caplog):
     caplog.set_level(logging.WARNING, logger="thenoise.pipeline")
-    _controller()._resolve_pipeline(_request(steps=2, sigmas=[1.0, 0.5]))
+    _controller()._resolve_pipeline(_request(steps=2, sigmas=[1.0, 0.5]), is_edit=False)
     assert caplog.text == ""
+
+
+class _GridModel(StubModel):
+    """An adapter shipping a fixed sigma grid as a default (Qwen-Image 2.1 Turbo)."""
+
+    DEFAULT_PREFS = {
+        **StubModel.DEFAULT_PREFS,
+        "steps": 4,
+        "sigmas": [1.0, 0.75, 0.5, 0.25],
+    }
+
+
+_GRID = (1.0, 0.75, 0.5, 0.25, 0.0)
+
+
+def test_resolve_uses_the_model_default_sigma_grid():
+    r = _controller(_GridModel())._resolve_pipeline(_request(), is_edit=False)
+
+    assert r.sigmas == _GRID
+    assert r.steps == 4
+
+
+def test_resolve_explicit_steps_drop_an_inherited_sigma_grid(caplog):
+    """An inherited grid is a default, not a mandate: a pinned step count wins."""
+    caplog.set_level(logging.WARNING, logger="thenoise.pipeline")
+    r = _controller(_GridModel())._resolve_pipeline(_request(steps=6), is_edit=False)
+
+    assert r.sigmas is None
+    assert r.steps == 6  # not 4: the discarded grid must not decide
+    assert caplog.text == ""
+
+
+def test_resolve_inherited_grid_matching_the_request_steps_stays_quiet(caplog):
+    caplog.set_level(logging.WARNING, logger="thenoise.pipeline")
+    r = _controller(_GridModel())._resolve_pipeline(_request(steps=4), is_edit=False)
+
+    assert (r.sigmas, r.steps) == (_GRID, 4)
+    assert caplog.text == ""
+
+
+def test_resolve_empty_sigmas_switch_off_a_model_default_grid():
+    """``sigmas: []`` is the explicit "no grid" answer, at any step count."""
+    auto = _controller(_GridModel())._resolve_pipeline(_request(sigmas=[]), is_edit=False)
+    assert (auto.sigmas, auto.steps) == (None, 4)
+
+    pinned = _controller(_GridModel())._resolve_pipeline(
+        _request(sigmas=[], steps=6), is_edit=False
+    )
+    assert (pinned.sigmas, pinned.steps) == (None, 6)
+
+
+def test_resolve_request_grid_replaces_a_model_default_grid():
+    r = _controller(_GridModel())._resolve_pipeline(
+        _request(sigmas=[1.0, 0.5]), is_edit=False
+    )
+
+    assert (r.sigmas, r.steps) == ((1.0, 0.5, 0.0), 2)
 
 
 def test_generate_with_sigmas_bypasses_the_model_schedule():
@@ -414,6 +483,22 @@ def test_generate_without_sigmas_still_uses_the_model_schedule():
 
     assert controller.model.calls["schedule"] == 1
     assert controller.model.calls["denoise_step"] == 3
+
+
+def test_generate_runs_a_model_default_grid_without_the_model_schedule():
+    controller = _controller(_GridModel())
+    controller.generate(_request())
+
+    assert controller.model.calls["schedule"] == 0
+    assert controller.model.calls["denoise_step"] == 4
+
+
+def test_generate_with_pinned_steps_falls_back_to_the_model_schedule():
+    controller = _controller(_GridModel())
+    controller.generate(_request(steps=5))
+
+    assert controller.model.calls["schedule"] == 1
+    assert controller.model.calls["denoise_step"] == 5
 
 
 def test_custom_sigmas_hand_denoise_step_a_timestep_tensor():
@@ -492,43 +577,47 @@ def test_generate_without_upscale_never_touches_the_upscaler():
 
 
 def test_postprocess_dispatches_only_what_is_requested(monkeypatch):
+    """The chain runs a filter only when a knob of its own was asked for."""
     controller = _controller()
     calls = []
-    monkeypatch.setattr(
-        "thenoise.pipeline.rcas",
-        lambda pixels, strength: calls.append(("rcas", strength)) or pixels,
+    monkeypatch.setitem(
+        FILTERS, "rcas",
+        lambda pixels, *, sharpening: calls.append(("rcas", sharpening)) or pixels,
     )
-    monkeypatch.setattr(
-        "thenoise.pipeline.film_grain",
-        lambda pixels, strength: calls.append(("film", strength)) or pixels,
+    monkeypatch.setitem(
+        FILTERS, "film_grain",
+        lambda pixels, *, film_grain: calls.append(("film", film_grain)) or pixels,
     )
     pixels = torch.zeros(3, 4, 4)
 
-    # Both off -> the input object is returned untouched.
-    assert controller.postprocess(pixels) is pixels
+    # Nothing asked for -> no filter runs, and the input object comes back untouched.
+    assert controller.postprocess(pixels, PostprocessOptions()) is pixels
     assert calls == []
 
-    out = controller.postprocess(pixels, film_grain_strength=2.0, sharpening=0.5)
+    out = controller.postprocess(
+        pixels, PostprocessOptions(film_grain=2.0, sharpening=0.5)
+    )
     assert out is pixels
-    # film_grain is requested on a 0-10 scale and scaled /10 for the filter.
-    assert calls == [("rcas", 0.5), ("film", 0.2)]
+    # Chain order: sharpen first, then grain, each seeing the value as the request
+    # stated it (the grain adapter is what turns the 0-10 scale into the filter's 0-1).
+    assert calls == [("rcas", 0.5), ("film", 2.0)]
 
 
 def test_finalize_applies_the_notch_filter_only_when_asked(monkeypatch):
     controller = _controller()
     seen = []
-    monkeypatch.setattr(
-        "thenoise.pipeline.nyquist_notch",
-        lambda pixels: seen.append(1) or pixels,
+    monkeypatch.setitem(
+        FILTERS, "nyquist_notch",
+        lambda pixels, **_switch: seen.append(1) or pixels,
     )
     pixels = torch.zeros(3, 8, 8)
 
     plain = _request()
-    controller._finalize(pixels, plain, controller._resolve_pipeline(plain))
+    controller._finalize(pixels, plain, controller._resolve_pipeline(plain, is_edit=False))
     assert seen == []
 
     enhanced = _request(qwen_vae_enhance=True)
-    controller._finalize(pixels, enhanced, controller._resolve_pipeline(enhanced))
+    controller._finalize(pixels, enhanced, controller._resolve_pipeline(enhanced, is_edit=False))
     assert seen == [1]
 
 
@@ -536,7 +625,7 @@ def test_finalize_resizes_to_the_upscaled_target():
     controller = _controller()
     request = _request(upscale=True)
     image = controller._finalize(
-        torch.zeros(3, 64, 64), request, controller._resolve_pipeline(request)
+        torch.zeros(3, 64, 64), request, controller._resolve_pipeline(request, is_edit=False)
     )
     assert image.size == (128, 128)
 
@@ -556,6 +645,38 @@ def test_finalize_attaches_png_metadata():
 
     # ...and the chunks really survive a PNG round-trip.
     assert json.loads(_text_chunk(image, "generation_data"))["seed"] == 5
+
+
+def test_edit_keeps_the_input_metadata_and_records_itself_separately():
+    """An edit lands in ``edit_data`` next to the input's chunks, never over them."""
+    from PIL import Image
+
+    from conftest import EditingStubModel
+
+    controller = _controller(EditingStubModel())
+    source = Image.new("RGB", (64, 64), "white")
+    source.info["generation_data"] = '{"prompt": "a fox", "seed": 111}'
+    source.info["parameters"] = "a fox\nModel: stub, Steps: 9, Seed: 111"
+    source.info["Software"] = "whatever wrote the input"
+    source.info["edit_data"] = '{"prompt": "an earlier edit"}'  # replaced, not appended
+
+    image = controller.edit(
+        _request(image=source, prompt="a fox with a scarf", steps=1, seed=5)
+    )
+
+    texts = _all_texts(image._pnginfo)
+    assert json.loads(texts["generation_data"]) == {"prompt": "a fox", "seed": 111}
+    assert texts["parameters"] == "a fox\nModel: stub, Steps: 9, Seed: 111"
+    assert texts["Software"] == "whatever wrote the input"
+
+    edit = json.loads(texts["edit_data"])
+    assert (edit["prompt"], edit["steps"], edit["seed"]) == (
+        "a fox with a scarf",
+        1,
+        5,
+    )
+    # The chunks really survive the save, as every other section does.
+    assert json.loads(_text_chunk(image, "edit_data"))["seed"] == 5
 
 
 def _text_chunk(image, keyword: str) -> str:
@@ -584,9 +705,7 @@ def _parameters(**overrides) -> str:
         upscale_factor=1.0,
         upscale_type="refined",
         sampler="euler",
-        qwen_vae_enhance=False,
-        film_grain=0.0,
-        sharpening=0.0,
+        postprocess=PostprocessOptions(),
         lora_specs=None,
         pixel_upscaler=None,
         sigmas=None,
@@ -611,19 +730,44 @@ def test_pnginfo_json_block_covers_every_field():
     info = build_pnginfo(
         model="anima", prompt="p", negative_prompt="n", width=512, height=256,
         steps=8, guidance_scale=1.5, seed=3, upscale=True, upscale_factor=2.0,
-        upscale_type="no-refiner", sampler="er_sde", qwen_vae_enhance=True,
-        film_grain=0.5, sharpening=0.2, lora_specs=["a:1.0"], pixel_upscaler="x4",
-        sigmas=[1.0, 0.5, 0.0],
+        upscale_type="no-refiner", sampler="er_sde",
+        postprocess=PostprocessOptions(
+            qwen_vae_enhance=True, saturation=0.4, vibrance=-0.2, temperature=0.3,
+            tint=-0.1, sharpening=0.2, film_grain=0.5,
+        ),
+        lora_specs=["a:1.0"], pixel_upscaler="x4",
+        sigmas=[1.0, 0.5, 0.0], ref_method="index_timestep_zero", kv_cache=True,
     )
     data = json.loads(_chunk_text(info, "generation_data"))
     assert data == {
         "model": "anima", "prompt": "p", "negative_prompt": "n",
         "width": 512, "height": 256, "steps": 8, "guidance_scale": 1.5, "seed": 3,
         "upscale": True, "upscale_factor": 2.0, "upscale_type": "no-refiner",
-        "sampler": "er_sde", "qwen_vae_enhance": True, "film_grain": 0.5,
-        "sharpening": 0.2, "lora_specs": ["a:1.0"], "pixel_upscaler": "x4",
-        "sigmas": [1.0, 0.5, 0.0],
+        "sampler": "er_sde", "qwen_vae_enhance": True, "saturation": 0.4,
+        "vibrance": -0.2, "temperature": 0.3, "tint": -0.1,
+        "sharpening": 0.2, "film_grain": 0.5,
+        "lora_specs": ["a:1.0"], "pixel_upscaler": "x4",
+        "sigmas": [1.0, 0.5, 0.0], "ref_method": "index_timestep_zero",
+        "kv_cache": True,
     }
+
+
+def test_generation_data_carries_every_post_decode_knob():
+    """A knob is recorded flat, under its declared name, whatever the chain does with it."""
+    info = build_pnginfo(
+        model="anima", prompt="p", negative_prompt="", width=64, height=64,
+        steps=4, guidance_scale=1.0, seed=1, upscale=False, upscale_factor=1.0,
+        upscale_type="refined", sampler="euler", postprocess=PostprocessOptions(),
+        lora_specs=None, pixel_upscaler=None,
+    )
+
+    assert set(POSTPROCESS_NAMES) <= set(json.loads(_chunk_text(info, "generation_data")))
+
+
+def test_pnginfo_keeps_the_reference_flags_out_of_the_a1111_text():
+    """``parameters`` is read by third-party tools: it stays byte-compatible."""
+    assert "kv_cache" not in _parameters(kv_cache=True)
+    assert "ref_method" not in _parameters(ref_method="index")
 
 
 def test_pnginfo_parameters_layout():
@@ -682,6 +826,30 @@ def test_build_upscale_pnginfo_carries_over_and_replaces():
         "upscaler_model": "RealESRGAN_x4",
         "upscale_factor": 4.0,
     }
+
+
+def test_save_output_writes_the_provenance_the_controller_attached(tmp_path):
+    from PIL import Image
+
+    from thenoise.utils.png import build_upscale_pnginfo, save_output
+
+    image = Image.new("RGB", (2, 2))
+    image._pnginfo = build_upscale_pnginfo(image, "RealESRGAN_x4", 2.0)
+
+    # A name with no extension cannot tell PIL a format, so it becomes the PNG the
+    # metadata needs; the path actually written is handed back for the caller to log.
+    path = save_output(image, str(tmp_path / "out"))
+    assert path.endswith("out.png")
+    saved = Image.open(path)
+    assert json.loads(saved.info["upscale_data"])["upscaler_model"] == "RealESRGAN_x4"
+
+
+def test_pnginfo_of_an_image_that_carries_none():
+    from PIL import Image
+
+    from thenoise.utils.png import pnginfo_of
+
+    assert pnginfo_of(Image.new("RGB", (2, 2))) is None
 
 
 def test_kv_cache_requires_an_edit_request():

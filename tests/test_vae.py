@@ -6,8 +6,9 @@ being re-declared by the model adapters — a DiT's own input width is a differe
 number (it patchifies the latent further), and two declarations of one fact is how
 they drift apart.
 
-The second half covers the shared Wan2.1-family loader, which builds ONE
-architecture two ways — Qwen-Image (RGB, per-channel z-scored latent) and
+The middle section covers the two Flux.2 decoders, which the loader likewise tells
+apart from the weights. The last section covers the shared Wan2.1-family loader, which
+builds ONE architecture two ways — Qwen-Image (RGB, per-channel z-scored latent) and
 Ming-Image (RGBA, scalar scale) — deciding which from the weights themselves.
 """
 from __future__ import annotations
@@ -23,6 +24,7 @@ from thenoise.vae import (
     AutoencoderKLFlux,
     AutoencoderKLFlux2,
     AutoencoderKLQwenImage,
+    load_flux2_vae,
     load_ming_vae,
     load_qwen_vae,
 )
@@ -50,6 +52,61 @@ def test_qwen_compression_follows_the_downsampling_stages(dim_mult, compression)
     vae = AutoencoderKLQwenImage(base_dim=4, dim_mult=dim_mult)  # tiny random init
     assert vae.z_dim == 16
     assert vae.spatial_compression == compression
+
+
+# -------------------------------------------------- the Flux.2 decoder variants
+
+
+def _flux2_checkpoint(tmp_path, name: str, *, decoder_ch: int) -> tuple[str, dict]:
+    """A tiny Flux.2 checkpoint, as a file holds it: ``(path, the tensors in it)``."""
+    source = AutoencoderKLFlux2(encoder_ch=32, decoder_ch=decoder_ch).state_dict()
+    path = write_safetensors(tmp_path / name, {k: v.clone() for k, v in source.items()})
+    return path, source
+
+
+@pytest.mark.parametrize("decoder_ch", [32, 64])
+def test_the_flux2_decoder_width_comes_from_the_file(tmp_path, decoder_ch):
+    """Full and small decoders share ``--vae``: the weights say which one is in use.
+
+    The production widths are 128 base channels (full) and 96 (BFL's small decoder);
+    both are one base scaled by ``(1, 2, 4, 4)``, so the loader is exercised here at
+    widths cheap enough to build.
+    """
+    path, source = _flux2_checkpoint(tmp_path, "flux2_vae.safetensors", decoder_ch=decoder_ch)
+
+    vae = load_flux2_vae(path, device="cpu")
+
+    assert vae.decoder_ch == decoder_ch
+    loaded = vae.state_dict()
+    assert set(loaded) == set(source)
+    for key, value in source.items():
+        assert torch.equal(loaded[key], value), key
+    # What the DiT sees is identical either way; only the pixels get cheaper.
+    assert (vae.z_dim, vae.spatial_compression, vae.pixel_channels) == (128, 16, 3)
+    with torch.no_grad():
+        assert vae.decode_to_pixels(torch.randn(1, 128, 4, 4)).shape == (1, 3, 64, 64)
+
+
+def test_a_flux2_decoder_of_the_wrong_shape_is_refused(tmp_path):
+    """The widths come off the ``conv_in`` of each half, so they get checked: a
+    Qwen-Image VAE has those keys too, and guessing from them would build a nonsense
+    Flux.2 half instead of saying the file is not one.
+    """
+    encoder = {"encoder.conv_in.weight": torch.zeros(128, 3, 3, 3)}
+
+    qwen = write_safetensors(
+        tmp_path / "qwen_image_vae.safetensors",
+        dict(encoder, **{"decoder.conv_in.weight": torch.zeros(512, 16, 3, 3)}),  # 16ch latent
+    )
+    with pytest.raises(ValueError, match="taking 32 channels on its input"):
+        load_flux2_vae(qwen, device="cpu")
+
+    ragged = write_safetensors(
+        tmp_path / "ragged.safetensors",
+        dict(encoder, **{"decoder.conv_in.weight": torch.zeros(510, 32, 3, 3)}),
+    )
+    with pytest.raises(ValueError, match="510-channel decoder input"):
+        load_flux2_vae(ragged, device="cpu")
 
 
 # ------------------------------------------------ the shared Wan2.1-family loader

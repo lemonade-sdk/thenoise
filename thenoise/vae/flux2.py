@@ -30,6 +30,23 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+#: The two halves' shape, stated once. ``_CH_MULT`` scales a base width per stage, so
+#: the Flux.2 releases differ only in that base: every checkpoint *encodes* at 128
+#: (stages 128/256/512/512), while BFL's distilled `FLUX.2-small-decoder
+#: <https://huggingface.co/black-forest-labs/FLUX.2-small-decoder>`_ *decodes* at 96
+#: (96/192/384/384) — ~28M decoder parameters instead of ~50M, ~1.4x faster decode and
+#: ~1.4x less decode memory, at bit-identical latents and the same encoder. Point
+#: ``--vae`` at either file: the loader reads the width from the weights.
+_CH_MULT = (1, 2, 4, 4)
+_Z_CHANNELS = 32  # raw latent channels, 2x2-packed into the canonical 128
+_PIXEL_CHANNELS = 3
+ENCODER_CH = 128
+FULL_DECODER_CH = 128
+SMALL_DECODER_CH = 96
+#: The widths that have shipped, for the log line.
+_DECODER_VARIANTS = {FULL_DECODER_CH: "full", SMALL_DECODER_CH: "small"}
+
+
 def swish(x: torch.Tensor) -> torch.Tensor:
     return F.silu(x)
 
@@ -134,11 +151,11 @@ class _Encoder(nn.Module):
 
     def __init__(
         self,
-        ch: int = 128,
-        in_channels: int = 3,
-        ch_mult: list[int] = [1, 2, 4, 4],
+        ch: int = ENCODER_CH,
+        in_channels: int = _PIXEL_CHANNELS,
+        ch_mult: tuple[int, ...] = _CH_MULT,
         num_res_blocks: int = 2,
-        z_channels: int = 32,
+        z_channels: int = _Z_CHANNELS,
     ):
         super().__init__()
         self.ch = ch
@@ -206,11 +223,11 @@ class _Decoder(nn.Module):
 
     def __init__(
         self,
-        ch: int = 128,
-        out_ch: int = 3,
-        ch_mult: list[int] = [1, 2, 4, 4],
+        ch: int = FULL_DECODER_CH,
+        out_ch: int = _PIXEL_CHANNELS,
+        ch_mult: tuple[int, ...] = _CH_MULT,
         num_res_blocks: int = 2,
-        z_channels: int = 32,
+        z_channels: int = _Z_CHANNELS,
     ):
         super().__init__()
         self.post_quant_conv = nn.Conv2d(z_channels, z_channels, 1)
@@ -277,19 +294,33 @@ class AutoencoderKLFlux2(nn.Module):
     """Flux.2 VAE (encoder + decoder), with musubi/Flux key naming.
 
     Accepts/produces the canonical packed latent ``[B, 128, H//16, W//16]``
-    (normalized); pixels are in [-1, 1] both ways.
+    (normalized); pixels are in [-1, 1] both ways. The latent is the same whichever
+    decoder is attached, so a small-decoder checkpoint drops into any Flux.2 model.
     """
 
     z_dim = 128  # packed latent channels
     spatial_compression = 16  # pixel / packed-latent ratio
-    pixel_channels = 3  # RGB
+    pixel_channels = _PIXEL_CHANNELS
     bn_eps = 1e-4
 
-    def __init__(self, channels: int = 128):
+    def __init__(
+        self,
+        channels: int = 128,
+        encoder_ch: int = ENCODER_CH,
+        decoder_ch: int = FULL_DECODER_CH,
+    ):
+        """``channels`` is the packed latent width; the rest are the halves' base widths.
+
+        Both widths are arguments because the releases differ (see :data:`_CH_MULT`):
+        :func:`load_flux2_vae` reads them off the checkpoint, so naming them by hand is
+        only for building one from scratch — or a cheap one, in the tests.
+        """
         super().__init__()
+        self.encoder_ch = encoder_ch
+        self.decoder_ch = decoder_ch
         self.bn = nn.BatchNorm2d(channels, eps=self.bn_eps, momentum=0.1, affine=False, track_running_stats=True)
-        self.encoder = _Encoder()
-        self.decoder = _Decoder()
+        self.encoder = _Encoder(ch=encoder_ch)
+        self.decoder = _Decoder(ch=decoder_ch)
 
     @property
     def dtype(self):
@@ -328,6 +359,33 @@ class AutoencoderKLFlux2(nn.Module):
         return image.clamp(-1.0, 1.0)
 
 
+_HALF_WIDTHS = {"encoder": (1, _PIXEL_CHANNELS), "decoder": (_CH_MULT[-1], _Z_CHANNELS)}
+
+
+def _half_width(state_dict: dict, half: str, vae_path: str) -> int:
+    """Base channel width of one half of ``state_dict`` — 96 for a small decoder, 128 otherwise.
+
+    Each half's ``conv_in`` states it, so no config file is needed and the strict load
+    right after checks the rest of the layout. Requiring the input channels — 3 pixels,
+    32 raw latent — is what separates a Flux.2 AE from any VAE that happens to carry a
+    ``decoder.conv_in.weight``.
+    """
+    scale, in_channels = _HALF_WIDTHS[half]
+    key = f"{half}.conv_in.weight"
+    weight = state_dict.get(key)
+    if weight is None or weight.dim() != 4 or weight.shape[1] != in_channels:
+        raise ValueError(
+            f"'{key}' taking {in_channels} channels on its input is missing from "
+            f"{vae_path} (not a Flux.2 VAE?)"
+        )
+    if weight.shape[0] % scale:
+        raise ValueError(
+            f"{vae_path}: a {weight.shape[0]}-channel {half} input is not a scaled "
+            f"{list(_CH_MULT)} stage layout (not a Flux.2 {half}?)"
+        )
+    return weight.shape[0] // scale
+
+
 def load_flux2_vae(
     vae_path: str,
     device: Union[str, torch.device],
@@ -338,7 +396,6 @@ def load_flux2_vae(
     logger.info("Loading Flux.2 VAE from %s", vae_path)
     state_dict = load_safetensors(vae_path, device=device)
 
-    vae = AutoencoderKLFlux2()
     keep = {
         k: v
         for k, v in state_dict.items()
@@ -346,8 +403,17 @@ def load_flux2_vae(
     }
     if not keep:
         raise ValueError(f"No 'encoder.*'/'decoder.*'/'bn.*' keys found in {vae_path} (not a Flux.2 VAE?)")
+
+    encoder_ch = _half_width(keep, "encoder", vae_path)
+    decoder_ch = _half_width(keep, "decoder", vae_path)
+    vae = AutoencoderKLFlux2(encoder_ch=encoder_ch, decoder_ch=decoder_ch)
     info = vae.load_state_dict(keep, strict=True, assign=True)
-    logger.info("Loaded Flux.2 VAE: %s", info)
+    logger.info(
+        "Loaded Flux.2 VAE (%s %d-channel decoder): %s",
+        _DECODER_VARIANTS.get(decoder_ch, "unknown"),
+        decoder_ch,
+        info,
+    )
 
     vae.to(device)
     if dtype is not None:
@@ -355,4 +421,9 @@ def load_flux2_vae(
     return vae
 
 
-__all__ = ["AutoencoderKLFlux2", "load_flux2_vae"]
+__all__ = [
+    "AutoencoderKLFlux2",
+    "load_flux2_vae",
+    "FULL_DECODER_CH",
+    "SMALL_DECODER_CH",
+]

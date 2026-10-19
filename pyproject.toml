@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "thenoise"
-version = "0.10.0"
+version = "0.11.1"
 description = "Diffusion inference engine targeting ROCm"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,12 +15,12 @@ dependencies = [
     "uvicorn[standard]>=0.29",
     "pydantic>=2.6",
     # model code
-    "transformers>=4.57.6",
+    "transformers>=5.4.0",
     "safetensors>=0.4.5",
     "einops>=0.7.0",
     "accelerate>=1.6.0",
     "pillow>=11.3.0",
-    "comfy-kitchen>=0.2.36",
+    "comfy-kitchen>=0.2.38",
     "numpy",
     "tqdm",
 ]
@@ -41,13 +41,16 @@ packages = [
     "thenoise.dit.krea2",
     "thenoise.dit.mage_flow",
     "thenoise.dit.ming_image",
+    "thenoise.dit.moss_image",
     "thenoise.dit.qwen_image",
     "thenoise.dit.qwen_image21",
     "thenoise.dit.anima",
     "thenoise.dit.zimage",
     "thenoise.dit.flux2",
+    "thenoise.dit.flux3",
     "thenoise.models",
     "thenoise.postprocess",
+    "thenoise.controlmap",
     "thenoise.samplers",
     "thenoise.text_encoders",
     "thenoise.ui",

@@ -30,6 +30,7 @@ from thenoise.dit.qwen_image.models import build_video_positions
 from thenoise.models.base import Conditioning, DiffusionModel, Step, normalize_keys
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
+from thenoise.utils.image_tensor import ReferenceSizing
 from thenoise.utils.math import round_up
 from thenoise.utils.positions import grid_positions
 from thenoise.vae import load_mage_family_vae
@@ -51,6 +52,9 @@ class MageFlowModel(DiffusionModel):
     # The single-row timestep embedding modulates the references at ``t``, so their
     # K/V change every step.
     CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": False}
+
+    # Upstream caps a reference's longest side instead of normalising its area.
+    REFERENCE_SIZING = ReferenceSizing(fit="long_edge", cap=1024, align=16)
 
     @staticmethod
     def detect(f) -> bool:
