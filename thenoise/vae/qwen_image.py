@@ -104,7 +104,7 @@ class QwenImageRMS_norm(nn.Module):
         self.gamma = nn.Parameter(torch.ones(dim, 1, 1))
 
     def forward(self, x):
-        return F.normalize(x, dim=1) * (self.scale * self.gamma)
+        return F.normalize(x, dim=1) * self.scale * self.gamma
 
 
 class QwenImageResample(nn.Module):
@@ -184,7 +184,8 @@ class QwenImageAttentionBlock(nn.Module):
 
         qkv = self.to_qkv(x)
         qkv = qkv.reshape(batch_size, 1, channels * 3, -1)
-        q, k, v = (t.transpose(2, 3) for t in qkv.chunk(3, dim=2))
+        qkv = qkv.permute(0, 1, 3, 2).contiguous()
+        q, k, v = qkv.chunk(3, dim=-1)
 
         x = single_head_attention(q, k, v)
 
