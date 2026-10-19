@@ -61,11 +61,11 @@ class _Attention(nn.Module):
         b, c, h, w = x.shape
         hidden = self.norm(x)
         # [B, C, H, W] -> [B, 1, H*W, C], one head over the H*W positions.
-        q = self.q(hidden).view(b, 1, c, -1).transpose(2, 3)  # (b, 1, hw, c)
-        k = self.k(hidden).view(b, 1, c, -1).transpose(2, 3)
-        v = self.v(hidden).view(b, 1, c, -1).transpose(2, 3)
+        q = self.q(hidden).view(b, 1, c, -1).transpose(2, 3).contiguous()  # (b, 1, hw, c)
+        k = self.k(hidden).view(b, 1, c, -1).transpose(2, 3).contiguous()
+        v = self.v(hidden).view(b, 1, c, -1).transpose(2, 3).contiguous()
         hidden = single_head_attention(q, k, v)
-        hidden = hidden.transpose(2, 3).reshape(b, c, h, w)
+        hidden = hidden.transpose(2, 3).reshape(b, c, h, w).contiguous()
         return x + self.proj_out(hidden)
 
 
