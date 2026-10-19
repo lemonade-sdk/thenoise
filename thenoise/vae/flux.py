@@ -60,9 +60,7 @@ class _Attention(nn.Module):
     def forward(self, x):
         b, c, h, w = x.shape
         hidden = self.norm(x)
-        # [B, C, H, W] -> [B, 1, H*W, C], one head over the H*W positions. A view of the
-        # conv output, not a copy of it: that form is what the matmuls read, and the
-        # answer comes back in it too, so the projection conv needs a copy neither.
+        # [B, C, H, W] -> [B, 1, H*W, C], one head over the H*W positions.
         q = self.q(hidden).view(b, 1, c, -1).transpose(2, 3)  # (b, 1, hw, c)
         k = self.k(hidden).view(b, 1, c, -1).transpose(2, 3)
         v = self.v(hidden).view(b, 1, c, -1).transpose(2, 3)
