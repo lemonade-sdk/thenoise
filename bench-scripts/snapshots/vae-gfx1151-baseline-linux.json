@@ -1,12 +1,12 @@
 {
   "tool": "vae_bench",
   "schema": 1,
-  "timestamp": "2026-10-19T08:08:03Z",
-  "elapsed_s": 305.7,
+  "timestamp": "2026-10-21T09:45:28Z",
+  "elapsed_s": 303.4,
   "git": {
-    "sha": "c15979df92f7c2b4af298e00bd05683e041b0c64",
-    "describe": "c15979d",
-    "dirty": true
+    "sha": "c5f4e94bb1b4b0bc8506107497d8f11630d5e61c",
+    "describe": "c5f4e94",
+    "dirty": false
   },
   "env": {
     "python": "3.14.7",
@@ -54,17 +54,17 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "16x128x128",
-      "ms": 301.167,
-      "cov_pct": 0.14,
+      "ms": 303.4809,
+      "cov_pct": 0.065,
       "groups": [
-        300.7802,
-        301.167,
-        301.8029
+        303.1283,
+        303.4809,
+        303.5872
       ],
-      "first_s": 0.94,
+      "first_s": 0.95,
       "tflop": 2.8518,
-      "tflops": 9.47,
-      "mpx_per_s": 3.4817,
+      "tflops": 9.4,
+      "mpx_per_s": 3.4552,
       "peak_gib": 2.418,
       "peak_reserved_gib": 2.555,
       "detail": "3ch px 1024x1024; 16ch/8x rgb; anima+krea2 too",
@@ -80,17 +80,17 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "16x128x128",
-      "ms": 489.1981,
-      "cov_pct": 0.044,
+      "ms": 490.8384,
+      "cov_pct": 0.058,
       "groups": [
-        488.8154,
-        489.1981,
-        489.3248
+        490.5016,
+        490.8384,
+        491.1945
       ],
       "first_s": 0.58,
       "tflop": 4.7102,
-      "tflops": 9.63,
-      "mpx_per_s": 2.1435,
+      "tflops": 9.6,
+      "mpx_per_s": 2.1363,
       "peak_gib": 2.601,
       "peak_reserved_gib": 4.0,
       "detail": "3ch px 1024x1024; 16ch/8x rgb; anima+krea2 too",
@@ -106,17 +106,17 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "16x128x128",
-      "ms": 302.3056,
-      "cov_pct": 0.071,
+      "ms": 302.5546,
+      "cov_pct": 0.088,
       "groups": [
-        302.1469,
-        302.3056,
-        302.6611
+        302.2132,
+        302.5546,
+        302.8658
       ],
       "first_s": 0.33,
       "tflop": 2.8536,
-      "tflops": 9.44,
-      "mpx_per_s": 3.4686,
+      "tflops": 9.43,
+      "mpx_per_s": 3.4657,
       "peak_gib": 2.42,
       "peak_reserved_gib": 2.572,
       "detail": "4ch px 1024x1024; 16ch/8x rgba, scalar scale",
@@ -132,17 +132,17 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "16x128x128",
-      "ms": 488.6734,
-      "cov_pct": 0.043,
+      "ms": 489.7026,
+      "cov_pct": 0.105,
       "groups": [
-        488.4173,
-        488.6734,
-        488.9357
+        489.4374,
+        489.7026,
+        490.6323
       ],
       "first_s": 0.55,
       "tflop": 4.7121,
-      "tflops": 9.64,
-      "mpx_per_s": 2.1458,
+      "tflops": 9.62,
+      "mpx_per_s": 2.1413,
       "peak_gib": 2.601,
       "peak_reserved_gib": 4.125,
       "detail": "4ch px 1024x1024; 16ch/8x rgba, scalar scale",
@@ -158,17 +158,17 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "64x64x64",
-      "ms": 294.7482,
-      "cov_pct": 0.184,
+      "ms": 286.162,
+      "cov_pct": 0.074,
       "groups": [
-        294.0719,
-        294.7482,
-        295.4
+        286.0428,
+        286.162,
+        286.5368
       ],
       "first_s": 0.39,
       "tflop": 3.1851,
-      "tflops": 10.81,
-      "mpx_per_s": 3.5575,
+      "tflops": 11.13,
+      "mpx_per_s": 3.6643,
       "peak_gib": 1.788,
       "peak_reserved_gib": 2.93,
       "detail": "4ch px 1024x1024; 64ch/16x rgba",
@@ -184,21 +184,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "64x64x64",
-      "ms": 1126.4811,
-      "cov_pct": 0.037,
+      "ms": 1084.035,
+      "cov_pct": 0.033,
       "groups": [
-        1125.7248,
-        1126.4811,
-        1126.6945
+        1083.4972,
+        1084.035,
+        1084.3666
       ],
-      "first_s": 1.41,
+      "first_s": 1.37,
       "tflop": 17.8051,
-      "tflops": 15.81,
-      "mpx_per_s": 0.9308,
+      "tflops": 16.42,
+      "mpx_per_s": 0.9673,
       "peak_gib": 3.523,
-      "peak_reserved_gib": 3.574,
+      "peak_reserved_gib": 3.576,
       "detail": "4ch px 1024x1024; 64ch/16x rgba",
-      "t_s": 17.4
+      "t_s": 17.2
     },
     {
       "key": "qwen_image21/features@1024x1024",
@@ -210,21 +210,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "64x64x64",
-      "ms": 50.2747,
-      "cov_pct": 0.098,
+      "ms": 49.2954,
+      "cov_pct": 0.066,
       "groups": [
-        50.1822,
-        50.2747,
-        50.2953
+        49.2555,
+        49.2954,
+        49.3356
       ],
       "first_s": 0.06,
       "tflop": 1.5083,
-      "tflops": 30.0,
-      "mpx_per_s": 20.8569,
+      "tflops": 30.6,
+      "mpx_per_s": 21.2713,
       "peak_gib": 0.973,
       "peak_reserved_gib": 1.68,
       "detail": "4ch px 1024x1024; 64ch/16x rgba, stops after upsample 1/5",
-      "t_s": 17.8
+      "t_s": 17.6
     },
     {
       "key": "wan22/encode@1024x1024",
@@ -236,21 +236,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "48x64x64",
-      "ms": 124.7074,
-      "cov_pct": 0.039,
+      "ms": 119.8669,
+      "cov_pct": 0.023,
       "groups": [
-        124.6577,
-        124.7074,
-        124.7777
+        119.8388,
+        119.8669,
+        119.9071
       ],
-      "first_s": 0.18,
+      "first_s": 0.17,
       "tflop": 1.7557,
-      "tflops": 14.08,
-      "mpx_per_s": 8.4083,
+      "tflops": 14.65,
+      "mpx_per_s": 8.7478,
       "peak_gib": 1.138,
       "peak_reserved_gib": 1.65,
       "detail": "3ch px 1024x1024; 48ch/16x rgb, patchify 2",
-      "t_s": 18.7
+      "t_s": 18.4
     },
     {
       "key": "wan22/decode@1024x1024",
@@ -262,21 +262,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "48x64x64",
-      "ms": 545.6616,
-      "cov_pct": 0.182,
+      "ms": 533.7418,
+      "cov_pct": 0.299,
       "groups": [
-        544.4166,
-        545.6616,
-        546.8532
+        533.2808,
+        533.7418,
+        536.8779
       ],
-      "first_s": 0.69,
+      "first_s": 0.67,
       "tflop": 10.2748,
-      "tflops": 18.83,
-      "mpx_per_s": 1.9217,
+      "tflops": 19.25,
+      "mpx_per_s": 1.9646,
       "peak_gib": 1.809,
-      "peak_reserved_gib": 3.006,
+      "peak_reserved_gib": 1.881,
       "detail": "3ch px 1024x1024; 48ch/16x rgb, patchify 2",
-      "t_s": 21.7
+      "t_s": 21.4
     },
     {
       "key": "wan22/features@1024x1024",
@@ -288,21 +288,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "48x64x64",
-      "ms": 54.7002,
-      "cov_pct": 0.591,
+      "ms": 54.113,
+      "cov_pct": 0.139,
       "groups": [
-        54.6088,
-        54.7002,
-        55.338
+        53.961,
+        54.113,
+        54.1263
       ],
       "first_s": 0.06,
       "tflop": 1.1891,
-      "tflops": 21.74,
-      "mpx_per_s": 19.1695,
+      "tflops": 21.97,
+      "mpx_per_s": 19.3775,
       "peak_gib": 0.912,
       "peak_reserved_gib": 1.479,
       "detail": "3ch px 1024x1024; 48ch/16x rgb, patchify 2, stops after upsample 1/4",
-      "t_s": 22.1
+      "t_s": 21.8
     },
     {
       "key": "flux/decode@1024x1024",
@@ -314,21 +314,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "16x128x128",
-      "ms": 795.9347,
-      "cov_pct": 0.096,
+      "ms": 804.5834,
+      "cov_pct": 0.176,
       "groups": [
-        795.0034,
-        795.9347,
-        796.8685
+        804.3864,
+        804.5834,
+        807.4821
       ],
       "first_s": 1.22,
       "tflop": 10.4722,
-      "tflops": 13.16,
-      "mpx_per_s": 1.3174,
+      "tflops": 13.02,
+      "mpx_per_s": 1.3033,
       "peak_gib": 6.051,
       "peak_reserved_gib": 9.787,
       "detail": "3ch px 1024x1024; 16ch/8x rgb, decoder only",
-      "t_s": 26.7
+      "t_s": 26.4
     },
     {
       "key": "flux2/encode@1024x1024",
@@ -340,21 +340,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "128x64x64",
-      "ms": 392.6455,
-      "cov_pct": 0.1,
+      "ms": 399.4971,
+      "cov_pct": 0.139,
       "groups": [
-        392.1495,
-        392.6455,
-        393.1113
+        398.4176,
+        399.4971,
+        399.6681
       ],
       "first_s": 0.49,
       "tflop": 4.8875,
-      "tflops": 12.45,
-      "mpx_per_s": 2.6705,
+      "tflops": 12.23,
+      "mpx_per_s": 2.6247,
       "peak_gib": 3.249,
       "peak_reserved_gib": 3.4,
       "detail": "3ch px 1024x1024; 128ch/16x packed, bn normalised",
-      "t_s": 28.9
+      "t_s": 28.7
     },
     {
       "key": "flux2/decode@1024x1024",
@@ -366,21 +366,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "128x64x64",
-      "ms": 795.7469,
-      "cov_pct": 0.055,
+      "ms": 807.4191,
+      "cov_pct": 0.087,
       "groups": [
-        795.7281,
-        795.7469,
-        796.6618
+        806.4926,
+        807.4191,
+        808.2059
       ],
-      "first_s": 0.85,
+      "first_s": 0.87,
       "tflop": 10.4747,
-      "tflops": 13.16,
-      "mpx_per_s": 1.3177,
+      "tflops": 12.97,
+      "mpx_per_s": 1.2987,
       "peak_gib": 5.996,
       "peak_reserved_gib": 8.801,
       "detail": "3ch px 1024x1024; 128ch/16x packed, bn normalised",
-      "t_s": 33.1
+      "t_s": 32.9
     },
     {
       "key": "mage_flow/encode@1024x1024",
@@ -392,21 +392,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "128x64x64",
-      "ms": 37.6631,
-      "cov_pct": 0.07,
+      "ms": 37.6332,
+      "cov_pct": 0.144,
       "groups": [
-        37.6103,
-        37.6631,
-        37.669
+        37.5709,
+        37.6332,
+        37.7039
       ],
-      "first_s": 0.14,
+      "first_s": 0.15,
       "tflop": 0.3619,
-      "tflops": 9.61,
-      "mpx_per_s": 27.841,
+      "tflops": 9.62,
+      "mpx_per_s": 27.8631,
       "peak_gib": 0.431,
       "peak_reserved_gib": 0.645,
       "detail": "3ch px 1024x1024; 128ch/16x, one-step denoiser",
-      "t_s": 33.5
+      "t_s": 33.4
     },
     {
       "key": "mage_flow/decode@1024x1024",
@@ -418,21 +418,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "128x64x64",
-      "ms": 141.0547,
-      "cov_pct": 0.513,
+      "ms": 143.5761,
+      "cov_pct": 0.815,
       "groups": [
-        139.7201,
-        141.0547,
-        141.3907
+        141.9983,
+        143.5761,
+        144.8563
       ],
       "first_s": 0.15,
       "tflop": 0.4517,
-      "tflops": 3.2,
-      "mpx_per_s": 7.4338,
+      "tflops": 3.15,
+      "mpx_per_s": 7.3033,
       "peak_gib": 0.924,
       "peak_reserved_gib": 1.291,
       "detail": "3ch px 1024x1024; 128ch/16x, one-step denoiser",
-      "t_s": 34.4
+      "t_s": 34.3
     },
     {
       "key": "qwen_image/encode@1536x2048",
@@ -444,21 +444,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "16x256x192",
-      "ms": 1117.6004,
-      "cov_pct": 0.091,
+      "ms": 1120.8476,
+      "cov_pct": 0.041,
       "groups": [
-        1117.493,
-        1117.6004,
-        1119.7055
+        1119.9982,
+        1120.8476,
+        1121.0749
       ],
       "first_s": 1.4,
       "tflop": 11.0294,
-      "tflops": 9.87,
-      "mpx_per_s": 2.8147,
+      "tflops": 9.84,
+      "mpx_per_s": 2.8066,
       "peak_gib": 6.93,
       "peak_reserved_gib": 7.178,
       "detail": "3ch px 1536x2048; 16ch/8x rgb; anima+krea2 too",
-      "t_s": 40.5
+      "t_s": 40.4
     },
     {
       "key": "qwen_image/decode@1536x2048",
@@ -470,21 +470,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "16x256x192",
-      "ms": 1805.4004,
-      "cov_pct": 0.036,
+      "ms": 1809.2704,
+      "cov_pct": 0.033,
       "groups": [
-        1804.1654,
-        1805.4004,
-        1805.6593
+        1808.1419,
+        1809.2704,
+        1809.5328
       ],
-      "first_s": 2.28,
+      "first_s": 2.29,
       "tflop": 16.6046,
-      "tflops": 9.2,
-      "mpx_per_s": 1.7424,
+      "tflops": 9.18,
+      "mpx_per_s": 1.7387,
       "peak_gib": 12.543,
       "peak_reserved_gib": 16.703,
       "detail": "3ch px 1536x2048; 16ch/8x rgb; anima+krea2 too",
-      "t_s": 50.2
+      "t_s": 50.1
     },
     {
       "key": "ming_image/encode@1536x2048",
@@ -496,21 +496,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "16x256x192",
-      "ms": 1119.199,
-      "cov_pct": 0.033,
+      "ms": 1120.425,
+      "cov_pct": 0.048,
       "groups": [
-        1118.9176,
-        1119.199,
-        1119.8046
+        1120.1385,
+        1120.425,
+        1121.3969
       ],
       "first_s": 1.19,
       "tflop": 11.0348,
-      "tflops": 9.86,
-      "mpx_per_s": 2.8107,
+      "tflops": 9.85,
+      "mpx_per_s": 2.8076,
       "peak_gib": 6.936,
       "peak_reserved_gib": 7.258,
       "detail": "4ch px 1536x2048; 16ch/8x rgba, scalar scale",
-      "t_s": 56.0
+      "t_s": 55.9
     },
     {
       "key": "ming_image/decode@1536x2048",
@@ -522,21 +522,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "16x256x192",
-      "ms": 1804.6026,
-      "cov_pct": 0.013,
+      "ms": 1810.0578,
+      "cov_pct": 0.049,
       "groups": [
-        1804.3419,
-        1804.6026,
-        1804.9224
+        1808.7984,
+        1810.0578,
+        1810.9505
       ],
-      "first_s": 2.05,
+      "first_s": 2.06,
       "tflop": 16.6101,
-      "tflops": 9.2,
-      "mpx_per_s": 1.7432,
+      "tflops": 9.18,
+      "mpx_per_s": 1.7379,
       "peak_gib": 12.543,
       "peak_reserved_gib": 16.598,
       "detail": "4ch px 1536x2048; 16ch/8x rgba, scalar scale",
-      "t_s": 65.5
+      "t_s": 65.4
     },
     {
       "key": "qwen_image21/encode@1536x2048",
@@ -548,21 +548,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "64x128x96",
-      "ms": 905.9264,
-      "cov_pct": 0.014,
+      "ms": 884.7962,
+      "cov_pct": 0.048,
       "groups": [
-        905.8847,
-        905.9264,
-        906.1698
+        884.1367,
+        884.7962,
+        885.1699
       ],
-      "first_s": 1.14,
+      "first_s": 1.12,
       "tflop": 9.9901,
-      "tflops": 11.03,
-      "mpx_per_s": 3.4724,
+      "tflops": 11.29,
+      "mpx_per_s": 3.5553,
       "peak_gib": 3.96,
       "peak_reserved_gib": 4.895,
       "detail": "4ch px 1536x2048; 64ch/16x rgba",
-      "t_s": 70.4
+      "t_s": 70.3
     },
     {
       "key": "qwen_image21/decode@1536x2048",
@@ -574,21 +574,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "64x128x96",
-      "ms": 3498.3482,
-      "cov_pct": 0.087,
+      "ms": 3377.8223,
+      "cov_pct": 0.093,
       "groups": [
-        3492.3168,
-        3498.3482,
-        3499.1405
+        3376.742,
+        3377.8223,
+        3383.9054
       ],
-      "first_s": 3.99,
+      "first_s": 3.86,
       "tflop": 55.2415,
-      "tflops": 15.79,
-      "mpx_per_s": 0.8992,
+      "tflops": 16.35,
+      "mpx_per_s": 0.9313,
       "peak_gib": 9.167,
-      "peak_reserved_gib": 10.191,
+      "peak_reserved_gib": 16.941,
       "detail": "4ch px 1536x2048; 64ch/16x rgba",
-      "t_s": 88.6
+      "t_s": 87.8
     },
     {
       "key": "qwen_image21/features@1536x2048",
@@ -600,21 +600,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "64x128x96",
-      "ms": 189.0306,
-      "cov_pct": 0.037,
+      "ms": 182.7115,
+      "cov_pct": 0.072,
       "groups": [
-        188.9128,
-        189.0306,
-        189.077
+        182.6971,
+        182.7115,
+        182.9818
       ],
-      "first_s": 0.2,
+      "first_s": 0.19,
       "tflop": 5.0072,
-      "tflops": 26.49,
-      "mpx_per_s": 16.6414,
+      "tflops": 27.4,
+      "mpx_per_s": 17.2169,
       "peak_gib": 1.45,
       "peak_reserved_gib": 2.328,
       "detail": "4ch px 1536x2048; 64ch/16x rgba, stops after upsample 1/5",
-      "t_s": 89.7
+      "t_s": 88.9
     },
     {
       "key": "wan22/encode@1536x2048",
@@ -626,21 +626,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "48x128x96",
-      "ms": 391.9371,
-      "cov_pct": 0.017,
+      "ms": 377.5445,
+      "cov_pct": 0.067,
       "groups": [
-        391.9086,
-        391.9371,
-        392.0626
+        377.4048,
+        377.5445,
+        377.9947
       ],
-      "first_s": 0.5,
+      "first_s": 0.47,
       "tflop": 5.5633,
-      "tflops": 14.19,
-      "mpx_per_s": 8.0261,
+      "tflops": 14.74,
+      "mpx_per_s": 8.3321,
       "peak_gib": 1.935,
       "peak_reserved_gib": 2.855,
       "detail": "3ch px 1536x2048; 48ch/16x rgb, patchify 2",
-      "t_s": 91.9
+      "t_s": 91.1
     },
     {
       "key": "wan22/decode@1536x2048",
@@ -652,21 +652,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "48x128x96",
-      "ms": 1680.5992,
-      "cov_pct": 0.285,
+      "ms": 1637.4715,
+      "cov_pct": 0.343,
       "groups": [
-        1674.1075,
-        1680.5992,
-        1685.8178
+        1627.8399,
+        1637.4715,
+        1641.1665
       ],
-      "first_s": 1.92,
+      "first_s": 1.86,
       "tflop": 32.0963,
-      "tflops": 19.1,
-      "mpx_per_s": 1.8718,
+      "tflops": 19.6,
+      "mpx_per_s": 1.9211,
       "peak_gib": 4.323,
-      "peak_reserved_gib": 8.107,
+      "peak_reserved_gib": 4.357,
       "detail": "3ch px 1536x2048; 48ch/16x rgb, patchify 2",
-      "t_s": 100.7
+      "t_s": 99.6
     },
     {
       "key": "wan22/features@1536x2048",
@@ -678,21 +678,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "48x128x96",
-      "ms": 200.3084,
-      "cov_pct": 0.318,
+      "ms": 196.127,
+      "cov_pct": 0.244,
       "groups": [
-        199.5633,
-        200.3084,
-        201.1223
+        195.2145,
+        196.127,
+        196.3063
       ],
       "first_s": 0.21,
       "tflop": 4.0085,
-      "tflops": 20.01,
-      "mpx_per_s": 15.7044,
+      "tflops": 20.44,
+      "mpx_per_s": 16.0392,
       "peak_gib": 1.28,
       "peak_reserved_gib": 2.008,
       "detail": "3ch px 1536x2048; 48ch/16x rgb, patchify 2, stops after upsample 1/4",
-      "t_s": 101.9
+      "t_s": 100.7
     },
     {
       "key": "flux/decode@1536x2048",
@@ -704,21 +704,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "16x256x192",
-      "ms": 2918.0447,
-      "cov_pct": 0.035,
+      "ms": 2928.0399,
+      "cov_pct": 0.037,
       "groups": [
-        2917.1174,
-        2918.0447,
-        2919.5877
+        2927.9848,
+        2928.0399,
+        2930.2819
       ],
-      "first_s": 4.1,
+      "first_s": 4.12,
       "tflop": 34.7151,
-      "tflops": 11.9,
-      "mpx_per_s": 1.078,
+      "tflops": 11.86,
+      "mpx_per_s": 1.0743,
       "peak_gib": 17.805,
       "peak_reserved_gib": 28.912,
       "detail": "3ch px 1536x2048; 16ch/8x rgb, decoder only",
-      "t_s": 117.9
+      "t_s": 116.8
     },
     {
       "key": "flux2/encode@1536x2048",
@@ -730,21 +730,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "128x128x96",
-      "ms": 1589.9975,
-      "cov_pct": 0.084,
+      "ms": 1582.1246,
+      "cov_pct": 0.111,
       "groups": [
-        1588.3788,
-        1589.9975,
-        1591.6431
+        1579.3283,
+        1582.1246,
+        1583.546
       ],
-      "first_s": 1.85,
+      "first_s": 1.83,
       "tflop": 17.9612,
-      "tflops": 11.3,
-      "mpx_per_s": 1.9784,
+      "tflops": 11.35,
+      "mpx_per_s": 1.9883,
       "peak_gib": 9.261,
       "peak_reserved_gib": 9.506,
       "detail": "3ch px 1536x2048; 128ch/16x packed, bn normalised",
-      "t_s": 126.3
+      "t_s": 125.2
     },
     {
       "key": "flux2/decode@1536x2048",
@@ -756,21 +756,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "128x128x96",
-      "ms": 2998.1413,
-      "cov_pct": 0.073,
+      "ms": 2977.5487,
+      "cov_pct": 0.037,
       "groups": [
-        2995.3302,
-        2998.1413,
-        3000.7179
+        2976.4523,
+        2977.5487,
+        2979.1643
       ],
-      "first_s": 3.25,
+      "first_s": 3.22,
       "tflop": 34.7225,
-      "tflops": 11.58,
-      "mpx_per_s": 1.0492,
+      "tflops": 11.66,
+      "mpx_per_s": 1.0565,
       "peak_gib": 17.503,
       "peak_reserved_gib": 24.0,
       "detail": "3ch px 1536x2048; 128ch/16x packed, bn normalised",
-      "t_s": 141.7
+      "t_s": 140.5
     },
     {
       "key": "mage_flow/encode@1536x2048",
@@ -782,21 +782,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "128x128x96",
-      "ms": 130.9724,
-      "cov_pct": 0.05,
+      "ms": 131.0903,
+      "cov_pct": 0.026,
       "groups": [
-        130.8706,
-        130.9724,
-        131.0283
+        131.0282,
+        131.0903,
+        131.1064
       ],
-      "first_s": 0.15,
+      "first_s": 0.14,
       "tflop": 1.0857,
-      "tflops": 8.29,
-      "mpx_per_s": 24.0183,
+      "tflops": 8.28,
+      "mpx_per_s": 23.9966,
       "peak_gib": 0.597,
       "peak_reserved_gib": 0.82,
       "detail": "3ch px 1536x2048; 128ch/16x, one-step denoiser",
-      "t_s": 142.6
+      "t_s": 141.3
     },
     {
       "key": "mage_flow/decode@1536x2048",
@@ -808,21 +808,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "128x128x96",
-      "ms": 434.0523,
-      "cov_pct": 0.924,
+      "ms": 431.3776,
+      "cov_pct": 0.237,
       "groups": [
-        427.1368,
-        434.0523,
-        436.599
+        430.5942,
+        431.3776,
+        433.0453
       ],
       "first_s": 0.44,
       "tflop": 1.3551,
-      "tflops": 3.12,
-      "mpx_per_s": 7.2473,
+      "tflops": 3.14,
+      "mpx_per_s": 7.2923,
       "peak_gib": 2.074,
       "peak_reserved_gib": 2.77,
       "detail": "3ch px 1536x2048; 128ch/16x, one-step denoiser",
-      "t_s": 144.9
+      "t_s": 143.7
     },
     {
       "key": "qwen_image/encode@2048x2048",
@@ -834,21 +834,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "16x256x256",
-      "ms": 1633.2215,
-      "cov_pct": 0.035,
+      "ms": 1651.5922,
+      "cov_pct": 0.064,
       "groups": [
-        1632.1922,
-        1633.2215,
-        1633.5437
+        1651.5123,
+        1651.5922,
+        1653.7953
       ],
-      "first_s": 2.02,
+      "first_s": 2.04,
       "tflop": 16.3551,
-      "tflops": 10.01,
-      "mpx_per_s": 2.5681,
+      "tflops": 9.9,
+      "mpx_per_s": 2.5396,
       "peak_gib": 9.186,
       "peak_reserved_gib": 9.508,
       "detail": "3ch px 2048x2048; 16ch/8x rgb; anima+krea2 too",
-      "t_s": 153.7
+      "t_s": 152.5
     },
     {
       "key": "qwen_image/decode@2048x2048",
@@ -860,21 +860,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "16x256x256",
-      "ms": 2575.1915,
-      "cov_pct": 0.035,
+      "ms": 2610.821,
+      "cov_pct": 0.003,
       "groups": [
-        2573.3648,
-        2575.1915,
-        2575.3441
+        2610.7713,
+        2610.821,
+        2610.9389
       ],
       "first_s": 3.19,
       "tflop": 23.7888,
-      "tflops": 9.24,
-      "mpx_per_s": 1.6287,
+      "tflops": 9.11,
+      "mpx_per_s": 1.6065,
       "peak_gib": 16.669,
       "peak_reserved_gib": 27.672,
       "detail": "3ch px 2048x2048; 16ch/8x rgb; anima+krea2 too",
-      "t_s": 167.4
+      "t_s": 166.4
     },
     {
       "key": "ming_image/encode@2048x2048",
@@ -886,21 +886,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "16x256x256",
-      "ms": 1666.7542,
-      "cov_pct": 0.058,
+      "ms": 1658.7308,
+      "cov_pct": 0.061,
       "groups": [
-        1665.4546,
-        1666.7542,
-        1667.8099
+        1657.7271,
+        1658.7308,
+        1660.1821
       ],
-      "first_s": 1.77,
+      "first_s": 1.76,
       "tflop": 16.3623,
-      "tflops": 9.82,
-      "mpx_per_s": 2.5165,
+      "tflops": 9.86,
+      "mpx_per_s": 2.5286,
       "peak_gib": 9.193,
       "peak_reserved_gib": 9.594,
       "detail": "4ch px 2048x2048; 16ch/8x rgba, scalar scale",
-      "t_s": 176.0
+      "t_s": 174.9
     },
     {
       "key": "ming_image/decode@2048x2048",
@@ -912,21 +912,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "16x256x256",
-      "ms": 2586.1567,
-      "cov_pct": 0.026,
+      "ms": 2588.942,
+      "cov_pct": 0.016,
       "groups": [
-        2585.4141,
-        2586.1567,
-        2587.035
+        2588.5123,
+        2588.942,
+        2589.5471
       ],
       "first_s": 2.92,
       "tflop": 23.796,
-      "tflops": 9.2,
-      "mpx_per_s": 1.6218,
+      "tflops": 9.19,
+      "mpx_per_s": 1.6201,
       "peak_gib": 16.669,
       "peak_reserved_gib": 28.141,
       "detail": "4ch px 2048x2048; 16ch/8x rgba, scalar scale",
-      "t_s": 189.5
+      "t_s": 188.5
     },
     {
       "key": "qwen_image21/encode@2048x2048",
@@ -938,21 +938,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "64x128x128",
-      "ms": 1254.5268,
-      "cov_pct": 0.025,
+      "ms": 1239.8213,
+      "cov_pct": 0.056,
       "groups": [
-        1253.9085,
-        1254.5268,
-        1254.6004
+        1239.1645,
+        1239.8213,
+        1240.8595
       ],
-      "first_s": 1.54,
+      "first_s": 1.52,
       "tflop": 13.5903,
-      "tflops": 10.83,
-      "mpx_per_s": 3.3433,
+      "tflops": 10.96,
+      "mpx_per_s": 3.383,
       "peak_gib": 5.046,
       "peak_reserved_gib": 6.141,
       "detail": "4ch px 2048x2048; 64ch/16x rgba",
-      "t_s": 196.3
+      "t_s": 195.2
     },
     {
       "key": "qwen_image21/decode@2048x2048",
@@ -964,21 +964,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "64x128x128",
-      "ms": 4890.4512,
-      "cov_pct": 0.081,
+      "ms": 4733.7195,
+      "cov_pct": 0.031,
       "groups": [
-        4889.4649,
-        4890.4512,
-        4898.2848
+        4732.4639,
+        4733.7195,
+        4736.0314
       ],
-      "first_s": 5.48,
+      "first_s": 5.33,
       "tflop": 75.6412,
-      "tflops": 15.47,
-      "mpx_per_s": 0.8577,
+      "tflops": 15.98,
+      "mpx_per_s": 0.886,
       "peak_gib": 11.99,
-      "peak_reserved_gib": 13.248,
+      "peak_reserved_gib": 22.248,
       "detail": "4ch px 2048x2048; 64ch/16x rgba",
-      "t_s": 221.5
+      "t_s": 219.6
     },
     {
       "key": "qwen_image21/features@2048x2048",
@@ -990,21 +990,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "64x128x128",
-      "ms": 280.5146,
-      "cov_pct": 0.101,
+      "ms": 276.2392,
+      "cov_pct": 0.081,
       "groups": [
-        280.0029,
-        280.5146,
-        280.6623
+        276.1128,
+        276.2392,
+        276.6377
       ],
       "first_s": 0.29,
       "tflop": 7.1322,
-      "tflops": 25.43,
-      "mpx_per_s": 14.9522,
+      "tflops": 25.82,
+      "mpx_per_s": 15.1836,
       "peak_gib": 1.95,
       "peak_reserved_gib": 2.648,
       "detail": "4ch px 2048x2048; 64ch/16x rgba, stops after upsample 1/5",
-      "t_s": 223.1
+      "t_s": 221.2
     },
     {
       "key": "wan22/encode@2048x2048",
@@ -1016,21 +1016,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "48x128x128",
-      "ms": 542.5871,
-      "cov_pct": 0.039,
+      "ms": 530.871,
+      "cov_pct": 0.007,
       "groups": [
-        542.3364,
-        542.5871,
-        542.8481
+        530.8442,
+        530.871,
+        530.9373
       ],
-      "first_s": 0.7,
+      "first_s": 0.69,
       "tflop": 7.6448,
-      "tflops": 14.09,
-      "mpx_per_s": 7.7302,
+      "tflops": 14.4,
+      "mpx_per_s": 7.9008,
       "peak_gib": 2.396,
       "peak_reserved_gib": 3.639,
       "detail": "3ch px 2048x2048; 48ch/16x rgb, patchify 2",
-      "t_s": 226.1
+      "t_s": 224.2
     },
     {
       "key": "wan22/decode@2048x2048",
@@ -1042,21 +1042,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "48x128x128",
-      "ms": 2379.1694,
-      "cov_pct": 0.042,
+      "ms": 2334.129,
+      "cov_pct": 0.144,
       "groups": [
-        2377.3873,
-        2379.1694,
-        2379.6997
+        2332.4588,
+        2334.129,
+        2340.2998
       ],
-      "first_s": 2.64,
+      "first_s": 2.59,
       "tflop": 43.9183,
-      "tflops": 18.46,
-      "mpx_per_s": 1.7629,
+      "tflops": 18.82,
+      "mpx_per_s": 1.7969,
       "peak_gib": 5.58,
-      "peak_reserved_gib": 6.258,
+      "peak_reserved_gib": 10.258,
       "detail": "3ch px 2048x2048; 48ch/16x rgb, patchify 2",
-      "t_s": 238.4
+      "t_s": 236.3
     },
     {
       "key": "wan22/features@2048x2048",
@@ -1068,21 +1068,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "48x128x128",
-      "ms": 318.414,
-      "cov_pct": 0.216,
+      "ms": 306.4878,
+      "cov_pct": 0.101,
       "groups": [
-        318.1977,
-        318.414,
-        319.7557
+        305.8335,
+        306.4878,
+        306.4889
       ],
-      "first_s": 0.33,
+      "first_s": 0.32,
       "tflop": 5.6388,
-      "tflops": 17.71,
-      "mpx_per_s": 13.1725,
+      "tflops": 18.4,
+      "mpx_per_s": 13.6851,
       "peak_gib": 1.772,
       "peak_reserved_gib": 2.57,
       "detail": "3ch px 2048x2048; 48ch/16x rgb, patchify 2, stops after upsample 1/4",
-      "t_s": 240.2
+      "t_s": 238.0
     },
     {
       "key": "flux/decode@2048x2048",
@@ -1094,21 +1094,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "16x256x256",
-      "ms": 4373.1359,
-      "cov_pct": 0.024,
+      "ms": 4360.2138,
+      "cov_pct": 0.076,
       "groups": [
-        4371.3564,
-        4373.1359,
-        4373.8393
+        4354.1837,
+        4360.2138,
+        4361.847
       ],
-      "first_s": 5.82,
+      "first_s": 5.81,
       "tflop": 48.4859,
-      "tflops": 11.09,
-      "mpx_per_s": 0.9591,
+      "tflops": 11.12,
+      "mpx_per_s": 0.9619,
       "peak_gib": 23.682,
       "peak_reserved_gib": 38.475,
       "detail": "3ch px 2048x2048; 16ch/8x rgb, decoder only",
-      "t_s": 263.7
+      "t_s": 261.5
     },
     {
       "key": "flux2/encode@2048x2048",
@@ -1120,21 +1120,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "128x128x128",
-      "ms": 2599.8833,
-      "cov_pct": 0.014,
+      "ms": 2625.865,
+      "cov_pct": 0.053,
       "groups": [
-        2599.4056,
-        2599.8833,
-        2600.3243
+        2623.7957,
+        2625.865,
+        2627.1854
       ],
-      "first_s": 2.94,
+      "first_s": 2.93,
       "tflop": 26.1472,
-      "tflops": 10.06,
-      "mpx_per_s": 1.6133,
+      "tflops": 9.96,
+      "mpx_per_s": 1.5973,
       "peak_gib": 12.267,
       "peak_reserved_gib": 12.605,
       "detail": "3ch px 2048x2048; 128ch/16x packed, bn normalised",
-      "t_s": 277.4
+      "t_s": 275.2
     },
     {
       "key": "flux2/decode@2048x2048",
@@ -1146,21 +1146,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "128x128x128",
-      "ms": 4698.6078,
-      "cov_pct": 0.019,
+      "ms": 4670.6345,
+      "cov_pct": 0.047,
       "groups": [
-        4698.4006,
-        4698.6078,
-        4700.4074
+        4666.9881,
+        4670.6345,
+        4672.2762
       ],
-      "first_s": 5.07,
+      "first_s": 5.03,
       "tflop": 48.4957,
-      "tflops": 10.32,
-      "mpx_per_s": 0.8927,
+      "tflops": 10.38,
+      "mpx_per_s": 0.898,
       "peak_gib": 23.255,
       "peak_reserved_gib": 31.883,
       "detail": "3ch px 2048x2048; 128ch/16x packed, bn normalised",
-      "t_s": 301.4
+      "t_s": 299.1
     },
     {
       "key": "mage_flow/encode@2048x2048",
@@ -1172,21 +1172,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "128x128x128",
-      "ms": 182.239,
-      "cov_pct": 0.019,
+      "ms": 181.9388,
+      "cov_pct": 0.004,
       "groups": [
-        182.1758,
-        182.239,
-        182.2559
+        181.9273,
+        181.9388,
+        181.9447
       ],
       "first_s": 0.2,
       "tflop": 1.4476,
-      "tflops": 7.94,
-      "mpx_per_s": 23.0154,
+      "tflops": 7.96,
+      "mpx_per_s": 23.0534,
       "peak_gib": 0.68,
       "peak_reserved_gib": 0.92,
       "detail": "3ch px 2048x2048; 128ch/16x, one-step denoiser",
-      "t_s": 302.5
+      "t_s": 300.2
     },
     {
       "key": "mage_flow/decode@2048x2048",
@@ -1198,21 +1198,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "128x128x128",
-      "ms": 574.7984,
-      "cov_pct": 0.437,
+      "ms": 583.4818,
+      "cov_pct": 0.784,
       "groups": [
-        571.2674,
-        574.7984,
-        577.3946
+        576.5097,
+        583.4818,
+        587.5643
       ],
       "first_s": 0.58,
       "tflop": 1.8068,
-      "tflops": 3.14,
-      "mpx_per_s": 7.297,
+      "tflops": 3.1,
+      "mpx_per_s": 7.1884,
       "peak_gib": 2.65,
       "peak_reserved_gib": 3.541,
       "detail": "3ch px 2048x2048; 128ch/16x, one-step denoiser",
-      "t_s": 305.6
+      "t_s": 303.3
     }
   ]
 }
