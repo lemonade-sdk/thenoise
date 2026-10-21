@@ -31,6 +31,7 @@ from thenoise.dit.quantized import QuantizedLinear  # noqa: E402
 from thenoise.models import (  # noqa: E402
     MODEL_CATALOG,
     AnimaModel,
+    Fibo2Model,
     Flux3Model,
     FluxKleinModel,
     Krea2Model,
@@ -522,6 +523,49 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
     # The two Qwen-Images share the img_in / txt_in / time_text_embed prefixes: the
     # detection matrix below pins down that neither claims the other's key-set.
     # The same matrix is what keeps Mage-Flow (12 blocks) out of Qwen-Image's 60.
+    # Fibo 2.0 shares the fused self-attention and the bare head with the Lumina-Next
+    # models; the Perceiver's queries are the whole fingerprint.
+    "fibo2": (
+        Fibo2Model,
+        [
+            "perceiver.latent_queries",
+            "perceiver.layers.0.cross_attention.to_kv.weight",
+            "noise_refiner.0.attention.qkv.weight",
+            "layers.0.attention.qkv.weight",
+            "layers.0.attention.q_norm.weight",
+            "layers.0.adaLN_modulation.0.weight",
+            "layers.6.cross_attn_gate",
+            "layers.0.feed_forward.w13.weight",
+            "t_embedder.mlp.0.weight",
+            "final_layer.linear.weight",
+        ],
+    ),
+    "fibo2_wrapped": (
+        Fibo2Model,
+        [
+            "model.diffusion_model.perceiver.latent_queries",
+            "model.diffusion_model.layers.0.attention.qkv.weight",
+            "model.diffusion_model.layers.0.adaLN_modulation.0.weight",
+            "model.diffusion_model.layers.0.feed_forward.w13.weight",
+            "model.diffusion_model.perceiver.layers.0.cross_attention.norm_q.weight",
+            "model.diffusion_model.t_embedder.mlp.0.weight",
+            "model.diffusion_model.final_layer.linear.weight",
+        ],
+    ),
+    # The un-fused SwiGLU spelling is the same model: an export that stores w1/w3
+    # apart must still resolve to it.
+    "fibo2_split_ffn": (
+        Fibo2Model,
+        [
+            "perceiver.latent_queries",
+            "layers.0.attention.qkv.weight",
+            "layers.0.adaLN_modulation.0.weight",
+            "layers.0.feed_forward.w1.weight",
+            "layers.0.feed_forward.w3.weight",
+            "t_embedder.mlp.0.weight",
+            "final_layer.linear.weight",
+        ],
+    ),
     "unknown": (None, ["some.random.key", "blocks.0.attn.gate.weight"]),
 }
 

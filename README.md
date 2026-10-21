@@ -4,7 +4,7 @@
 
 TheNoise is an open-source image generation / editing engine made specifically to run well on Strix Halo (gfx1151) and other ROCm-capable AMD iGPUs and dGPUs. It is tuned to perform extremely well on the machine it runs on.  
 
-TheNoise loads one model at a time and generates images from text prompts. Editing-capable models - like Qwen-Image 2.1, Qwen-Image-Edit, FLUX.2 Klein, Mage-Flow and Flux.3 - can also edit an existing image from a text instruction (image + prompt → edited image).
+TheNoise loads one model at a time and generates images from text prompts. Editing-capable models - like Qwen-Image 2.1, Qwen-Image-Edit, FLUX.2 Klein, Mage-Flow, Flux.3 and Fibo 2.0 - can also edit an existing image from a text instruction (image + prompt → edited image).
 
 TheNoise can be used standalone, from the command line or through a webui or through an OpenAI-compatible server like [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends), with which it is already integrated.
 
@@ -56,6 +56,7 @@ TheNoise ships:
 | **Ming-Image 0.1**, RGBA output with real transparency | ✓ | — | [ming-image](docs/models/ming-image.md) |
 | **Mage-Flow / Turbo**, the fastest model, with editing | ✓ | ✓ | [mage-flow](docs/models/mage-flow.md) |
 | **Flux.3**, 15 steps with editing | ✓ | ✓ | [flux3](docs/models/flux3.md) |
+| **Fibo 2.0**, Bria's 4-step generate-and-edit model | ✓ | ✓ | [fibo2](docs/models/fibo2.md) |
 
 New models are added over time. PRs adding model support are welcome.
 

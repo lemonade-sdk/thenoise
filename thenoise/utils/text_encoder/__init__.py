@@ -319,16 +319,24 @@ def load_qwen3_vl_tokenizer(
     return tokenizer, tokenizer
 
 
-def load_qwen3_vl_processor(tokenizer):
+def load_qwen3_vl_processor(tokenizer, *, size: Optional[dict] = None):
     """Build a Qwen3-VL processor (image preprocessor + the same tokenizer) locally.
 
     The image config is vendored (``QWEN3_VL_PREPROCESSOR_CONFIG``) so no
     ``preprocessor_config.json`` is fetched. The video processor is built with its
     defaults: this engine feeds the encoder single images only, but the processor
     requires one.
+
+    ``size`` replaces the vendored grid limits, which are areas under the
+    ``shortest_edge``/``longest_edge`` names: a model trained to see a narrower range
+    of pixels gets its own, and the ``smart_resize`` round trip cannot quietly move an
+    image off the grid it was pre-sized to.
     """
+    image_config = dict(QWEN3_VL_PREPROCESSOR_CONFIG)
+    if size is not None:
+        image_config["size"] = dict(size)
     return Qwen3VLProcessor(
-        image_processor=Qwen2VLImageProcessor.from_dict(QWEN3_VL_PREPROCESSOR_CONFIG),
+        image_processor=Qwen2VLImageProcessor.from_dict(image_config),
         tokenizer=tokenizer,
         video_processor=Qwen3VLVideoProcessor(),
     )

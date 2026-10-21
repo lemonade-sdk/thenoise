@@ -85,8 +85,7 @@ Generate:
 ```
 
 Edit — `--image` is repeatable and each image becomes a reference the model can
-look at. The **first** image sets the output size (1024 on its longest side,
-aspect preserved) unless you pass `--width`/`--height`:
+look at. The **first** image sets the output size unless you pass `--width`/`--height`:
 
 ```bash
 ./thenoise.sh edit \

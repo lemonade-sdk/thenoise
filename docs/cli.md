@@ -91,7 +91,7 @@ Edits an existing image from an instruction (image + prompt → edited image).
 Requires an editing-capable model and shares all generation flags with `generate`.
 
 `--image` is repeatable. The **first** image sets the output size when
-`--width`/`--height` are omitted: 1024 on its largest side, aspect preserved.
+`--width`/`--height` are omitted: its own aspect ratio at about a megapixel.
 
 ```bash
 ./thenoise.sh edit \

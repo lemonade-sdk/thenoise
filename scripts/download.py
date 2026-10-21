@@ -23,6 +23,8 @@ Models:
                   https://huggingface.co/Comfy-Org/Qwen-Image-2.1
   mage-flow       Microsoft Mage-Flow (t2i + edit; base / RL / turbo)
                   https://huggingface.co/Comfy-Org/Mage-Flow
+  fibo2           Bria Fibo 2.0 edit-turbo / dev (t2i + edit in one DiT)
+                  https://huggingface.co/Comfy-Org/Fibo-2.0
   esrgan          Real-ESRGAN x4 pixel upscaler (optional, for upscaling)
                   https://huggingface.co/Comfy-Org/Real-ESRGAN_repackaged
   controlmaps      Control-map checkpoints: a Depth-Anything-V2 depth model, or the
@@ -55,6 +57,9 @@ Usage:
     python scripts/download.py --model mage-flow
     python scripts/download.py --model mage-flow --variant base
     python scripts/download.py --model mage-flow --int8-convrot --edit-only
+    python scripts/download.py --model fibo2
+    python scripts/download.py --model fibo2 --variant dev
+    python scripts/download.py --model fibo2 --variant dev --int8-convrot
     python scripts/download.py --model esrgan
     python scripts/download.py --model controlmaps
     python scripts/download.py --model controlmaps --variant pose
@@ -309,6 +314,24 @@ def _mage_flow_jobs(args: argparse.Namespace) -> list[Artifact]:
     return jobs
 
 
+#: Fibo 2.0 variant -> DiT file stem. Both releases are the same architecture: dev is
+#: the 50-step model at CFG 5, edit-turbo the 4-step distilled one (the engine's
+#: defaults), and either generates as well as edits.
+_FIBO2_REPO = "Comfy-Org/Fibo-2.0"
+_FIBO2_VARIANTS = {"dev": "fibo2_dev", "edit-turbo": "fibo2_edit_turbo"}
+
+
+def _fibo2_jobs(args: argparse.Namespace) -> list[Artifact]:
+    """Fibo 2.0: one DiT per variant + the shared Qwen3-VL-4B TE + the Flux.2 AE."""
+    stem = _FIBO2_VARIANTS[args.variant]
+    suffix = "int8_convrot" if args.int8_convrot else "bf16"
+    return [
+        ("dit", _FIBO2_REPO, f"diffusion_models/{stem}_{suffix}.safetensors"),
+        ("text_encoder", _FIBO2_REPO, f"text_encoders/qwen3vl_4b_{suffix}.safetensors"),
+        ("vae", _FIBO2_REPO, "vae/flux2-vae.safetensors"),
+    ]
+
+
 def _esrgan_jobs(args: argparse.Namespace) -> list[Artifact]:
     """Real-ESRGAN x4 pixel upscaler (no DiT/TE/VAE)."""
     return [
@@ -448,6 +471,14 @@ MODELS: dict[str, ModelSpec] = {
         variant_choices=("base", "rl", "turbo"),
         default_variant="turbo",
     ),
+    "fibo2": ModelSpec(
+        "fibo2", "./models/fibo2",
+        "Bria Fibo 2.0 (t2i + edit in one DiT; edit-turbo by default)",
+        _fibo2_jobs,
+        variant_supported=True,
+        variant_choices=("edit-turbo", "dev"),
+        default_variant="edit-turbo",
+    ),
     "esrgan": ModelSpec(
         "esrgan", "./models/esrgan",
         "Real-ESRGAN x4 pixel upscaler (optional; used for upscaling)",
@@ -489,6 +520,8 @@ def _epilog() -> str:
         "  python scripts/download.py --model mage-flow",
         "  python scripts/download.py --model mage-flow --variant base",
         "  python scripts/download.py --model mage-flow --int8-convrot --edit-only",
+        "  python scripts/download.py --model fibo2",
+        "  python scripts/download.py --model fibo2 --variant dev --int8-convrot",
         "  python scripts/download.py --model esrgan",
         "  python scripts/download.py --model controlmaps            # depth + pose",
         "  python scripts/download.py --model controlmaps --variant base",
@@ -523,6 +556,7 @@ def main() -> None:
             "klein: 4b | 4b-base | 9b | 9b-base (default: 4b) | "
             "qwen-image-2.1: turbo | base (default: turbo) | "
             "mage-flow: turbo | rl | base (default: turbo) | "
+            "fibo2: edit-turbo | dev (default: edit-turbo) | "
             "controlmaps: all | small | base | large | pose | pose-r50vd "
             "(default: all, the depth model and both pose checkpoints)"
         ),

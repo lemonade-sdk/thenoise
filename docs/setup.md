@@ -69,6 +69,7 @@ All models and options (variants, `--int8-convrot`, ...):
 | Mage-Flow / Turbo | `--model mage-flow` | 18–25 GB | [model page](models/mage-flow.md) |
 | Flux.3 | not in the script — see below | ~5.8 GB (INT8) | [model page](models/flux3.md) |
 | MOSS-Image | `--model moss-image` | 14–19 GB | [model page](models/moss-image.md) |
+| Fibo 2.0 edit-turbo / dev | `--model fibo2 --int8-convrot` | 14–26 GB | [model page](models/fibo2.md) |
 | Real-ESRGAN x4 *(optional, upscaling)* | `--model esrgan` | ~0.7 GB | [CLI: upscaling](cli.md#upscaling) |
 | Control-map checkpoints *(optional, control-map extraction)* | `--model controlmap` | 99 MB – 425 MB | [CLI: control maps](cli.md#control-map-a-control-map) |
 

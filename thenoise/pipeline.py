@@ -44,10 +44,6 @@ from thenoise.utils.png import build_pnginfo
 logger = logging.getLogger(__name__)
 
 
-# Largest side for the edit output when neither width nor height is given.
-_EDIT_DEFAULT_SIZE = 1024
-
-
 @dataclass(frozen=True)
 class _ResolvedRequest:
     """Resolved pipeline values shared by ``generate`` and ``edit``.
@@ -182,17 +178,18 @@ class PipelineController:
             return ("prompt",) + base
         return ("prompt_edit",) + base + (ref_key,)
 
-    def _cache_key_reference(self, images: list[Image.Image]) -> Tuple:
+    def _cache_key_reference(self, images: list[Image.Image], target: Tuple[int, int]) -> Tuple:
         """Cache key for the encoded reference latent(s) (edit path).
 
         Hashes each image's normalized pixel bytes (RGBA when it carries
         transparency) in order, plus the sizing policy that decided the size each one
-        was encoded at.
+        was encoded at and the canvas size that policy was given: a model may fit a
+        reference to the result (``DiffusionModel.fit_references``).
         """
         digests = tuple(
             hashlib.md5(load_image(img).tobytes()).hexdigest() for img in images
         )
-        return ("reference", self.model.REFERENCE_SIZING, digests)
+        return ("reference", self.model.REFERENCE_SIZING, target, digests)
 
     def _cache_key_sampling(
         self,
@@ -260,22 +257,14 @@ class PipelineController:
         if not images:
             raise ValueError("edit requires an input image")
 
-        # Without explicit width/height the first reference sets the output
-        # aspect ratio, resized to ``_EDIT_DEFAULT_SIZE`` on its largest side.
+        # Without explicit width/height the first reference decides the output size.
         local = request
         if request.width is None and request.height is None:
-            iw, ih = images[0].size
-            target = _EDIT_DEFAULT_SIZE
-            if iw >= ih:
-                w = target
-                h = round(ih * target / iw)
-            else:
-                h = target
-                w = round(iw * target / ih)
-            local = replace(request, width=w, height=h)
+            width, height = model.default_edit_size(*images[0].size)
+            local = replace(request, width=width, height=height)
 
         r = self._resolve_pipeline(local, is_edit=True)
-        ref_key = self._cache_key_reference(images)
+        ref_key = self._cache_key_reference(images, (r.width, r.height))
         with inference():
             return self._finalize(
                 self._run(local, r, ref_key=ref_key, ref_method=r.ref_method),
@@ -333,11 +322,12 @@ class PipelineController:
                 if self._cache.reference_hit(ref_key):
                     ref_latents = self._cache.reference_get()
                 else:
-                    ref_latents = []
-                    for img in self._edit_images(request):
-                        fitted = model.prepare_reference(img)
-                        pixels = pil_to_pixels(fitted, model.pixel_channels)
-                        ref_latents.append(model.encode_reference(pixels))  # [1,C,H,W]
+                    ref_latents = [
+                        model.encode_reference(
+                            pil_to_pixels(fitted, model.pixel_channels))  # [1,C,H,W]
+                        for fitted in model.fit_references(
+                            self._edit_images(request), (r.width, r.height))
+                    ]
                     self._cache.reference_store(ref_key, ref_latents)
 
             # Stage 1: prompt conditioning — text encoder only.

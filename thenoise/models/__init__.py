@@ -9,6 +9,7 @@ from typing import List, Type
 
 from .base import DiffusionModel
 from .anima import AnimaModel
+from .fibo2 import Fibo2Model
 from .flux_klein import FluxKleinModel
 from .flux3 import Flux3Model
 from .krea2 import Krea2Model
@@ -30,6 +31,7 @@ MODEL_CATALOG: List[Type[DiffusionModel]] = [
     QwenImageModel,
     QwenImage21Model,
     MossImageModel,
+    Fibo2Model,
 ]
 
 

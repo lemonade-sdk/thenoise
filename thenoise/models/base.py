@@ -297,6 +297,19 @@ class DiffusionModel(ABC):
         """Return the effective (width, height). Override to round/validate."""
         return width, height
 
+    #: Area an edit is sampled at when the request names no size.
+    EDIT_DEFAULT_AREA: ClassVar[int] = 1024 * 1024
+
+    def default_edit_size(self, width: int, height: int) -> Tuple[int, int]:
+        """The result size of an edit that names none, for a ``width`` x ``height`` reference.
+
+        The reference's aspect ratio at :data:`EDIT_DEFAULT_AREA`; ``resolve_size`` still
+        rounds the answer onto this model's latent cell. Override it when a model was
+        trained at particular sizes rather than at any size.
+        """
+        scale = (self.EDIT_DEFAULT_AREA / (width * height)) ** 0.5
+        return round(width * scale), round(height * scale)
+
     def percent_to_sigma(self, percent: float) -> float:
         """Map a percent (0..1) to a sigma, used by the sampler's SNR offset.
 
@@ -309,12 +322,23 @@ class DiffusionModel(ABC):
     # How one reference is fitted for ``encode_reference``: aspect preserved, never
     # cropped, aligned to the model's latent cell. ``prepare_reference`` must stay a
     # pure function of the image and this struct — the pipeline caches the encoded
-    # reference on it.
+    # reference on it, and on the canvas size it hands ``fit_references``.
     REFERENCE_SIZING: ClassVar[ReferenceSizing] = ReferenceSizing()
 
     def prepare_reference(self, image: Image.Image) -> Image.Image:
         """Fit one reference image for :meth:`encode_reference`."""
         return self.REFERENCE_SIZING.apply(image)
+
+    def fit_references(self, images: List[Image.Image],
+                       target: Tuple[int, int]) -> List[Image.Image]:
+        """Every reference of one edit, fitted for :meth:`encode_reference`.
+
+        ``target`` is the size of the result. The default hands each image to
+        :meth:`prepare_reference` and ignores it, because a reference normally keeps the
+        shape it arrived in; a model whose edit lines up with its lone reference pixel
+        for pixel overrides this to put that reference on the canvas's own grid.
+        """
+        return [self.prepare_reference(img) for img in images]
 
     def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
         """Encode input pixels (``[C,H,W]`` in [-1, 1]) into the canonical latent."""

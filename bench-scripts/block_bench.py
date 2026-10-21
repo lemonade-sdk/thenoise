@@ -972,6 +972,133 @@ def moss_image_text_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     return Case(run, flops, ctx.txt, detail=f"txt={ctx.txt}")
 
 
+def _fibo2_pe(ctx: Ctx, params, num_gist: int, side: int, refs: int):
+    """Rotary table for ``[gist, target, references]``, through the model's own builder.
+
+    ``store`` without a ``dtype``, as ``Fibo2Model`` stores it: the table stays fp32 and
+    the rope kernel casts the activations to match.
+    """
+    from thenoise.dit.fibo2.models import sequence_positions
+
+    ids = sequence_positions(num_gist, side, side, [(side, side)] * refs,
+                             params.max_gist_tokens, device=ctx.tdev)
+    return rope_cache(ctx, list(params.axes_dims), params.rope_theta).store("bench", ids)
+
+
+def _fibo2_case(ctx: Ctx, tokens: int, scenario: str, role: str) -> Case:
+    """One Fibo 2.0 ``Block``, at the released width, over the stream it is called with.
+
+    Fibo 2.0 runs a single stream and reaches the prompt only by cross-attention, so the
+    roles are the shapes that one class is called with: ``block`` (39 of 44, the stream
+    alone), ``injection`` (the 5 that also read a text bundle) and ``noise_refiner``
+    (the 2 that run before the gist joins). Only the refiner's modulation changes with
+    the scenario: references give it both AdaLN rows and a span, a plain run gives it
+    the noisy row alone and no span at all.
+    """
+    from thenoise.dit.fibo2.models import Block, Fibo2Params, gist_count
+
+    params = Fibo2Params()
+    name = f"fibo2/{role}"
+    heads, dim, head_dim = params.num_heads, params.dim, params.head_dim
+    refiner, injection = role == "noise_refiner", role == "injection"
+    side = grid_side(tokens)
+    tokens = side * side
+    nref = n_refs(ctx, scenario)
+    refs = nref * tokens
+
+    blk = new_block(ctx, name, Block, params, params.cap_dim if injection else None)
+    seed_inputs(name, scenario, tokens)
+
+    num_gist = gist_count(ctx.txt, params.max_gist_tokens)
+    if refiner:
+        # Production passes ``pe[:, num_gist:]``. The image rides the plane past every
+        # gist count the model can emit, so a table built without the gist is that slice
+        # exactly rather than an approximation of it.
+        pe = _fibo2_pe(ctx, params, 0, side, nref)
+        x = randn(ctx, 1, tokens + refs, dim)
+        if refs:
+            adaln, span = randn(ctx, 2, params.adaln_dim), (0, tokens)
+        else:
+            adaln, span = randn(ctx, 1, params.adaln_dim), None
+    else:
+        pe = _fibo2_pe(ctx, params, num_gist, side, nref)
+        x = randn(ctx, 1, num_gist + tokens + refs, dim)
+        # Clean and noisy timestep rows stacked on the batch axis: the gist and the
+        # references modulate from the first, the target from the second.
+        adaln, span = randn(ctx, 2, params.adaln_dim), (num_gist, num_gist + tokens)
+
+    context = randn(ctx, 1, ctx.txt, params.cap_dim) if injection else None
+
+    def run():
+        return blk(x, pe, adaln, span, context)
+
+    n = x.shape[1]
+    parts = [(gemm_params(blk.attention) + gemm_params(blk.feed_forward), n),
+             (gemm_params(blk.adaLN_modulation), adaln.shape[0])]
+    pairs: list[tuple[int, int]] = [(n, n)]
+    if injection:
+        # Only ``to_kv`` reads the bundle; the gate is a scalar, and it is zero in a
+        # block that never loaded one, which costs a multiply but no FLOPs.
+        ca = blk.cross_attention
+        parts.append((gemm_params(ca.to_q) + gemm_params(ca.to_out), n))
+        parts.append((gemm_params(ca.to_kv), ctx.txt))
+        pairs.append((n, ctx.txt))
+
+    bits = ([] if refiner else [("gist", num_gist)]) + [("img", tokens), ("refs", refs)]
+    if injection:
+        bits.append(("txt", ctx.txt))
+    bits.append(("rows", adaln.shape[0]))
+    if refiner:
+        bits.append(("span", "none" if span is None else f"{span[0]}-{span[1]}"))
+    flops = gemm_flops(*parts) + attn_flops(heads, head_dim, tuple(pairs))
+    return Case(run, flops, n, detail=" ".join(f"{k}={v}" for k, v in bits))
+
+
+@fixture("fibo2", "block", ("plain", "edit"))
+def fibo2_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """A main block over ``[gist, target, references]``: rotated self-attention, no text."""
+    return _fibo2_case(ctx, tokens, scenario, "block")
+
+
+@fixture("fibo2", "injection", ("plain", "edit"))
+def fibo2_injection(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """An injection block: that stream plus a cross-attention to one bundle of the prompt."""
+    return _fibo2_case(ctx, tokens, scenario, "injection")
+
+
+@fixture("fibo2", "noise_refiner", ("plain", "edit"))
+def fibo2_noise_refiner(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """A refiner block over ``[target, references]``, twice per step, before the gist joins."""
+    return _fibo2_case(ctx, tokens, scenario, "noise_refiner")
+
+
+@fixture("fibo2", "perceiver", fixed_seq=True)
+def fibo2_perceiver(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """One Perceiver layer, twice per CFG branch: the gist queries reading the prompt."""
+    from thenoise.dit.fibo2.models import Fibo2Params, PerceiverLayer, gist_count
+
+    params = Fibo2Params()
+    name = "fibo2/perceiver"
+    heads, dim, head_dim = params.num_heads, params.dim, params.head_dim
+
+    blk = new_block(ctx, name, PerceiverLayer, params)
+    seed_inputs(name, scenario, ctx.txt)
+    num_gist = gist_count(ctx.txt, params.max_gist_tokens)
+    x = randn(ctx, 1, num_gist, dim)
+    context = randn(ctx, 1, ctx.txt, params.cap_dim)
+
+    def run():
+        return blk(x, context)
+
+    cross = blk.cross_attention
+    flops = gemm_flops(
+        (gemm_params(cross.to_q) + gemm_params(cross.to_out)
+         + gemm_params(blk.self_attention) + gemm_params(blk.ffn), num_gist),
+        (gemm_params(cross.to_kv), ctx.txt),
+    ) + attn_flops(heads, head_dim, ((num_gist, ctx.txt), (num_gist, num_gist)))
+    return Case(run, flops, num_gist, detail=f"gist={num_gist} txt={ctx.txt}")
+
+
 # ------------------------------------------------------------------ measurement
 @dataclass
 class Timing:

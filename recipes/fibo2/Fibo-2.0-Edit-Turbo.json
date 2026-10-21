@@ -1,0 +1,29 @@
+{
+  "checkpoints": {
+    "main": "Comfy-Org/Fibo-2.0:diffusion_models/fibo2_edit_turbo_bf16.safetensors",
+    "text_encoder": "Comfy-Org/Fibo-2.0:text_encoders/qwen3vl_4b_int8_convrot.safetensors",
+    "vae": "Comfy-Org/Fibo-2.0:vae/flux2-vae.safetensors"
+  },
+  "image_defaults": {
+    "cfg_scale": 1,
+    "height": 1024,
+    "steps": 4,
+    "width": 1024
+  },
+  "labels": [
+    "custom",
+    "image",
+    "edit"
+  ],
+  "recipe": "thenoise",
+  "recipe_options": {
+    "cfg_scale": 1,
+    "height": 1024,
+    "steps": 4,
+    "width": 1024
+  },
+  "registry_source": "huggingface",
+  "size": 20.16,
+  "source": "huggingface",
+  "model_name": "user.Fibo-2.0-Edit-Turbo"
+}
