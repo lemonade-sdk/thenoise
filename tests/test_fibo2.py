@@ -37,6 +37,7 @@ from thenoise.dit.fibo2.models import (
 )
 from thenoise.dit.fibo2.sampling import SHIFT, get_sigmas, shift
 from thenoise.dit.fibo2.sizes import TRAINED_AREA, trained_size
+from thenoise.dit.kvcache import KVCache
 from thenoise.dit.fibo2.utils import detect_params, load_fibo2_dit
 from thenoise.models import Fibo2Model
 from thenoise.models.base import Conditioning
@@ -141,7 +142,7 @@ def _blocks_run_eagerly(monkeypatch):
         )
 
 
-def _run(dit, x, ctx, refs=(), timestep=0.7, dtype=torch.bfloat16):
+def _run(dit, x, ctx, refs=(), timestep=0.7, dtype=torch.bfloat16, kv=None):
     """One forward over the layout ``x``/``refs`` imply, positions and gist included."""
     positions = sequence_positions(
         gist_count(ctx.shape[1], GIST), x.shape[-2], x.shape[-1],
@@ -154,7 +155,7 @@ def _run(dit, x, ctx, refs=(), timestep=0.7, dtype=torch.bfloat16):
         gist = dit.gist_tokens(context)
         return dit(
             x.to(dtype), torch.tensor([timestep], dtype=dtype), context, gist,
-            dit.pe_embedder["pe"], [r.to(dtype) for r in refs],
+            dit.pe_embedder["pe"], [r.to(dtype) for r in refs], kv,
         )
 
 
@@ -488,7 +489,10 @@ def test_prepare_latent_puts_each_reference_on_its_own_plane(dit):
     model = _bare(dit=dit, params=_params_dict(), vae=FakeVAE())
     refs = [torch.ones(1, Z, 2, 3), torch.ones(1, Z, 1, 2)]
 
-    model.prepare_latent(_n(1, Z, 4, 3), Conditioning(cond=_n(1, 6, CTX)), _params(), ref=refs)
+    model.prepare_latent(
+        _n(1, Z, 4, 3), Conditioning(cond=_n(1, 6, CTX)), _params(), ref=refs,
+        ref_method="index_timestep_zero",
+    )
 
     table = dit.pe_embedder["cond"]
     assert table.shape[1] == GIST_MIN_TOKENS + 12 + 6 + 2  # gist, image, both references
@@ -504,39 +508,101 @@ def test_prepare_latent_puts_each_reference_on_its_own_plane(dit):
     assert not torch.equal(plane(first_ref), plane(second_ref))
 
 
-def test_both_timestep_zero_names_mean_one_layout(dit):
-    """The marker a checkpoint carries picks which *name* the pref arrives under; both
-    mean "append the clean latent on its own plane", so either runs identically."""
+def test_the_accepted_reference_method_is_the_one_the_model_uses(dit):
+    """A reference joins the sequence on its own plane at ``t = 0`` and there is no
+    other reading of it, so the one accepted name is also the model's own default."""
     model = _bare(dit=dit, params=_params_dict(), vae=FakeVAE())
-    refs, cond, latents = [torch.ones(1, Z, 2, 2)], Conditioning(cond=_n(1, 6, CTX)), _n(1, Z, 4, 3)
+    assert Fibo2Model.REF_METHODS == ("index_timestep_zero",)
+    assert Fibo2Model.DEFAULT_PREFS["ref_method"] == "index_timestep_zero"
 
-    runs = []
-    for method in Fibo2Model.REF_METHODS:
-        x = model.prepare_latent(latents, cond, _params(), ref=refs, ref_method=method)
-        with _compute():
-            velocity = model._dit_forward(
-                x, torch.full((1,), 0.5, dtype=torch.float32), "cond"
-            )
-        runs.append((dit.pe_embedder["cond"].clone(), velocity))
-
-    (pe_first, out_first), (pe_second, out_second) = runs
-    assert torch.equal(pe_first, pe_second)
-    assert torch.equal(out_first, out_second)
+    x = model.prepare_latent(
+        _n(1, Z, 4, 3), Conditioning(cond=_n(1, 6, CTX)), _params(),
+        ref=[torch.ones(1, Z, 2, 2)], ref_method="index_timestep_zero",
+    )
+    with _compute():
+        velocity = model._dit_forward(x, torch.full((1,), 0.5, dtype=torch.float32), "cond")
+    assert velocity.shape == x.shape
 
 
-@pytest.mark.parametrize("method", ["channel", "index_timestep_one"])
+@pytest.mark.parametrize("method", ["index", "channel", "index_timestep_one"])
 def test_an_unsupported_reference_method_is_refused(dit, method):
-    """Rejected on the run, whether or not it carries references: a pref the model
-    cannot honour should not wait until an edit to say so."""
+    """Including the plain ``index`` other edit models offer: there is no variant of
+    this architecture where a reference carries the step's timestep."""
     model = _bare(dit=dit, params=_params_dict(), vae=FakeVAE())
-    cond = Conditioning(cond=_n(1, 6, CTX))
 
-    with pytest.raises(ValueError, match="unsupported ref_latents_method"):
-        model.prepare_latent(_n(1, Z, 4, 3), cond, _params(), ref=None, ref_method=method)
     with pytest.raises(ValueError, match="unsupported ref_latents_method"):
         model.prepare_latent(
-            _n(1, Z, 4, 3), cond, _params(), ref=[torch.ones(1, Z, 2, 2)], ref_method=method
+            _n(1, Z, 4, 3), Conditioning(cond=_n(1, 6, CTX)), _params(),
+            ref=[torch.ones(1, Z, 2, 2)], ref_method=method,
         )
+
+
+def test_the_method_is_only_asked_of_a_run_that_carries_references(dit):
+    """The refiner pass of ``--upscale`` re-enters ``prepare_latent`` with no reference
+    and the base default method; a name this model was never offered must not stop it."""
+    model = _bare(dit=dit, params=_params_dict(), vae=FakeVAE())
+
+    x = model.prepare_latent(
+        _n(1, Z, 4, 3), Conditioning(cond=_n(1, 6, CTX)), _params(), ref_method="index"
+    )
+    assert x.shape[-2:] == (4, 3)
+
+
+def test_the_cache_reads_back_the_sequence_it_replaced(dit):
+    """The filling pass runs the references, the reading pass leaves them out and takes
+    their K/V from the buffers. At one timestep and one latent the frozen slice holds
+    what the full sequence would have computed, so the two agree exactly."""
+    x, context, refs = _n(1, Z, 4, 3), _n(1, 6, CTX), [_n(1, Z, 2, 2)]
+
+    full = _run(dit, x, context, refs=refs)
+    cache = KVCache("cond")
+    _run(dit, x, context, refs=refs, kv=cache)
+    assert cache.filled
+    read = _run(dit, x, context, refs=refs, kv=cache)
+
+    assert torch.allclose(read, full, atol=1e-5), (read - full).abs().max().item()
+
+
+def test_the_cache_is_filled_by_the_first_step_and_read_by_the_rest(dit):
+    model = _bare(dit=dit, params=_params_dict(), vae=FakeVAE())
+    cond = Conditioning(cond=_n(1, 6, CTX))
+    x = model.prepare_latent(
+        _n(1, Z, 4, 3), cond, _params(kv_cache=True), ref=[torch.ones(1, Z, 2, 2)],
+        ref_method="index_timestep_zero",
+    )
+    cache = model.kv_cache("cond")
+    assert cache is not None and not cache.filled
+
+    with _compute():
+        model.denoise_step(x, 0.6, cond, 1.0, 0)
+        assert cache.filled
+        velocity = model.denoise_step(x, 0.4, cond, 1.0, 1)
+    assert velocity.shape == x.shape
+
+    model.finalize_latent(velocity, _params())
+    assert model.kv_cache("cond") is None  # gone before anything decodes
+
+
+def test_every_branch_gets_its_own_frozen_references(dit):
+    model = _bare(dit=dit, params=_params_dict(), vae=FakeVAE())
+    cond = Conditioning(cond=_n(1, 6, CTX), null=_n(1, 6, CTX))
+    model.prepare_latent(
+        _n(1, Z, 4, 3), cond, _params(kv_cache=True, guidance_scale=3.0),
+        ref=[torch.ones(1, Z, 2, 2)], ref_method="index_timestep_zero",
+    )
+
+    assert model.kv_cache("cond") is not None
+    assert model.kv_cache("cond") is not model.kv_cache("uncond")
+
+
+def test_a_run_without_references_starts_no_cache(dit):
+    """What the cache freezes is reference K/V; a plain generation has none to freeze."""
+    model = _bare(dit=dit, params=_params_dict(), vae=FakeVAE())
+    model.prepare_latent(
+        _n(1, Z, 4, 3), Conditioning(cond=_n(1, 6, CTX)), _params(kv_cache=True)
+    )
+
+    assert model.kv_cache("cond") is None
 
 
 def test_encode_reference_encodes_pixels_at_full_size():

@@ -51,14 +51,13 @@ class Fibo2Model(DiffusionModel):
         "steps": 4,
         "guidance_scale": 1.0,
         "sampler": "euler",
+        "ref_method": "index_timestep_zero",
     }
 
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": False}
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": True}
+    KV_CACHED_SLICE = "suffix"
 
-    #: A reference is always clean: ``t = 0`` modulation, one RoPE plane each. Both
-    #: method names mean exactly that, so a checkpoint carrying the timestep-zero
-    #: marker is accepted under either.
-    REF_METHODS = ("index", "index_timestep_zero")
+    REF_METHODS = ("index_timestep_zero",)
 
     #: Fused sub-projections a LoRA may train apart, in each fused matrix's row order.
     lora_fusions = {
@@ -134,11 +133,11 @@ class Fibo2Model(DiffusionModel):
         is fixed here, per branch, so the per-step ``denoise_step`` stays a pure DiT
         forward. Safe under the lock.
         """
-        if ref_method not in self.REF_METHODS:
+        if ref and ref_method not in self.REF_METHODS:
             raise ValueError(
-                f"unsupported ref_latents_method {ref_method!r} for fibo2; a reference "
-                "is only ever appended to the sequence, on its own rope plane, at "
-                "timestep zero"
+                f"unsupported ref_latents_method {ref_method!r}; Fibo 2.0 always "
+                "conditions its reference tokens at timestep zero, on a rope plane of "
+                "their own"
             )
         dev = torch.device(self.device)
         x = latents.to(device=dev, dtype=self.dtype)
@@ -152,6 +151,12 @@ class Fibo2Model(DiffusionModel):
         if cond.null is not None:
             null = cond.null.to(device=dev, dtype=self.dtype)
             self._branches["uncond"] = (null, self._prepare_branch("uncond", null, height, width))
+
+        self.start_kv_caches(
+            params,
+            has_reference=bool(self._refs),
+            has_uncond=params.guidance_scale > 1.0 and "uncond" in self._branches,
+        )
         return x
 
     def _prepare_branch(
@@ -204,7 +209,17 @@ class Fibo2Model(DiffusionModel):
     ) -> torch.Tensor:
         """One forward on one conditioning branch: its own text, gist and positions."""
         context, gist = self._branches[branch]
-        return self.dit(x, t_full, context, gist, self.dit.pe_embedder[branch], self._refs)
+        return self.dit(
+            x, t_full, context, gist, self.dit.pe_embedder[branch],
+            self._refs, self.kv_cache(branch),
+        )
+
+    def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:
+        """Drop the run's caches and per-branch state before anything decodes."""
+        self.end_kv_caches()
+        self._branches = {}
+        self._refs = []
+        return latents
 
     # ------------------------------------------------------------ editing
     def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:

@@ -26,9 +26,11 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from thenoise.dit.kvcache import KVBuffers, KVCache, cache_mode
 from thenoise.dit.lumina.models import Attention as RotatedAttention
 from thenoise.dit.lumina.models import FinalLayer, TimestepEmbedder
 from thenoise.dit.quantized import QuantizedLinear
+from thenoise.utils.dynamo import mark_token_axis
 from thenoise.utils.attention import attention
 from thenoise.utils.positions import grid_from_axes, grid_positions
 from thenoise.utils.qk_norm import QKNorm
@@ -202,7 +204,7 @@ class Block(nn.Module):
             # Closed rather than uninitialized until a checkpoint gives it a value.
             self.cross_attn_gate = nn.Parameter(torch.zeros(1))
 
-    @torch.compile(fullgraph=True)
+    @torch.compile(fullgraph=False)
     def forward(
         self,
         x: Tensor,
@@ -210,6 +212,7 @@ class Block(nn.Module):
         adaln: Tensor,
         span: Optional[Tuple[int, int]] = None,
         context: Optional[Tensor] = None,
+        bufs: Optional[KVBuffers] = None,
     ) -> Tensor:
         scale_attn, gate_attn, scale_ffn, gate_ffn = self.adaLN_modulation(adaln).chunk(
             4, dim=-1
@@ -218,6 +221,7 @@ class Block(nn.Module):
         y = self.attention(
             scale_tokens(self.attention_norm1(x), (1.0 + scale_attn).unsqueeze(1), span),
             freqs_cis=pe,
+            bufs=bufs,
         )
         x = x + scale_tokens(self.attention_norm2(y), gate_attn.tanh().unsqueeze(1), span)
 
@@ -324,6 +328,18 @@ class Fibo2Transformer2DModel(nn.Module):
             bundle, gist_count(context.shape[1], self.params.max_gist_tokens)
         )
 
+    def kv_buffers(
+        self, kv: Optional[KVCache], mode: str, key: str, tokens: Tensor
+    ) -> Optional[KVBuffers]:
+        """One block's cache buffers for a forward over ``tokens`` ``[B, L, dim]``."""
+        if kv is None:
+            return None
+        heads, head_dim = self.params.num_heads, self.params.head_dim
+        return kv.buffers(
+            key, mode, (tokens.shape[0], heads, tokens.shape[1], head_dim),
+            tokens.dtype, tokens.device,
+        )
+
     def forward(
         self,
         x: Tensor,
@@ -332,6 +348,7 @@ class Fibo2Transformer2DModel(nn.Module):
         gist: Tensor,
         pe: Tensor,
         refs: Sequence[Tensor] = (),
+        kv: Optional[KVCache] = None,
     ) -> Tensor:
         """The velocity of the whole latent, ``[B, latent, H, W]``.
 
@@ -339,34 +356,57 @@ class Fibo2Transformer2DModel(nn.Module):
         branch's Perceiver output for it and ``pe`` the rotary table over the whole
         ``[gist, image, references]`` sequence. ``refs`` are reference latents in the
         same canonical layout as ``x``.
+
+        ``kv`` is this branch's K/V cache. Only the references qualify for it, and only
+        because they are modulated at ``t = 0``: the filling pass runs them and stores
+        their K/V, every later pass leaves them out of the sequence and reads them back.
+        The ``[gist, image]`` tokens a step does recompute stay at the front of the
+        buffer, so the frozen references are the suffix.
         """
         batch, channels, height, width = x.shape
         num_img = height * width
         num_gist = gist.shape[1]
         bundles = context.chunk(self.params.num_bundles, dim=-1)
+        mode = cache_mode(kv, bool(refs))
+        read = mode == "read"
+        # Positions run out where the sequence does: a cached reference needs none, its
+        # keys were stored after rope.
+        live = pe if not read else pe[:, :num_gist + num_img]
 
         # Two AdaLN rows: the clean tokens read the first, the noisy image the second.
         adaln = self.t_embedder(torch.cat((torch.zeros_like(timestep), timestep)))
 
         tokens = [x.flatten(2).transpose(1, 2)]
-        tokens += [ref.flatten(2).transpose(1, 2) for ref in refs]
+        if not read:
+            tokens += [ref.flatten(2).transpose(1, 2) for ref in refs]
         img = self.x_embedder(torch.cat(tokens, dim=1))
 
         if refs:
             refiner_adaln, refiner_span = adaln, (0, num_img)
         else:
             refiner_adaln, refiner_span = adaln[batch:], None
-        for block in self.noise_refiner:
-            img = block(img, pe[:, num_gist:], refiner_adaln, refiner_span)
+        pe_img = live[:, num_gist:]
+        for i, block in enumerate(self.noise_refiner):
+            mark_token_axis(img, pe_img)
+            img = block(
+                img, pe_img, refiner_adaln, refiner_span,
+                bufs=self.kv_buffers(kv, mode, ("noise_refiner", i), img),
+            )
 
         x = torch.cat((gist, img), dim=1)
         del img
         noisy_span = (num_gist, num_gist + num_img)
         for i, block in enumerate(self.layers):
             bundle = self._bundle_of.get(i)
+            mark_token_axis(x, live)
             x = block(
-                x, pe, adaln, noisy_span, None if bundle is None else bundles[bundle]
+                x, live, adaln, noisy_span,
+                None if bundle is None else bundles[bundle],
+                bufs=self.kv_buffers(kv, mode, ("layer", i), x),
             )
+
+        if mode == "fill" and kv is not None:
+            kv.set_filled()
 
         out = self.final_layer(x[:, num_gist:num_gist + num_img], adaln[batch:])
         return out.transpose(1, 2).reshape(batch, channels, height, width)

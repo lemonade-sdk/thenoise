@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
+from thenoise.dit.kvcache import attend
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention
 from thenoise.utils.qk_norm import QKNorm
@@ -72,7 +73,7 @@ class Attention(nn.Module):
         self.out = QuantizedLinear(dim, dim, bias=False)
         self.qk_norm = QKNorm(self.head_dim, eps=eps)
 
-    def forward(self, hidden_states, attention_mask=None, freqs_cis=None):
+    def forward(self, hidden_states, attention_mask=None, freqs_cis=None, bufs=None):
         dim = hidden_states.shape[-1]
         q, k, v = self.qkv(hidden_states).split([dim, dim, dim], dim=-1)
 
@@ -90,7 +91,12 @@ class Attention(nn.Module):
             # Expand the [B, S] key-padding mask to SDPA's [B, 1, 1, S] (True = attend).
             params = AttentionParams(attention_mask=attention_mask[:, None, None, :])
 
-        hidden_states = attention([query, key, value], attn_params=params, drop_rate=0.0)
+        if bufs is not None:
+            hidden_states = attend(query, key, value, bufs)
+        else:
+            hidden_states = attention(
+                [query, key, value], attn_params=params, drop_rate=0.0
+            )
         return self.out(hidden_states)
 
 

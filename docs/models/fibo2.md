@@ -30,7 +30,7 @@ canonical 128-channel ones at 16 pixels per cell and one DiT token is one latent
 | VAE | Flux.2 AE, 128-ch latent at 16 px per cell |
 | Text encoder | Qwen3-VL 4B, read as six bundles of three tapped decoder layers |
 | Editing | ✓ |
-| KV cache | — |
+| KV cache | ✓ |
 | Default settings | 1024×1024, 4 steps, guidance 1.0, euler |
 
 ## Checkpoints
@@ -94,7 +94,7 @@ Generate:
 ```
 
 Edit — `--image` is repeatable, and each image becomes a reference on its own RoPE
-plane, read at `t = 0` while the target is denoised:
+plane, modulated at `t = 0` while the target is denoised:
 
 ```bash
 ./thenoise.sh edit \

@@ -991,11 +991,15 @@ def _fibo2_case(ctx: Ctx, tokens: int, scenario: str, role: str) -> Case:
     Fibo 2.0 runs a single stream and reaches the prompt only by cross-attention, so the
     roles are the shapes that one class is called with: ``block`` (39 of 44, the stream
     alone), ``injection`` (the 5 that also read a text bundle) and ``noise_refiner``
-    (the 2 that run before the gist joins). Only the refiner's modulation changes with
-    the scenario: references give it both AdaLN rows and a span, a plain run gives it
-    the noisy row alone and no span at all.
+    (the 2 that run before the gist joins).
+
+    ``fill`` runs the references and writes their K/V, ``read`` leaves them out of the
+    sequence and attends to the stored ones instead, so only the sequence and the rotary
+    table shorten: the references still hold the clean AdaLN row, which is exactly what
+    makes them cacheable.
     """
     from thenoise.dit.fibo2.models import Block, Fibo2Params, gist_count
+    from thenoise.utils.dynamo import mark_token_axis
 
     params = Fibo2Params()
     name = f"fibo2/{role}"
@@ -1005,6 +1009,7 @@ def _fibo2_case(ctx: Ctx, tokens: int, scenario: str, role: str) -> Case:
     tokens = side * side
     nref = n_refs(ctx, scenario)
     refs = nref * tokens
+    read = scenario == "read"
 
     blk = new_block(ctx, name, Block, params, params.cap_dim if injection else None)
     seed_inputs(name, scenario, tokens)
@@ -1014,28 +1019,47 @@ def _fibo2_case(ctx: Ctx, tokens: int, scenario: str, role: str) -> Case:
         # Production passes ``pe[:, num_gist:]``. The image rides the plane past every
         # gist count the model can emit, so a table built without the gist is that slice
         # exactly rather than an approximation of it.
-        pe = _fibo2_pe(ctx, params, 0, side, nref)
-        x = randn(ctx, 1, tokens + refs, dim)
-        if refs:
-            adaln, span = randn(ctx, 2, params.adaln_dim), (0, tokens)
-        else:
-            adaln, span = randn(ctx, 1, params.adaln_dim), None
+        pe_full = _fibo2_pe(ctx, params, 0, side, nref)
+        live = tokens if read else tokens + refs
     else:
-        pe = _fibo2_pe(ctx, params, num_gist, side, nref)
-        x = randn(ctx, 1, num_gist + tokens + refs, dim)
-        # Clean and noisy timestep rows stacked on the batch axis: the gist and the
-        # references modulate from the first, the target from the second.
+        pe_full = _fibo2_pe(ctx, params, num_gist, side, nref)
+        live = num_gist + tokens if read else num_gist + tokens + refs
+    x = randn(ctx, 1, live, dim)
+    pe = pe_full[:, :live]
+    full = pe_full.shape[1]     # the sequence the filling pass ran, cached length too
+
+    # Clean and noisy timestep rows stacked on the batch axis: the gist and the
+    # references modulate from the first, the target from the second. A read pass carries
+    # no reference tokens and still takes both rows, because the cached ones were
+    # modulated at timestep zero.
+    if not refs:
+        adaln, span = randn(ctx, 1, params.adaln_dim), None
+    elif refiner:
+        adaln, span = randn(ctx, 2, params.adaln_dim), (0, tokens)
+    else:
         adaln, span = randn(ctx, 2, params.adaln_dim), (num_gist, num_gist + tokens)
+
+    bufs = None
+    if scenario != "plain":
+        cache = new_cache("suffix")                 # the references are the tail
+        key = ("noise_refiner", 0) if refiner else ("layer", 0)
+        cache_buffers(cache, key, "fill", (1, heads, full, head_dim), ctx)
+        if read:
+            cache.set_filled()
+        bufs = cache_buffers(cache, key, scenario, (1, heads, live, head_dim), ctx,
+                             prime=read)
 
     context = randn(ctx, 1, ctx.txt, params.cap_dim) if injection else None
 
     def run():
-        return blk(x, pe, adaln, span, context)
+        mark_token_axis(x, pe)
+        return blk(x, pe, adaln, span, context, bufs=bufs)
 
     n = x.shape[1]
     parts = [(gemm_params(blk.attention) + gemm_params(blk.feed_forward), n),
              (gemm_params(blk.adaLN_modulation), adaln.shape[0])]
-    pairs: list[tuple[int, int]] = [(n, n)]
+    # A read pass asks the live tokens' questions of the whole cached sequence.
+    pairs: list[tuple[int, int]] = [(n, full)]
     if injection:
         # Only ``to_kv`` reads the bundle; the gate is a scalar, and it is zero in a
         # block that never loaded one, which costs a multiply but no FLOPs.
@@ -1048,25 +1072,27 @@ def _fibo2_case(ctx: Ctx, tokens: int, scenario: str, role: str) -> Case:
     if injection:
         bits.append(("txt", ctx.txt))
     bits.append(("rows", adaln.shape[0]))
+    if scenario != "plain":
+        bits.append(("cache", full))
     if refiner:
         bits.append(("span", "none" if span is None else f"{span[0]}-{span[1]}"))
     flops = gemm_flops(*parts) + attn_flops(heads, head_dim, tuple(pairs))
     return Case(run, flops, n, detail=" ".join(f"{k}={v}" for k, v in bits))
 
 
-@fixture("fibo2", "block", ("plain", "edit"))
+@fixture("fibo2", "block", CACHE_SCENARIOS)
 def fibo2_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     """A main block over ``[gist, target, references]``: rotated self-attention, no text."""
     return _fibo2_case(ctx, tokens, scenario, "block")
 
 
-@fixture("fibo2", "injection", ("plain", "edit"))
+@fixture("fibo2", "injection", CACHE_SCENARIOS)
 def fibo2_injection(ctx: Ctx, tokens: int, scenario: str) -> Case:
     """An injection block: that stream plus a cross-attention to one bundle of the prompt."""
     return _fibo2_case(ctx, tokens, scenario, "injection")
 
 
-@fixture("fibo2", "noise_refiner", ("plain", "edit"))
+@fixture("fibo2", "noise_refiner", CACHE_SCENARIOS)
 def fibo2_noise_refiner(ctx: Ctx, tokens: int, scenario: str) -> Case:
     """A refiner block over ``[target, references]``, twice per step, before the gist joins."""
     return _fibo2_case(ctx, tokens, scenario, "noise_refiner")

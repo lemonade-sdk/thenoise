@@ -167,7 +167,7 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
         (QwenImageModel, True, True),
         (QwenImage21Model, True, True),
         (MossImageModel, False, False),
-        (Fibo2Model, True, False),
+        (Fibo2Model, True, True),
     ],
     ids=CATALOG_IDS,
 )
