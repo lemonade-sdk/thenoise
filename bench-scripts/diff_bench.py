@@ -15,7 +15,9 @@ counted, not printed: the useful answer from comparing two equal runs is the sen
 
 The headers are compared first. Two snapshots taken with a different ladder, torch
 build, dtype or ``--refs`` are not the same experiment, and the deltas between them are
-decoration — so they are still printed, under a warning that says as much.
+decoration — so they are still printed, under a warning that says as much. The same test
+runs per case, since ``--dtype auto`` lets one codec change dtype between snapshots: that
+row is a different experiment, so it is listed apart and counted nowhere.
 
 Usage
 -----
@@ -94,12 +96,6 @@ def floor_pct(a: dict, b: dict, k: float) -> float:
     return max(k * max(a.get("cov_pct", 0.0), b.get("cov_pct", 0.0)), MIN_COV_FLOOR)
 
 
-def tfl(case: dict) -> str:
-    """TFLOPS as a fixed-width cell; a vae case whose flop count failed has none."""
-    value = case.get("tflops")
-    return f"{value:6.1f}" if value else "     -"
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description="Diff two bench snapshots.")
     ap.add_argument("before")
@@ -127,13 +123,18 @@ def main() -> None:
     A = {c["key"]: c for c in a["cases"]}
     B = {c["key"]: c for c in b["cases"]}
     common = sorted(set(A) & set(B))
-    moved, quiet, memory, broke, fixed = [], [], [], [], []
+    moved, quiet, memory, broke, fixed, dtype_split = [], [], [], [], [], []
     for key in common:
         ra, rb = A[key], B[key]
         if ra["status"] != rb["status"]:
             (broke if rb["status"] != "ok" else fixed).append((key, rb.get("error", "")))
             continue
         if ra["status"] != "ok" or not ra.get("ms"):
+            continue
+        # Only if both sides name one: an older snapshot records no dtype per case.
+        da, db = ra.get("dtype"), rb.get("dtype")
+        if da and db and da != db:
+            dtype_split.append((key, da, db, ra, rb))
             continue
         delta = 100 * (rb["ms"] - ra["ms"]) / ra["ms"]
         noise = floor_pct(ra, rb, args.sigma)
@@ -145,13 +146,13 @@ def main() -> None:
             memory.append((dgib, key, ra, rb))
 
     def line(delta: float, noise: float, key: str, ra: dict, rb: dict, mark: str = "") -> None:
-        print(f"  {key:44s} {ra['ms']:9.2f} {rb['ms']:9.2f} {delta:+8.1f} {noise:5.1f} "
-              f"{tfl(ra)} -> {tfl(rb):<6s} "
+        print(f"  {key:44s} {ra.get('dtype') or '':>4s} {ra['ms']:9.2f} {rb['ms']:9.2f} "
+              f"{delta:+8.1f} {noise:5.1f} "
               f"{ra['peak_gib']:5.2f} -> {rb['peak_gib']:<5.2f} {mark}".rstrip())
 
     def header() -> None:
-        print(f"  {'case':44s} {'before':>9s} {'after':>9s} {'Δ%':>8s} {'floor':>5s} "
-              f"{'TFLOPS':>16s} {'GiB':>14s}")
+        print(f"  {'case':44s} {'dt':>4s} {'before':>9s} {'after':>9s} {'Δ%':>8s} "
+              f"{'floor':>5s} {'GiB':>14s}")
 
     if args.all:
         print(f"\nevery compared case ({len(moved) + len(quiet)}), [*] clears "
@@ -177,6 +178,11 @@ def main() -> None:
             print(f"  {key:44s} {ra['peak_gib']:6.2f} -> {rb['peak_gib']:6.2f} GiB "
                   f"{dgib:+6.1f}%")
 
+    if dtype_split:
+        print(f"\nnot comparable, different compute dtype ({len(dtype_split)})")
+        for key, da, db, ra, rb in sorted(dtype_split):
+            print(f"  {key:44s} {da:>4s} {ra['ms']:9.2f}  ->  {db:<4s} {rb['ms']:9.2f} ms")
+
     for title, rows in (("now failing", broke), ("no longer failing", fixed)):
         if rows:
             print(f"\n{title} ({len(rows)})")
@@ -195,6 +201,8 @@ def main() -> None:
                f"({args.sigma:g} sigma)")
     if memory:
         summary += f", {len(memory)} memory"
+    if dtype_split:
+        summary += f", {len(dtype_split)} left out for a dtype change"
     if broke:
         summary += f", {len(broke)} broken"
     print(summary)

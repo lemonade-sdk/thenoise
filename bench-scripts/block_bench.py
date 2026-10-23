@@ -1263,14 +1263,12 @@ def device_slug(info: dict) -> str:
 
 # -------------------------------------------------------------------------- CLI
 def select(models: str) -> list[Fixture]:
-    """Fixtures whose ``model/block`` key matches a comma-separated prefix filter."""
-    wanted = [w.strip() for w in models.split(",") if w.strip()]
-
-    def matches(f: Fixture, w: str) -> bool:
-        key = f"{f.model}/{f.block}"
-        return key.startswith(w) or w.startswith(key) or w == f.block or w == f.model
-
-    keep = [f for f in FIXTURES if any(matches(f, w) for w in wanted)]
+    """The fixtures the comma-separated filter names exactly: a ``model/block`` key, a
+    whole model, or a block name — always the whole name, since a prefix silently changes
+    how many rows a comparison has."""
+    wanted = {w.strip() for w in models.split(",") if w.strip()}
+    keep = [f for f in FIXTURES
+            if f"{f.model}/{f.block}" in wanted or f.model in wanted or f.block in wanted]
     if not keep:
         raise SystemExit(f"no block matches {models}\nknown: "
                          f"{', '.join(f.model + '/' + f.block for f in FIXTURES)}")
@@ -1297,7 +1295,8 @@ def main() -> None:
         description="Snapshot the cost of every DiT transformer block.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="blocks: " + ", ".join(f"{f.model}/{f.block}" for f in FIXTURES))
-    ap.add_argument("--models", help="comma-separated model or block filter, e.g. krea2,zimage")
+    ap.add_argument("--models", help="comma-separated model, block or model/block filter, "
+                                    "matched exactly, e.g. krea2,zimage/noise")
     ap.add_argument("--tokens", default=DEFAULT_TOKENS,
                     help="image-token ladder (default %(default)s)")
     ap.add_argument("--txt", type=int, default=512, help="text / context tokens")

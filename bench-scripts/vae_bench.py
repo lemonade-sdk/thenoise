@@ -36,18 +36,15 @@ Measurement protocol
 Fixed, and recorded in the JSON: numbers are only comparable between runs of the same
 protocol *and* environment, which the JSON records next to them.
 
-* batch 1, ``bfloat16`` (the dtype every model ends up running its codec in: the loaders
-  either cast to the model dtype or ship bf16 files — a fp32 checkpoint nobody cast is a
-  file choice, and ``--dtype fp32`` is there to price it), ``torch.no_grad()``, the
-  codec's own eager forward — nothing here is compiled, and no codec ships a
-  ``@torch.compile``.
+* batch 1, ``torch.no_grad()``, the codec's own eager forward — nothing here is compiled,
+  and no codec ships a ``@torch.compile``.
+* dtype ``auto``: each codec in the ``compute_dtype`` it declares, recorded per case, as a
+  model runs it. ``--dtype bf16`` pins one dtype to price them against each other.
 * weights are seeded from the codec's name (so a codec gets identical weights at every
   rung and op), activations from the case key. Pixels are drawn in fp32 then cast, and
   latents are a unit-normal draw, which is what a denoised canonical latent looks like.
-* one untimed first call — which also counts the case's FLOPs with PyTorch's flop
-  counter, so ``TFLOPS`` is measured geometry (convs and matmuls, the way a peak is
-  quoted) rather than an assumed one — then ``--warmup`` calls, then ``--repeats``
-  groups of ``--iters`` timed calls. ``ms`` is the
+* one untimed first call, then ``--warmup`` calls, then ``--repeats`` groups of
+  ``--iters`` timed calls. ``ms`` is the
   median of the groups, ``±%`` their coefficient of variation; read it before believing
   a small delta. A VAE pass is long enough that ``--iters 1`` costs nothing in launch
   noise, and the scatter across groups is what exposes drift. The raw groups go into the
@@ -56,18 +53,21 @@ protocol *and* environment, which the JSON records next to them.
   case's warmup) and ``resv`` the peak it had *reserved*: at 2048x2048 a decoder's
   activations are gigabytes wide and the gap between those two columns is fragmentation,
   which is what actually bites on unified memory. ``Mpx/s`` is the throughput a user
-  feels; ``TFLOPS`` is the one to compare across rungs, since it is the only column that
-  is scale-free.
+  feels; ``GiB/Mpx`` is the scale-free one. No FLOP column: PyTorch's flop counter cannot
+  see ``comfy_kitchen::*``, so it would quote a conv codec at a fraction of its work.
 * ``1st`` is the untimed first call: MIOpen picks a conv algorithm per shape there, so
   it is the cold-shape tax a server pays and never a measured number.
 * a case that raises — a 16 GB card will lose the top rung of the ladder — is reported
   and skipped, so one broken codec still leaves a snapshot of everything else (the exit
   code is 1).
-* at the end, a *watchlist*: cases over ``±1%``, and codecs that end the ladder costing
-  more per FLOP than they started it. Codec rows that get *better* along the ladder are
-  only counted, never listed — that is normal, since a bigger conv is a fatter GEMM —
-  so what is left is decay: the score-matrix or strip tiling in ``utils.attention`` and
-  ``vae.wan22`` switching on, or the allocator starting to thrash.
+* at the end, a *watchlist*: cases over ``±1%``, and codec ops that end the ladder
+  costing more per megapixel than they did anywhere on it. Memory is what a codec pays in
+  direct proportion to pixels — once the row-strip walk is tiling, a rung should cost the
+  same per megapixel as the one below it — so growth along the ladder is the shape of a
+  regression: strip tiling in ``vae.fused`` or ``utils.attention`` dropping out above a
+  threshold, or the allocator thrashing. Rows that get *cheaper* per megapixel along the
+  ladder are only counted, never listed: fixed weights spread over more pixels is the
+  normal shape of that column.
 
 A cold ``MIOPEN_USER_DB_PATH`` costs find time in ``1st``, never measured time.
 
@@ -77,6 +77,8 @@ Usage
     .venv/bin/python bench-scripts/vae_bench.py                      # everything
     .venv/bin/python bench-scripts/vae_bench.py --models flux2,qwen_image21
     .venv/bin/python bench-scripts/vae_bench.py --ops decode --res 2048x2048
+    .venv/bin/python bench-scripts/vae_bench.py --ops encode,decode --models qwen_image
+    .venv/bin/python bench-scripts/vae_bench.py --models qwen          # both qwen codecs
     .venv/bin/python bench-scripts/vae_bench.py --out bench-scripts/snapshots/head.json
     .venv/bin/python bench-scripts/diff_bench.py before.json after.json   # what moved
 """
@@ -103,7 +105,8 @@ ENCODE, DECODE, FEATURES = "encode", "decode", "features"
 BOTH = (ENCODE, DECODE)
 FEATURED = (ENCODE, DECODE, FEATURES)      # decoders that can stop early
 OPS = (ENCODE, DECODE, FEATURES)
-DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+DTYPES = {"auto": None, "bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
+DTYPE_SLUG = {v: k for k, v in DTYPES.items() if v is not None}
 
 # Environment that silently changes which kernels get measured. Convs are what a VAE is,
 # so the MIOpen find mode and the allocator are as much part of the protocol here as the
@@ -122,6 +125,7 @@ class Case:
 
     run: Callable[[], object]
     mpx: float             # pixels this op moves, for the Mpx/s column
+    dtype: torch.dtype     # what the codec turned out to be built in, under ``auto``
     latent: str = ""       # the canonical latent it produces or consumes
     detail: str = ""       # free-form: who loads this codec, what the op stops at
 
@@ -153,7 +157,7 @@ class Ctx:
     warmup: int = 1
     iters: int = 1
     repeats: int = 3
-    dtype: torch.dtype = torch.bfloat16
+    dtype: torch.dtype | None = None    # None: each codec's own compute_dtype
 
     @property
     def tdev(self) -> torch.device:
@@ -207,10 +211,10 @@ def seed_of(key: str) -> int:
 
 
 def new_vae(ctx: Ctx, name: str, cls, *args, **kwargs):
-    """Seeded random weights, on device, compute dtype, eval — as a loaded codec is."""
+    """Seeded random weights, on device, in the codec's own dtype, eval — as loaded."""
     torch.manual_seed(seed_of(name))
     with torch.device(ctx.device):
-        vae = cls(*args, **kwargs).to(ctx.dtype).eval()
+        vae = cls(*args, **kwargs).to(ctx.dtype or cls.compute_dtype).eval()
     vae.requires_grad_(False)
     return vae
 
@@ -219,15 +223,15 @@ def seed_inputs(name: str, op: str, res: Res) -> None:
     torch.manual_seed(seed_of(f"{name}/{op}@{res}"))
 
 
-def randn(ctx: Ctx, *shape) -> torch.Tensor:
+def randn(ctx: Ctx, dtype: torch.dtype, *shape) -> torch.Tensor:
     """Seeded values drawn in fp32 then cast, so they are dtype-independent."""
-    return torch.randn(*shape, device=ctx.tdev, dtype=torch.float32).to(ctx.dtype)
+    return torch.randn(*shape, device=ctx.tdev, dtype=torch.float32).to(dtype)
 
 
-def rand_pixels(ctx: Ctx, res: Res, channels: int) -> torch.Tensor:
+def rand_pixels(ctx: Ctx, dtype: torch.dtype, res: Res, channels: int) -> torch.Tensor:
     """Uniform [-1, 1] noise: what a decoded image is bounded by, both ways."""
     x = torch.rand(1, channels, res.h, res.w, device=ctx.tdev, dtype=torch.float32)
-    return (x * 2.0 - 1.0).to(ctx.dtype)
+    return (x * 2.0 - 1.0).to(dtype)
 
 
 def vae_case(ctx: Ctx, vae, name: str, res: Res, op: str, note: str = "") -> Case:
@@ -244,12 +248,12 @@ def vae_case(ctx: Ctx, vae, name: str, res: Res, op: str, note: str = "") -> Cas
     latent = f"{vae.z_dim}x{lh}x{lw}"
 
     if op == ENCODE:
-        x = rand_pixels(ctx, res, vae.pixel_channels)
+        x = rand_pixels(ctx, vae.dtype, res, vae.pixel_channels)
 
         def run():
             return vae.encode_pixels_to_latents(x)
     elif op in (DECODE, FEATURES):
-        x = randn(ctx, 1, vae.z_dim, lh, lw)
+        x = randn(ctx, vae.dtype, 1, vae.z_dim, lh, lw)
         # ``decode_features`` is a decode that stops after its first upsample stage, so
         # it is fed the same canonical latent the full decode is.
         step = vae.decode_to_pixels if op == DECODE else vae.decode_features
@@ -262,7 +266,7 @@ def vae_case(ctx: Ctx, vae, name: str, res: Res, op: str, note: str = "") -> Cas
     detail = f"{vae.pixel_channels}ch px {res}; {note}"
     if op == FEATURES:
         detail += f", stops after upsample 1/{len(vae.decoder.upsamples)}"
-    return Case(run, res.mpx, latent, detail)
+    return Case(run, res.mpx, vae.dtype, latent, detail)
 
 
 # --------------------------------------------------------------------- fixtures
@@ -360,35 +364,18 @@ class Timing:
     ms: float
     cov_pct: float
     groups: list[float]
-    flops: float
     peak_gib: float
     peak_res_gib: float
     first_s: float
 
 
 def measure(run, ctx: Ctx) -> Timing:
-    """Count the FLOPs on an untimed call, warm up, then ``repeats`` x ``iters`` timed.
-
-    The counting pass is free in wall-clock terms (it *is* the call every case makes
-    anyway, wrapped in a flop counter) and it is the only honest source of FLOPs for a
-    convnet: a decoder's cost per pixel depends on which stage runs at which width, and
-    on attention switching to its tiled path. If the counter itself is what fails the
-    case is still measured, with ``TFLOPS`` left blank.
-    """
+    """One untimed call (MIOpen searches a conv algorithm per shape there), ``warmup``
+    more, then ``repeats`` x ``iters`` timed."""
     sync = torch.cuda.synchronize if ctx.cuda else (lambda: None)
     with torch.no_grad():
         t0 = time.perf_counter()
-        flops = 0.0
-        try:
-            from torch.utils.flop_counter import FlopCounterMode
-
-            with FlopCounterMode(display=False) as counter:
-                run()
-            flops = float(counter.get_total_flops())
-        except Exception as exc:                                # noqa: BLE001
-            print(f"\n    (no FLOP count: {type(exc).__name__}: {str(exc)[:80]})",
-                  file=sys.stderr)
-            run()                                               # re-raises a real failure
+        run()
         sync()
         first_s = time.perf_counter() - t0
         for _ in range(ctx.warmup):
@@ -409,48 +396,41 @@ def measure(run, ctx: Ctx) -> Timing:
     peak = torch.cuda.max_memory_allocated() / 2**30 if ctx.cuda else 0.0
     peak_res = torch.cuda.max_memory_reserved() / 2**30 if ctx.cuda else 0.0
     return Timing(groups[len(groups) // 2], 100 * math.sqrt(var) / mean,
-                  [round(g, 4) for g in groups], flops, peak, peak_res, first_s)
+                  [round(g, 4) for g in groups], peak, peak_res, first_s)
 
 
-def watchlist(results: list[dict], cov_warn: float = 1.0, decay_pct: float = 25.0,
+def watchlist(results: list[dict], cov_warn: float = 1.0, grow_pct: float = 25.0,
               show: int = 5) -> None:
-    """Rows worth a second look inside *this* snapshot, printed as they are found.
-
-    Two cheap rules, no judgement: a case that was not stable (``±%`` over
-    ``cov_warn``), and a codec op that ends the ladder costing more per FLOP than it
-    started it. Rows that get *better* along the ladder are only counted, never listed —
-    a bigger conv is a fatter GEMM, so that is the normal shape of the column — so what
-    is left is decay, which for a VAE has three usual suspects: the score-matrix tiling
-    in ``utils.attention`` engaging on a mid-block attention, the row-strip convs in
-    ``vae.wan22`` crossing their element threshold, and the allocator.
+    """Rows worth a second look inside *this* snapshot: an unstable case, and a codec op
+    that got dearer per megapixel along its ladder (which needs two rungs to say anything).
     """
-    ok = [r for r in results if r["status"] == "ok" and r.get("tflops")]
-    noisy = sorted((r for r in results if r["status"] == "ok" and r["cov_pct"] > cov_warn),
-                   key=lambda r: -r["cov_pct"])
+    ok = [r for r in results if r["status"] == "ok"]
+    noisy = sorted((r for r in ok if r["cov_pct"] > cov_warn), key=lambda r: -r["cov_pct"])
     series: dict[tuple[str, str], list[dict]] = {}
     for r in ok:
         series.setdefault((r["model"], r["op"]), []).append(r)
-    decaying, gaining = [], 0
+    growing, cheapening = [], 0
     for key, rows in series.items():
         if len(rows) < 2:
             continue
         rows.sort(key=lambda r: r["pixels"])
-        lost = 100 * (1 - rows[-1]["tflops"] / max(r["tflops"] for r in rows))
-        if lost > decay_pct:
-            decaying.append((lost, key, rows))
-        elif 100 * (rows[-1]["tflops"] / rows[0]["tflops"] - 1) > decay_pct:
-            gaining += 1
-    if not decaying and not noisy:
-        print(f"\nwatchlist: clean (no codec op losing {decay_pct:.0f}% of its TFLOPS "
-              f"along the ladder, every case under ±{cov_warn}%)")
+        over = 100 * (rows[-1]["gib_per_mpx"] / min(r["gib_per_mpx"] for r in rows) - 1)
+        if over > grow_pct:
+            growing.append((over, key, rows))
+        elif 100 * (1 - rows[-1]["gib_per_mpx"]
+                    / max(r["gib_per_mpx"] for r in rows)) > grow_pct:
+            cheapening += 1
+    if not growing and not noisy:
+        print(f"\nwatchlist: clean (no codec op ending the ladder over +{grow_pct:.0f}% per Mpx, "
+              f"every case under ±{cov_warn}%)")
         return
     print("\nwatchlist")
-    for lost, key, rows in sorted(decaying, key=lambda d: -d[0]):
-        track = "  ".join(f"{r['resolution']}:{r['tflops']:.1f}" for r in rows)
-        print(f"  {'/'.join(key):26s} loses {lost:3.0f}% of its TFLOPS  {track}")
-    if gaining:
-        print(f"  {'':26s} ({gaining} codec op(s) gain {decay_pct:.0f}% along the ladder "
-              f"instead — normal, a bigger conv is a fatter GEMM)")
+    for over, key, rows in sorted(growing, key=lambda d: -d[0]):
+        track = "  ".join(f"{r['resolution']}:{r['gib_per_mpx']:.2f}" for r in rows)
+        print(f"  {'/'.join(key):26s} ends the ladder +{over:3.0f}% per Mpx  {track} GiB/Mpx")
+    if cheapening:
+        print(f"  {'':26s} ({cheapening} codec op(s) get {grow_pct:.0f}% cheaper per Mpx along "
+              f"the ladder instead — normal, fixed weights over more pixels)")
     for r in noisy[:show]:
         print(f"  {'/'.join((r['model'], r['op'])):26s} "
               f"unstable: ±{r['cov_pct']:.1f}% at {r['resolution']}")
@@ -491,13 +471,11 @@ def device_slug(info: dict) -> str:
 
 # -------------------------------------------------------------------------- CLI
 def select(models: str) -> list[Fixture]:
-    """Fixtures whose codec name starts with one of the comma-separated filters.
-
-    Prefix in one direction only on purpose: ``qwen`` covers ``qwen_image`` and
-    ``qwen_image21``, while ``qwen_image21`` means that codec alone.
-    """
-    wanted = [w.strip() for w in models.split(",") if w.strip()]
-    keep = [f for f in FIXTURES if any(f.model.startswith(w) for w in wanted)]
+    """The fixtures named by the comma-separated filter, matched exactly: a codec name
+    that is also another codec's prefix would otherwise decide how many rows a comparison
+    has, and silently."""
+    wanted = {w.strip() for w in models.split(",") if w.strip()}
+    keep = [f for f in FIXTURES if f.model in wanted]
     if not keep:
         raise SystemExit(f"no codec matches {models}\nknown: "
                          f"{', '.join(f.model for f in FIXTURES)}")
@@ -519,13 +497,15 @@ def main() -> None:
         description="Snapshot the cost of every VAE codec.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="codecs: " + ", ".join(f.model for f in FIXTURES))
-    ap.add_argument("--models", help="comma-separated codec filter, e.g. flux2,qwen_image21")
+    ap.add_argument("--models", help="comma-separated codec filter, matched exactly, "
+                                     "e.g. flux2,qwen_image21")
     ap.add_argument("--res", default=DEFAULT_RES,
                     help="pixel ladder as WxH (bare N = square), default %(default)s")
     ap.add_argument("--ops", default=",".join(OPS),
                     help="comma-separated subset of encode,decode,features")
-    ap.add_argument("--dtype", default="bf16", choices=sorted(DTYPES),
-                    help="compute dtype, as every model loads it (default %(default)s)")
+    ap.add_argument("--dtype", default="auto", choices=sorted(DTYPES),
+                    help="compute dtype; auto leaves each codec in its own "
+                         "(default %(default)s)")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--iters", type=int, default=1, help="timed calls per group")
     ap.add_argument("--repeats", type=int, default=3, help="groups per case (median reported)")
@@ -557,7 +537,8 @@ def main() -> None:
 
     env = env_info(args.device)
     print(f"{env.get('gpu', args.device)} | torch {torch.__version__} | hip {env.get('hip')}")
-    print(f"{args.dtype} | batch 1 | ladder {', '.join(map(str, ladder))} | ops "
+    asked = "auto (each codec's own compute_dtype)" if args.dtype == "auto" else args.dtype
+    print(f"{asked} | batch 1 | ladder {', '.join(map(str, ladder))} | ops "
           f"{','.join(ops)} | warmup {ctx.warmup} + {ctx.repeats}x{ctx.iters} timed "
           f"| {len(cases)} cases")
 
@@ -566,8 +547,8 @@ def main() -> None:
     for f, res, op in cases:
         if res != last_res:
             print(f"\n=== {res} ({res.mpx:.1f} Mpx) ===")
-            print(f"  {'codec/op':26s} {'latent':>13s} {'ms':>9s} {'±%':>5s} {'Mpx/s':>7s} "
-                  f"{'TFLOPS':>7s} {'GiB':>6s} {'resv':>6s} {'1st':>6s}")
+            print(f"  {'codec/op':26s} {'dt':>4s} {'latent':>13s} {'ms':>9s} {'±%':>5s} "
+                  f"{'Mpx/s':>7s} {'GiB/Mpx':>7s} {'GiB':>6s} {'resv':>6s} {'1st':>6s}")
             last_res = res
         label = f"{f.model}/{op}"
         entry = {"key": f"{label}@{res}", "model": f.model, "op": op,
@@ -580,23 +561,24 @@ def main() -> None:
         try:
             case = f.build(ctx, res, op)
             tim = measure(case.run, ctx)
-            tflops = tim.flops / (tim.ms / 1000) / 1e12 if tim.flops else 0.0
             mpx = case.mpx / (tim.ms / 1000)
-            tf = f"{tflops:7.1f}" if tim.flops else "      -"
-            print(f" {case.latent:>13s} {tim.ms:9.1f} {tim.cov_pct:5.1f} {mpx:7.2f} {tf} "
+            gib_mpx = tim.peak_gib / case.mpx
+            print(f" {DTYPE_SLUG[case.dtype]:>4s} {case.latent:>13s} {tim.ms:9.1f} "
+                  f"{tim.cov_pct:5.1f} {mpx:7.2f} {gib_mpx:7.2f} "
                   f"{tim.peak_gib:6.2f} {tim.peak_res_gib:6.2f} {tim.first_s:6.1f}",
                   flush=True)
             entry.update({"status": "ok", "latent": case.latent,
+                          "dtype": DTYPE_SLUG[case.dtype],
                           "ms": round(tim.ms, 4), "cov_pct": round(tim.cov_pct, 3),
                           "groups": tim.groups, "first_s": round(tim.first_s, 2),
-                          "tflop": round(tim.flops / 1e12, 4) if tim.flops else None,
-                          "tflops": round(tflops, 2) if tim.flops else None,
                           "mpx_per_s": round(mpx, 4),
+                          "gib_per_mpx": round(gib_mpx, 4),
                           "peak_gib": round(tim.peak_gib, 3),
                           "peak_reserved_gib": round(tim.peak_res_gib, 3),
                           "detail": case.detail})
         except Exception as exc:                                # noqa: BLE001
-            print(f" {'FAILED':>13s}  {type(exc).__name__}: {str(exc)[:100]}", flush=True)
+            print(f" {'-':>4s} {'FAILED':>13s}  {type(exc).__name__}: {str(exc)[:100]}",
+                  flush=True)
             entry.update({"status": "error", "error": f"{type(exc).__name__}: {exc}"})
             failed += 1
         entry["t_s"] = round(time.perf_counter() - started, 1)   # drift is not a shape
@@ -621,7 +603,6 @@ def main() -> None:
                      "compile": "none (no codec ships one)",
                      "resolutions": [str(r) for r in ladder], "ops": list(ops),
                      "warmup": ctx.warmup, "iters": ctx.iters, "repeats": ctx.repeats,
-                     "flops": "torch FlopCounterMode, counted on the untimed first call",
                      "order": "pixel count ascending, codecs in registry order, "
                               "encode before decode"},
         "cases": results,
