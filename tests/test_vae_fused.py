@@ -23,11 +23,13 @@ from comfy_kitchen.registry import registry
 from thenoise.vae import AutoencoderKLFlux, AutoencoderKLFlux2
 from thenoise.vae.fused import (
     STRIP_ELEMS,
+    _strip_rows,
     fused_available,
     group_norm_only,
     interleaved_view,
     pointwise,
     region,
+    strip_apply,
     strip_conv,
     strip_down,
 )
@@ -148,6 +150,103 @@ def test_group_norm_only_normalises_without_activation_or_pad():
         got = group_norm_only(x, norm)
     assert torch.allclose(got, norm(x), atol=1e-5)
     assert got.is_contiguous(memory_format=torch.channels_last)
+
+
+# --------------------------------------------------------------- the generic strip walk
+
+
+@pytest.fixture
+def chain():
+    """Two 3x3 convs, each padding by itself: ``halo=2`` is what keeps a strip honest.
+
+    Width-preserving, so the same chain serves a block accumulating into its own input.
+    """
+    torch.manual_seed(0)
+    return nn.Sequential(
+        nn.Conv2d(6, 9, 3, padding=1), nn.SiLU(), nn.Conv2d(9, 6, 3, padding=1)
+    ).eval().requires_grad_(False)
+
+
+@pytest.fixture
+def narrowing_chain():
+    torch.manual_seed(1)
+    return nn.Sequential(
+        nn.Conv2d(6, 4, 3, padding=1), nn.SiLU(), nn.Conv2d(4, 3, 3, padding=1)
+    ).eval().requires_grad_(False)
+
+
+def test_strip_apply_asks_for_the_whole_image_below_the_threshold():
+    seen = []
+    strip_apply(lambda s: seen.append(s.shape[-2]) or s, torch.randn(1, 4, 8, 8))
+    assert seen == [8]  # one whole call, no strips
+
+
+@pytest.mark.parametrize("strip_elems", [STRIP_ELEMS, 1 << 9, 1 << 7, 1 << 5])
+def test_strip_apply_matches_the_chain_applied_at_once(chain, strip_elems, monkeypatch):
+    monkeypatch.setattr(fused_module, "STRIP_ELEMS", strip_elems)
+    x = torch.randn(1, 6, 34, 5)
+    with torch.no_grad():
+        assert torch.allclose(strip_apply(chain, x, halo=2), chain(x), atol=1e-5)
+
+
+@pytest.mark.parametrize("strip_elems", [STRIP_ELEMS, 1 << 9, 1 << 7])
+def test_strip_apply_matches_the_upsample_inside_it(strip_elems, monkeypatch):
+    monkeypatch.setattr(fused_module, "STRIP_ELEMS", strip_elems)
+    up = nn.Sequential(
+        nn.Upsample(scale_factor=2, mode="nearest-exact"), nn.Conv2d(4, 4, 3, padding=1)
+    ).eval().requires_grad_(False)
+    x = torch.randn(1, 4, 24, 5)
+    with torch.no_grad():
+        assert torch.allclose(strip_apply(up, x, scale=2, halo=1), up(x), atol=1e-5)
+
+
+@pytest.mark.parametrize("strip_elems", [1 << 9, 1 << 7, 1 << 6])
+def test_strip_apply_accumulates_into_the_tensor_it_read(chain, strip_elems, monkeypatch):
+    """A residual block updating its own input: the rows a strip writes are the next
+    strip's halo, so they wait for it, which is what a plain loop gets wrong.
+    """
+    monkeypatch.setattr(fused_module, "STRIP_ELEMS", strip_elems)
+    x = torch.randn(1, 6, 34, 5)
+    with torch.no_grad():
+        want = x + chain(x)
+        buf = x.clone()
+        got = strip_apply(chain, buf, halo=2, out=buf, accumulate=True)
+    assert got is buf
+    assert torch.allclose(got, want, atol=1e-5)
+
+
+@pytest.mark.parametrize("strip_elems", [1 << 9, 1 << 7, 1 << 6])
+def test_strip_apply_lands_a_block_in_the_leading_channels_of_its_input(
+    narrowing_chain, strip_elems, monkeypatch
+):
+    """The ``C -> C'`` block narrowing in place, the other half of the same deferral."""
+    monkeypatch.setattr(fused_module, "STRIP_ELEMS", strip_elems)
+    x = torch.randn(1, 6, 30, 5)
+    with torch.no_grad():
+        want = narrowing_chain(x)
+        pristine = x.clone()
+        got = strip_apply(narrowing_chain, x, halo=2, out=x.narrow(1, 0, 3))
+    assert torch.allclose(got, want, atol=1e-5)
+    assert torch.equal(x.narrow(1, 3, 3), pristine.narrow(1, 3, 3))  # the rest is untouched
+
+
+def test_the_destination_is_handed_over_only_where_nothing_reads_it(monkeypatch):
+    """A fused kernel writes its destination and moves nothing; it keeps that privilege up
+    to the point where the rows would be written before the next strip had read them.
+    """
+    monkeypatch.setattr(fused_module, "STRIP_ELEMS", 1 << 7)
+    seen: list[bool] = []
+
+    def fn(rows, top, bottom, dst):
+        seen.append(dst is not None)
+        return rows + 1.0
+
+    x = torch.randn(1, 3, 34, 5)
+    assert _strip_rows(fn, x, 1 << 7, out=torch.empty_like(x)) is not None
+    assert len(seen) > 1 and all(seen)
+    seen.clear()
+    assert _strip_rows(fn, x, 1 << 7, out=x) is x
+    assert len(seen) > 1 and not any(seen)
 
 
 # ------------------------------------------------------------- the shared buffer views

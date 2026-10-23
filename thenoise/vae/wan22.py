@@ -27,7 +27,7 @@ from einops import rearrange
 
 from thenoise.utils.attention import single_head_attention
 from thenoise.utils.safetensors import load_safetensors
-from .fused import STRIP_ELEMS
+from .fused import strip_apply
 
 from thenoise.utils.setup_logging import setup_logging
 
@@ -49,35 +49,6 @@ def unpatchify(x: torch.Tensor, patch_size: int) -> torch.Tensor:
     if patch_size == 1:
         return x
     return rearrange(x, "b (c r q) h w -> b c (h q) (w r)", q=patch_size, r=patch_size)
-
-
-def strip_apply(fn, x: torch.Tensor, scale: int = 1, halo: int = 1, out: torch.Tensor | None = None):
-    """Apply a spatial ``fn`` to ``x`` in horizontal strips of rows.
-
-    ``scale`` is the height multiplier of ``fn`` (2 for a 2x upsample), ``halo``
-    is the number of neighbouring rows fed in on each side — one per 3x3 conv in
-    ``fn``, so the kept rows are bit-identical to the unstripped call.
-
-    ``out`` is a preallocated result to ADD into.
-    """
-    n = -(-x.numel() * scale * scale // STRIP_ELEMS)
-    if n <= 1 and out is None:
-        return fn(x)
-    add = out is not None
-    size = x.shape[-2]
-    step = -(-size // n)
-    for a in range(0, size, step):
-        b = min(size, a + step)
-        lo = max(0, a - halo)
-        y = fn(x.narrow(-2, lo, min(size, b + halo) - lo)).narrow(-2, (a - lo) * scale, (b - a) * scale)
-        if out is None:
-            out = y.new_empty(*y.shape[:-2], size * scale, y.shape[-1])
-        dst = out.narrow(-2, a * scale, (b - a) * scale)
-        if add:
-            dst.add_(y)
-        else:
-            dst.copy_(y)
-    return out
 
 
 class Wan22RMSNorm(nn.Module):

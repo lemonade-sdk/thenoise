@@ -18,6 +18,10 @@ The 1x1s — a shortcut, an attention block's projections — go to :func:`point
 than to a conv, because on ROCm MIOpen costs more for a channels-last 1x1 than the GEMM
 over channel rows that the layout already offers.
 
+:func:`strip_apply` is the same walk without the kernels, for a codec whose convolutions
+stay with torch: it takes any chain of them, given only how many there are to read context
+for, and it is what lets such a block update its own input in place.
+
 Opt-in per VAE (``fused=True``) and only where :func:`fused_available` agrees.
 """
 from __future__ import annotations
@@ -37,6 +41,7 @@ __all__ = [
     "interleaved_view",
     "pointwise",
     "region",
+    "strip_apply",
     "strip_conv",
     "strip_down",
 ]
@@ -64,6 +69,12 @@ def fused_available(device: torch.device, dtype: torch.dtype) -> bool:
     )
 
 
+def _overlaps(a: torch.Tensor, b: torch.Tensor) -> bool:
+    """Whether two tensors can address the same bytes."""
+    a0, b0 = a.data_ptr(), b.data_ptr()
+    return a0 < b0 + b.numel() * b.element_size() and b0 < a0 + a.numel() * a.element_size()
+
+
 def _strip_step(x: torch.Tensor, out_elems: Optional[int] = None) -> int:
     """Rows per strip, so neither ``x`` nor an output of ``out_elems`` elements is whole."""
     budget = x.numel() if out_elems is None else max(x.numel(), out_elems)
@@ -73,46 +84,100 @@ def _strip_step(x: torch.Tensor, out_elems: Optional[int] = None) -> int:
 def _strip_rows(
     fn: Callable[..., torch.Tensor],
     x: torch.Tensor,
-    channels: int,
     out_elems: int,
     *,
     scale: int = 1,
+    halo: int = 1,
+    edge_padded: bool = True,
+    layout: Optional[torch.memory_format] = None,
     out: Optional[torch.Tensor] = None,
     accumulate: bool = False,
 ) -> torch.Tensor:
     """Walk ``x`` in strips of rows, ``fn(strip, top, bottom, dst)`` each, into one result.
 
-    A strip is read with one halo row on each side and the fused kernel pads only where
-    the image ends, so the conv's rows for strip ``[a, b)`` start at ``scale * (a - lo) +
-    top - 1`` of its output. ``fn`` hands back what landed in ``dst`` — a kernel writing
-    in place hands back ``dst`` and nothing is moved, otherwise the rows (``scale`` times
-    taller than the strip's input) are.
+    A strip is read ``halo`` rows beyond the rows it keeps, and hands back either ``dst`` —
+    a kernel writing in place, which moves nothing — or the rows it computed, ``scale``
+    times taller than its input. Of those, the strip's first kept row is
+    ``scale * (a - lo) + top - halo``, where ``top`` counts the zero rows standing in for
+    context the image does not have: one at an edge for a kernel that pads only there
+    (``edge_padded``), all of them for a convolution chain that pads itself and so answers
+    exactly one row per row it was handed.
 
-    ``out`` is a preallocated channels-last result, ADDED into when ``accumulate``.
-    Strips write further forward than they read, so ``out`` may be the tail of the
-    buffer ``x`` itself lives in.
+    ``out`` is a preallocated result, ADDED into when ``accumulate``; left to the driver
+    the result is the first strip's shape in ``layout``, or in whatever layout the strip
+    came back in. Strips write further
+    forward than they read, so it may be the tail of the buffer ``x`` itself lives in; and
+    when it shares the rows being read it is written a strip late, since the next strip
+    reads this strip's last ``halo`` rows as its own halo. That deferral costs the kernel
+    its in-place write, so it is taken only where the two really overlap.
     """
     size = x.shape[-2]
     step = _strip_step(x, out_elems)
-    if out is None:
-        out = torch.empty(
-            (x.shape[0], channels, size * scale, x.shape[-1] * scale),
-            dtype=x.dtype,
-            device=x.device,
-            memory_format=torch.channels_last,
-        )
+    if out is None and step >= size:
+        # The whole image is one strip, so its result needs no staging into a second buffer.
+        edge = 1 if edge_padded else halo
+        return fn(x, edge, edge, None)
+    put = torch.Tensor.add_ if accumulate else torch.Tensor.copy_
+    hold = halo if out is not None and _overlaps(out, x) else 0
+    held: Optional[torch.Tensor] = None
+
     for a in range(0, size, step):
         b = min(size, a + step)
-        lo, hi = max(0, a - 1), min(size, b + 1)
-        dst = out.narrow(-2, scale * a, scale * (b - a))
-        rows = fn(x.narrow(-2, lo, hi - lo), int(lo == 0), int(hi == size), dst)
-        if rows is not dst:
-            kept = rows.narrow(-2, scale * (a - lo) + int(lo == 0) - 1, scale * (b - a))
-            if accumulate:
-                dst.add_(kept)
-            else:
-                dst.copy_(kept)
+        lo, hi = max(0, a - halo), min(size, b + halo)
+        top = int(lo == 0) if edge_padded else halo
+        bottom = int(hi == size) if edge_padded else halo
+        dst = None if hold or out is None else out.narrow(-2, scale * a, scale * (b - a))
+        rows = fn(x.narrow(-2, lo, hi - lo), top, bottom, dst)
+        if rows is dst:
+            continue
+        if out is None:
+            # Without a wanted ``layout`` the result takes the strip's own: a codec given
+            # the other one spends its time transposing, which is a magnitude of cost and
+            # not a rounding, so it is the caller's to state and not the driver's to guess.
+            shape = (x.shape[0], rows.shape[1], size * scale, x.shape[-1] * scale)
+            out = (
+                rows.new_empty(shape)
+                if layout is None
+                else torch.empty(shape, dtype=rows.dtype, device=rows.device, memory_format=layout)
+            )
+        kept = rows.narrow(-2, scale * (a - lo) + top - halo, scale * (b - a))
+        live = scale * max(0, b - a - hold)
+        if held is not None:
+            put(out.narrow(-2, scale * a - held.shape[-2], held.shape[-2]), held)
+        put(out.narrow(-2, scale * a, live), kept.narrow(-2, 0, live))
+        held = kept.narrow(-2, live, kept.shape[-2] - live).clone() if hold else None
+    if held is not None:
+        put(out.narrow(-2, size * scale - held.shape[-2], held.shape[-2]), held)
     return out
+
+
+def strip_apply(
+    fn: Callable[[torch.Tensor], torch.Tensor],
+    x: torch.Tensor,
+    *,
+    scale: int = 1,
+    halo: int = 1,
+    out: Optional[torch.Tensor] = None,
+    accumulate: bool = False,
+) -> torch.Tensor:
+    """``fn`` over whole rows of ``x``, in strips, assuming nothing about what ``fn`` is.
+
+    ``halo`` is the number of 3x3 convolutions inside ``fn``, each of which pads by itself
+    and so reads a synthetic edge at a strip's inner border: read that many rows more than
+    the strip keeps and the kept rows are what the whole image would have given.
+    ``out`` and ``accumulate`` are :func:`_strip_rows`', which is what makes ``out=x`` — a
+    residual block updating its own input — as exact as any other use.
+    """
+    return _strip_rows(
+        lambda rows, top, bottom, dst: fn(rows),
+        x,
+        x.numel() * scale * scale,
+        scale=scale,
+        halo=halo,
+        edge_padded=False,
+        out=out,
+        accumulate=accumulate,
+    )
 
 
 def group_norm_only(x: torch.Tensor, norm: torch.nn.GroupNorm) -> torch.Tensor:
@@ -206,7 +271,8 @@ def strip_conv(
         return _padded_conv(padded, weight, conv.bias, dst if into_dst and not accumulate else None)
 
     kept = x.shape[0] * conv.out_channels * x.shape[2] * x.shape[3] * scale * scale
-    return _strip_rows(one, x, conv.out_channels, kept, scale=scale, out=out, accumulate=accumulate)
+    return _strip_rows(one, x, kept, scale=scale, layout=torch.channels_last,
+                       out=out, accumulate=accumulate)
 
 
 def strip_down(conv: torch.nn.Conv2d, x: torch.Tensor) -> torch.Tensor:

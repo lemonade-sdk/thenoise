@@ -3,7 +3,7 @@
 The tests cover the 16x encode/decode geometry, the documented latent
 normalisation, the exact single-frame folds of the reference's
 ``AvgDown3D``/``DupUp3D`` shortcuts (checked against a verbatim copy of the
-official 5D code run on a one-frame input), the row-strip conv path, and the
+official 5D code run on a one-frame input), the row-strip walk it borrows, and the
 checkpoint loader's weight collapse + architecture inference for BOTH shipped
 variants (48ch RGB/patchify-2 and 64ch RGBA/patchify-1). A reduced-channel
 instance keeps everything sub-second; the shipped constants are asserted on the
@@ -18,7 +18,7 @@ import torch.nn.functional as F
 
 from conftest import write_safetensors
 from thenoise.vae import AutoencoderKLWan22, load_wan22_vae
-from thenoise.vae import wan22 as wan22_module
+import thenoise.vae.fused as fused_module
 from thenoise.vae.wan22 import (
     LATENT_STATS,
     QWEN_IMAGE21_LATENTS_MEAN,
@@ -28,7 +28,6 @@ from thenoise.vae.wan22 import (
     Wan22AvgDown,
     Wan22DupUp,
     Wan22ResidualBlock,
-    strip_apply,
     unpatchify,
 )
 
@@ -184,44 +183,6 @@ def test_qwen21_normalises_with_its_own_stats(tiny_qwen21):
 # ------------------------------------------------------------------ row stripping
 
 
-def test_strip_apply_is_a_no_op_below_the_threshold():
-    conv = nn.Conv2d(4, 4, 3, padding=1).eval().requires_grad_(False)
-    x = torch.randn(1, 4, 8, 8)
-    assert strip_apply(conv, x) is not None
-    calls = []
-    strip_apply(lambda s: calls.append(s.shape[-2]) or conv(s), x)
-    assert calls == [8]  # one whole call, no strips
-
-
-def test_strip_apply_matches_the_direct_conv(monkeypatch):
-    """Forced tiny strips must give the same result as one full call."""
-    conv = nn.Conv2d(4, 6, 3, padding=1).eval().requires_grad_(False)
-    x = torch.randn(1, 4, 40, 7)
-    monkeypatch.setattr(wan22_module, "STRIP_ELEMS", 256)
-    assert torch.allclose(strip_apply(conv, x, halo=1), conv(x), atol=1e-5)
-
-
-def test_strip_apply_matches_the_direct_upsample(monkeypatch):
-    fn = nn.Sequential(
-        nn.Upsample(scale_factor=2, mode="nearest-exact"), nn.Conv2d(4, 4, 3, padding=1)
-    ).eval().requires_grad_(False)
-    x = torch.randn(1, 4, 24, 5)
-    monkeypatch.setattr(wan22_module, "STRIP_ELEMS", 128)
-    assert torch.allclose(strip_apply(fn, x, scale=2, halo=1), fn(x), atol=1e-5)
-
-
-def test_strip_apply_out_adds_in_place(monkeypatch):
-    x = torch.randn(1, 4, 24, 5)
-    out = torch.full((1, 4, 48, 5), 3.0)
-    monkeypatch.setattr(wan22_module, "STRIP_ELEMS", 128)
-    got = strip_apply(
-        lambda s: torch.ones(s.shape[0], s.shape[1], s.shape[2] * 2, s.shape[3]),
-        x, scale=2, halo=0, out=out,
-    )
-    assert got is out
-    assert torch.equal(out, torch.full_like(out, 4.0))
-
-
 def test_residual_block_is_strip_invariant():
     """The stripped block (its normal path) equals the plain sequential one."""
     blk = nn.Sequential(*[Wan22ResidualBlock(6, 8)]).eval().requires_grad_(False)
@@ -239,7 +200,7 @@ def test_encode_and_decode_are_strip_invariant(tiny_vae, monkeypatch):
     pixels = torch.randn(1, 3, 32, 32)
     with torch.no_grad():
         ref_decode, ref_encode = tiny_vae.decode(z), tiny_vae.encode(pixels)
-        monkeypatch.setattr(wan22_module, "STRIP_ELEMS", 64)
+        monkeypatch.setattr(fused_module, "STRIP_ELEMS", 64)
         got_decode, got_encode = tiny_vae.decode(z), tiny_vae.encode(pixels)
     assert torch.allclose(got_decode, ref_decode, atol=1e-4)
     assert torch.allclose(got_encode, ref_encode, atol=1e-4)
