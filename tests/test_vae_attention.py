@@ -57,6 +57,20 @@ def test_the_tile_policy_leaves_the_small_shapes_alone():
     assert attn.score_tile_rows(262144) == 256    # 4K latents
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_probabilities_written_over_the_scores_answer_the_same(dtype):
+    """What the aliased softmax inside `single_head_attention` rests on.
+
+    A path that read the scores again after the alias would answer differently and the
+    SDPA and tiling tests here would notice; this catches the alias itself moving the
+    numbers, which is what `out=` does not promise not to do.
+    """
+    torch.manual_seed(0)
+    scores = torch.randn(256, 1024, dtype=dtype)
+    ref = torch.softmax(scores, -1)
+    assert torch.equal(torch.softmax(scores, -1, out=scores), ref)
+
+
 @pytest.mark.parametrize("rows", [1, 63, 128, 257, 10_000])
 def test_tiling_the_queries_does_not_change_the_answer(rows):
     """Exact, because a query's output depends on no other query. Odd tile counts are
