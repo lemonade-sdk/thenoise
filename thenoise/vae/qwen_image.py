@@ -111,10 +111,8 @@ class QwenImageRMS_norm(nn.Module):
 class QwenImageResample(nn.Module):
     r"""2D spatial resampling: ``upsample2d``, ``downsample2d``, else identity.
 
-    Both convolutions run in row strips (:mod:`.fused`), which is what keeps a level's
-    working set to a strip rather than to the frame. The modules stay the plain ones the
-    checkpoint names, and the pad the stride-2 walk needs is the driver's, not
-    :class:`nn.ZeroPad2d` — which is kept only so the state dict keys do.
+    Both convolutions run in row strips (:mod:`.fused`). The stride-2 walk does its own
+    padding, so the :class:`nn.ZeroPad2d` is here only to keep the state dict keys.
     """
 
     def __init__(self, dim: int, mode: str) -> None:
@@ -141,12 +139,7 @@ class QwenImageResample(nn.Module):
 
 
 class QwenImageResidualBlock(nn.Module):
-    r"""Residual block: norm/SiLU/conv twice, plus a 1x1 shortcut when the width changes.
-
-    The convolutions run in row strips (:mod:`.fused`), and a block that keeps its width
-    adds its result into the tensor it read, so a level of them needs no buffer beyond
-    the one it started with.
-    """
+    r"""Residual block: norm/SiLU/conv twice, plus a 1x1 shortcut when the width changes."""
 
     def __init__(
         self,
@@ -178,11 +171,9 @@ class QwenImageResidualBlock(nn.Module):
         return self.conv2(x)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # In strips: halo=2 feeds the two 3x3 convs the context they cannot do without, so
-        # the kept rows are what the whole image would have given. Where the widths match
-        # the shortcut is the identity, which is the residual term ``accumulate`` supplies
-        # for free by adding into ``x`` itself; a block that changes width has nowhere to
-        # write but a new buffer, and pays for its own shortcut.
+        # In strips: halo=2 feeds the two 3x3 convs their context. Where the widths match
+        # the shortcut is the identity, so ``accumulate`` supplies the residual term by
+        # adding into ``x`` itself and the level keeps one feature map.
         if isinstance(self.conv_shortcut, nn.Identity):
             return strip_apply(self.path, x, halo=2, out=x, accumulate=True)
         return strip_apply(
@@ -293,8 +284,6 @@ class QwenImageEncoder2d(nn.Module):
         self.conv_out = nn.Conv2d(out_dim, z_dim, 3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # The one layer whose result dwarfs its input — pixel channels to ``dim`` — so it
-        # is the layer that has to say how wide the output is.
         x = strip_apply(self.conv_in, x, halo=1, out_elems=image_elems(x, self.conv_in.out_channels))
 
         for layer in self.down_blocks:

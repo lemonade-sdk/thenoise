@@ -1,10 +1,7 @@
-"""The Qwen-Image codec (Wan 2.1 family): Qwen-Image and Ming-Image, still-image port.
+"""The Qwen-Image codec (Wan 2.1 family), row-strip decode: what each strip layer answers,
+strip invariance of the whole codec, and the in-place blocks leaving inputs alone.
 
-This covers what the row-strip decode depends on and nothing else: that each strip layer
-answers exactly as its plain module would, that the norm is the one kind a strip can
-compute for itself, that the whole codec is strip-invariant, and that a block updating
-its own input leaves the caller's tensors alone. The latent format, the loader and the
-normalisation are ``test_vae.py``; the DiT is ``test_qwen_image.py``.
+The latent format and the loader are ``test_vae.py``; the DiT is ``test_qwen_image.py``.
 """
 from __future__ import annotations
 
@@ -43,10 +40,9 @@ def tiny_vae() -> AutoencoderKLQwenImage:
 
 
 def test_the_norm_is_the_one_a_strip_can_compute_for_itself():
-    """``F.normalize`` over channels: every pixel's scale comes from that pixel alone.
+    """``F.normalize`` over channels: a strip can compute this norm for itself.
 
-    The reason this codec strips without needing whole-frame statistics, where a
-    GroupNorm codec has to carry them in.
+    Where a GroupNorm codec has to carry whole-frame statistics in, this one needs none.
     """
     norm = QwenImageRMS_norm(6).float().eval().requires_grad_(False)
     x = torch.randn(1, 6, 8, 3)
@@ -58,12 +54,9 @@ def test_the_norm_is_the_one_a_strip_can_compute_for_itself():
 
 @pytest.mark.parametrize("out_dim", [6, 9])
 def test_residual_block_matches_its_own_layers(out_dim, monkeypatch):
-    """Both shapes of the block in strips: the one that adds into ``x``, and the one that
-    needs a buffer of its own because it changes width.
+    """Both shapes of the block in strips, and which of them returns the tensor it read.
 
-    The block's return identity is the memory claim — a width-preserving block updating
-    its input is what keeps a decoder level at one feature map instead of one per block —
-    so it is pinned here rather than left to the camera's ``GiB`` column.
+    That identity is what keeps a level at one feature map instead of one per block.
     """
     monkeypatch.setattr(fused_module, "STRIP_ELEMS", 1 << 8)
     blk = QwenImageResidualBlock(6, out_dim).float().eval().requires_grad_(False)
@@ -93,9 +86,8 @@ def test_resample_matches_the_plain_module_it_wraps(mode, monkeypatch):
 def test_encode_and_decode_are_strip_invariant(tiny_vae, monkeypatch):
     """Strips are a memory device, not an approximation: same numbers either way.
 
-    The tiny threshold puts the full-resolution levels over several strips while the mid
-    block stays a single one, so a strip reading a synthetic edge would show as a seam at
-    the border of a level — which is where an in-place block is most likely to make one.
+    The tiny threshold leaves the mid block a single strip, so a seam would show up as a
+    border between levels — where an in-place block is most likely to make one.
     """
     z = torch.randn(1, 16, 4, 4)
     pixels = torch.rand(1, 3, 64, 64) * 2 - 1
@@ -110,11 +102,7 @@ def test_encode_and_decode_are_strip_invariant(tiny_vae, monkeypatch):
 
 
 def test_the_codec_leaves_what_the_caller_handed_it(tiny_vae):
-    """In-place blocks write to activations the codec made itself, never to an input.
-
-    A caller reusing one latent for two decodes would otherwise get a different picture
-    the second time, which no single-decode test can see.
-    """
+    """In-place blocks write to activations the codec made itself, never to an input."""
     z = torch.randn(1, 16, 4, 4)
     pixels = torch.rand(1, 3, 64, 64) * 2 - 1
     z0, pixels0 = z.clone(), pixels.clone()

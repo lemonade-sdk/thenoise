@@ -27,7 +27,7 @@ from einops import rearrange
 
 from thenoise.utils.attention import single_head_attention
 from thenoise.utils.safetensors import load_safetensors
-from .fused import strip_apply
+from .fused import image_elems, strip_apply
 
 from thenoise.utils.setup_logging import setup_logging
 
@@ -80,9 +80,22 @@ class Wan22ResidualBlock(nn.Module):
         )
         self.shortcut = nn.Conv2d(in_dim, out_dim, 1) if in_dim != out_dim else nn.Identity()
 
+    @property
+    def updates_input_in_place(self) -> bool:
+        """Whether ``forward`` writes into the tensor it was handed: a caller that still
+        needs it afterwards must copy it first."""
+        return isinstance(self.shortcut, nn.Identity)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # In strips: halo=2 covers the two 3x3 convs, so the result is exact.
-        return strip_apply(lambda s: self.residual(s).add_(self.shortcut(s)), x, halo=2)
+        # In strips: halo=2 covers the two 3x3 convs. Where the widths match the shortcut
+        # is the identity, so ``accumulate`` supplies the residual term by adding into
+        # ``x`` itself and the level keeps one feature map.
+        if self.updates_input_in_place:
+            return strip_apply(self.residual, x, halo=2, out=x, accumulate=True)
+        return strip_apply(
+            lambda s: self.residual(s) + self.shortcut(s),
+            x, halo=2, out_elems=image_elems(x, self.shortcut.out_channels),
+        )
 
 
 class Wan22AttentionBlock(nn.Module):
@@ -227,7 +240,7 @@ class Wan22DownBlock(nn.Module):
         h = self.avg_shortcut(x)
         for layer in self.downsamples:
             x = layer(x)
-        return x + h
+        return x.add_(h)
 
 
 class Wan22UpBlock(nn.Module):
@@ -251,11 +264,15 @@ class Wan22UpBlock(nn.Module):
         self.upsamples = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # The DupUp reads the block's input at the end, so it takes a copy only where the
+        # first stack block updates that input in place. A copy is a quarter of the block's
+        # output; materialising the DupUp to avoid one is the whole of it.
+        shortcut = x.clone() if self.upsamples[0].updates_input_in_place else x
         h = x
         for layer in self.upsamples:
             h = layer(h)
         if self.avg_shortcut is not None:
-            h = self.avg_shortcut.add_to(x, h)
+            h = self.avg_shortcut.add_to(shortcut, h)
         return h
 
 
@@ -304,14 +321,12 @@ class Wan22Encoder(nn.Module):
         self.head = _head(dims[-1], z_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv1(x)
+        x = strip_apply(self.conv1, x, halo=1, out_elems=image_elems(x, self.conv1.out_channels))
         for layer in self.downsamples:
             x = layer(x)
         for layer in self.middle:
             x = layer(x)
-        for layer in self.head:
-            x = layer(x)
-        return x
+        return strip_apply(self.head, x, halo=1)
 
 
 class Wan22Decoder(nn.Module):
@@ -345,14 +360,14 @@ class Wan22Decoder(nn.Module):
         self.head = _head(dims[-1], out_channels)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv1(x)
+        x = strip_apply(self.conv1, x, halo=1, out_elems=image_elems(x, self.conv1.out_channels))
         for layer in self.middle:
             x = layer(x)
         for layer in self.upsamples:
             x = layer(x)
-        for layer in self.head:
-            x = layer(x)
-        return x
+        # The conv that closes a decode asks MIOpen for more at full frame than the maps
+        # it is given cost: it was this codec's peak.
+        return strip_apply(self.head, x, halo=1)
 
 
 # ---------------------------------------------------------------------------

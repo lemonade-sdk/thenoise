@@ -96,34 +96,28 @@ def _strip_rows(
 ) -> torch.Tensor:
     """Walk ``x`` in strips of rows, ``fn(strip, top, bottom, dst)`` each, into one result.
 
-    A strip is read ``halo`` rows beyond the rows it keeps, and hands back either ``dst`` —
-    a kernel writing in place, which moves nothing — or the rows it computed, ``scale``
-    times taller than its input. Of those, the strip's first kept row is
-    ``scale * (a - lo) + top - halo``, where ``top`` counts the zero rows standing in for
-    context the image does not have: one at an edge for a kernel that pads only there
-    (``edge_padded``), all of them for a convolution chain that pads itself and so answers
-    exactly one row per row it was handed.
+    A strip is read ``halo`` rows beyond what it keeps and hands back either ``dst`` — a
+    kernel writing in place, which moves nothing — or the rows it computed. Its first kept
+    row is ``scale * (a - lo) + top - halo``, ``top`` counting zero rows standing in for
+    context the image does not have: one at an image edge for a kernel that pads only
+    there, all of them for a chain that pads itself and answers one row per row handed it.
 
-    ``out`` is a preallocated result, ADDED into when ``accumulate``; left to the driver
-    the result is the first strip's shape in ``layout``, or in whatever layout the strip
-    came back in. Strips write further
-    forward than they read, so it may be the tail of the buffer ``x`` itself lives in; and
-    when it shares the rows being read it is written a strip late, since the next strip
-    reads this strip's last ``halo`` rows as its own halo. That deferral costs the kernel
-    its in-place write, so it is taken only where the two really overlap.
+    ``out`` is a preallocated result, ADDED into when ``accumulate``, and may be the tail
+    of the buffer ``x`` lives in — strips write further forward than they read. When it
+    shares rows being read it is written a strip late, because the next strip reads this
+    strip's last ``halo`` rows as its own halo; the deferral costs the kernel its in-place
+    write, so it is taken only where the two really overlap.
     """
     size = x.shape[-2]
     step = _strip_step(x, out_elems)
-    if out is None and step >= size:
-        # The whole image is one strip, so its result needs no staging into a second buffer.
+    if out is None and step >= size:  # one strip: no second buffer to stage the rows through
         edge = 1 if edge_padded else halo
         return fn(x, edge, edge, None)
     put = torch.Tensor.add_ if accumulate else torch.Tensor.copy_
     hold = halo if out is not None and _overlaps(out, x) else 0
     if hold:
-        # Holding rows back protects the next strip's halo, and a strip cannot hold back
-        # more rows than it made: below the halo width a strip would read rows the
-        # previous one had already written, so the walk stops being one.
+        # A strip cannot hold back more rows than it made, and below the halo width the
+        # next one reads rows this one had already written.
         step = max(step, hold)
     held: Optional[torch.Tensor] = None
 
@@ -137,9 +131,8 @@ def _strip_rows(
         if rows is dst:
             continue
         if out is None:
-            # Without a wanted ``layout`` the result takes the strip's own: a codec given
-            # the other one spends its time transposing, which is a magnitude of cost and
-            # not a rounding, so it is the caller's to state and not the driver's to guess.
+            # The caller states a layout because the wrong one costs a magnitude, not a
+            # rounding; with none asked for, the strip's own is the only honest answer.
             shape = (x.shape[0], rows.shape[1], size * scale, x.shape[-1] * scale)
             out = (
                 rows.new_empty(shape)
@@ -174,14 +167,12 @@ def strip_apply(
 ) -> torch.Tensor:
     """``fn`` over whole rows of ``x``, in strips, assuming nothing about what ``fn`` is.
 
-    ``halo`` is the number of 3x3 convolutions inside ``fn``, each of which pads by itself
-    and so reads a synthetic edge at a strip's inner border: read that many rows more than
-    the strip keeps and the kept rows are what the whole image would have given.
-    ``out_elems`` is the size of the result, for a ``fn`` that changes the channel count
-    (:func:`_strip_rows`' argument, which otherwise assumes the width is kept; see
-    :func:`image_elems`). ``out``
-    and ``accumulate`` are also :func:`_strip_rows`', which is what makes ``out=x`` — a
-    residual block updating its own input — as exact as any other use.
+    ``halo`` is the number of 3x3 convolutions inside ``fn``, each padding by itself and so
+    reading a synthetic edge at a strip's inner border; that many rows more than the strip
+    keeps makes the kept rows what the whole image would have given. ``out_elems`` gives
+    the result's size for an ``fn`` that changes the channel count (:func:`image_elems`).
+    ``out`` and ``accumulate`` are :func:`_strip_rows`', which is what makes ``out=x`` — a
+    block updating its own input — as exact as any other use.
     """
     return _strip_rows(
         lambda rows, top, bottom, dst: fn(rows),
@@ -222,10 +213,10 @@ def pointwise(conv: torch.nn.Conv2d, x: torch.Tensor) -> torch.Tensor:
 def _conv_weight(weight: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     """The 5D form of a 3x3 weight when the kitchen conv is to take it, else as it is.
 
-    Only on ROCm, and only for a channels-last image: that kernel reads NHWC and takes an
-    ``NCHW`` one for neither, so a 5D weight doubles as the answer to "is the kitchen
-    conv in charge here". The kitchen kernel for CUDA accumulates in FP16 behind an
-    opt-in this engine has no knob for, so there cuDNN keeps the conv, and FP32 with it.
+    Only on ROCm, and only for a channels-last image: that kernel reads NHWC, so a 5D
+    weight doubles as the answer to "is the kitchen conv in charge here". Its CUDA twin
+    accumulates in FP16 behind an opt-in this engine has no knob for, so there cuDNN keeps
+    the conv, and FP32 with it.
     """
     if (
         x.dtype is torch.float16
@@ -299,11 +290,10 @@ def strip_conv(
 def strip_down(conv: torch.nn.Conv2d, x: torch.Tensor) -> torch.Tensor:
     """A stride-2 conv with its ``(0, 1, 0, 1)`` pad, in strips.
 
-    Output rows ``[a, b)`` read input rows ``[2a, 2b + 1)``, so a strip needs one input
-    row more than it produces rather than a halo on both sides — and no norm, so no
-    whole-frame statistics either. Only the image's last row is short one, so a strip
-    that ends inside the image must not be padded at its bottom: the fused pad is told
-    where the image ends, and torch's is given nothing to pad there.
+    Output rows ``[a, b)`` read input rows ``[2a, 2b + 1)``, so a strip needs one input row
+    more than it produces rather than a halo on both sides — and no norm, so no whole-frame
+    statistics either. Only the image's own last row is short one, and both pads are told
+    where the image ends; a strip ending inside it must not be padded at its bottom.
     """
     rows = x.shape[2] // 2
     step = _strip_step(x, x.shape[0] * conv.out_channels * rows * x.shape[3])

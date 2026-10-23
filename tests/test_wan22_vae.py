@@ -28,6 +28,7 @@ from thenoise.vae.wan22 import (
     Wan22AvgDown,
     Wan22DupUp,
     Wan22ResidualBlock,
+    Wan22UpBlock,
     unpatchify,
 )
 
@@ -192,6 +193,45 @@ def test_residual_block_is_strip_invariant():
         plain = layer(plain)
     ref = plain + blk[0].shortcut(x)
     assert torch.allclose(blk(x), ref, atol=1e-5)
+
+
+def test_a_width_preserving_block_returns_the_tensor_it_read(monkeypatch):
+    """The block's return identity is what keeps a level at one feature map, not one per block."""
+    monkeypatch.setattr(fused_module, "STRIP_ELEMS", 1 << 8)
+    blk = Wan22ResidualBlock(6, 6).float().eval().requires_grad_(False)
+    x = torch.randn(1, 6, 12, 5)
+    with torch.no_grad():
+        plain = x.clone()
+        for layer in blk.residual:
+            plain = layer(plain)
+        want = plain + x
+        assert blk(x) is x
+    assert torch.allclose(x, want, atol=1e-5)
+
+    wide = Wan22ResidualBlock(6, 9).float().eval().requires_grad_(False)
+    with torch.no_grad():
+        got = wide(x)
+    assert got.shape == (1, 9, 12, 5) and got.data_ptr() != x.data_ptr()
+
+
+# 6 -> 6 opens with a block that updates its input in place; 6 -> 3 opens with one that
+# returns a new buffer, so the two cases differ in whether a copy is needed at all.
+@pytest.mark.parametrize("out_dim", [6, 3])
+def test_up_block_shortcut_reads_the_input_the_block_was_given(out_dim, monkeypatch):
+    """The DupUp reads the block's input after a stack that may have updated it in place.
+
+    Reading the mutated tensor is a wrong picture with no exception, and no
+    strip-invariance test can see it: both runs would read it at the same point.
+    """
+    monkeypatch.setattr(fused_module, "STRIP_ELEMS", 1 << 8)
+    blk = Wan22UpBlock(6, out_dim, num_res_blocks=1, temperal_upsample=False, upsample=True)
+    blk = blk.float().eval().requires_grad_(False)
+    x = torch.randn(1, 6, 8, 5)
+    with torch.no_grad():
+        dup = blk.avg_shortcut(x)  # the block's meaning, unoptimised
+        want = blk.upsamples(x.clone()) + dup
+        got = blk(x)
+    assert torch.allclose(got, want, atol=1e-5)
 
 
 def test_encode_and_decode_are_strip_invariant(tiny_vae, monkeypatch):

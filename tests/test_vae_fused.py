@@ -157,10 +157,7 @@ def test_group_norm_only_normalises_without_activation_or_pad():
 
 @pytest.fixture
 def chain():
-    """Two 3x3 convs, each padding by itself: ``halo=2`` is what keeps a strip honest.
-
-    Width-preserving, so the same chain serves a block accumulating into its own input.
-    """
+    """Two 3x3 convs, each padding by itself, width preserved: ``halo=2`` keeps a strip honest."""
     torch.manual_seed(0)
     return nn.Sequential(
         nn.Conv2d(6, 9, 3, padding=1), nn.SiLU(), nn.Conv2d(9, 6, 3, padding=1)
@@ -200,13 +197,11 @@ def test_strip_apply_matches_the_upsample_inside_it(strip_elems, monkeypatch):
         assert torch.allclose(strip_apply(up, x, scale=2, halo=1), up(x), atol=1e-5)
 
 
-# Down to one row per strip: a strip cannot hold back more rows than it made, so the
-# driver widens it to the halo instead of letting the next one read a row already written.
+# Down to one row per strip, where the driver has to widen a strip to the halo: a strip
+# cannot hold back more rows than it made.
 @pytest.mark.parametrize("strip_elems", [1 << 9, 1 << 7, 1 << 6, 1 << 4])
 def test_strip_apply_accumulates_into_the_tensor_it_read(chain, strip_elems, monkeypatch):
-    """A residual block updating its own input: the rows a strip writes are the next
-    strip's halo, so they wait for it, which is what a plain loop gets wrong.
-    """
+    """The rows a strip writes are the next strip's halo, so they wait for it."""
     monkeypatch.setattr(fused_module, "STRIP_ELEMS", strip_elems)
     x = torch.randn(1, 6, 34, 5)
     with torch.no_grad():
@@ -221,7 +216,7 @@ def test_strip_apply_accumulates_into_the_tensor_it_read(chain, strip_elems, mon
 def test_strip_apply_lands_a_block_in_the_leading_channels_of_its_input(
     narrowing_chain, strip_elems, monkeypatch
 ):
-    """The ``C -> C'`` block narrowing in place, the other half of the same deferral."""
+    """A ``C -> C'`` block writing into the leading channels of the input it read."""
     monkeypatch.setattr(fused_module, "STRIP_ELEMS", strip_elems)
     x = torch.randn(1, 6, 30, 5)
     with torch.no_grad():
@@ -233,9 +228,7 @@ def test_strip_apply_lands_a_block_in_the_leading_channels_of_its_input(
 
 
 def test_the_destination_is_handed_over_only_where_nothing_reads_it(monkeypatch):
-    """A fused kernel writes its destination and moves nothing; it keeps that privilege up
-    to the point where the rows would be written before the next strip had read them.
-    """
+    """A fused kernel keeps its in-place write until the rows would land too early."""
     monkeypatch.setattr(fused_module, "STRIP_ELEMS", 1 << 7)
     seen: list[bool] = []
 
