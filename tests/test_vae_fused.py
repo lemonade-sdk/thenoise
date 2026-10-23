@@ -200,7 +200,9 @@ def test_strip_apply_matches_the_upsample_inside_it(strip_elems, monkeypatch):
         assert torch.allclose(strip_apply(up, x, scale=2, halo=1), up(x), atol=1e-5)
 
 
-@pytest.mark.parametrize("strip_elems", [1 << 9, 1 << 7, 1 << 6])
+# Down to one row per strip: a strip cannot hold back more rows than it made, so the
+# driver widens it to the halo instead of letting the next one read a row already written.
+@pytest.mark.parametrize("strip_elems", [1 << 9, 1 << 7, 1 << 6, 1 << 4])
 def test_strip_apply_accumulates_into_the_tensor_it_read(chain, strip_elems, monkeypatch):
     """A residual block updating its own input: the rows a strip writes are the next
     strip's halo, so they wait for it, which is what a plain loop gets wrong.
@@ -215,7 +217,7 @@ def test_strip_apply_accumulates_into_the_tensor_it_read(chain, strip_elems, mon
     assert torch.allclose(got, want, atol=1e-5)
 
 
-@pytest.mark.parametrize("strip_elems", [1 << 9, 1 << 7, 1 << 6])
+@pytest.mark.parametrize("strip_elems", [1 << 9, 1 << 7, 1 << 6, 1 << 4])
 def test_strip_apply_lands_a_block_in_the_leading_channels_of_its_input(
     narrowing_chain, strip_elems, monkeypatch
 ):

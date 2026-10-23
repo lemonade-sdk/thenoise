@@ -38,6 +38,7 @@ __all__ = [
     "FusedResnetMixin",
     "fused_available",
     "group_norm_only",
+    "image_elems",
     "interleaved_view",
     "pointwise",
     "region",
@@ -119,6 +120,11 @@ def _strip_rows(
         return fn(x, edge, edge, None)
     put = torch.Tensor.add_ if accumulate else torch.Tensor.copy_
     hold = halo if out is not None and _overlaps(out, x) else 0
+    if hold:
+        # Holding rows back protects the next strip's halo, and a strip cannot hold back
+        # more rows than it made: below the halo width a strip would read rows the
+        # previous one had already written, so the walk stops being one.
+        step = max(step, hold)
     held: Optional[torch.Tensor] = None
 
     for a in range(0, size, step):
@@ -151,12 +157,18 @@ def _strip_rows(
     return out
 
 
+def image_elems(x: torch.Tensor, channels: int, scale: int = 1) -> int:
+    """What an image like ``x`` would hold with ``channels`` and ``scale`` times the side."""
+    return x.shape[0] * channels * x.shape[-2] * x.shape[-1] * scale * scale
+
+
 def strip_apply(
     fn: Callable[[torch.Tensor], torch.Tensor],
     x: torch.Tensor,
     *,
     scale: int = 1,
     halo: int = 1,
+    out_elems: Optional[int] = None,
     out: Optional[torch.Tensor] = None,
     accumulate: bool = False,
 ) -> torch.Tensor:
@@ -165,13 +177,16 @@ def strip_apply(
     ``halo`` is the number of 3x3 convolutions inside ``fn``, each of which pads by itself
     and so reads a synthetic edge at a strip's inner border: read that many rows more than
     the strip keeps and the kept rows are what the whole image would have given.
-    ``out`` and ``accumulate`` are :func:`_strip_rows`', which is what makes ``out=x`` — a
+    ``out_elems`` is the size of the result, for a ``fn`` that changes the channel count
+    (:func:`_strip_rows`' argument, which otherwise assumes the width is kept; see
+    :func:`image_elems`). ``out``
+    and ``accumulate`` are also :func:`_strip_rows`', which is what makes ``out=x`` — a
     residual block updating its own input — as exact as any other use.
     """
     return _strip_rows(
         lambda rows, top, bottom, dst: fn(rows),
         x,
-        x.numel() * scale * scale,
+        x.numel() * scale * scale if out_elems is None else out_elems,
         scale=scale,
         halo=halo,
         edge_padded=False,
@@ -207,10 +222,16 @@ def pointwise(conv: torch.nn.Conv2d, x: torch.Tensor) -> torch.Tensor:
 def _conv_weight(weight: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     """The 5D form of a 3x3 weight when the kitchen conv is to take it, else as it is.
 
-    Only on ROCm. The kitchen kernel for CUDA accumulates in FP16 behind an opt-in this
-    engine has no knob for, so there cuDNN keeps the conv, and accumulates in FP32.
+    Only on ROCm, and only for a channels-last image: that kernel reads NHWC and takes an
+    ``NCHW`` one for neither, so a 5D weight doubles as the answer to "is the kitchen
+    conv in charge here". The kitchen kernel for CUDA accumulates in FP16 behind an
+    opt-in this engine has no knob for, so there cuDNN keeps the conv, and FP32 with it.
     """
-    if x.dtype is torch.float16 and torch.version.hip is not None:
+    if (
+        x.dtype is torch.float16
+        and torch.version.hip is not None
+        and x.is_contiguous(memory_format=torch.channels_last)
+    ):
         return weight.unsqueeze(2).contiguous(memory_format=torch.channels_last_3d)
     return weight
 
@@ -280,31 +301,32 @@ def strip_down(conv: torch.nn.Conv2d, x: torch.Tensor) -> torch.Tensor:
 
     Output rows ``[a, b)`` read input rows ``[2a, 2b + 1)``, so a strip needs one input
     row more than it produces rather than a halo on both sides — and no norm, so no
-    whole-frame statistics either.
+    whole-frame statistics either. Only the image's last row is short one, so a strip
+    that ends inside the image must not be padded at its bottom: the fused pad is told
+    where the image ends, and torch's is given nothing to pad there.
     """
     rows = x.shape[2] // 2
     step = _strip_step(x, x.shape[0] * conv.out_channels * rows * x.shape[3])
-    out = torch.empty(
-        (x.shape[0], conv.out_channels, rows, x.shape[3] // 2),
-        dtype=x.dtype,
-        device=x.device,
-        memory_format=torch.channels_last,
-    )
+    out = x.new_empty((x.shape[0], conv.out_channels, rows, x.shape[3] // 2))
     weight = _conv_weight(conv.weight, x)
     for a in range(0, rows, step):
         b = min(rows, a + step)
         hi = min(x.shape[2], 2 * b + 1)
-        padded = group_norm_silu_pad3d(
-            x.narrow(2, 2 * a, hi - 2 * a).unsqueeze(2), None, None, 1, 0.0,
-            (0, 1, 0, int(hi == x.shape[2]), 0), False, zero_pad=True,
-        )
+        strip = x.narrow(2, 2 * a, hi - 2 * a)
+        end = int(hi == x.shape[2])
         # Stride 2 spends the one input row read ahead of the strip, leaving exactly the
         # rows this strip of the output is.
         dst = out.narrow(2, a, b - a)
         if weight.ndim == 5:
+            padded = group_norm_silu_pad3d(
+                strip.unsqueeze(2), None, None, 1, 0.0,
+                (0, 1, 0, end, 0), False, zero_pad=True,
+            )
             fp16_conv3d(padded, weight, conv.bias, None, 2, out=dst.unsqueeze(2))
         else:
-            dst.copy_(F.conv2d(padded.squeeze(2), conv.weight, conv.bias, stride=2))
+            dst.copy_(
+                F.conv2d(F.pad(strip, (0, 1, 0, end)), conv.weight, conv.bias, stride=2)
+            )
     return out
 
 

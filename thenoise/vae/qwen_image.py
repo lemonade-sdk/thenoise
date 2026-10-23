@@ -29,6 +29,7 @@ import numpy as np
 
 from thenoise.utils.attention import single_head_attention
 from thenoise.utils.safetensors import load_safetensors
+from thenoise.vae.fused import image_elems, strip_apply, strip_down
 
 from thenoise.utils.setup_logging import setup_logging
 
@@ -108,7 +109,13 @@ class QwenImageRMS_norm(nn.Module):
 
 
 class QwenImageResample(nn.Module):
-    r"""2D spatial resampling: ``upsample2d``, ``downsample2d``, else identity."""
+    r"""2D spatial resampling: ``upsample2d``, ``downsample2d``, else identity.
+
+    Both convolutions run in row strips (:mod:`.fused`), which is what keeps a level's
+    working set to a strip rather than to the frame. The modules stay the plain ones the
+    checkpoint names, and the pad the stride-2 walk needs is the driver's, not
+    :class:`nn.ZeroPad2d` — which is kept only so the state dict keys do.
+    """
 
     def __init__(self, dim: int, mode: str) -> None:
         super().__init__()
@@ -126,11 +133,20 @@ class QwenImageResample(nn.Module):
             self.resample = nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.mode == "upsample2d":
+            return strip_apply(self.resample, x, scale=2, halo=1)
+        if self.mode == "downsample2d":
+            return strip_down(self.resample[1], x)
         return self.resample(x)
 
 
 class QwenImageResidualBlock(nn.Module):
-    r"""Residual block: norm/SiLU/conv twice, plus a 1x1 shortcut when the width changes."""
+    r"""Residual block: norm/SiLU/conv twice, plus a 1x1 shortcut when the width changes.
+
+    The convolutions run in row strips (:mod:`.fused`), and a block that keeps its width
+    adds its result into the tensor it read, so a level of them needs no buffer beyond
+    the one it started with.
+    """
 
     def __init__(
         self,
@@ -150,9 +166,8 @@ class QwenImageResidualBlock(nn.Module):
         self.conv2 = nn.Conv2d(out_dim, out_dim, 3, padding=1)
         self.conv_shortcut = nn.Conv2d(in_dim, out_dim, 1) if in_dim != out_dim else nn.Identity()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.conv_shortcut(x)
-
+    def path(self, x: torch.Tensor) -> torch.Tensor:
+        """The two norm/SiLU/conv stages, without the shortcut."""
         x = self.norm1(x)
         x = self.nonlinearity(x)
         x = self.conv1(x)
@@ -160,9 +175,19 @@ class QwenImageResidualBlock(nn.Module):
         x = self.norm2(x)
         x = self.nonlinearity(x)
 
-        x = self.conv2(x)
+        return self.conv2(x)
 
-        return x + h
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # In strips: halo=2 feeds the two 3x3 convs the context they cannot do without, so
+        # the kept rows are what the whole image would have given. Where the widths match
+        # the shortcut is the identity, which is the residual term ``accumulate`` supplies
+        # for free by adding into ``x`` itself; a block that changes width has nowhere to
+        # write but a new buffer, and pays for its own shortcut.
+        if isinstance(self.conv_shortcut, nn.Identity):
+            return strip_apply(self.path, x, halo=2, out=x, accumulate=True)
+        return strip_apply(
+            lambda s: self.path(s) + self.conv_shortcut(s), x, halo=2, out_elems=image_elems(x, self.out_dim)
+        )
 
 
 class QwenImageAttentionBlock(nn.Module):
@@ -268,17 +293,16 @@ class QwenImageEncoder2d(nn.Module):
         self.conv_out = nn.Conv2d(out_dim, z_dim, 3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv_in(x)
+        # The one layer whose result dwarfs its input — pixel channels to ``dim`` — so it
+        # is the layer that has to say how wide the output is.
+        x = strip_apply(self.conv_in, x, halo=1, out_elems=image_elems(x, self.conv_in.out_channels))
 
         for layer in self.down_blocks:
             x = layer(x)
 
         x = self.mid_block(x)
 
-        x = self.norm_out(x)
-        x = self.nonlinearity(x)
-        x = self.conv_out(x)
-        return x
+        return strip_apply(lambda s: self.conv_out(self.nonlinearity(self.norm_out(s))), x, halo=1)
 
 
 class QwenImageUpBlock(nn.Module):
@@ -371,17 +395,14 @@ class QwenImageDecoder2d(nn.Module):
         self.conv_out = nn.Conv2d(out_dim, output_channels, 3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv_in(x)
+        x = strip_apply(self.conv_in, x, halo=1, out_elems=image_elems(x, self.conv_in.out_channels))
 
         x = self.mid_block(x)
 
         for up_block in self.up_blocks:
             x = up_block(x)
 
-        x = self.norm_out(x)
-        x = self.nonlinearity(x)
-        x = self.conv_out(x)
-        return x
+        return strip_apply(lambda s: self.conv_out(self.nonlinearity(self.norm_out(s))), x, halo=1)
 
 
 #: The Qwen-Image VAE's latent normalisation: a per-channel z-score.
