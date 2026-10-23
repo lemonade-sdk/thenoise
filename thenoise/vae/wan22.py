@@ -27,6 +27,7 @@ from einops import rearrange
 
 from thenoise.utils.attention import single_head_attention
 from thenoise.utils.safetensors import load_safetensors
+from .fused import STRIP_ELEMS
 
 from thenoise.utils.setup_logging import setup_logging
 
@@ -48,12 +49,6 @@ def unpatchify(x: torch.Tensor, patch_size: int) -> torch.Tensor:
     if patch_size == 1:
         return x
     return rearrange(x, "b (c r q) h w -> b c (h q) (w r)", q=patch_size, r=patch_size)
-
-
-# Elements per strip of rows (16.7M -> a 32MB bf16 buffer). Stripping bounds
-# cuDNN's conv workspace: a single full-size conv activation at 4K costs GBs, and
-# the library picks its algorithm from the tensor it is handed.
-STRIP_ELEMS = 2**24
 
 
 def strip_apply(fn, x: torch.Tensor, scale: int = 1, halo: int = 1, out: torch.Tensor | None = None):

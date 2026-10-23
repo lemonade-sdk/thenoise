@@ -74,7 +74,7 @@ def test_the_flux2_decoder_width_comes_from_the_file(tmp_path, decoder_ch):
     """
     path, source = _flux2_checkpoint(tmp_path, "flux2_vae.safetensors", decoder_ch=decoder_ch)
 
-    vae = load_flux2_vae(path, device="cpu")
+    vae = load_flux2_vae(path, device="cpu", dtype=torch.float32)  # FP32 to compare verbatim
 
     assert vae.decoder_ch == decoder_ch
     loaded = vae.state_dict()
@@ -85,6 +85,14 @@ def test_the_flux2_decoder_width_comes_from_the_file(tmp_path, decoder_ch):
     assert (vae.z_dim, vae.spatial_compression, vae.pixel_channels) == (128, 16, 3)
     with torch.no_grad():
         assert vae.decode_to_pixels(torch.randn(1, 128, 4, 4)).shape == (1, 3, 64, 64)
+
+
+def test_the_flux2_ae_picks_its_own_compute_dtype(tmp_path):
+    """``dtype`` is an override; leaving it out is not a request for FP32."""
+    path, _ = _flux2_checkpoint(tmp_path, "flux2_vae.safetensors", decoder_ch=32)
+
+    assert load_flux2_vae(path, device="cpu").dtype is AutoencoderKLFlux2.compute_dtype
+    assert load_flux2_vae(path, device="cpu", dtype=torch.bfloat16).dtype is torch.bfloat16
 
 
 def test_a_flux2_decoder_of_the_wrong_shape_is_refused(tmp_path):

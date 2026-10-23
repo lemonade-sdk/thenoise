@@ -87,7 +87,7 @@ class Fibo2Model(DiffusionModel):
         )
 
         logger.info("Loading Fibo 2.0 VAE (Flux.2) from %s", self.vae_path)
-        self.vae = load_flux2_vae(self.vae_path, device=self.device, dtype=self.dtype)
+        self.vae = load_flux2_vae(self.vae_path, device=self.device)
 
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)

@@ -585,7 +585,11 @@ def load_mage_family_vae(
     device: Union[str, torch.device],
     dtype: Optional[torch.dtype] = None,
 ) -> Union[AutoencoderKLMageFlow, AutoencoderKLFlux2]:
-    """Load whichever codec ``vae_path`` holds: the Mage-VAE or the Flux.2 AE."""
+    """Load whichever codec ``vae_path`` holds: the Mage-VAE or the Flux.2 AE.
+
+    ``dtype`` is the model's compute dtype: the Mage-VAE follows it, the Flux.2 AE keeps
+    its own (:attr:`AutoencoderKLFlux2.compute_dtype`).
+    """
     with MemoryEfficientSafeOpen(vae_path) as f:
         keys = list(f.keys())
 
@@ -593,7 +597,7 @@ def load_mage_family_vae(
         return load_mage_vae(vae_path, device, dtype=dtype)
     if any(key.startswith(_FLUX2_PREFIXES) for key in keys):
         logger.info("Mage-Flow codec: the Flux.2 AE rather than the Mage-VAE (%s)", vae_path)
-        return load_flux2_vae(vae_path, device, dtype=dtype)
+        return load_flux2_vae(vae_path, device)
     raise ValueError(
         f"{vae_path} is neither a Mage-VAE (no 'student.*'/'pipeline.*' keys) nor a "
         "Flux.2 AE (no 'encoder.*'/'decoder.*'/'bn.*' keys)"
