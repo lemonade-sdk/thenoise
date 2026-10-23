@@ -464,6 +464,17 @@ def _as_video_state_dict(
     return out
 
 
+def test_the_wan22_ae_picks_its_own_compute_dtype(tmp_path):
+    """BF16 whatever the file held: FP16 is the one dtype this family cannot run in."""
+    video_sd = _as_video_state_dict(_tiny_vae().state_dict(), enc_flags=[False, True, True],
+                                    dec_flags=[True, True, False], dim=8, dec_dim=8)
+    path = write_safetensors(tmp_path / "wan22.safetensors", video_sd)
+
+    stats = dict(latents_mean=TINY_MEAN, latents_std=TINY_STD)
+    assert load_wan22_vae(path, device="cpu", **stats).dtype is AutoencoderKLWan22.compute_dtype
+    assert load_wan22_vae(path, device="cpu", dtype=torch.float32, **stats).dtype is torch.float32
+
+
 def test_load_wan22_vae_collapses_and_infers(tmp_path):
     source = _tiny_vae()
     video_sd = _as_video_state_dict(
@@ -473,7 +484,8 @@ def test_load_wan22_vae_collapses_and_infers(tmp_path):
     assert any(".time_conv." in k for k in video_sd)
     path = write_safetensors(tmp_path / "wan22.safetensors", video_sd)
 
-    vae = load_wan22_vae(path, device="cpu", latents_mean=TINY_MEAN, latents_std=TINY_STD)
+    vae = load_wan22_vae(path, device="cpu", dtype=torch.float32,
+                         latents_mean=TINY_MEAN, latents_std=TINY_STD)
 
     assert isinstance(vae, AutoencoderKLWan22)
     # architecture inferred from the weights
@@ -508,7 +520,8 @@ def test_load_wan22_vae_infers_the_qwen21_variant(tmp_path):
     )
     path = write_safetensors(tmp_path / "qwen21_vae.safetensors", video_sd)
 
-    vae = load_wan22_vae(path, device="cpu")  # the z_dim=64 stats are picked for us
+    # the z_dim=64 stats are picked for us
+    vae = load_wan22_vae(path, device="cpu", dtype=torch.float32)
 
     assert vae.z_dim == 64
     assert vae.dim_mult == TINY_QWEN_DIM_MULT
@@ -532,7 +545,8 @@ def test_load_wan22_vae_without_temporal_flags(tmp_path):
     video_sd = _as_video_state_dict(source.state_dict(), [False, False, False], [False, False, False], 8, 8)
     path = write_safetensors(tmp_path / "wan22_2d.safetensors", video_sd)
 
-    vae = load_wan22_vae(path, device="cpu", latents_mean=TINY_MEAN, latents_std=TINY_STD)
+    vae = load_wan22_vae(path, device="cpu", dtype=torch.float32,
+                         latents_mean=TINY_MEAN, latents_std=TINY_STD)
     for i in range(3):
         assert vae.encoder.downsamples[i].avg_shortcut.factor_t == 1
         assert vae.decoder.upsamples[i].avg_shortcut.factor_t == 1

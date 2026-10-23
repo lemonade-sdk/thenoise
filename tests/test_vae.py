@@ -23,7 +23,9 @@ from thenoise.upscale.inference_adaptors import make_wan21
 from thenoise.vae import (
     AutoencoderKLFlux,
     AutoencoderKLFlux2,
+    AutoencoderKLMageFlow,
     AutoencoderKLQwenImage,
+    AutoencoderKLWan22,
     load_flux2_vae,
     load_ming_vae,
     load_qwen_vae,
@@ -87,12 +89,30 @@ def test_the_flux2_decoder_width_comes_from_the_file(tmp_path, decoder_ch):
         assert vae.decode_to_pixels(torch.randn(1, 128, 4, 4)).shape == (1, 3, 64, 64)
 
 
+def test_the_two_categories_of_compute_dtype():
+    """The Wan 2.2 family's activations leave FP16's range; nothing else here does.
+    Neither the checkpoint's format nor the DiT beside a codec decides this.
+    """
+    for cls in (AutoencoderKLFlux, AutoencoderKLFlux2, AutoencoderKLMageFlow, AutoencoderKLQwenImage):
+        assert cls.compute_dtype is torch.float16
+    assert AutoencoderKLWan22.compute_dtype is torch.bfloat16
+
+
 def test_the_flux2_ae_picks_its_own_compute_dtype(tmp_path):
     """``dtype`` is an override; leaving it out is not a request for FP32."""
     path, _ = _flux2_checkpoint(tmp_path, "flux2_vae.safetensors", decoder_ch=32)
 
     assert load_flux2_vae(path, device="cpu").dtype is AutoencoderKLFlux2.compute_dtype
     assert load_flux2_vae(path, device="cpu", dtype=torch.bfloat16).dtype is torch.bfloat16
+
+
+def test_the_qwen_ae_picks_its_own_compute_dtype(tmp_path, tiny_family_arch):
+    """A BF16 export of this codec runs in FP16; ``dtype`` stays the caller's override."""
+    stored, _ = _family_checkpoint(3)
+    path = write_safetensors(tmp_path / "qwen_vae.safetensors", stored)
+
+    assert load_qwen_vae(path, device="cpu").dtype is AutoencoderKLQwenImage.compute_dtype
+    assert load_qwen_vae(path, device="cpu", dtype=torch.bfloat16).dtype is torch.bfloat16
 
 
 def test_a_flux2_decoder_of_the_wrong_shape_is_refused(tmp_path):
@@ -173,7 +193,7 @@ def test_load_ming_vae_is_rgba_with_the_scalar_scale(tmp_path, tiny_family_arch)
     stored, expected = _family_checkpoint(4)
     path = write_safetensors(tmp_path / "ming_vae.safetensors", stored)
 
-    vae = load_ming_vae(path, device="cpu")
+    vae = load_ming_vae(path, device="cpu", dtype=torch.float32)
 
     assert (vae.z_dim, vae.spatial_compression, vae.pixel_channels) == (16, 8, 4)
     # The vendor's scalar pair (``canonical = raw * 8.0064``, shift 0), broadcastable.
@@ -187,7 +207,7 @@ def test_load_qwen_vae_is_rgb_with_the_per_channel_z_score(tmp_path, tiny_family
     stored, expected = _family_checkpoint(3)
     path = write_safetensors(tmp_path / "qwen_vae.safetensors", stored)
 
-    vae = load_qwen_vae(path, device="cpu")
+    vae = load_qwen_vae(path, device="cpu", dtype=torch.float32)
 
     assert (vae.z_dim, vae.spatial_compression, vae.pixel_channels) == (16, 8, 3)
     assert torch.equal(vae._latents_mean.view(-1), torch.tensor(QWEN_IMAGE_LATENTS_MEAN))

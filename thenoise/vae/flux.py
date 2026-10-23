@@ -152,6 +152,9 @@ class _UpBlock(nn.Module):
         return x
 
 
+COMPUTE_DTYPE = torch.float16
+
+
 class AutoencoderKLFlux(nn.Module):
     """Flux VAE decoder (decode-only), with ComfyUI / Flux-VAE key naming.
 
@@ -160,16 +163,13 @@ class AutoencoderKLFlux(nn.Module):
     ``[B, C, H, W]``.
     """
 
+    compute_dtype = COMPUTE_DTYPE
+
     z_dim = 16
     spatial_compression = 8  # pixel / latent ratio
     pixel_channels = 3  # RGB
     scaling_factor = 0.3611
     shift_factor = 0.1159
-
-    #: This AE computes in FP16 whatever the DiT next to it runs in: a conv chain this
-    #: depth leans on the mantissa, and it is the only dtype the fused kernels serve on
-    #: ROCm (see :func:`~thenoise.vae.fused.fused_available`).
-    compute_dtype = torch.float16
 
     def __init__(self, in_channels=16, out_channels=3, block_out_channels=(128, 256, 512, 512),
                  layers_per_block=2, norm_num_groups=32, act_fn="silu", mid_block_add_attention=True,
@@ -292,8 +292,10 @@ def load_flux_vae(
     override, not a request for FP32.
     """
     device = torch.device(device)
+    if dtype is None:
+        dtype = COMPUTE_DTYPE
     logger.info("Loading Flux VAE from %s", vae_path)
-    state_dict = load_safetensors(vae_path, device=device)
+    state_dict = load_safetensors(vae_path, device=device, dtype=dtype)
 
     vae = AutoencoderKLFlux()
     # Strip the ``decoder.`` prefix so keys line up with the model's bare names.
@@ -305,5 +307,5 @@ def load_flux_vae(
     info = vae.load_state_dict(decoder_sd, strict=True, assign=True)
     logger.info("Loaded Flux VAE decoder: %s", info)
 
-    vae.to(device, dtype if dtype is not None else vae.compute_dtype)
+    vae.to(device, dtype)
     return vae

@@ -106,7 +106,7 @@ class QwenImage21Model(DiffusionModel):
             config.text_encoder_path, dtype=config.dtype, device=self.offload_device
         )
 
-        self.vae = load_wan22_vae(self.vae_path, device=self.device, dtype=config.dtype)
+        self.vae = load_wan22_vae(self.vae_path, device=self.device)
         if self.vae.z_dim != self.dit.in_channels:
             raise ValueError(
                 f"the VAE's {self.vae.z_dim}ch latent does not feed this DiT's "

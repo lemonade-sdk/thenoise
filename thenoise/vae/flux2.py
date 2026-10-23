@@ -379,6 +379,9 @@ class _Decoder(nn.Module):
         return strip_conv(self.conv_out, h, self.norm_out)
 
 
+COMPUTE_DTYPE = torch.float16
+
+
 class AutoencoderKLFlux2(nn.Module):
     """Flux.2 VAE (encoder + decoder), with musubi/Flux key naming.
 
@@ -387,16 +390,12 @@ class AutoencoderKLFlux2(nn.Module):
     decoder is attached, so a small-decoder checkpoint drops into any Flux.2 model.
     """
 
+    compute_dtype = COMPUTE_DTYPE
+
     z_dim = 128  # packed latent channels
     spatial_compression = 16  # pixel / packed-latent ratio
     pixel_channels = _PIXEL_CHANNELS
     bn_eps = 1e-4
-
-    #: This AE computes in FP16 whatever the DiT next to it runs in: the latents are
-    #: BatchNorm-normalised, so nothing here leans on BF16's range while a conv of this
-    #: depth does lean on the mantissa, and it is the only dtype the fused kernels serve
-    #: on ROCm (see :func:`~thenoise.vae.fused.fused_available`).
-    compute_dtype = torch.float16
 
     def __init__(
         self,
@@ -497,7 +496,7 @@ def load_flux2_vae(
     """
     device = torch.device(device)
     if dtype is None:
-        dtype = AutoencoderKLFlux2.compute_dtype
+        dtype = COMPUTE_DTYPE
     logger.info("Loading Flux.2 VAE from %s", vae_path)
     state_dict = load_safetensors(vae_path, device=device)
 

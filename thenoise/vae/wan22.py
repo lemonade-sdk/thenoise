@@ -427,6 +427,11 @@ LATENT_STATS: dict[int, tuple[list[float], list[float]]] = {
 PIXEL_COMPRESSION = 16
 
 
+#: Not FP16: this family's activations pass its largest finite number on the way out of
+#: the last upsample, silently. FP16 convolutions are refused for it in fused._conv_weight.
+COMPUTE_DTYPE = torch.bfloat16
+
+
 class AutoencoderKLWan22(nn.Module):
     """Wan 2.2 family VAE for still images.
 
@@ -439,6 +444,8 @@ class AutoencoderKLWan22(nn.Module):
     the encode/decode boundary pads an opaque alpha onto RGB input when the VAE
     wants four channels, and decoding hands back ``image_channels`` channels.
     """
+
+    compute_dtype = COMPUTE_DTYPE
 
     def __init__(
         self,
@@ -671,8 +678,10 @@ def load_wan22_vae(
     time slice of 5D convs (causal padding puts the single frame at the end),
     squeeze 4D gammas.
     """
+    if dtype is None:
+        dtype = COMPUTE_DTYPE
     logger.info("Loading Wan 2.2 family VAE from %s", vae_path)
-    state_dict = load_safetensors(vae_path, device=device)
+    state_dict = load_safetensors(vae_path, device=device, dtype=dtype)
 
     required = (
         "encoder.conv1.weight",

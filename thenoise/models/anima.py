@@ -71,7 +71,7 @@ class AnimaModel(DiffusionModel):
         )
         self.encoding_strategy = AnimaTextEncodingStrategy()
 
-        self.vae = load_qwen_vae(self.vae_path, device=self.device).to(self.dtype)
+        self.vae = load_qwen_vae(self.vae_path, device=self.device)
 
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)

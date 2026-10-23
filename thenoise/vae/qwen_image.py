@@ -439,12 +439,17 @@ def _latent_normalisation(
     return torch.tensor(mean_values), 1.0 / torch.tensor(std_values)
 
 
+COMPUTE_DTYPE = torch.float16
+
+
 class AutoencoderKLQwenImage(nn.Module):
     r"""Single-frame (still-image) VAE with KL loss.
 
     Two shipped checkpoints share it and differ only in these knobs: Qwen-Image
     (RGB pixels, per-channel z-scored latent) and Ming-Image (RGBA, scalar scale).
     """
+
+    compute_dtype = COMPUTE_DTYPE
 
     def __init__(
         self,
@@ -735,6 +740,8 @@ def load_qwen_family_vae(
     pick the latent normalisation and declare the pixel width their model needs,
     which the file must confirm.
     """
+    if dtype is None:
+        dtype = COMPUTE_DTYPE
     logger.info(f"Loading VAE from {vae_path}")
     state_dict = load_safetensors(vae_path, device=device, dtype=dtype)
 
@@ -769,7 +776,7 @@ def load_qwen_family_vae(
         " ".join(f"{k}={v}" for k, v in config.items()),
     )
 
-    vae.to(device)
+    vae.to(device, dtype)
     return vae
 
 

@@ -5,6 +5,11 @@ always ``load_<name>_vae(path, device, dtype)``; where a model accepts more than
 one codec, ``load_<name>_family_vae`` reads the checkpoint header and dispatches
 to the right one. Variants of ONE codec — the Flux.2 AE's full or small decoder —
 are read off the weights inside that codec's own loader, so they need no choice.
+
+A codec runs in its own ``COMPUTE_DTYPE`` whatever the DiT beside it runs in -- FP16,
+except the Wan 2.2 family, whose activations leave that range. Its loader casts to that
+dtype while reading the file, so the file's own format decides nothing; passing
+``dtype`` overrides the codec and is not a request for the file's.
 """
 from .qwen_image import (
     AutoencoderKLQwenImage,
