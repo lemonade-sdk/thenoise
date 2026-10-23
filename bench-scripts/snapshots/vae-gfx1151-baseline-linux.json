@@ -1,11 +1,11 @@
 {
   "tool": "vae_bench",
   "schema": 1,
-  "timestamp": "2026-10-21T09:45:28Z",
-  "elapsed_s": 303.4,
+  "timestamp": "2026-10-23T12:45:35Z",
+  "elapsed_s": 244.2,
   "git": {
-    "sha": "c5f4e94bb1b4b0bc8506107497d8f11630d5e61c",
-    "describe": "c5f4e94",
+    "sha": "7ad4a707c747e994e8c17ab29c059c9ae4fde723",
+    "describe": "7ad4a70",
     "dirty": false
   },
   "env": {
@@ -23,7 +23,7 @@
     }
   },
   "protocol": {
-    "dtype": "bf16",
+    "dtype": "auto",
     "batch": 1,
     "grad": false,
     "compile": "none (no codec ships one)",
@@ -40,7 +40,6 @@
     "warmup": 1,
     "iters": 1,
     "repeats": 3,
-    "flops": "torch FlopCounterMode, counted on the untimed first call",
     "order": "pixel count ascending, codecs in registry order, encode before decode"
   },
   "cases": [
@@ -54,21 +53,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "16x128x128",
-      "ms": 303.4809,
-      "cov_pct": 0.065,
+      "dtype": "fp16",
+      "ms": 205.969,
+      "cov_pct": 0.197,
       "groups": [
-        303.1283,
-        303.4809,
-        303.5872
+        205.3052,
+        205.969,
+        206.2783
       ],
-      "first_s": 0.95,
-      "tflop": 2.8518,
-      "tflops": 9.4,
-      "mpx_per_s": 3.4552,
-      "peak_gib": 2.418,
-      "peak_reserved_gib": 2.555,
+      "first_s": 1.58,
+      "mpx_per_s": 5.0909,
+      "gib_per_mpx": 1.1816,
+      "peak_gib": 1.239,
+      "peak_reserved_gib": 1.826,
       "detail": "3ch px 1024x1024; 16ch/8x rgb; anima+krea2 too",
-      "t_s": 2.6
+      "t_s": 3.3
     },
     {
       "key": "qwen_image/decode@1024x1024",
@@ -80,21 +79,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "16x128x128",
-      "ms": 490.8384,
-      "cov_pct": 0.058,
+      "dtype": "fp16",
+      "ms": 323.5802,
+      "cov_pct": 0.093,
       "groups": [
-        490.5016,
-        490.8384,
-        491.1945
+        323.2125,
+        323.5802,
+        323.9474
       ],
-      "first_s": 0.58,
-      "tflop": 4.7102,
-      "tflops": 9.6,
-      "mpx_per_s": 2.1363,
-      "peak_gib": 2.601,
-      "peak_reserved_gib": 4.0,
+      "first_s": 0.36,
+      "mpx_per_s": 3.2405,
+      "gib_per_mpx": 1.1774,
+      "peak_gib": 1.235,
+      "peak_reserved_gib": 2.004,
       "detail": "3ch px 1024x1024; 16ch/8x rgb; anima+krea2 too",
-      "t_s": 5.3
+      "t_s": 5.1
     },
     {
       "key": "ming_image/encode@1024x1024",
@@ -106,21 +105,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "16x128x128",
-      "ms": 302.5546,
-      "cov_pct": 0.088,
+      "dtype": "fp16",
+      "ms": 195.2766,
+      "cov_pct": 0.662,
       "groups": [
-        302.2132,
-        302.5546,
-        302.8658
+        194.9996,
+        195.2766,
+        197.8802
       ],
-      "first_s": 0.33,
-      "tflop": 2.8536,
-      "tflops": 9.43,
-      "mpx_per_s": 3.4657,
-      "peak_gib": 2.42,
-      "peak_reserved_gib": 2.572,
+      "first_s": 0.22,
+      "mpx_per_s": 5.3697,
+      "gib_per_mpx": 1.1829,
+      "peak_gib": 1.24,
+      "peak_reserved_gib": 1.826,
       "detail": "4ch px 1024x1024; 16ch/8x rgba, scalar scale",
-      "t_s": 7.0
+      "t_s": 6.2
     },
     {
       "key": "ming_image/decode@1024x1024",
@@ -132,21 +131,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "16x128x128",
-      "ms": 489.7026,
-      "cov_pct": 0.105,
+      "dtype": "fp16",
+      "ms": 303.216,
+      "cov_pct": 0.263,
       "groups": [
-        489.4374,
-        489.7026,
-        490.6323
+        301.8753,
+        303.216,
+        303.776
       ],
-      "first_s": 0.55,
-      "tflop": 4.7121,
-      "tflops": 9.62,
-      "mpx_per_s": 2.1413,
-      "peak_gib": 2.601,
-      "peak_reserved_gib": 4.125,
+      "first_s": 0.33,
+      "mpx_per_s": 3.4582,
+      "gib_per_mpx": 1.1774,
+      "peak_gib": 1.235,
+      "peak_reserved_gib": 1.531,
       "detail": "4ch px 1024x1024; 16ch/8x rgba, scalar scale",
-      "t_s": 9.6
+      "t_s": 7.9
     },
     {
       "key": "qwen_image21/encode@1024x1024",
@@ -158,21 +157,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "64x64x64",
-      "ms": 286.162,
-      "cov_pct": 0.074,
+      "dtype": "bf16",
+      "ms": 233.6727,
+      "cov_pct": 0.24,
       "groups": [
-        286.0428,
-        286.162,
-        286.5368
+        233.0817,
+        233.6727,
+        234.4504
       ],
-      "first_s": 0.39,
-      "tflop": 3.1851,
-      "tflops": 11.13,
-      "mpx_per_s": 3.6643,
-      "peak_gib": 1.788,
-      "peak_reserved_gib": 2.93,
+      "first_s": 0.41,
+      "mpx_per_s": 4.4874,
+      "gib_per_mpx": 1.3479,
+      "peak_gib": 1.413,
+      "peak_reserved_gib": 1.688,
       "detail": "4ch px 1024x1024; 64ch/16x rgba",
-      "t_s": 11.3
+      "t_s": 9.4
     },
     {
       "key": "qwen_image21/decode@1024x1024",
@@ -184,21 +183,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "64x64x64",
-      "ms": 1084.035,
-      "cov_pct": 0.033,
+      "dtype": "bf16",
+      "ms": 953.4684,
+      "cov_pct": 0.133,
       "groups": [
-        1083.4972,
-        1084.035,
-        1084.3666
+        951.978,
+        953.4684,
+        955.0936
       ],
-      "first_s": 1.37,
-      "tflop": 17.8051,
-      "tflops": 16.42,
-      "mpx_per_s": 0.9673,
-      "peak_gib": 3.523,
-      "peak_reserved_gib": 3.576,
+      "first_s": 1.07,
+      "mpx_per_s": 1.0997,
+      "gib_per_mpx": 1.7735,
+      "peak_gib": 1.86,
+      "peak_reserved_gib": 3.059,
       "detail": "4ch px 1024x1024; 64ch/16x rgba",
-      "t_s": 17.2
+      "t_s": 14.4
     },
     {
       "key": "qwen_image21/features@1024x1024",
@@ -210,21 +209,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "64x64x64",
-      "ms": 49.2954,
-      "cov_pct": 0.066,
+      "dtype": "bf16",
+      "ms": 49.2223,
+      "cov_pct": 0.43,
       "groups": [
-        49.2555,
-        49.2954,
-        49.3356
+        49.1302,
+        49.2223,
+        49.6192
       ],
-      "first_s": 0.06,
-      "tflop": 1.5083,
-      "tflops": 30.6,
-      "mpx_per_s": 21.2713,
-      "peak_gib": 0.973,
+      "first_s": 0.05,
+      "mpx_per_s": 21.3029,
+      "gib_per_mpx": 0.9291,
+      "peak_gib": 0.974,
       "peak_reserved_gib": 1.68,
       "detail": "4ch px 1024x1024; 64ch/16x rgba, stops after upsample 1/5",
-      "t_s": 17.6
+      "t_s": 14.9
     },
     {
       "key": "wan22/encode@1024x1024",
@@ -236,21 +235,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "48x64x64",
-      "ms": 119.8669,
-      "cov_pct": 0.023,
+      "dtype": "bf16",
+      "ms": 104.7216,
+      "cov_pct": 0.043,
       "groups": [
-        119.8388,
-        119.8669,
-        119.9071
+        104.6565,
+        104.7216,
+        104.7661
       ],
-      "first_s": 0.17,
-      "tflop": 1.7557,
-      "tflops": 14.65,
-      "mpx_per_s": 8.7478,
-      "peak_gib": 1.138,
-      "peak_reserved_gib": 1.65,
+      "first_s": 0.14,
+      "mpx_per_s": 10.013,
+      "gib_per_mpx": 0.8181,
+      "peak_gib": 0.858,
+      "peak_reserved_gib": 1.25,
       "detail": "3ch px 1024x1024; 48ch/16x rgb, patchify 2",
-      "t_s": 18.4
+      "t_s": 15.6
     },
     {
       "key": "wan22/decode@1024x1024",
@@ -262,21 +261,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "48x64x64",
-      "ms": 533.7418,
-      "cov_pct": 0.299,
+      "dtype": "bf16",
+      "ms": 516.8315,
+      "cov_pct": 0.199,
       "groups": [
-        533.2808,
-        533.7418,
-        536.8779
+        516.6343,
+        516.8315,
+        518.9089
       ],
-      "first_s": 0.67,
-      "tflop": 10.2748,
-      "tflops": 19.25,
-      "mpx_per_s": 1.9646,
-      "peak_gib": 1.809,
-      "peak_reserved_gib": 1.881,
+      "first_s": 0.61,
+      "mpx_per_s": 2.0289,
+      "gib_per_mpx": 1.3248,
+      "peak_gib": 1.389,
+      "peak_reserved_gib": 2.889,
       "detail": "3ch px 1024x1024; 48ch/16x rgb, patchify 2",
-      "t_s": 21.4
+      "t_s": 18.4
     },
     {
       "key": "wan22/features@1024x1024",
@@ -288,21 +287,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "48x64x64",
-      "ms": 54.113,
-      "cov_pct": 0.139,
+      "dtype": "bf16",
+      "ms": 53.7555,
+      "cov_pct": 0.316,
       "groups": [
-        53.961,
-        54.113,
-        54.1263
+        53.4492,
+        53.7555,
+        53.845
       ],
       "first_s": 0.06,
-      "tflop": 1.1891,
-      "tflops": 21.97,
-      "mpx_per_s": 19.3775,
+      "mpx_per_s": 19.5064,
+      "gib_per_mpx": 0.8696,
       "peak_gib": 0.912,
       "peak_reserved_gib": 1.479,
       "detail": "3ch px 1024x1024; 48ch/16x rgb, patchify 2, stops after upsample 1/4",
-      "t_s": 21.8
+      "t_s": 18.8
     },
     {
       "key": "flux/decode@1024x1024",
@@ -314,21 +313,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "16x128x128",
-      "ms": 804.5834,
-      "cov_pct": 0.176,
+      "dtype": "fp16",
+      "ms": 827.0814,
+      "cov_pct": 0.116,
       "groups": [
-        804.3864,
-        804.5834,
-        807.4821
+        825.3871,
+        827.0814,
+        827.6533
       ],
-      "first_s": 1.22,
-      "tflop": 10.4722,
-      "tflops": 13.02,
-      "mpx_per_s": 1.3033,
-      "peak_gib": 6.051,
-      "peak_reserved_gib": 9.787,
+      "first_s": 0.86,
+      "mpx_per_s": 1.2678,
+      "gib_per_mpx": 1.2256,
+      "peak_gib": 1.285,
+      "peak_reserved_gib": 1.727,
       "detail": "3ch px 1024x1024; 16ch/8x rgb, decoder only",
-      "t_s": 26.4
+      "t_s": 23.1
     },
     {
       "key": "flux2/encode@1024x1024",
@@ -340,21 +339,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "128x64x64",
-      "ms": 399.4971,
-      "cov_pct": 0.139,
+      "dtype": "fp16",
+      "ms": 242.2715,
+      "cov_pct": 0.059,
       "groups": [
-        398.4176,
-        399.4971,
-        399.6681
+        242.0473,
+        242.2715,
+        242.3896
       ],
-      "first_s": 0.49,
-      "tflop": 4.8875,
-      "tflops": 12.23,
-      "mpx_per_s": 2.6247,
-      "peak_gib": 3.249,
-      "peak_reserved_gib": 3.4,
+      "first_s": 0.26,
+      "mpx_per_s": 4.3281,
+      "gib_per_mpx": 1.2862,
+      "peak_gib": 1.349,
+      "peak_reserved_gib": 2.213,
       "detail": "3ch px 1024x1024; 128ch/16x packed, bn normalised",
-      "t_s": 28.7
+      "t_s": 24.5
     },
     {
       "key": "flux2/decode@1024x1024",
@@ -366,21 +365,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "128x64x64",
-      "ms": 807.4191,
-      "cov_pct": 0.087,
+      "dtype": "fp16",
+      "ms": 827.8301,
+      "cov_pct": 0.071,
       "groups": [
-        806.4926,
-        807.4191,
-        808.2059
+        826.9627,
+        827.8301,
+        828.3803
       ],
-      "first_s": 0.87,
-      "tflop": 10.4747,
-      "tflops": 12.97,
-      "mpx_per_s": 1.2987,
-      "peak_gib": 5.996,
-      "peak_reserved_gib": 8.801,
+      "first_s": 0.83,
+      "mpx_per_s": 1.2667,
+      "gib_per_mpx": 1.2769,
+      "peak_gib": 1.339,
+      "peak_reserved_gib": 1.381,
       "detail": "3ch px 1024x1024; 128ch/16x packed, bn normalised",
-      "t_s": 32.9
+      "t_s": 28.8
     },
     {
       "key": "mage_flow/encode@1024x1024",
@@ -392,21 +391,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "128x64x64",
-      "ms": 37.6332,
-      "cov_pct": 0.144,
+      "dtype": "fp16",
+      "ms": 36.1892,
+      "cov_pct": 0.114,
       "groups": [
-        37.5709,
-        37.6332,
-        37.7039
+        36.159,
+        36.1892,
+        36.258
       ],
-      "first_s": 0.15,
-      "tflop": 0.3619,
-      "tflops": 9.62,
-      "mpx_per_s": 27.8631,
+      "first_s": 0.33,
+      "mpx_per_s": 28.9748,
+      "gib_per_mpx": 0.4115,
       "peak_gib": 0.431,
       "peak_reserved_gib": 0.645,
       "detail": "3ch px 1024x1024; 128ch/16x, one-step denoiser",
-      "t_s": 33.4
+      "t_s": 29.4
     },
     {
       "key": "mage_flow/decode@1024x1024",
@@ -418,21 +417,21 @@
       "pixels": 1048576,
       "status": "ok",
       "latent": "128x64x64",
-      "ms": 143.5761,
-      "cov_pct": 0.815,
+      "dtype": "fp16",
+      "ms": 137.1685,
+      "cov_pct": 1.336,
       "groups": [
-        141.9983,
-        143.5761,
-        144.8563
+        133.3376,
+        137.1685,
+        137.2088
       ],
-      "first_s": 0.15,
-      "tflop": 0.4517,
-      "tflops": 3.15,
-      "mpx_per_s": 7.3033,
+      "first_s": 0.18,
+      "mpx_per_s": 7.6444,
+      "gib_per_mpx": 0.8808,
       "peak_gib": 0.924,
-      "peak_reserved_gib": 1.291,
+      "peak_reserved_gib": 1.166,
       "detail": "3ch px 1024x1024; 128ch/16x, one-step denoiser",
-      "t_s": 34.3
+      "t_s": 30.3
     },
     {
       "key": "qwen_image/encode@1536x2048",
@@ -444,21 +443,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "16x256x192",
-      "ms": 1120.8476,
-      "cov_pct": 0.041,
+      "dtype": "fp16",
+      "ms": 799.2775,
+      "cov_pct": 0.194,
       "groups": [
-        1119.9982,
-        1120.8476,
-        1121.0749
+        796.6455,
+        799.2775,
+        800.319
       ],
-      "first_s": 1.4,
-      "tflop": 11.0294,
-      "tflops": 9.84,
-      "mpx_per_s": 2.8066,
-      "peak_gib": 6.93,
-      "peak_reserved_gib": 7.178,
+      "first_s": 0.83,
+      "mpx_per_s": 3.9357,
+      "gib_per_mpx": 0.3504,
+      "peak_gib": 1.102,
+      "peak_reserved_gib": 1.312,
       "detail": "3ch px 1536x2048; 16ch/8x rgb; anima+krea2 too",
-      "t_s": 40.4
+      "t_s": 34.5
     },
     {
       "key": "qwen_image/decode@1536x2048",
@@ -470,21 +469,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "16x256x192",
-      "ms": 1809.2704,
-      "cov_pct": 0.033,
+      "dtype": "fp16",
+      "ms": 1156.149,
+      "cov_pct": 1.172,
       "groups": [
-        1808.1419,
-        1809.2704,
-        1809.5328
+        1145.0703,
+        1156.149,
+        1177.7895
       ],
-      "first_s": 2.29,
-      "tflop": 16.6046,
-      "tflops": 9.18,
-      "mpx_per_s": 1.7387,
-      "peak_gib": 12.543,
-      "peak_reserved_gib": 16.703,
+      "first_s": 1.19,
+      "mpx_per_s": 2.7209,
+      "gib_per_mpx": 0.3434,
+      "peak_gib": 1.08,
+      "peak_reserved_gib": 1.932,
       "detail": "3ch px 1536x2048; 16ch/8x rgb; anima+krea2 too",
-      "t_s": 50.1
+      "t_s": 40.5
     },
     {
       "key": "ming_image/encode@1536x2048",
@@ -496,21 +495,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "16x256x192",
-      "ms": 1120.425,
-      "cov_pct": 0.048,
+      "dtype": "fp16",
+      "ms": 799.1783,
+      "cov_pct": 0.274,
       "groups": [
-        1120.1385,
-        1120.425,
-        1121.3969
+        798.5656,
+        799.1783,
+        803.5008
       ],
-      "first_s": 1.19,
-      "tflop": 11.0348,
-      "tflops": 9.85,
-      "mpx_per_s": 2.8076,
-      "peak_gib": 6.936,
-      "peak_reserved_gib": 7.258,
+      "first_s": 0.8,
+      "mpx_per_s": 3.9362,
+      "gib_per_mpx": 0.3523,
+      "peak_gib": 1.108,
+      "peak_reserved_gib": 1.354,
       "detail": "4ch px 1536x2048; 16ch/8x rgba, scalar scale",
-      "t_s": 55.9
+      "t_s": 44.6
     },
     {
       "key": "ming_image/decode@1536x2048",
@@ -522,21 +521,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "16x256x192",
-      "ms": 1810.0578,
-      "cov_pct": 0.049,
+      "dtype": "fp16",
+      "ms": 1150.4116,
+      "cov_pct": 0.467,
       "groups": [
-        1808.7984,
-        1810.0578,
-        1810.9505
+        1140.5813,
+        1150.4116,
+        1153.0473
       ],
-      "first_s": 2.06,
-      "tflop": 16.6101,
-      "tflops": 9.18,
-      "mpx_per_s": 1.7379,
-      "peak_gib": 12.543,
-      "peak_reserved_gib": 16.598,
+      "first_s": 1.18,
+      "mpx_per_s": 2.7344,
+      "gib_per_mpx": 0.3434,
+      "peak_gib": 1.08,
+      "peak_reserved_gib": 1.695,
       "detail": "4ch px 1536x2048; 16ch/8x rgba, scalar scale",
-      "t_s": 65.4
+      "t_s": 50.6
     },
     {
       "key": "qwen_image21/encode@1536x2048",
@@ -548,21 +547,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "64x128x96",
-      "ms": 884.7962,
-      "cov_pct": 0.048,
+      "dtype": "bf16",
+      "ms": 738.3716,
+      "cov_pct": 0.206,
       "groups": [
-        884.1367,
-        884.7962,
-        885.1699
+        735.7588,
+        738.3716,
+        739.3675
       ],
-      "first_s": 1.12,
-      "tflop": 9.9901,
-      "tflops": 11.29,
-      "mpx_per_s": 3.5553,
-      "peak_gib": 3.96,
-      "peak_reserved_gib": 4.895,
+      "first_s": 0.84,
+      "mpx_per_s": 4.2604,
+      "gib_per_mpx": 0.9015,
+      "peak_gib": 2.836,
+      "peak_reserved_gib": 3.408,
       "detail": "4ch px 1536x2048; 64ch/16x rgba",
-      "t_s": 70.3
+      "t_s": 54.5
     },
     {
       "key": "qwen_image21/decode@1536x2048",
@@ -574,21 +573,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "64x128x96",
-      "ms": 3377.8223,
-      "cov_pct": 0.093,
+      "dtype": "bf16",
+      "ms": 2995.9594,
+      "cov_pct": 0.094,
       "groups": [
-        3376.742,
-        3377.8223,
-        3383.9054
+        2991.8275,
+        2995.9594,
+        2998.6561
       ],
-      "first_s": 3.86,
-      "tflop": 55.2415,
-      "tflops": 16.35,
-      "mpx_per_s": 0.9313,
-      "peak_gib": 9.167,
-      "peak_reserved_gib": 16.941,
+      "first_s": 3.17,
+      "mpx_per_s": 1.05,
+      "gib_per_mpx": 1.219,
+      "peak_gib": 3.835,
+      "peak_reserved_gib": 5.666,
       "detail": "4ch px 1536x2048; 64ch/16x rgba",
-      "t_s": 87.8
+      "t_s": 69.9
     },
     {
       "key": "qwen_image21/features@1536x2048",
@@ -600,21 +599,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "64x128x96",
-      "ms": 182.7115,
-      "cov_pct": 0.072,
+      "dtype": "bf16",
+      "ms": 188.7377,
+      "cov_pct": 0.285,
       "groups": [
-        182.6971,
-        182.7115,
-        182.9818
+        187.6052,
+        188.7377,
+        188.7471
       ],
       "first_s": 0.19,
-      "tflop": 5.0072,
-      "tflops": 27.4,
-      "mpx_per_s": 17.2169,
-      "peak_gib": 1.45,
+      "mpx_per_s": 16.6672,
+      "gib_per_mpx": 0.4526,
+      "peak_gib": 1.424,
       "peak_reserved_gib": 2.328,
       "detail": "4ch px 1536x2048; 64ch/16x rgba, stops after upsample 1/5",
-      "t_s": 88.9
+      "t_s": 71.0
     },
     {
       "key": "wan22/encode@1536x2048",
@@ -626,21 +625,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "48x128x96",
-      "ms": 377.5445,
-      "cov_pct": 0.067,
+      "dtype": "bf16",
+      "ms": 345.6993,
+      "cov_pct": 0.069,
       "groups": [
-        377.4048,
-        377.5445,
-        377.9947
+        345.6199,
+        345.6993,
+        346.1643
       ],
-      "first_s": 0.47,
-      "tflop": 5.5633,
-      "tflops": 14.74,
-      "mpx_per_s": 8.3321,
-      "peak_gib": 1.935,
-      "peak_reserved_gib": 2.855,
+      "first_s": 0.39,
+      "mpx_per_s": 9.0996,
+      "gib_per_mpx": 0.4666,
+      "peak_gib": 1.468,
+      "peak_reserved_gib": 2.049,
       "detail": "3ch px 1536x2048; 48ch/16x rgb, patchify 2",
-      "t_s": 91.1
+      "t_s": 72.9
     },
     {
       "key": "wan22/decode@1536x2048",
@@ -652,21 +651,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "48x128x96",
-      "ms": 1637.4715,
-      "cov_pct": 0.343,
+      "dtype": "bf16",
+      "ms": 1606.4651,
+      "cov_pct": 0.067,
       "groups": [
-        1627.8399,
-        1637.4715,
-        1641.1665
+        1605.2825,
+        1606.4651,
+        1607.9191
       ],
-      "first_s": 1.86,
-      "tflop": 32.0963,
-      "tflops": 19.6,
-      "mpx_per_s": 1.9211,
-      "peak_gib": 4.323,
-      "peak_reserved_gib": 4.357,
+      "first_s": 1.8,
+      "mpx_per_s": 1.9582,
+      "gib_per_mpx": 0.7279,
+      "peak_gib": 2.29,
+      "peak_reserved_gib": 3.939,
       "detail": "3ch px 1536x2048; 48ch/16x rgb, patchify 2",
-      "t_s": 99.6
+      "t_s": 81.3
     },
     {
       "key": "wan22/features@1536x2048",
@@ -678,21 +677,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "48x128x96",
-      "ms": 196.127,
-      "cov_pct": 0.244,
+      "dtype": "bf16",
+      "ms": 198.2776,
+      "cov_pct": 0.065,
       "groups": [
-        195.2145,
-        196.127,
-        196.3063
+        198.1637,
+        198.2776,
+        198.4764
       ],
       "first_s": 0.21,
-      "tflop": 4.0085,
-      "tflops": 20.44,
-      "mpx_per_s": 16.0392,
-      "peak_gib": 1.28,
+      "mpx_per_s": 15.8653,
+      "gib_per_mpx": 0.3994,
+      "peak_gib": 1.256,
       "peak_reserved_gib": 2.008,
       "detail": "3ch px 1536x2048; 48ch/16x rgb, patchify 2, stops after upsample 1/4",
-      "t_s": 100.7
+      "t_s": 82.5
     },
     {
       "key": "flux/decode@1536x2048",
@@ -704,21 +703,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "16x256x192",
-      "ms": 2928.0399,
-      "cov_pct": 0.037,
+      "dtype": "fp16",
+      "ms": 2718.7473,
+      "cov_pct": 0.022,
       "groups": [
-        2927.9848,
-        2928.0399,
-        2930.2819
+        2717.8753,
+        2718.7473,
+        2719.3494
       ],
-      "first_s": 4.12,
-      "tflop": 34.7151,
-      "tflops": 11.86,
-      "mpx_per_s": 1.0743,
-      "peak_gib": 17.805,
-      "peak_reserved_gib": 28.912,
+      "first_s": 2.73,
+      "mpx_per_s": 1.1571,
+      "gib_per_mpx": 0.6514,
+      "peak_gib": 2.049,
+      "peak_reserved_gib": 2.309,
       "detail": "3ch px 1536x2048; 16ch/8x rgb, decoder only",
-      "t_s": 116.8
+      "t_s": 96.2
     },
     {
       "key": "flux2/encode@1536x2048",
@@ -730,21 +729,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "128x128x96",
-      "ms": 1582.1246,
-      "cov_pct": 0.111,
+      "dtype": "fp16",
+      "ms": 929.014,
+      "cov_pct": 0.178,
       "groups": [
-        1579.3283,
-        1582.1246,
-        1583.546
+        928.7818,
+        929.014,
+        932.4107
       ],
-      "first_s": 1.83,
-      "tflop": 17.9612,
-      "tflops": 11.35,
-      "mpx_per_s": 1.9883,
-      "peak_gib": 9.261,
-      "peak_reserved_gib": 9.506,
+      "first_s": 0.96,
+      "mpx_per_s": 3.3861,
+      "gib_per_mpx": 0.8341,
+      "peak_gib": 2.624,
+      "peak_reserved_gib": 2.756,
       "detail": "3ch px 1536x2048; 128ch/16x packed, bn normalised",
-      "t_s": 125.2
+      "t_s": 101.1
     },
     {
       "key": "flux2/decode@1536x2048",
@@ -756,21 +755,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "128x128x96",
-      "ms": 2977.5487,
-      "cov_pct": 0.037,
+      "dtype": "fp16",
+      "ms": 2637.2176,
+      "cov_pct": 0.172,
       "groups": [
-        2976.4523,
-        2977.5487,
-        2979.1643
+        2628.1809,
+        2637.2176,
+        2638.2606
       ],
-      "first_s": 3.22,
-      "tflop": 34.7225,
-      "tflops": 11.66,
-      "mpx_per_s": 1.0565,
-      "peak_gib": 17.503,
-      "peak_reserved_gib": 24.0,
+      "first_s": 2.65,
+      "mpx_per_s": 1.1928,
+      "gib_per_mpx": 0.6729,
+      "peak_gib": 2.117,
+      "peak_reserved_gib": 2.74,
       "detail": "3ch px 1536x2048; 128ch/16x packed, bn normalised",
-      "t_s": 140.5
+      "t_s": 114.4
     },
     {
       "key": "mage_flow/encode@1536x2048",
@@ -782,21 +781,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "128x128x96",
-      "ms": 131.0903,
-      "cov_pct": 0.026,
+      "dtype": "fp16",
+      "ms": 126.6339,
+      "cov_pct": 0.3,
       "groups": [
-        131.0282,
-        131.0903,
-        131.1064
+        125.9709,
+        126.6339,
+        126.8675
       ],
       "first_s": 0.14,
-      "tflop": 1.0857,
-      "tflops": 8.28,
-      "mpx_per_s": 23.9966,
+      "mpx_per_s": 24.8411,
+      "gib_per_mpx": 0.1899,
       "peak_gib": 0.597,
       "peak_reserved_gib": 0.82,
       "detail": "3ch px 1536x2048; 128ch/16x, one-step denoiser",
-      "t_s": 141.3
+      "t_s": 115.2
     },
     {
       "key": "mage_flow/decode@1536x2048",
@@ -808,21 +807,21 @@
       "pixels": 3145728,
       "status": "ok",
       "latent": "128x128x96",
-      "ms": 431.3776,
-      "cov_pct": 0.237,
+      "dtype": "fp16",
+      "ms": 417.0207,
+      "cov_pct": 0.486,
       "groups": [
-        430.5942,
-        431.3776,
-        433.0453
+        415.5692,
+        417.0207,
+        420.4153
       ],
-      "first_s": 0.44,
-      "tflop": 1.3551,
-      "tflops": 3.14,
-      "mpx_per_s": 7.2923,
+      "first_s": 0.43,
+      "mpx_per_s": 7.5433,
+      "gib_per_mpx": 0.6593,
       "peak_gib": 2.074,
-      "peak_reserved_gib": 2.77,
+      "peak_reserved_gib": 2.395,
       "detail": "3ch px 1536x2048; 128ch/16x, one-step denoiser",
-      "t_s": 143.7
+      "t_s": 117.5
     },
     {
       "key": "qwen_image/encode@2048x2048",
@@ -834,21 +833,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "16x256x256",
-      "ms": 1651.5922,
-      "cov_pct": 0.064,
+      "dtype": "fp16",
+      "ms": 1268.2051,
+      "cov_pct": 0.439,
       "groups": [
-        1651.5123,
-        1651.5922,
-        1653.7953
+        1265.9861,
+        1268.2051,
+        1278.7675
       ],
-      "first_s": 2.04,
-      "tflop": 16.3551,
-      "tflops": 9.9,
-      "mpx_per_s": 2.5396,
-      "peak_gib": 9.186,
-      "peak_reserved_gib": 9.508,
+      "first_s": 1.33,
+      "mpx_per_s": 3.3073,
+      "gib_per_mpx": 0.3206,
+      "peak_gib": 1.345,
+      "peak_reserved_gib": 1.574,
       "detail": "3ch px 2048x2048; 16ch/8x rgb; anima+krea2 too",
-      "t_s": 152.5
+      "t_s": 124.1
     },
     {
       "key": "qwen_image/decode@2048x2048",
@@ -860,21 +859,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "16x256x256",
-      "ms": 2610.821,
-      "cov_pct": 0.003,
+      "dtype": "fp16",
+      "ms": 1769.7387,
+      "cov_pct": 0.493,
       "groups": [
-        2610.7713,
-        2610.821,
-        2610.9389
+        1754.4282,
+        1769.7387,
+        1774.9458
       ],
-      "first_s": 3.19,
-      "tflop": 23.7888,
-      "tflops": 9.11,
-      "mpx_per_s": 1.6065,
-      "peak_gib": 16.669,
-      "peak_reserved_gib": 27.672,
+      "first_s": 1.81,
+      "mpx_per_s": 2.37,
+      "gib_per_mpx": 0.3253,
+      "peak_gib": 1.364,
+      "peak_reserved_gib": 2.109,
       "detail": "3ch px 2048x2048; 16ch/8x rgb; anima+krea2 too",
-      "t_s": 166.4
+      "t_s": 133.1
     },
     {
       "key": "ming_image/encode@2048x2048",
@@ -886,21 +885,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "16x256x256",
-      "ms": 1658.7308,
-      "cov_pct": 0.061,
+      "dtype": "fp16",
+      "ms": 1277.4653,
+      "cov_pct": 0.093,
       "groups": [
-        1657.7271,
-        1658.7308,
-        1660.1821
+        1275.514,
+        1277.4653,
+        1278.3473
       ],
-      "first_s": 1.76,
-      "tflop": 16.3623,
-      "tflops": 9.86,
-      "mpx_per_s": 2.5286,
-      "peak_gib": 9.193,
-      "peak_reserved_gib": 9.594,
+      "first_s": 1.29,
+      "mpx_per_s": 3.2833,
+      "gib_per_mpx": 0.3225,
+      "peak_gib": 1.353,
+      "peak_reserved_gib": 1.619,
       "detail": "4ch px 2048x2048; 16ch/8x rgba, scalar scale",
-      "t_s": 174.9
+      "t_s": 139.6
     },
     {
       "key": "ming_image/decode@2048x2048",
@@ -912,21 +911,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "16x256x256",
-      "ms": 2588.942,
-      "cov_pct": 0.016,
+      "dtype": "fp16",
+      "ms": 1769.0254,
+      "cov_pct": 0.015,
       "groups": [
-        2588.5123,
-        2588.942,
-        2589.5471
+        1768.7278,
+        1769.0254,
+        1769.3948
       ],
-      "first_s": 2.92,
-      "tflop": 23.796,
-      "tflops": 9.19,
-      "mpx_per_s": 1.6201,
-      "peak_gib": 16.669,
-      "peak_reserved_gib": 28.141,
+      "first_s": 1.79,
+      "mpx_per_s": 2.371,
+      "gib_per_mpx": 0.3253,
+      "peak_gib": 1.364,
+      "peak_reserved_gib": 2.084,
       "detail": "4ch px 2048x2048; 16ch/8x rgba, scalar scale",
-      "t_s": 188.5
+      "t_s": 148.6
     },
     {
       "key": "qwen_image21/encode@2048x2048",
@@ -938,21 +937,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "64x128x128",
-      "ms": 1239.8213,
-      "cov_pct": 0.056,
+      "dtype": "bf16",
+      "ms": 1057.4928,
+      "cov_pct": 0.099,
       "groups": [
-        1239.1645,
-        1239.8213,
-        1240.8595
+        1056.2549,
+        1057.4928,
+        1058.8139
       ],
-      "first_s": 1.52,
-      "tflop": 13.5903,
-      "tflops": 10.96,
-      "mpx_per_s": 3.383,
-      "peak_gib": 5.046,
-      "peak_reserved_gib": 6.141,
+      "first_s": 1.2,
+      "mpx_per_s": 3.9663,
+      "gib_per_mpx": 0.8457,
+      "peak_gib": 3.547,
+      "peak_reserved_gib": 4.252,
       "detail": "4ch px 2048x2048; 64ch/16x rgba",
-      "t_s": 195.2
+      "t_s": 154.2
     },
     {
       "key": "qwen_image21/decode@2048x2048",
@@ -964,21 +963,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "64x128x128",
-      "ms": 4733.7195,
-      "cov_pct": 0.031,
+      "dtype": "bf16",
+      "ms": 4211.1876,
+      "cov_pct": 0.088,
       "groups": [
-        4732.4639,
-        4733.7195,
-        4736.0314
+        4209.4945,
+        4211.1876,
+        4218.0404
       ],
-      "first_s": 5.33,
-      "tflop": 75.6412,
-      "tflops": 15.98,
-      "mpx_per_s": 0.886,
-      "peak_gib": 11.99,
-      "peak_reserved_gib": 22.248,
+      "first_s": 4.49,
+      "mpx_per_s": 0.996,
+      "gib_per_mpx": 1.1525,
+      "peak_gib": 4.834,
+      "peak_reserved_gib": 5.861,
       "detail": "4ch px 2048x2048; 64ch/16x rgba",
-      "t_s": 219.6
+      "t_s": 175.8
     },
     {
       "key": "qwen_image21/features@2048x2048",
@@ -990,21 +989,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "64x128x128",
-      "ms": 276.2392,
-      "cov_pct": 0.081,
+      "dtype": "bf16",
+      "ms": 282.1841,
+      "cov_pct": 0.209,
       "groups": [
-        276.1128,
-        276.2392,
-        276.6377
+        282.048,
+        282.1841,
+        283.3653
       ],
       "first_s": 0.29,
-      "tflop": 7.1322,
-      "tflops": 25.82,
-      "mpx_per_s": 15.1836,
-      "peak_gib": 1.95,
-      "peak_reserved_gib": 2.648,
+      "mpx_per_s": 14.8637,
+      "gib_per_mpx": 0.4566,
+      "peak_gib": 1.915,
+      "peak_reserved_gib": 2.322,
       "detail": "4ch px 2048x2048; 64ch/16x rgba, stops after upsample 1/5",
-      "t_s": 221.2
+      "t_s": 177.3
     },
     {
       "key": "wan22/encode@2048x2048",
@@ -1016,21 +1015,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "48x128x128",
-      "ms": 530.871,
-      "cov_pct": 0.007,
+      "dtype": "bf16",
+      "ms": 495.4403,
+      "cov_pct": 0.368,
       "groups": [
-        530.8442,
-        530.871,
-        530.9373
+        494.4805,
+        495.4403,
+        498.7414
       ],
-      "first_s": 0.69,
-      "tflop": 7.6448,
-      "tflops": 14.4,
-      "mpx_per_s": 7.9008,
-      "peak_gib": 2.396,
-      "peak_reserved_gib": 3.639,
+      "first_s": 0.57,
+      "mpx_per_s": 8.4658,
+      "gib_per_mpx": 0.4228,
+      "peak_gib": 1.773,
+      "peak_reserved_gib": 3.201,
       "detail": "3ch px 2048x2048; 48ch/16x rgb, patchify 2",
-      "t_s": 224.2
+      "t_s": 180.1
     },
     {
       "key": "wan22/decode@2048x2048",
@@ -1042,21 +1041,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "48x128x128",
-      "ms": 2334.129,
-      "cov_pct": 0.144,
+      "dtype": "bf16",
+      "ms": 2270.1307,
+      "cov_pct": 0.026,
       "groups": [
-        2332.4588,
-        2334.129,
-        2340.2998
+        2268.9852,
+        2270.1307,
+        2270.3216
       ],
-      "first_s": 2.59,
-      "tflop": 43.9183,
-      "tflops": 18.82,
-      "mpx_per_s": 1.7969,
-      "peak_gib": 5.58,
-      "peak_reserved_gib": 10.258,
+      "first_s": 2.41,
+      "mpx_per_s": 1.8476,
+      "gib_per_mpx": 0.6505,
+      "peak_gib": 2.728,
+      "peak_reserved_gib": 4.578,
       "detail": "3ch px 2048x2048; 48ch/16x rgb, patchify 2",
-      "t_s": 236.3
+      "t_s": 191.7
     },
     {
       "key": "wan22/features@2048x2048",
@@ -1068,21 +1067,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "48x128x128",
-      "ms": 306.4878,
-      "cov_pct": 0.101,
+      "dtype": "bf16",
+      "ms": 304.2019,
+      "cov_pct": 0.24,
       "groups": [
-        305.8335,
-        306.4878,
-        306.4889
+        302.9017,
+        304.2019,
+        304.6133
       ],
-      "first_s": 0.32,
-      "tflop": 5.6388,
-      "tflops": 18.4,
-      "mpx_per_s": 13.6851,
-      "peak_gib": 1.772,
+      "first_s": 0.31,
+      "mpx_per_s": 13.7879,
+      "gib_per_mpx": 0.4151,
+      "peak_gib": 1.741,
       "peak_reserved_gib": 2.57,
       "detail": "3ch px 2048x2048; 48ch/16x rgb, patchify 2, stops after upsample 1/4",
-      "t_s": 238.0
+      "t_s": 193.4
     },
     {
       "key": "flux/decode@2048x2048",
@@ -1094,21 +1093,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "16x256x256",
-      "ms": 4360.2138,
-      "cov_pct": 0.076,
+      "dtype": "fp16",
+      "ms": 3885.6545,
+      "cov_pct": 0.143,
       "groups": [
-        4354.1837,
-        4360.2138,
-        4361.847
+        3882.1783,
+        3885.6545,
+        3895.3248
       ],
-      "first_s": 5.81,
-      "tflop": 48.4859,
-      "tflops": 11.12,
-      "mpx_per_s": 0.9619,
-      "peak_gib": 23.682,
-      "peak_reserved_gib": 38.475,
+      "first_s": 3.94,
+      "mpx_per_s": 1.0794,
+      "gib_per_mpx": 0.6087,
+      "peak_gib": 2.553,
+      "peak_reserved_gib": 2.854,
       "detail": "3ch px 2048x2048; 16ch/8x rgb, decoder only",
-      "t_s": 261.5
+      "t_s": 213.0
     },
     {
       "key": "flux2/encode@2048x2048",
@@ -1120,21 +1119,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "128x128x128",
-      "ms": 2625.865,
+      "dtype": "fp16",
+      "ms": 1421.0713,
       "cov_pct": 0.053,
       "groups": [
-        2623.7957,
-        2625.865,
-        2627.1854
+        1419.881,
+        1421.0713,
+        1421.7142
       ],
-      "first_s": 2.93,
-      "tflop": 26.1472,
-      "tflops": 9.96,
-      "mpx_per_s": 1.5973,
-      "peak_gib": 12.267,
-      "peak_reserved_gib": 12.605,
+      "first_s": 1.46,
+      "mpx_per_s": 2.9515,
+      "gib_per_mpx": 0.8071,
+      "peak_gib": 3.385,
+      "peak_reserved_gib": 3.629,
       "detail": "3ch px 2048x2048; 128ch/16x packed, bn normalised",
-      "t_s": 275.2
+      "t_s": 220.4
     },
     {
       "key": "flux2/decode@2048x2048",
@@ -1146,21 +1145,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "128x128x128",
-      "ms": 4670.6345,
-      "cov_pct": 0.047,
+      "dtype": "fp16",
+      "ms": 3893.2298,
+      "cov_pct": 0.041,
       "groups": [
-        4666.9881,
-        4670.6345,
-        4672.2762
+        3892.4169,
+        3893.2298,
+        3896.1478
       ],
-      "first_s": 5.03,
-      "tflop": 48.4957,
-      "tflops": 10.38,
-      "mpx_per_s": 0.898,
-      "peak_gib": 23.255,
-      "peak_reserved_gib": 31.883,
+      "first_s": 3.9,
+      "mpx_per_s": 1.0773,
+      "gib_per_mpx": 0.6253,
+      "peak_gib": 2.623,
+      "peak_reserved_gib": 3.35,
       "detail": "3ch px 2048x2048; 128ch/16x packed, bn normalised",
-      "t_s": 299.1
+      "t_s": 240.0
     },
     {
       "key": "mage_flow/encode@2048x2048",
@@ -1172,21 +1171,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "128x128x128",
-      "ms": 181.9388,
-      "cov_pct": 0.004,
+      "dtype": "fp16",
+      "ms": 178.0093,
+      "cov_pct": 0.22,
       "groups": [
-        181.9273,
-        181.9388,
-        181.9447
+        177.3148,
+        178.0093,
+        178.2334
       ],
-      "first_s": 0.2,
-      "tflop": 1.4476,
-      "tflops": 7.96,
-      "mpx_per_s": 23.0534,
+      "first_s": 0.19,
+      "mpx_per_s": 23.5623,
+      "gib_per_mpx": 0.1622,
       "peak_gib": 0.68,
       "peak_reserved_gib": 0.92,
       "detail": "3ch px 2048x2048; 128ch/16x, one-step denoiser",
-      "t_s": 300.2
+      "t_s": 241.1
     },
     {
       "key": "mage_flow/decode@2048x2048",
@@ -1198,21 +1197,21 @@
       "pixels": 4194304,
       "status": "ok",
       "latent": "128x128x128",
-      "ms": 583.4818,
-      "cov_pct": 0.784,
+      "dtype": "fp16",
+      "ms": 562.6297,
+      "cov_pct": 0.511,
       "groups": [
-        576.5097,
-        583.4818,
-        587.5643
+        558.9775,
+        562.6297,
+        566.0131
       ],
       "first_s": 0.58,
-      "tflop": 1.8068,
-      "tflops": 3.1,
-      "mpx_per_s": 7.1884,
-      "peak_gib": 2.65,
-      "peak_reserved_gib": 3.541,
+      "mpx_per_s": 7.4548,
+      "gib_per_mpx": 0.6316,
+      "peak_gib": 2.649,
+      "peak_reserved_gib": 3.037,
       "detail": "3ch px 2048x2048; 128ch/16x, one-step denoiser",
-      "t_s": 303.3
+      "t_s": 244.1
     }
   ]
 }
