@@ -1,4 +1,4 @@
-"""The kitchen-fused strip machinery, and the Flux.2 AE running on it.
+"""The kitchen-fused strip machinery, and the two Flux AEs running on it.
 
 Past the gate, which is production policy, everything forces the fused path on — its
 own answer for these fixtures is "no", the kernels being GPU ones — and shrinks
@@ -16,10 +16,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import thenoise.vae.flux as flux_module
 import thenoise.vae.flux2 as flux2_module
 import thenoise.vae.fused as fused_module
 from comfy_kitchen.registry import registry
-from thenoise.vae import AutoencoderKLFlux2
+from thenoise.vae import AutoencoderKLFlux, AutoencoderKLFlux2
 from thenoise.vae.fused import (
     STRIP_ELEMS,
     fused_available,
@@ -188,24 +189,31 @@ def _flux2_pair() -> tuple[AutoencoderKLFlux2, AutoencoderKLFlux2]:
     return stock, fused
 
 
+#: Every codec module that asks the gate before going fused.
+_GATED = (flux2_module, flux_module)
+
+
 @contextlib.contextmanager
 def _fused_path(strip_elems: int) -> Iterator[list[torch.Size]]:
-    """Force the fused path at a given strip size, and count the kernel calls it makes."""
+    """Force the fused path of every codec at a given strip size, counting the kernel calls."""
     calls: list[torch.Size] = []
     real_norm = fused_module.group_norm_silu_pad3d
-    saved_gate, saved_strip = flux2_module.fused_available, fused_module.STRIP_ELEMS
+    saved_gates = {module: module.fused_available for module in _GATED}
+    saved_strip = fused_module.STRIP_ELEMS
 
     def counting(x, *args, **kwargs):
         calls.append(x.shape)
         return real_norm(x, *args, **kwargs)
 
-    flux2_module.fused_available = lambda device, dtype: True
+    for module in _GATED:
+        module.fused_available = lambda device, dtype: True
     fused_module.group_norm_silu_pad3d = counting
     fused_module.STRIP_ELEMS = strip_elems
     try:
         yield calls
     finally:
-        flux2_module.fused_available = saved_gate
+        for module, gate in saved_gates.items():
+            module.fused_available = gate
         fused_module.group_norm_silu_pad3d = real_norm
         fused_module.STRIP_ELEMS = saved_strip
 
@@ -255,6 +263,77 @@ def test_flux2_leaves_the_pixels_alone_when_the_gate_says_no(monkeypatch):
     latents = torch.randn(1, 128, 2, 3)
     with _fused_path(STRIP_ELEMS) as calls:
         flux2_module.fused_available = fused_available  # the real gate, on CPU
+        with torch.no_grad():
+            want = stock.decode_to_pixels(latents)
+            got = fused.decode_to_pixels(latents)
+    assert not calls
+    assert torch.equal(got, want)
+
+
+# -------------------------------------------------------- the Flux AE on the fused path
+
+
+def _flux_pair() -> tuple[AutoencoderKLFlux, AutoencoderKLFlux]:
+    """A plain and a fused Flux AE sharing one set of tiny weights.
+
+    The widths keep the shipped ``128/256/512/512`` ratios, so the two channel-halving
+    blocks — the ones that run inside the residual stream — are the ones under test.
+    """
+    torch.manual_seed(0)
+    kwargs = dict(block_out_channels=(32, 64, 128, 128), norm_num_groups=8, layers_per_block=1)
+    stock = AutoencoderKLFlux(fused=False, **kwargs).eval().requires_grad_(False)
+    fused = AutoencoderKLFlux(fused=True, **kwargs).eval().requires_grad_(False)
+    fused.load_state_dict(stock.state_dict())
+    return stock, fused
+
+
+@pytest.mark.parametrize("strip_elems", [STRIP_ELEMS, 1 << 15, 1 << 12, 1 << 10])
+def test_flux_fused_decode_matches_the_plain_one(strip_elems):
+    stock, fused = _flux_pair()
+    latents = torch.randn(1, 16, 3, 5)
+    with _fused_path(strip_elems) as calls:
+        with torch.no_grad():
+            want = stock.decode_to_pixels(latents)
+            got = fused.decode_to_pixels(latents)
+    assert calls, "the fused path never ran"
+    assert got.shape == (1, 3, 24, 40)
+    assert torch.allclose(got, want, atol=1e-4)
+
+
+def test_flux_fused_decode_rounds_a_batch_one_image_at_a_time():
+    stock, fused = _flux_pair()
+    latents = torch.randn(2, 16, 2, 3)
+    with _fused_path(1 << 12):
+        with torch.no_grad():
+            want = stock.decode_to_pixels(latents)
+            got = fused.decode_to_pixels(latents)
+    assert got.shape == want.shape == (2, 3, 16, 24)
+    assert torch.allclose(got, want, atol=1e-4)
+
+
+def test_flux_fused_decode_gives_a_level_room_when_there_is_none():
+    """A last level that does not halve fills the buffer with its own stream, so its
+    blocks allocate instead of scratching into what they are reading.
+    """
+    torch.manual_seed(0)
+    kwargs = dict(block_out_channels=(32, 32, 64, 64), norm_num_groups=8, layers_per_block=1)
+    stock = AutoencoderKLFlux(fused=False, **kwargs).eval().requires_grad_(False)
+    fused = AutoencoderKLFlux(fused=True, **kwargs).eval().requires_grad_(False)
+    fused.load_state_dict(stock.state_dict())
+    latents = torch.randn(1, 16, 2, 2)
+    with _fused_path(1 << 12) as calls:
+        with torch.no_grad():
+            want = stock.decode_to_pixels(latents)
+            got = fused.decode_to_pixels(latents)
+    assert calls, "the fused path never ran"
+    assert torch.allclose(got, want, atol=1e-4)
+
+
+def test_flux_leaves_the_pixels_alone_when_the_gate_says_no():
+    stock, fused = _flux_pair()
+    latents = torch.randn(1, 16, 2, 3)
+    with _fused_path(STRIP_ELEMS) as calls:
+        flux_module.fused_available = fused_available  # the real gate, on CPU
         with torch.no_grad():
             want = stock.decode_to_pixels(latents)
             got = fused.decode_to_pixels(latents)

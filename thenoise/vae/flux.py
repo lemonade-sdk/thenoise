@@ -15,6 +15,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from thenoise.utils.attention import single_head_attention
+from .fused import (
+    FusedResnetMixin,
+    fused_available,
+    group_norm_only,
+    interleaved_view,
+    pointwise,
+    region,
+    strip_conv,
+)
 from thenoise.utils.safetensors import load_safetensors
 from thenoise.utils.setup_logging import setup_logging
 
@@ -23,11 +32,14 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 
-class _ResnetBlock(nn.Module):
+class _ResnetBlock(FusedResnetMixin, nn.Module):
     """Resnet block with ComfyUI / Flux-VAE key naming (``norm1/conv1/norm2/conv2/nin_shortcut``)."""
 
-    def __init__(self, in_channels, out_channels, norm_num_groups, act_fn="silu"):
+    def __init__(self, in_channels, out_channels, norm_num_groups, act_fn="silu", fused=False):
         super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.fused = fused
         self.norm1 = nn.GroupNorm(norm_num_groups, in_channels, eps=1e-6, affine=True)
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
         self.norm2 = nn.GroupNorm(norm_num_groups, out_channels, eps=1e-6, affine=True)
@@ -38,7 +50,9 @@ class _ResnetBlock(nn.Module):
         else:
             self.nin_shortcut = nn.Identity()
 
-    def forward(self, x):
+    def forward(self, x, hidden=None):
+        if self.fused and fused_available(x.device, x.dtype):
+            return self.fused_forward(x, hidden)
         hidden = self.nonlinearity(self.norm1(x))
         hidden = self.conv1(hidden)
         hidden = self.nonlinearity(self.norm2(hidden))
@@ -49,44 +63,70 @@ class _ResnetBlock(nn.Module):
 class _Attention(nn.Module):
     """Single-head spatial attention with QKV 1x1 convs (``norm/q/k/v/proj_out``)."""
 
-    def __init__(self, channels, norm_num_groups):
+    def __init__(self, channels, norm_num_groups, fused=False):
         super().__init__()
+        self.fused = fused
         self.norm = nn.GroupNorm(norm_num_groups, channels, eps=1e-6, affine=True)
         self.q = nn.Conv2d(channels, channels, kernel_size=1)
         self.k = nn.Conv2d(channels, channels, kernel_size=1)
         self.v = nn.Conv2d(channels, channels, kernel_size=1)
         self.proj_out = nn.Conv2d(channels, channels, kernel_size=1)
 
-    def forward(self, x):
-        b, c, h, w = x.shape
-        hidden = self.norm(x)
-        # [B, C, H, W] -> [B, 1, H*W, C], one head over the H*W positions.
-        q = self.q(hidden).view(b, 1, c, -1).transpose(2, 3).contiguous()  # (b, 1, hw, c)
-        k = self.k(hidden).view(b, 1, c, -1).transpose(2, 3).contiguous()
-        v = self.v(hidden).view(b, 1, c, -1).transpose(2, 3).contiguous()
+    def attention(self, hidden, fused):
+        b, c, h, w = hidden.shape
+        if fused:
+            # [B, C, H, W] -> [B, 1, H*W, C], one head over the H*W positions. The channel
+            # rows of a channels-last image are already those positions, so neither this
+            # nor the trip back through ``view`` needs a copy.
+            q = pointwise(self.q, hidden).flatten(2).transpose(1, 2).unsqueeze(1)
+            k = pointwise(self.k, hidden).flatten(2).transpose(1, 2).unsqueeze(1)
+            v = pointwise(self.v, hidden).flatten(2).transpose(1, 2).unsqueeze(1)
+        else:
+            q = self.q(hidden).view(b, 1, c, -1).transpose(2, 3).contiguous()  # (b, 1, hw, c)
+            k = self.k(hidden).view(b, 1, c, -1).transpose(2, 3).contiguous()
+            v = self.v(hidden).view(b, 1, c, -1).transpose(2, 3).contiguous()
+        # ``q``/``k`` of this AE reach ~1e3, whose product is off the end of FP16 twice over
+        # (the head's own 1/sqrt(C) is nowhere near enough). BF16 has the range and the same
+        # tensor path. The cast sits after the position view, whose last axis has to stay the
+        # contiguous one for the matmul to keep its fast kernels.
+        fp16 = q.dtype is torch.float16
+        if fp16:
+            q, k, v = (t.bfloat16() for t in (q, k, v))
         hidden = single_head_attention(q, k, v)
-        hidden = hidden.transpose(2, 3).reshape(b, c, h, w).contiguous()
-        return x + self.proj_out(hidden)
+        if fp16:
+            hidden = hidden.half()
+        if fused:
+            return hidden.squeeze(1).view(b, h, w, c).permute(0, 3, 1, 2)
+        return hidden.transpose(2, 3).reshape(b, c, h, w).contiguous()
+
+    def forward(self, x):
+        fused = self.fused and fused_available(x.device, x.dtype)
+        hidden = group_norm_only(x, self.norm) if fused else self.norm(x)
+        hidden = self.attention(hidden, fused)
+        return x + (pointwise(self.proj_out, hidden) if fused else self.proj_out(hidden))
 
 
 class _Upsample(nn.Module):
     """Nearest 2x upsampler followed by a 3x3 conv (``upsample.conv``)."""
 
-    def __init__(self, channels):
+    def __init__(self, channels, fused=False):
         super().__init__()
+        self.fused = fused
         self.conv = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
 
-    def forward(self, x):
+    def forward(self, x, out=None):
+        if self.fused and fused_available(x.device, x.dtype):
+            return strip_conv(self.conv, x, scale=2, out=out)
         x = F.interpolate(x, scale_factor=2, mode="nearest")
         return self.conv(x)
 
 
 class _MidBlock(nn.Module):
-    def __init__(self, channels, norm_num_groups, act_fn, add_attention=True):
+    def __init__(self, channels, norm_num_groups, act_fn, add_attention=True, fused=False):
         super().__init__()
-        self.block_1 = _ResnetBlock(channels, channels, norm_num_groups, act_fn)
-        self.attn_1 = _Attention(channels, norm_num_groups) if add_attention else nn.Identity()
-        self.block_2 = _ResnetBlock(channels, channels, norm_num_groups, act_fn)
+        self.block_1 = _ResnetBlock(channels, channels, norm_num_groups, act_fn, fused=fused)
+        self.attn_1 = _Attention(channels, norm_num_groups, fused=fused) if add_attention else nn.Identity()
+        self.block_2 = _ResnetBlock(channels, channels, norm_num_groups, act_fn, fused=fused)
 
     def forward(self, x):
         x = self.block_1(x)
@@ -95,14 +135,15 @@ class _MidBlock(nn.Module):
 
 
 class _UpBlock(nn.Module):
-    def __init__(self, num_layers, in_channels, out_channels, norm_num_groups, act_fn, add_upsampling):
+    def __init__(self, num_layers, in_channels, out_channels, norm_num_groups, act_fn,
+                 add_upsampling, fused=False):
         super().__init__()
         blocks = []
         for i in range(num_layers):
             res_in = in_channels if i == 0 else out_channels
-            blocks.append(_ResnetBlock(res_in, out_channels, norm_num_groups, act_fn))
+            blocks.append(_ResnetBlock(res_in, out_channels, norm_num_groups, act_fn, fused=fused))
         self.block = nn.ModuleList(blocks)  # -> block.0 / block.1 / block.2
-        self.upsample = _Upsample(out_channels) if add_upsampling else nn.Identity()
+        self.upsample = _Upsample(out_channels, fused=fused) if add_upsampling else nn.Identity()
 
     def forward(self, x):
         for resnet in self.block:
@@ -125,12 +166,22 @@ class AutoencoderKLFlux(nn.Module):
     scaling_factor = 0.3611
     shift_factor = 0.1159
 
+    #: This AE computes in FP16 whatever the DiT next to it runs in: a conv chain this
+    #: depth leans on the mantissa, and it is the only dtype the fused kernels serve on
+    #: ROCm (see :func:`~thenoise.vae.fused.fused_available`).
+    compute_dtype = torch.float16
+
     def __init__(self, in_channels=16, out_channels=3, block_out_channels=(128, 256, 512, 512),
-                 layers_per_block=2, norm_num_groups=32, act_fn="silu", mid_block_add_attention=True):
+                 layers_per_block=2, norm_num_groups=32, act_fn="silu", mid_block_add_attention=True,
+                 fused: bool = True):
+        """``fused`` asks every stage to run through :mod:`thenoise.vae.fused`, each still
+        falling back to its plain path wherever those kernels are not served."""
         super().__init__()
+        self.fused = fused
         self.block_out_channels = list(block_out_channels)
         self.conv_in = nn.Conv2d(in_channels, self.block_out_channels[-1], kernel_size=3, padding=1)
-        self.mid = _MidBlock(self.block_out_channels[-1], norm_num_groups, act_fn, mid_block_add_attention)
+        self.mid = _MidBlock(self.block_out_channels[-1], norm_num_groups, act_fn, mid_block_add_attention,
+                             fused=fused)
 
         outs = self.block_out_channels[::-1]                 # [512, 512, 256, 128]
         ins = [self.block_out_channels[-1]] + outs[:-1]      # [512, 512, 512, 256]
@@ -139,7 +190,8 @@ class AutoencoderKLFlux(nn.Module):
         self.up = nn.ModuleDict(
             {
                 idx: _UpBlock(
-                    layers_per_block + 1, in_c, out_c, norm_num_groups, act_fn, add_upsampling=flag
+                    layers_per_block + 1, in_c, out_c, norm_num_groups, act_fn, add_upsampling=flag,
+                    fused=fused
                 )
                 for idx, in_c, out_c, flag in zip(indices, ins, outs, flags)
             }
@@ -158,6 +210,11 @@ class AutoencoderKLFlux(nn.Module):
         return self.conv_in.weight.device
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
+        if self.fused and fused_available(z.device, z.dtype):
+            # The shared buffer works on one image, so a batch is decoded one at a time.
+            out = [self._decode_fused(z[i : i + 1]) for i in range(z.shape[0])]
+            return out[0] if len(out) == 1 else torch.cat(out)
+
         x = self.conv_in(z)
         x = self.mid(x)
         for idx in ("3", "2", "1", "0"):
@@ -166,6 +223,56 @@ class AutoencoderKLFlux(nn.Module):
         x = self.conv_act(x)
         x = self.conv_out(x)
         return x
+
+    def _decode_fused(self, z: torch.Tensor) -> torch.Tensor:
+        """One image, on one buffer the size of the largest upsample output.
+
+        A level scratches in the region just before the residual stream it reads at the end
+        of the buffer, and its upsample writes the next level over that end: four elements
+        produced per element consumed, from further back, so the write front never catches
+        the read front. A block halving the channels keeps hidden state and result inside
+        the stream itself (:meth:`FusedResnetMixin.halves_in_place`) rather than in a
+        region, which the last level needs: by then the buffer is nothing but the stream.
+        """
+        levels = len(self.up)
+        h = self.conv_in(z.contiguous(memory_format=torch.channels_last))
+        h = self.mid(h)
+
+        buf = torch.empty(
+            max(
+                self.up[str(i)].block[-1].out_channels
+                * (h.shape[2] << (levels - i))
+                * (h.shape[3] << (levels - i))
+                for i in range(1, levels)
+            ),
+            dtype=h.dtype,
+            device=h.device,
+        )
+        for i_level in reversed(range(levels)):
+            level = self.up[str(i_level)]
+            # One scratch region per level: only one block's hidden state is live at a time.
+            hidden: Optional[torch.Tensor] = None
+            for i_block, block in enumerate(level.block):
+                if i_block == 0:
+                    if block.halves_in_place(h):
+                        hidden = interleaved_view(h, block.out_channels, 0)
+                    else:
+                        n = block.out_channels * h.shape[2] * h.shape[3]
+                        room = buf.numel() - (h.numel() if i_level < levels - 1 else 0)
+                        # A stream that fills the buffer leaves this level's blocks to
+                        # allocate. No shipped width reaches it: they halve twice, the
+                        # second time at the last level.
+                        hidden = (
+                            region(buf, room, block.out_channels, h.shape[2], h.shape[3])
+                            if room >= n
+                            else None
+                        )
+                h = block(h, hidden)
+            if i_level != 0:
+                h = level.upsample(
+                    h, out=region(buf, buf.numel(), h.shape[1], 2 * h.shape[2], 2 * h.shape[3])
+                )
+        return strip_conv(self.conv_out, h, self.norm_out)
 
     def decode_to_pixels(self, latents: torch.Tensor) -> torch.Tensor:
         """Decode canonical 2D latents ``[B, C, H, W]`` to ``[B, C, H, W]`` pixels in [-1, 1]."""
@@ -179,7 +286,11 @@ def load_flux_vae(
     device: Union[str, torch.device],
     dtype: Optional[torch.dtype] = None,
 ) -> AutoencoderKLFlux:
-    """Load the Flux VAE decoder weights from ``vae_path`` (e.g. flux-dev/ae.safetensors)."""
+    """Load the Flux VAE decoder weights from ``vae_path`` (e.g. flux-dev/ae.safetensors).
+
+    The AE runs in its own :attr:`AutoencoderKLFlux.compute_dtype`; ``dtype`` is an
+    override, not a request for FP32.
+    """
     device = torch.device(device)
     logger.info("Loading Flux VAE from %s", vae_path)
     state_dict = load_safetensors(vae_path, device=device)
@@ -194,7 +305,5 @@ def load_flux_vae(
     info = vae.load_state_dict(decoder_sd, strict=True, assign=True)
     logger.info("Loaded Flux VAE decoder: %s", info)
 
-    vae.to(device)
-    if dtype is not None:
-        vae.to(dtype)
+    vae.to(device, dtype if dtype is not None else vae.compute_dtype)
     return vae

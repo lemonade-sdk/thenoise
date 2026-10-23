@@ -89,6 +89,28 @@ def test_flux_decode_never_reaches_for_sdpa(tiny_flux, monkeypatch):
     assert pixels.shape == (1, 3, 32, 32)
 
 
+def test_the_flux_attention_head_outlives_its_fp16_queries(tiny_flux):
+    """The shipped AE drives ``q``/``k`` to ~1e3, whose dot product runs the scores past
+    FP16's range, so the head works in FP32 and only its result comes back.
+
+    The direct call is the mechanism of it: the same projections left in FP16 answer NaN.
+    """
+    torch.manual_seed(0)
+    block = tiny_flux.mid.attn_1.to(torch.float16)
+    for name in ("q", "k"):
+        getattr(block, name).weight.mul_(300.0)  # the magnitudes the real weights reach
+    x = torch.randn(1, 8, 6, 6, dtype=torch.float16)
+    with torch.no_grad():
+        q, k, v = (
+            getattr(block, n)(block.norm(x)).flatten(2).transpose(1, 2).unsqueeze(1)
+            for n in ("q", "k", "v")
+        )
+        assert not torch.isfinite(single_head_attention(q, k, v)).all()
+        out = block(x)
+    assert out.dtype == torch.float16
+    assert torch.isfinite(out).all()
+
+
 def _reference_patched_attention(q, k, v):
     """Mage-Flow's windowed block, per Comfy-Org/ComfyUI ``comfy/ldm/mage_flow/vae.py``."""
     b, c, length = q.shape
