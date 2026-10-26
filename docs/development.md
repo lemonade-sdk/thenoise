@@ -23,6 +23,7 @@ thenoise/                  the package
   api.py / cli.py          HTTP API and CLI entry points
 scripts/                   download.py — the unified model download helper
 build-scripts/             portable bundle build, archive, GPU qualification
+docker/                    container image, entrypoint, Compose example
 tests/                     test suite (runs without real weights)
 ```
 
@@ -141,6 +142,29 @@ PyTorch, all deps, bundled `clang`, `bin/thenoise` launcher, plus
 splits it into ≤1.9 GB parts when needed (GitHub's asset limit).
 `qualify_thenoise.sh` runs on a real GPU: import checks, model download, one
 end-to-end generation including the first-run `torch.compile`.
+
+## Building the container image
+
+[`docker/Dockerfile`](../docker/Dockerfile) builds the bundle with the same
+`build_portable.sh` and copies it onto a bare Ubuntu, so the image and the
+portable bundle cannot drift apart. Locally:
+
+```bash
+docker build -f docker/Dockerfile --build-arg GFX_ARCH=gfx1151 -t thenoise:local .
+docker compose -f docker/docker-compose.yml up -d anima
+```
+
+[`build-docker-image.yml`](../.github/workflows/build-docker-image.yml)
+publishes one image per GPU target to GHCR on every `v*` tag, and builds (but
+does not publish) on pull requests that touch the image, the bundle scripts or
+the package. The checks it can run without a GPU are the launcher coming up and
+`import torch` resolving every library the wheels expect; the real generation is
+[manual, on whatever hardware you have](docker.md).
+
+Keep the two in sync when changing the bundle: `ensure_soname_symlinks` and the
+bundled `clang` are what let the container run with no ROCm and no compiler
+installed, and the image's runtime stage carries the only system libraries the
+wheels do not vendor (`libgomp1`, `libatomic1`).
 
 ## Contributing
 

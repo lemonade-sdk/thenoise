@@ -40,6 +40,9 @@ cat thenoise-*.part*.tar.gz | tar -xz
 
 No installation step: the extracted directory *is* TheNoise.
 
+> Prefer to let a container manager own the process? The same bundle ships as a
+> ROCm image: [Docker / Compose](docker.md).
+
 On Windows, extract into a short folder such as
 `%LOCALAPPDATA%\Programs\thenoise`. With Windows
 long paths disabled (the default), the GPU libraries cannot open their kernel
@@ -121,6 +124,7 @@ Upscale tabs, driven by whatever model is loaded.
 ## What next
 
 - [CLI reference](cli.md) - every `generate` / `edit` / `serve` / `upscale` flag
+- [Docker / Compose](docker.md) - run it as a managed service instead of a shell session
 - [HTTP API reference](api.md) - endpoints, request/response formats, curl examples
 - [Model pages](models/) - per-model download options, examples, settings
 - [Upscaling](cli.md#upscaling) - latent refine + Real-ESRGAN pixel upscaling, up to 8×

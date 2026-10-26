@@ -35,6 +35,7 @@ TheNoise ships:
 
 - image generation / editing support for major open-weights models,
 - [Lemonade Server](https://lemonade-server.ai) integration - TheNoise ships as its `thenoise` backend, see [Using TheNoise with Lemonade Server](docs/lemonade.md),
+- a ROCm container image and Compose example, for lifecycle management and for handing the GPU to other services - see [Docker / Compose](docs/docker.md),
 - a built-in 2× refiner-based (SesquiLSR) upscaler - fast and high-quality upscaling without loading extra model files,
 - pixel-space upscalers (Real-ESRGAN) up to 4× - standard ESRGAN-based models,
 - post-processing in the decode tail - colour grading (saturation, vibrance and a
@@ -150,6 +151,7 @@ uv pip install -e ".[scripts]"
 | generate an image from the command line | the [CLI](docs/cli.md) - `generate`, `edit`, `upscale`, `controlmap` |
 | work through a browser | the web UI at `http://localhost:8000/` when running `serve` |
 | call it from other software | the [HTTP API](docs/api.md) - `/text2image`, `/edit`, `/upscale`, `/controlmap` |
+| manage it as a service | the [Docker / Compose](docs/docker.md) image - start, stop, swap models |
 | extract a control map from an image | `controlmap` - the [CLI](docs/cli.md#control-map-a-control-map), the `/controlmap` endpoint or the web UI's Control Maps tab |
 
 ## Documentation
@@ -159,6 +161,7 @@ uv pip install -e ".[scripts]"
 | [**Setup**](docs/setup.md) | from a released build to your first image |
 | [**CLI reference**](docs/cli.md) | all `generate` / `edit` / `serve` / `upscale` flags, upscaling, LoRAs |
 | [**HTTP API**](docs/api.md) | endpoints, request/response reference, curl and Python examples |
+| [**Docker / Compose**](docs/docker.md) | running the ROCm container, model + cache volumes, swapping models |
 | [**Development & Contribution**](docs/development.md) | building from source, tests, portable builds, adding models |
 
 ## Acknowledgments

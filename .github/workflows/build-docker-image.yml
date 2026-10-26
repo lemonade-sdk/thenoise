@@ -1,0 +1,178 @@
+name: Build TheNoise Docker image (ROCm)
+
+# Builds the ROCm container image (docker/Dockerfile) and publishes it to GHCR,
+# one image per GPU target because the ROCm wheels carry device-specific code
+# objects: ghcr.io/<owner>/thenoise:gfx1151, :<version>-gfx1151, and :latest for
+# the primary target.
+#
+# Triggers:
+#   * every git tag matching v*  -> build + smoke test + push
+#   * workflow_dispatch          -> build + smoke test (+ push only if the
+#     push_image toggle is on; it defaults to off so testing is free)
+#   * pull_request               -> build + smoke test only (a fork's token
+#     cannot push to GHCR, and PR images are not worth keeping)
+#
+# Only gfx1151 is published by default. Every image is ~10 GB and every build
+# downloads several GB of ROCm wheels, so widening the matrix is a deliberate
+# act — the workflow_dispatch `gfx_target` input takes a comma-separated list,
+# and anyone on another target can build it locally in one command:
+#   docker build -f docker/Dockerfile --build-arg GFX_ARCH=gfx1150 .
+#
+# The smoke test runs without a GPU. It checks the two things that can silently
+# break the container while the portable bundle keeps working: the launcher
+# coming up behind the entrypoint, and the image carrying the system libraries
+# the ROCm wheels expect but do not vendor (import torch is what pulls them in).
+# A real generation inside a container still has to happen on a ROCm box — see
+# docs/docker.md.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      gfx_target:
+        description: 'AMD GPU targets (comma-separated)'
+        required: false
+        default: 'gfx1151'
+      push_image:
+        description: 'Push the built image to GHCR'
+        required: false
+        default: false
+        type: boolean
+  pull_request:
+    paths:
+      - 'docker/**'
+      - 'build-scripts/**'
+      - 'thenoise/**'
+      - 'scripts/**'
+      - 'pyproject.toml'
+      - '.dockerignore'
+      - '.github/workflows/build-docker-image.yml'
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+      push: ${{ steps.set.outputs.push }}
+    steps:
+      - name: Set inputs
+        id: set
+        env:
+          GFX_IN: ${{ github.event.inputs.gfx_target }}
+          PUSH_IN: ${{ github.event.inputs.push_image }}
+        run: |
+          set -euo pipefail
+          targets="${GFX_IN:-gfx1151}"
+          matrix=$(echo "$targets" | tr ',' '\n' | sed 's/^ *//;s/ *$//' \
+            | jq -R . | jq -s '{gfx_target:.}' | jq -c)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          # A tag is a release, so it publishes. A manual run publishes only if
+          # asked. A pull request never can (fork tokens are read-only).
+          if [ "${{ github.event_name }}" = push ]; then push=true
+          elif [ "$PUSH_IN" = true ]; then push=true
+          else push=false; fi
+          echo "push=$push" >> "$GITHUB_OUTPUT"
+
+  build-image:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set image name
+        id: image
+        run: |
+          # GHCR refs must be lowercase and github.repository_owner is not
+          # guaranteed to be.
+          echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/thenoise" >> "$GITHUB_OUTPUT"
+
+      # The bundle is ~10 GB, the image that contains it another ~10 GB, and
+      # the smoke test wants a third copy in the daemon. The runner images carry
+      # toolchains no build here uses, so they go first.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                     /opt/hostedtoolcache/CodeQL
+          df -h / || true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: needs.prepare.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            # v0.12.1 -> 0.12.1-gfx1151
+            type=semver,pattern={{version}},suffix=-gfx${{ matrix.gfx_target }}
+            # the rolling per-target tag the docs point at
+            type=raw,value=gfx${{ matrix.gfx_target }}
+            # and :latest for the primary target, releases only
+            type=raw,value=latest,enable=${{ matrix.gfx_target == 'gfx1151' && github.event_name == 'push' }}
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          build-args: |
+            GFX_ARCH=${{ matrix.gfx_target }}
+          tags: |
+            ${{ steps.meta.outputs.tags }}
+            thenoise-smoke:${{ matrix.gfx_target }}
+          labels: ${{ steps.meta.outputs.labels }}
+          push: ${{ needs.prepare.outputs.push == 'true' }}
+          # When nothing was pushed, load the build into the daemon so the
+          # smoke test below has an image to run.
+          load: ${{ needs.prepare.outputs.push != 'true' }}
+          # One plain image per tag: no provenance attestation manifest beside
+          # it, and no second artifact per release.
+          provenance: false
+          # Deliberately no cache-from/cache-to: the layer worth caching is the
+          # ~10 GB ROCm one, and it changes with every release.
+
+      - name: Smoke test (no GPU)
+        run: |
+          set -euo pipefail
+          if [ '${{ needs.prepare.outputs.push }}' = true ]; then
+            # Publish first, then test what the registry handed back.
+            ref=$(echo '${{ steps.meta.outputs.tags }}' \
+                  | grep -E "gfx${{ matrix.gfx_target }}$" | head -n1)
+            docker pull --quiet "$ref"
+          else
+            ref="thenoise-smoke:${{ matrix.gfx_target }}"
+          fi
+          # entrypoint -> launcher -> argparse
+          docker run --rm "$ref" --help >/dev/null
+          # torch import is the load-bearing check: it pulls in libgomp,
+          # libatomic and the bundled ROCm libraries.
+          docker run --rm --entrypoint python3 "$ref" \
+            -c 'import torch, torchvision, thenoise, fastapi
+                print("torch", torch.__version__)'
+          echo "image=${ref}" >> "$GITHUB_STEP_SUMMARY"
+          docker image inspect --format 'size={{.Size}} bytes' "$ref" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
