@@ -98,9 +98,10 @@ jobs:
           else push=false; fi
           echo "push=$push" >> "$GITHUB_OUTPUT"
           # The rolling tag is a pointer, so only a release may move it: a
-          # manual build publishes beside it as edge-gfx<target>.
-          if [ "${{ github.event_name }}" = push ]; then prefix=gfx
-          else prefix=edge-gfx; fi
+          # manual build publishes beside it as edge-gfx<target>. The target
+          # already spells the gfx, so a release adds no prefix at all.
+          if [ "${{ github.event_name }}" = push ]; then prefix=
+          else prefix=edge-; fi
           echo "tag_prefix=$prefix" >> "$GITHUB_OUTPUT"
 
   build-image:
@@ -162,12 +163,13 @@ jobs:
           file: docker/Dockerfile
           build-args: |
             GFX_ARCH=${{ matrix.gfx_target }}
+          # Comments belong above the key: the toolkit parses this value as CSV
+          # with its comment character disabled, so a # line in here becomes a
+          # tag. And the smoke tag must stay out of the push path entirely — an
+          # unprefixed name resolves to docker.io/library/<name>, which the GHCR
+          # token has no scope for.
           tags: |
             ${{ steps.meta.outputs.tags }}
-            # An unprefixed name resolves to docker.io/library/<name>, and every
-            # tag in this list gets pushed whenever push is on — the GHCR token
-            # cannot mint a docker.io scope. So the smoke tag exists only on the
-            # paths that load into the daemon instead of publishing.
             ${{ needs.prepare.outputs.push != 'true' && format('thenoise-smoke:{0}', matrix.gfx_target) || '' }}
           labels: ${{ steps.meta.outputs.labels }}
           push: ${{ needs.prepare.outputs.push == 'true' }}
