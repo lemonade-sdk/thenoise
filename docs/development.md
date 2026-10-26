@@ -155,13 +155,16 @@ docker compose -f docker/docker-compose.yml up -d anima
 ```
 
 [`build-docker-image.yml`](../.github/workflows/build-docker-image.yml)
-publishes one image per GPU target to GHCR on every `v*` tag, and builds (but
-does not publish) on pull requests that touch the image, the bundle scripts or
-the package. The checks it can run without a GPU are the launcher coming up and
-`import torch` resolving every library the wheels expect; the real generation is
+publishes one image per GPU target to GHCR on every `v*` tag — a release is the
+only thing that moves the rolling `gfx<target>` tag the docs point at, while a
+manual run publishes as `edge-gfx<target>` beside it. A pull request builds
+nothing until a reviewer applies the `docker-build` label: that is how you get a
+change to the image, the bundle scripts or the package checked before merging.
+What CI can check without a GPU is the launcher coming up and `import torch`
+resolving every library the wheels expect; the real generation is
 [manual, on whatever hardware you have](docker.md).
 
-Keep the two in sync when changing the bundle: `ensure_soname_symlinks` and the
+Keep them in sync when changing the bundle: `ensure_soname_symlinks` and the
 bundled `clang` are what let the container run with no ROCm and no compiler
 installed, and the image's runtime stage carries the only system libraries the
 wheels do not vendor (`libgomp1`, `libatomic1`).

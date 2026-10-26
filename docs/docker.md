@@ -32,6 +32,10 @@ docker pull ghcr.io/lemonade-sdk/thenoise:gfx1151        # latest release
 docker pull ghcr.io/lemonade-sdk/thenoise:0.12.0-gfx1151 # a specific version
 ```
 
+Only a release moves `:gfx1151`. You may also see `:edge-gfx1151` in the registry
+— that is the last image someone built by hand to check something, and it is not
+a release.
+
 Building from a checkout pulls several GB of wheels, so expect ten to thirty
 minutes and ~25 GB of free disk:
 

@@ -6,11 +6,16 @@ name: Build TheNoise Docker image (ROCm)
 # the primary target.
 #
 # Triggers:
-#   * every git tag matching v*  -> build + smoke test + push
-#   * workflow_dispatch          -> build + smoke test (+ push only if the
-#     push_image toggle is on; it defaults to off so testing is free)
-#   * pull_request               -> build + smoke test only (a fork's token
-#     cannot push to GHCR, and PR images are not worth keeping)
+#   * git tag matching v*        -> build + smoke test + push. A release is the
+#     only thing that moves the rolling :gfx<target> / :latest tags.
+#   * workflow_dispatch          -> build + smoke test. With the push_image
+#     toggle on it publishes as :edge-gfx<target>, never as :gfx<target>, so a
+#     test build cannot repoint what the docs tell people to pull.
+#   * pull_request + the `docker-build` label -> build + smoke test, no push (a
+#     fork's token is read-only for packages, and PR images are not worth
+#     keeping). Label-gated because a build is 30+ minutes and several GB of
+#     wheels, and `pull_request` would otherwise fire on every push to the
+#     branch — including the ones nobody asked about.
 #
 # Only gfx1151 is published by default. Every image is ~10 GB and every build
 # downloads several GB of ROCm wheels, so widening the matrix is a deliberate
@@ -41,6 +46,9 @@ on:
         default: false
         type: boolean
   pull_request:
+    # `labeled` is in the list, `synchronize` (every push) is not: an open pull
+    # request builds nothing until a reviewer puts the label on it.
+    types: [opened, labeled]
     paths:
       - 'docker/**'
       - 'build-scripts/**'
@@ -61,9 +69,16 @@ concurrency:
 jobs:
   prepare:
     runs-on: ubuntu-24.04
+    # One gate for the whole workflow: with nothing to build, the build job
+    # needs this one and is skipped along with it. To re-run a pull request
+    # build after pushing, take the label off and put it back on; the label has
+    # to exist in the repository's labels settings.
+    if: ${{ github.event_name != 'pull_request' ||
+          contains(github.event.pull_request.labels.*.name, 'docker-build') }}
     outputs:
       matrix: ${{ steps.set.outputs.matrix }}
       push: ${{ steps.set.outputs.push }}
+      tag_prefix: ${{ steps.set.outputs.tag_prefix }}
     steps:
       - name: Set inputs
         id: set
@@ -82,6 +97,11 @@ jobs:
           elif [ "$PUSH_IN" = true ]; then push=true
           else push=false; fi
           echo "push=$push" >> "$GITHUB_OUTPUT"
+          # The rolling tag is a pointer, so only a release may move it: a
+          # manual build publishes beside it as edge-gfx<target>.
+          if [ "${{ github.event_name }}" = push ]; then prefix=gfx
+          else prefix=edge-gfx; fi
+          echo "tag_prefix=$prefix" >> "$GITHUB_OUTPUT"
 
   build-image:
     needs: prepare
@@ -129,8 +149,9 @@ jobs:
           tags: |
             # v0.12.1 -> 0.12.1-gfx1151
             type=semver,pattern={{version}},suffix=-gfx${{ matrix.gfx_target }}
-            # the rolling per-target tag the docs point at
-            type=raw,value=gfx${{ matrix.gfx_target }}
+            # the rolling per-target tag the docs point at; edge-gfx<target>
+            # for anything that is not a release (see prepare)
+            type=raw,value=${{ needs.prepare.outputs.tag_prefix }}${{ matrix.gfx_target }}
             # and :latest for the primary target, releases only
             type=raw,value=latest,enable=${{ matrix.gfx_target == 'gfx1151' && github.event_name == 'push' }}
 
@@ -159,9 +180,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ '${{ needs.prepare.outputs.push }}' = true ]; then
-            # Publish first, then test what the registry handed back.
-            ref=$(echo '${{ steps.meta.outputs.tags }}' \
-                  | grep -E "gfx${{ matrix.gfx_target }}$" | head -n1)
+            # Publish first, then test what the registry handed back — naming the
+            # tag outright means this fails if the tag is not there.
+            ref="${{ steps.image.outputs.name }}:${{ needs.prepare.outputs.tag_prefix }}${{ matrix.gfx_target }}"
             docker pull --quiet "$ref"
           else
             ref="thenoise-smoke:${{ matrix.gfx_target }}"
@@ -171,8 +192,7 @@ jobs:
           # torch import is the load-bearing check: it pulls in libgomp,
           # libatomic and the bundled ROCm libraries.
           docker run --rm --entrypoint python3 "$ref" \
-            -c 'import torch, torchvision, thenoise, fastapi
-                print("torch", torch.__version__)'
+            -c 'import torch, torchvision, thenoise, fastapi; print("torch", torch.__version__)'
           echo "image=${ref}" >> "$GITHUB_STEP_SUMMARY"
           docker image inspect --format 'size={{.Size}} bytes' "$ref" \
             | tee -a "$GITHUB_STEP_SUMMARY"
