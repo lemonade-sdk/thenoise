@@ -164,7 +164,11 @@ jobs:
             GFX_ARCH=${{ matrix.gfx_target }}
           tags: |
             ${{ steps.meta.outputs.tags }}
-            thenoise-smoke:${{ matrix.gfx_target }}
+            # An unprefixed name resolves to docker.io/library/<name>, and every
+            # tag in this list gets pushed whenever push is on — the GHCR token
+            # cannot mint a docker.io scope. So the smoke tag exists only on the
+            # paths that load into the daemon instead of publishing.
+            ${{ needs.prepare.outputs.push != 'true' && format('thenoise-smoke:{0}', matrix.gfx_target) || '' }}
           labels: ${{ steps.meta.outputs.labels }}
           push: ${{ needs.prepare.outputs.push == 'true' }}
           # When nothing was pushed, load the build into the daemon so the
