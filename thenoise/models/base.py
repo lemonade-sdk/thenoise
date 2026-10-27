@@ -52,6 +52,14 @@ logger = logging.getLogger(__name__)
 # peak (denoise, VAE decode) plus the pipeline cache. ``--offload-device`` forces it.
 _RESIDENT_VRAM_FRACTION = 0.6
 
+# What one stage of a request asks of that headroom per megapixel of pixels, for the
+# residency decision `MemoryManager.stage` makes before it runs. Measured on gfx1151 at
+# 2048x2048 with the aliased softmax the decoders use now: the VAE's peak sits near
+# 0.7 GiB/Mpx for most codecs and 1.2 for the widest, and no denoise peak has been
+# measured at all. A stage that claims too little gets the device handed back mid-run,
+# so this is above every figure observed.
+_STAGE_BYTES_PER_MEGAPIXEL = 1_500_000_000
+
 
 @dataclass
 class Conditioning:
@@ -477,6 +485,28 @@ class DiffusionModel(ABC):
     def pixel_channels(self) -> int:
         """Pixel channels this model's VAE consumes and emits (3 = RGB, 4 = RGBA)."""
         return getattr(getattr(self, "vae", None), "pixel_channels", 3)
+
+    # ------------------------------------------------------------ stage claims
+    def activation_bytes(self, width: int, height: int) -> int:
+        """What a stage moving this many pixels needs beside the weights it runs on.
+
+        The claim a stage makes on the device, which is how a codec tells the residency
+        policy what it actually costs: an over-estimate costs a weight set a round trip,
+        an under-estimate costs the run. Overridable per codec once its own peak is
+        measured; the pipeline asks at the final resolution, because whatever the device
+        holds at the end of a request it holds through the tail that follows.
+        """
+        mpx = max(1.0, width * height / 1_000_000)   # a small stage still has a floor
+        return int(_STAGE_BYTES_PER_MEGAPIXEL * mpx)
+
+    def denoise_activation_bytes(self, width: int, height: int) -> int:
+        """The sampling loop's claim. The fleet figure, until that loop is measured.
+
+        Its peak really follows token count and head width rather than the pixel count
+        of a VAE's feature maps, so a codec that knows better overrides this and not
+        `activation_bytes`.
+        """
+        return self.activation_bytes(width, height)
 
     # ------------------------------------------------------------ decode
     def decode(self, latents: torch.Tensor) -> torch.Tensor:

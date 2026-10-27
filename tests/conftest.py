@@ -796,3 +796,28 @@ def editing_stub_model():
 def flux2_vae():
     """One random-init Flux.2 VAE per module (building it costs ~0.2s)."""
     return AutoencoderKLFlux2().eval().requires_grad_(False)
+
+
+class TrackedModule(torch.nn.Module):
+    """Weights parked on ``meta`` at a stated size, plus a log of every device move.
+
+    ``meta`` is what makes an offload and a reload legal where there is no device, and a
+    meta tensor still reports the byte size a placement decision reads — ``nbytes`` is
+    that size. ``device`` is the device the manager is *told* the module sits on, which
+    is what residency and fixity follow.
+    """
+
+    def __init__(self, nbytes: int, device: str = "meta"):
+        super().__init__()
+        self.p = torch.nn.Parameter(torch.empty(max(nbytes // 4, 1), device="meta"))
+        self._at = torch.device(device)
+        self.moves: list[str] = []
+
+    @property
+    def device(self):
+        return self._at
+
+    def to(self, device=None, *args, **kwargs):  # noqa: D102
+        self._at = torch.device(device)
+        self.moves.append(self._at.type)
+        return self

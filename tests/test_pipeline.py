@@ -12,7 +12,8 @@ import logging
 import pytest
 import torch
 
-from conftest import StubLatentUpscaler, StubModel
+from conftest import StubLatentUpscaler, StubModel, TrackedModule
+from thenoise.memory import MemoryManager
 from thenoise.models.config import GenerateRequest, SamplingParams
 from thenoise.postprocess import FILTERS, POSTPROCESS_NAMES, PostprocessOptions
 from thenoise.pipeline import (
@@ -875,3 +876,155 @@ def test_kv_cache_requires_a_model_that_supports_it():
         controller.edit(
             _request(image=Image.new("RGB", (64, 64), "white"), steps=1, kv_cache=True)
         )
+
+
+# ---------------------------------------------------- residency across the stages
+class _Device(MemoryManager):
+    """A manager whose device reports a fixed capacity, so placement is decidable."""
+
+    def __init__(self, capacity: int):
+        super().__init__("cpu", "meta")
+        self.capacity = capacity
+
+    def free_bytes(self) -> int:
+        return self.capacity - sum(self.weight_bytes(n) for n in self.resident())
+
+
+def _model_on(capacity: int, *, claims=(1 << 30, 1 << 30)):
+    """``capacity`` and the two ``claims`` (a pixel stage's, the sampling loop's), with
+    the weight sets at GiB scale."""
+    """A StubModel with tracked weight sets, arriving the way the real ones do.
+
+    The VAE comes up on the compute device and the other two on the offload device,
+    which is the distinction the adapters make and the manager remembers. ``claims``
+    fixes what a stage will ask for rather than leaving the test at the mercy of the
+    fleet estimate.
+    """
+    model = StubModel()
+    decode, denoise = claims
+    model.denoise_activation_bytes = lambda _w, _h: denoise
+    model.activation_bytes = lambda _w, _h: decode
+
+    memory = _Device(capacity)
+    parts = {"dit": TrackedModule(1 << 30), "text_encoder": TrackedModule(1 << 30),
+             "vae": TrackedModule(128 << 20, device="cpu")}    # 1 GiB, 1 GiB, 128 MiB
+    for name, part in parts.items():
+        memory.register(name, part)
+    model.memory = memory
+    return model, parts
+
+
+def _request_at(model, **kwargs) -> GenerateRequest:
+    return _request(**{"width": 64, "height": 64, **kwargs})
+
+
+def test_a_request_leaves_the_weights_it_used_on_the_device(monkeypatch):
+    """The point of the whole arrangement: no round trip between two stages."""
+    model, parts = _model_on(24 << 30)
+    _controller(model).generate(_request_at(model))
+
+    assert parts["dit"].moves == ["cpu"], "up once, and not back down again"
+    assert parts["text_encoder"].moves == ["cpu"]
+    assert model.memory.resident() == {"dit", "text_encoder", "vae"}
+
+
+def test_two_requests_on_a_cached_prompt_upload_the_dit_once(monkeypatch):
+    model, parts = _model_on(24 << 30)
+    controller = _controller(model)
+
+    controller.generate(_request_at(model))
+    controller.generate(_request_at(model))
+
+    assert parts["dit"].moves == ["cpu"]
+    assert parts["text_encoder"].moves == ["cpu"]
+
+
+def test_the_idle_weights_pay_for_a_stage_that_needs_the_room():
+    """The text encoder is finished with by the time the DiT needs the device.
+
+    Sized so the sampling claim does not fit beside encoder and DiT together, while the
+    decode's does fit beside the DiT: the weight set that has already been used is the
+    one that goes, and the one still in the loop keeps its place.
+    """
+    model, parts = _model_on(int(2.5 * (1 << 30)), claims=(1 << 30, 1 << 30))
+    _controller(model).generate(_request_at(model))
+
+    assert parts["text_encoder"].moves == ["cpu", "meta"]
+    assert parts["dit"].moves == ["cpu"]
+    assert model.memory.resident() == {"dit", "vae"}
+
+
+def test_a_decode_with_a_big_claim_takes_the_last_weight_set_too():
+    """Nothing is exempt from a claim it cannot be met without — except the VAE running."""
+    model, parts = _model_on(3 << 30, claims=(4 << 30, 1 << 29))
+    _controller(model).generate(_request_at(model))
+
+    assert parts["dit"].moves == ["cpu", "meta"]
+    assert model.memory.resident() == {"vae"}, "the VAE came up on the device to stay"
+
+
+def test_a_decode_that_ran_out_gets_the_idle_weights_off_the_device():
+    """A stage that claimed less than it needed is not the end of the image."""
+    model, parts = _model_on(24 << 30)
+    real_decode = model.decode
+    attempts = {"n": 0}
+
+    def once(latents):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise torch.cuda.OutOfMemoryError("the claim was too small")
+        return real_decode(latents)
+
+    model.decode = once
+    image = _controller(model).generate(_request_at(model))
+
+    assert attempts["n"] == 2 and image.size == (64, 64)
+    assert parts["dit"].moves == ["cpu", "meta"], "everything idle went, the VAE stayed"
+    assert model.memory.resident() == {"vae"}
+
+
+def test_a_second_oom_with_nothing_left_to_take_is_not_retried():
+    model, _ = _model_on(24 << 30)
+
+    def always(latents):
+        raise torch.cuda.OutOfMemoryError("nothing left to give")
+
+    model.decode = always
+    with pytest.raises(torch.cuda.OutOfMemoryError):
+        _controller(model).generate(_request_at(model))
+
+
+def test_a_stage_only_asks_for_the_room_it_declared():
+    """The manager never evicts on a claim the device can already satisfy."""
+    model, parts = _model_on(5 << 30)
+    _controller(model).generate(_request_at(model))
+
+    assert parts["text_encoder"].moves == ["cpu"], "there was room for all of it"
+
+
+def test_a_stage_asks_about_the_pixels_it_will_move(monkeypatch):
+    """Each stage claims, once, at the size it really runs at."""
+    model, _ = _model_on(24 << 30)
+    asked: list[tuple[str, tuple[int, int]]] = []
+    for kind in ("activation_bytes", "denoise_activation_bytes"):
+        monkeypatch.setattr(model, kind,
+                            lambda w, h, kind=kind: (
+                                asked.append((kind.split("_")[0], (w, h))), 1 << 30)[1])
+
+    _controller(model).generate(_request(width=64, height=64, upscale=True))
+
+    scale = model.UPSCALE_SCALE
+    assert asked == [("activation", (64, 64)), ("denoise", (64, 64)),
+                     ("denoise", (64 * scale, 64 * scale)),
+                     ("activation", (64 * scale, 64 * scale))]
+
+
+def test_the_stage_claim_grows_with_pixels():
+    """One constant, one home: the claim is that constant times the megapixels."""
+    from thenoise.models import base
+
+    model = StubModel()
+    per_mpx = base._STAGE_BYTES_PER_MEGAPIXEL
+    assert model.activation_bytes(1000, 1000) == per_mpx
+    assert model.activation_bytes(2000, 2000) == 4 * per_mpx
+    assert model.activation_bytes(64, 64) == per_mpx, "a sub-megapixel stage has a floor"
