@@ -22,6 +22,16 @@ the machine it runs on, use the portable bundle.
 - The **amdgpu kernel driver on the host**, exposing `/dev/kfd` and `/dev/dri`.
   No ROCm user-space install is needed on the host — it is in the image.
 - A GPU whose target matches the image's `GFX_ARCH` (`gfx1151` for Strix Halo).
+- The **GID of the group that owns `/dev/kfd`**, passed to `--group-add` by number:
+  Docker resolves group *names* against the image, whose Ubuntu base has no `render`
+  group (container creation aborts) and a `video` group at GID 44 that is not the
+  host's. Where the DRI nodes belong to a different group — `video` on some distros —
+  pass that GID as well, but pass each one once: Compose rejects a `group_add` list
+  with duplicate entries.
+
+  ```bash
+  stat -c '%g %n' /dev/kfd /dev/dri/renderD128    # render on most distros
+  ```
 
 ## Get the image
 
@@ -54,6 +64,11 @@ defines one service per model (TheNoise loads one at a time) and a `download`
 service for filling the model directory:
 
 ```bash
+# the GID that owns /dev/kfd, for group_add in the compose file. Export it, or
+# write it into docker/.env (compose reads that file from the directory holding the
+# compose file, and does not expand commands inside it).
+export KFD_GID=$(stat -c %g /dev/kfd)
+
 # build once, or delete the build: block and pull from ghcr.io instead
 docker compose -f docker/docker-compose.yml build
 
@@ -81,7 +96,7 @@ are the container paths of the checkpoints you mounted:
 ```bash
 docker run --rm \
   --device /dev/kfd --device /dev/dri \
-  --group-add render --group-add video \
+  --group-add "$(stat -c %g /dev/kfd)" \
   --security-opt seccomp=unconfined --ipc=host \
   -v "$PWD/models:/models" -v thenoise-cache:/cache -v "$PWD/output:/output" \
   -p 8000:8000 \
@@ -97,7 +112,7 @@ output directory:
 ```bash
 docker run --rm \
   --device /dev/kfd --device /dev/dri \
-  --group-add render --group-add video \
+  --group-add "$(stat -c %g /dev/kfd)" \
   --security-opt seccomp=unconfined --ipc=host \
   -v "$PWD/models:/models" -v thenoise-cache:/cache -v "$PWD/output:/output" \
   thenoise:local generate \
@@ -163,7 +178,7 @@ override any of them:
         docker run --rm -i
         --network host
         --device /dev/kfd --device /dev/dri
-        --group-add render --group-add video
+        --group-add "$(stat -c %g /dev/kfd)"
         --security-opt seccomp=unconfined --ipc=host
         -v /srv/models:/models -v thenoise-cache:/cache
         ghcr.io/lemonade-sdk/thenoise:gfx1151
@@ -187,7 +202,7 @@ The libraries the bundle ships are registered with the loader, so a bare
 ```bash
 # does the container see the GPU?
 docker run --rm --device /dev/kfd --device /dev/dri \
-  --group-add render --group-add video --security-opt seccomp=unconfined \
+  --group-add "$(stat -c %g /dev/kfd)" --security-opt seccomp=unconfined \
   --entrypoint python3 thenoise:local \
   -c 'import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))'
 
@@ -200,7 +215,8 @@ docker run --rm -it --entrypoint bash thenoise:local
 
 | Symptom | Fix |
 |---|---|
-| `Permission denied` on `/dev/kfd` | The device nodes are group-owned — `render` on most distros, `video` on others — so pass both `--group-add render --group-add video`. Especially when running with `user:`, where DAC applies. |
+| `unable to find group render: no matching entries in group file` | `group_add` names are looked up inside the image, which has no `render` group. Pass the host GIDs instead — see [requirements](#requirements). |
+| `Permission denied` on `/dev/kfd` | The device nodes are group-owned — `render` on most distros, `video` on others — so pass both groups' GIDs (`stat -c '%g %n' /dev/kfd /dev/dri/renderD128`). Especially when running with `user:`, where DAC applies. |
 | `no HIP devices found` while the host is fine | Wrong `GFX_ARCH` for this GPU, or the amdgpu driver is not loaded on the host. |
 | `libgomp.so.1: cannot open shared object file` | A base-image change dropped the library; the runtime stage installs `libgomp1` and `libatomic1` on purpose. [Open an issue](https://github.com/lemonade-sdk/thenoise/issues). |
 | Container reports `unhealthy` but generates images | The healthcheck assumes port 8000 and starts counting during the model load. Pass the URL to it (`test: ["CMD", "healthcheck.sh", "http://127.0.0.1:8123/health"]`) and raise `start_period`. |

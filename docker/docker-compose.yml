@@ -27,10 +27,15 @@ x-thenoise: &thenoise
   devices:
     - /dev/kfd
     - /dev/dri
-  # The GPU nodes belong to these groups on different distros; pass both.
+  # Docker resolves group_add *names* against the image's /etc/group, so this is a
+  # host GID. The Ubuntu base has no `render` group at all — a name aborts container
+  # creation with "unable to find group render" — and its `video` is GID 44, which is
+  # not the host's. Export it before `up`, or put it in a `.env` next to this file
+  # (compose does not expand commands in `.env`, so write the number):
+  #   export KFD_GID=$(stat -c %g /dev/kfd)   # render on most distros
+  # If /dev/dri/renderD128 is owned by another group, add that GID as a second entry.
   group_add:
-    - render
-    - video
+    - "${KFD_GID:?host GID that owns /dev/kfd — see docs/docker.md, Requirements}"
   # The ROCm runtime makes ioctls and syscalls the default profile blocks.
   security_opt:
     - seccomp=unconfined
