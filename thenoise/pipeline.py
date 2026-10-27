@@ -336,7 +336,11 @@ class PipelineController:
             if self._cache.prompt_hit(prompt_key):
                 cond = self._cache.prompt_get()
             else:
-                with memory.stage("text_encoder", pixels=r.width * r.height) as s:
+                seen = self._edit_images(request)
+                with memory.stage(
+                    "text_encoder",
+                    pixels=sum(image.width * image.height for image in seen),
+                ) as s:
                     cond_raw = s.run(model.encode_prompt, EncodePromptArgs(
                         prompt=request.prompt,
                         negative_prompt=request.negative_prompt,

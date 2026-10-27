@@ -165,9 +165,9 @@ class MemoryManager:
                    observed.get(bucket * 2, 0))
 
     def _learn(self, names: tuple, pixels: int, baseline: int) -> None:
-        """Remember the peak a stage allocated above what was live on entry, for its size
-        and itself. The window spans a retry, so a stage that had to squeeze learns what
-        sufficed.
+        """Remember the peak a stage allocated above the bytes live when its work started,
+        for its size and itself. The window spans a retry, so a stage that had to squeeze
+        learns what sufficed.
         """
         transient = self._peak_end(self._load, baseline)
         bucket = _peak_bucket(pixels)
@@ -216,9 +216,10 @@ class MemoryManager:
         """
         self._held.update(names)
         depth, self._depth = self._depth, self._depth + 1
-        baseline = self._peak_begin(self._load) if depth == 0 else None
+        baseline = None
         try:
             self._place(names, self._reserve_for(names, pixels))
+            baseline = self._peak_begin(self._load) if depth == 0 else None
             yield _Stage(self)
         finally:
             self._held.difference_update(names)

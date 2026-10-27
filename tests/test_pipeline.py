@@ -1022,6 +1022,28 @@ def test_a_stage_only_asks_for_the_room_it_declared(monkeypatch):
     assert parts["text_encoder"].moves == ["cpu"], "there was room for all of it"
 
 
+def test_the_prompt_stage_claims_the_pixels_the_encoder_sees(monkeypatch):
+    """An edit feeds the encoder its images; the size of the result is not its business."""
+    from PIL import Image
+
+    from conftest import EditingStubModel
+
+    model = EditingStubModel()
+    memory = model.memory
+    stage = memory.stage
+    asked: list[tuple[tuple[str, ...], int]] = []
+
+    def spy(*names, pixels):
+        asked.append((names, pixels))
+        return stage(*names, pixels=pixels)
+
+    memory.stage = spy
+    _controller(model).edit(_request(image=Image.new("RGB", (32, 48)), steps=1))
+
+    claims = [pixels for names, pixels in asked if names == ("text_encoder",)]
+    assert claims == [32 * 48], "the vision tower is sized by what it is shown"
+
+
 def test_a_stage_sizes_its_room_by_the_pixels_it_moves(monkeypatch):
     """Each stage says how big an image it runs, once, at the size it really runs at."""
     model, _ = _model_on(monkeypatch, 24 << 30)
@@ -1038,7 +1060,7 @@ def test_a_stage_sizes_its_room_by_the_pixels_it_moves(monkeypatch):
 
     scale = model.UPSCALE_SCALE
     target = (64 * scale) ** 2
-    assert asked == [(("text_encoder",), 64 * 64),
+    assert asked == [(("text_encoder",), 0),
                      (("dit",), 64 * 64),
                      (("dit", "vae"), target),
                      (("vae",), target)], (

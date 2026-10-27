@@ -307,6 +307,23 @@ def _measures(monkeypatch, transient: int) -> list:
     return begins
 
 
+def test_a_stage_counts_from_after_its_own_placement(monkeypatch):
+    """What the manager uploaded for a stage is resident, not the stage's transient."""
+    order: list[str] = []
+    monkeypatch.setattr(
+        MemoryManager, "_place", lambda self, names, room: order.append("place"))
+    monkeypatch.setattr(
+        MemoryManager, "_peak_begin",
+        staticmethod(lambda device: order.append("begin") or 0))
+    monkeypatch.setattr(
+        MemoryManager, "_peak_end",
+        staticmethod(lambda device, baseline: order.append("end") or 0))
+    mm = MemoryManager("cpu", "meta")
+    with mm.stage("vae", pixels=0):
+        pass
+    assert order == ["place", "begin", "end"]
+
+
 def test_a_stage_reserves_what_it_used_last_time(monkeypatch):
     """The fleet figure is a floor the device's own measurement overrides."""
     _reserve(monkeypatch, 0, per_megapixel=_mib(1))       # 1 MiB to the megapixel
