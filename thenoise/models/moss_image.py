@@ -73,18 +73,18 @@ class MossImageModel(DiffusionModel):
 
         logger.info("Loading MOSS-Image DiT from %s", config.dit_path)
         self.dit = load_moss_image_dit(
-            config.dit_path, self.params, device=self.offload_device, dtype=config.dtype
+            config.dit_path, self.params, device=self._load_target(config.dit_path), dtype=config.dtype
         )
 
         logger.info(
             "Loading MOSS-Image text encoder (Qwen3.5-9B) from %s", config.text_encoder_path
         )
         self.text_encoder = load_moss_image_text_encoder(
-            config.text_encoder_path, dtype=config.dtype, device=self.offload_device
+            config.text_encoder_path, dtype=config.dtype, device=self._load_target(config.text_encoder_path)
         )
 
         logger.info("Loading MOSS-Image VAE (Flux.2) from %s", self.vae_path)
-        self.vae = load_flux2_vae(self.vae_path, device=self.device)
+        self.vae = load_flux2_vae(self.vae_path, device=self._load_target(self.vae_path))
 
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)

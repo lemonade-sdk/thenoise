@@ -51,7 +51,7 @@ class AnimaModel(DiffusionModel):
 
         logger.info("Loading Anima DiT from %s", config.dit_path)
         self.dit = anima_utils.load_anima_model(
-            self.offload_device,
+            self._load_target(config.dit_path),
             config.dit_path,
             dit_weight_dtype=config.dtype,
         )
@@ -59,7 +59,7 @@ class AnimaModel(DiffusionModel):
         # Text encoder (Qwen3-0.6B) + tokenizers.
         logger.info("Loading Anima text encoder from %s", config.text_encoder_path)
         self.text_encoder, self.qwen3_tokenizer = load_qwen3_text_encoder(
-            config.text_encoder_path, dtype=config.dtype, device=self.offload_device
+            config.text_encoder_path, dtype=config.dtype, device=self._load_target(config.text_encoder_path)
         )
         self.t5_tokenizer = load_t5_tokenizer(None)
 
@@ -71,7 +71,7 @@ class AnimaModel(DiffusionModel):
         )
         self.encoding_strategy = AnimaTextEncodingStrategy()
 
-        self.vae = load_qwen_vae(self.vae_path, device=self.device)
+        self.vae = load_qwen_vae(self.vae_path, device=self._load_target(self.vae_path))
 
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)

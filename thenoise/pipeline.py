@@ -25,7 +25,6 @@ import torch
 from PIL import Image
 
 from thenoise.inference import inference, inference_lock
-from thenoise.memory import MemoryManager
 from thenoise.models.base import DiffusionModel, Conditioning
 from thenoise.models.config import EncodePromptArgs, GenerateRequest, SamplingParams
 from thenoise.samplers import Step, create_sampler
@@ -323,31 +322,27 @@ class PipelineController:
                 if self._cache.reference_hit(ref_key):
                     ref_latents = self._cache.reference_get()
                 else:
-                    with memory.stage("vae",
-                                      activations=model.activation_bytes(r.width, r.height)):
-                        ref_latents = [
+                    with memory.stage("vae", pixels=r.width * r.height) as s:
+                        fitted = model.fit_references(self._edit_images(request),
+                                                      (r.width, r.height))
+                        ref_latents = s.run(lambda: [
                             model.encode_reference(
-                                pil_to_pixels(fitted, model.pixel_channels))  # [1,C,H,W]
-                            for fitted in model.fit_references(
-                                self._edit_images(request), (r.width, r.height))
-                        ]
+                                pil_to_pixels(image, model.pixel_channels))  # [1,C,H,W]
+                            for image in fitted
+                        ])
                     self._cache.reference_store(ref_key, ref_latents)
 
-            # Stage 1: prompt conditioning — text encoder only, bounded by the fleet's
-            # per-pixel figure rather than measured, since it works over the prompt.
+            # Stage 1: prompt conditioning — text encoder only.
             if self._cache.prompt_hit(prompt_key):
                 cond = self._cache.prompt_get()
             else:
-                with memory.stage("text_encoder",
-                                  activations=model.activation_bytes(r.width, r.height)):
-                    cond_raw = model.encode_prompt(
-                        EncodePromptArgs(
-                            prompt=request.prompt,
-                            negative_prompt=request.negative_prompt,
-                            guidance_scale=r.guidance_scale,
-                            image=request.image if is_edit else None,
-                        )
-                    )
+                with memory.stage("text_encoder", pixels=r.width * r.height) as s:
+                    cond_raw = s.run(model.encode_prompt, EncodePromptArgs(
+                        prompt=request.prompt,
+                        negative_prompt=request.negative_prompt,
+                        guidance_scale=r.guidance_scale,
+                        image=request.image if is_edit else None,
+                    ))
 
             params = SamplingParams(
                 height=r.height, width=r.width, steps=r.steps, seed=r.seed,
@@ -360,15 +355,13 @@ class PipelineController:
             if self._cache.sampling_hit(sampling_key):
                 latents = self._cache.sampling_get()
             else:
-                with memory.stage("dit",
-                                  activations=model.denoise_activation_bytes(
-                                      r.width, r.height)):
+                with memory.stage("dit", pixels=r.width * r.height) as s:
                     model.switch_loras(request.lora_specs, model.dit)
                     if not self._cache.prompt_hit(prompt_key):
                         cond = model.fuse_text(cond_raw)
                         self._cache.prompt_store(prompt_key, cond)
-                    latents = self._denoise(
-                        cond, params, ref_latents, ref_method or "index",
+                    latents = s.run(
+                        self._denoise, cond, params, ref_latents, ref_method or "index",
                         sigmas=r.sigmas,
                     )
                 self._cache.sampling_store(sampling_key, latents)
@@ -378,30 +371,17 @@ class PipelineController:
                 pixels = self._cache.decode_get()
             else:
                 if r.refined:
-                    with memory.stage("dit",
-                                      activations=model.denoise_activation_bytes(
-                                          r.target_width, r.target_height)):
-                        latents = self._upscale_and_refine(latents, cond, params)
-                pixels = self._decode(model, memory, latents,
-                                      r.target_width, r.target_height)
+                    # the upscaler builds its weights here and may round-trip the VAE;
+                    # nothing moves once a stage has started, so both are held
+                    with memory.stage("dit", "vae",
+                                      pixels=r.target_width * r.target_height) as s:
+                        latents = s.run(self._upscale_and_refine, latents, cond, params)
+                with memory.stage("vae",
+                                  pixels=r.target_width * r.target_height) as s:
+                    pixels = s.run(model.decode, latents)  # fp32 GPU [C,H,W]
                 self._cache.decode_store(decode_key, pixels)
 
             return pixels
-
-    def _decode(self, model, memory: MemoryManager, latents: torch.Tensor,
-                width: int, height: int) -> torch.Tensor:
-        """Decode over the whole device, retrying once if the claim was still short.
-
-        The retry is what lets the claim be an estimate: a stage that asked for less than
-        it needed takes what the finished stages left and runs again.
-        """
-        with memory.stage("vae", activations=model.activation_bytes(width, height)):
-            try:
-                return model.decode(latents)  # fp32 GPU [C,H,W]
-            except torch.cuda.OutOfMemoryError:
-                if memory.squeeze(held="vae") == 0:
-                    raise
-                return model.decode(latents)
 
     def _denoise(
         self,

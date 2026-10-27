@@ -120,8 +120,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="bind port (default: 8000)")
     serve.add_argument("--device", default="cuda",
                        help="inference device; ROCm aliases cuda -> hip (default: cuda)")
-    serve.add_argument("--offload-device", default="",
-                       help="device for idle weights (default: auto-detect from safetensors size vs VRAM)")
+    serve.add_argument(
+        "--offload-device", default="cpu",
+        help="device for idle weights (default: %(default)s; pass the compute device to"
+             " keep every weight set resident)")
 
     # generate
     gen = sub.add_parser("generate", help="run one generation and save a PNG")

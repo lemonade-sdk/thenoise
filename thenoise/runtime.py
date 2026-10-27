@@ -7,6 +7,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
+from thenoise.errors import ModelReloadNeeded
 from thenoise.inference import inference
 from thenoise.utils.device import release_device_memory
 
@@ -19,7 +20,7 @@ class Settings:
     ``upscaler_dir`` is server configuration: pixel upscaling needs no diffusion model.
     """
     device: str = "cuda"      # ROCm torch aliases cuda -> hip
-    offload_device: str = ""   # empty = auto-detect from safetensors size vs VRAM
+    offload_device: str = "cpu"   # the compute device itself keeps every weight set
     host: str = "127.0.0.1"
     port: int = 8000
     upscaler_dir: str = ""     # directory of pixel-domain upscaler models
@@ -50,6 +51,7 @@ class Runtime:
         from .upscale_controller import PixelUpscaleController
 
         self._settings = settings
+        self._paths: Optional[ModelPaths] = None
         self._model: Any = None
         self._model_name: Optional[str] = None
         # Shared pixel-domain upscaler pool (model-free, server-level).
@@ -86,7 +88,26 @@ class Runtime:
         with inference():
             self._model = cls(config=config)
         self._model_name = name
+        self._paths = paths
         self._pipeline = PipelineController(self._model, self._pixel_upscalers)
+
+    def reload(self) -> None:
+        """Rebuild the loaded model from its checkpoints, which clears an unfit state."""
+        if self._paths is None:
+            raise NotLoadedError("no model loaded")
+        self.load(self._paths)
+
+    def run(self, action):
+        """``action(pipeline)``; once, and once more against a rebuilt model if it reports
+        itself unfit. The action is handed the controller because a rebuild replaces it.
+        """
+        try:
+            return action(self.pipeline)
+        except ModelReloadNeeded:
+            logger.warning("%s: rebuilding the model, which reported itself unfit",
+                           self._model_name)
+            self.reload()
+            return action(self.pipeline)
 
     def _unload(self) -> None:
         if self._model is None:

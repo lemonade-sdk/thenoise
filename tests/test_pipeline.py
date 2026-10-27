@@ -890,21 +890,16 @@ class _Device(MemoryManager):
         return self.capacity - sum(self.weight_bytes(n) for n in self.resident())
 
 
-def _model_on(capacity: int, *, claims=(1 << 30, 1 << 30)):
-    """``capacity`` and the two ``claims`` (a pixel stage's, the sampling loop's), with
-    the weight sets at GiB scale."""
-    """A StubModel with tracked weight sets, arriving the way the real ones do.
+def _model_on(monkeypatch, capacity: int, *, reserve: int = 1 << 30):
+    """A StubModel with tracked weight sets on a device of ``capacity``.
 
-    The VAE comes up on the compute device and the other two on the offload device,
-    which is the distinction the adapters make and the manager remembers. ``claims``
-    fixes what a stage will ask for rather than leaving the test at the mercy of the
-    fleet estimate.
+    ``reserve`` pins what every stage keeps free, so the fixtures are about placement at
+    GiB scale and not at the mercy of the fleet's figure.
     """
-    model = StubModel()
-    decode, denoise = claims
-    model.denoise_activation_bytes = lambda _w, _h: denoise
-    model.activation_bytes = lambda _w, _h: decode
+    monkeypatch.setattr("thenoise.memory._RESERVE_BASE_BYTES", reserve)
+    monkeypatch.setattr("thenoise.memory._RESERVE_BYTES_PER_MEGAPIXEL", 0)
 
+    model = StubModel()
     memory = _Device(capacity)
     parts = {"dit": TrackedModule(1 << 30), "text_encoder": TrackedModule(1 << 30),
              "vae": TrackedModule(128 << 20, device="cpu")}    # 1 GiB, 1 GiB, 128 MiB
@@ -920,7 +915,7 @@ def _request_at(model, **kwargs) -> GenerateRequest:
 
 def test_a_request_leaves_the_weights_it_used_on_the_device(monkeypatch):
     """The point of the whole arrangement: no round trip between two stages."""
-    model, parts = _model_on(24 << 30)
+    model, parts = _model_on(monkeypatch, 24 << 30)
     _controller(model).generate(_request_at(model))
 
     assert parts["dit"].moves == ["cpu"], "up once, and not back down again"
@@ -929,7 +924,7 @@ def test_a_request_leaves_the_weights_it_used_on_the_device(monkeypatch):
 
 
 def test_two_requests_on_a_cached_prompt_upload_the_dit_once(monkeypatch):
-    model, parts = _model_on(24 << 30)
+    model, parts = _model_on(monkeypatch, 24 << 30)
     controller = _controller(model)
 
     controller.generate(_request_at(model))
@@ -939,14 +934,13 @@ def test_two_requests_on_a_cached_prompt_upload_the_dit_once(monkeypatch):
     assert parts["text_encoder"].moves == ["cpu"]
 
 
-def test_the_idle_weights_pay_for_a_stage_that_needs_the_room():
+def test_the_idle_weights_pay_for_a_stage_that_needs_the_room(monkeypatch):
     """The text encoder is finished with by the time the DiT needs the device.
 
-    Sized so the sampling claim does not fit beside encoder and DiT together, while the
-    decode's does fit beside the DiT: the weight set that has already been used is the
-    one that goes, and the one still in the loop keeps its place.
+    Sized so the room will not fit beside encoder and DiT together: leaving a stage moves
+    nothing, so it is the DiT's own entry that evicts the encoder.
     """
-    model, parts = _model_on(int(2.5 * (1 << 30)), claims=(1 << 30, 1 << 30))
+    model, parts = _model_on(monkeypatch, int(2.5 * (1 << 30)))
     _controller(model).generate(_request_at(model))
 
     assert parts["text_encoder"].moves == ["cpu", "meta"]
@@ -954,18 +948,18 @@ def test_the_idle_weights_pay_for_a_stage_that_needs_the_room():
     assert model.memory.resident() == {"dit", "vae"}
 
 
-def test_a_decode_with_a_big_claim_takes_the_last_weight_set_too():
+def test_a_decode_with_a_big_claim_takes_the_last_weight_set_too(monkeypatch):
     """Nothing is exempt from a claim it cannot be met without — except the VAE running."""
-    model, parts = _model_on(3 << 30, claims=(4 << 30, 1 << 29))
+    model, parts = _model_on(monkeypatch, 3 << 30, reserve=4 << 30)
     _controller(model).generate(_request_at(model))
 
     assert parts["dit"].moves == ["cpu", "meta"]
-    assert model.memory.resident() == {"vae"}, "the VAE came up on the device to stay"
+    assert model.memory.resident() == {"vae"}, "only the VAE running the decode is exempt"
 
 
-def test_a_decode_that_ran_out_gets_the_idle_weights_off_the_device():
+def test_a_decode_that_ran_out_gets_the_idle_weights_off_the_device(monkeypatch):
     """A stage that claimed less than it needed is not the end of the image."""
-    model, parts = _model_on(24 << 30)
+    model, parts = _model_on(monkeypatch, 24 << 30)
     real_decode = model.decode
     attempts = {"n": 0}
 
@@ -983,8 +977,34 @@ def test_a_decode_that_ran_out_gets_the_idle_weights_off_the_device():
     assert model.memory.resident() == {"vae"}
 
 
-def test_a_second_oom_with_nothing_left_to_take_is_not_retried():
-    model, _ = _model_on(24 << 30)
+def test_a_prompt_that_ran_out_gets_the_idle_weights_off_the_device(monkeypatch):
+    """The stage that ran out is not always the one the device was sized for.
+
+    The second request finds the first one's DiT still aboard — residency is sticky —
+    and its encoder is the one that runs short.
+    """
+    model, parts = _model_on(monkeypatch, 24 << 30)
+    controller = _controller(model)
+    controller.generate(_request_at(model, prompt="first"))
+
+    real = model.encode_prompt
+    attempts = {"n": 0}
+
+    def once(args):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise torch.cuda.OutOfMemoryError("the encoder wanted more")
+        return real(args)
+
+    model.encode_prompt = once
+    image = controller.generate(_request_at(model, prompt="second"))
+
+    assert attempts["n"] == 2 and image.size == (64, 64)
+    assert parts["dit"].moves == ["cpu", "meta", "cpu"], "paid for, then loaded again"
+
+
+def test_a_second_oom_with_nothing_left_to_take_is_not_retried(monkeypatch):
+    model, _ = _model_on(monkeypatch, 24 << 30)
 
     def always(latents):
         raise torch.cuda.OutOfMemoryError("nothing left to give")
@@ -994,37 +1014,33 @@ def test_a_second_oom_with_nothing_left_to_take_is_not_retried():
         _controller(model).generate(_request_at(model))
 
 
-def test_a_stage_only_asks_for_the_room_it_declared():
+def test_a_stage_only_asks_for_the_room_it_declared(monkeypatch):
     """The manager never evicts on a claim the device can already satisfy."""
-    model, parts = _model_on(5 << 30)
+    model, parts = _model_on(monkeypatch, 5 << 30)
     _controller(model).generate(_request_at(model))
 
     assert parts["text_encoder"].moves == ["cpu"], "there was room for all of it"
 
 
-def test_a_stage_asks_about_the_pixels_it_will_move(monkeypatch):
-    """Each stage claims, once, at the size it really runs at."""
-    model, _ = _model_on(24 << 30)
-    asked: list[tuple[str, tuple[int, int]]] = []
-    for kind in ("activation_bytes", "denoise_activation_bytes"):
-        monkeypatch.setattr(model, kind,
-                            lambda w, h, kind=kind: (
-                                asked.append((kind.split("_")[0], (w, h))), 1 << 30)[1])
+def test_a_stage_sizes_its_room_by_the_pixels_it_moves(monkeypatch):
+    """Each stage says how big an image it runs, once, at the size it really runs at."""
+    model, _ = _model_on(monkeypatch, 24 << 30)
+    memory = model.memory
+    stage = memory.stage
+    asked: list[tuple[tuple[str, ...], int]] = []
 
+    def spy(*names, pixels):
+        asked.append((names, pixels))
+        return stage(*names, pixels=pixels)
+
+    memory.stage = spy
     _controller(model).generate(_request(width=64, height=64, upscale=True))
 
     scale = model.UPSCALE_SCALE
-    assert asked == [("activation", (64, 64)), ("denoise", (64, 64)),
-                     ("denoise", (64 * scale, 64 * scale)),
-                     ("activation", (64 * scale, 64 * scale))]
-
-
-def test_the_stage_claim_is_a_floor_plus_a_slope():
-    """Both terms live once, in the model base; the claim is arithmetic on them."""
-    from thenoise.models import base
-
-    model = StubModel()
-    slope, floor = base._STAGE_BYTES_PER_MEGAPIXEL, base._STAGE_FLOOR_BYTES
-    assert model.activation_bytes(1000, 1000) == floor + slope
-    assert model.activation_bytes(2000, 2000) == floor + 4 * slope
-    assert model.activation_bytes(0, 0) == floor, "the fixed part is the whole claim at nil"
+    target = (64 * scale) ** 2
+    assert asked == [(("text_encoder",), 64 * 64),
+                     (("dit",), 64 * 64),
+                     (("dit", "vae"), target),
+                     (("vae",), target)], (
+        # The refine holds the VAE too: a latent upscale can be a round trip through it.
+        "the tail sizes itself by the final image")

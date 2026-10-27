@@ -637,7 +637,7 @@ class StubModel(DiffusionModel):
             config=config
             or ModelConfig(
                 dit_path="dit", vae_path="vae", text_encoder_path="te",
-                device="cpu", dtype=torch.float32, lora_dir=lora_dir,
+                offload_device="cpu", device="cpu", dtype=torch.float32, lora_dir=lora_dir,
             )
         )
         if capabilities is not None:

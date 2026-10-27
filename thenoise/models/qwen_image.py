@@ -73,18 +73,18 @@ class QwenImageModel(DiffusionModel):
 
         logger.info("Loading Qwen-Image DiT from %s", config.dit_path)
         self.dit = qwen_models.load_qwen_image_dit(
-            config.dit_path, device=self.offload_device, dtype=config.dtype
+            config.dit_path, device=self._load_target(config.dit_path), dtype=config.dtype
         )
 
         tokenizer_dir = QWEN25_TOKENIZER_CONFIG_DIR
         logger.info("Loading Qwen2.5-VL text encoder from %s", config.text_encoder_path)
         self.text_encoder = load_qwen2_5_vl_model(
-            config.text_encoder_path, dtype=config.dtype, device=self.offload_device
+            config.text_encoder_path, dtype=config.dtype, device=self._load_target(config.text_encoder_path)
         )
         self.tokenizer = load_qwen2_tokenizer(tokenizer_dir)
         self.vl_processor = load_qwen2_5_vl_processor(self.tokenizer)
 
-        self.vae = load_qwen_vae(self.vae_path, device=self.device)
+        self.vae = load_qwen_vae(self.vae_path, device=self._load_target(self.vae_path))
 
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)
