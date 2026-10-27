@@ -1019,12 +1019,12 @@ def test_a_stage_asks_about_the_pixels_it_will_move(monkeypatch):
                      ("activation", (64 * scale, 64 * scale))]
 
 
-def test_the_stage_claim_grows_with_pixels():
-    """One constant, one home: the claim is that constant times the megapixels."""
+def test_the_stage_claim_is_a_floor_plus_a_slope():
+    """Both terms live once, in the model base; the claim is arithmetic on them."""
     from thenoise.models import base
 
     model = StubModel()
-    per_mpx = base._STAGE_BYTES_PER_MEGAPIXEL
-    assert model.activation_bytes(1000, 1000) == per_mpx
-    assert model.activation_bytes(2000, 2000) == 4 * per_mpx
-    assert model.activation_bytes(64, 64) == per_mpx, "a sub-megapixel stage has a floor"
+    slope, floor = base._STAGE_BYTES_PER_MEGAPIXEL, base._STAGE_FLOOR_BYTES
+    assert model.activation_bytes(1000, 1000) == floor + slope
+    assert model.activation_bytes(2000, 2000) == floor + 4 * slope
+    assert model.activation_bytes(0, 0) == floor, "the fixed part is the whole claim at nil"

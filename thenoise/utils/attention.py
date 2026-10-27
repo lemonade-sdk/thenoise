@@ -33,8 +33,8 @@ class AttentionParams:
 def l_major(t: torch.Tensor) -> bool:
     """True when ``L`` is the second-innermost dimension of a ``[B, H, L, D]`` tensor.
 
-    This is the layout the fused SDPA kernels want; a transpose of a packed
-    ``[B, L, H, D]`` projection is contiguous in the plain sense but not ``L``-major.
+    The layout the fused SDPA kernels want; a transpose of a packed ``[B, L, H, D]``
+    projection is contiguous in the plain sense but not ``L``-major.
     """
     return t.dim() == 4 and t.stride(-1) == 1 and t.stride(-2) == t.size(-1)
 
@@ -44,13 +44,10 @@ def uniform_layout(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Put ``q``/``k``/``v`` in the ``L``-major layout SDPA's fast kernels require.
 
-    The kernels pick their code path from the input strides and a straggler in
-    packed order costs an order of magnitude on gfx1151 at 16k tokens (32.6 TFLOPS
-    all ``L``-major, 5.4 with one packed tensor, 1.7 all packed). Blocks hand over
-    ``v`` as a transpose of its packed projection and, when compiled, possibly q/k
-    too, so the trio must be normalised on every call.
-
-    Already-``L``-major tensors copy nothing, and a segment's offset ``q`` keeps the
+    The kernels pick their code path from the input strides, and a straggler in packed
+    order costs an order of magnitude. Blocks hand over ``v`` as a transpose of its packed
+    projection and, when compiled, possibly q/k too, so the trio is normalised on every
+    call. Already-``L``-major tensors copy nothing, and a segment's offset ``q`` keeps the
     strides of the buffer it slices.
     """
     if not l_major(q):
@@ -69,10 +66,9 @@ MIN_TILE_ROWS = 64            # thinner than this a tile is launch overhead, not
 def score_tile_rows(n: int) -> int:
     """Query rows to score at once for an ``N x N`` score matrix. ``n`` means: all of it.
 
-    A row costs ``2N`` bytes since the probabilities overwrite the scores, so the
-    ``4N`` divisor leaves every tile at half of ``SCORE_TILE_BYTES``, and tiling engages
-    at half the token count the limit suggests. Halving rows back would spend the same
-    bytes for half the launches; the footprints decided for the saving.
+    A row costs ``2N`` bytes since the probabilities overwrite the scores, so the ``4N``
+    divisor leaves every tile at half of ``SCORE_TILE_BYTES`` and tiling engages at half the
+    token count the limit suggests: the footprints were taken for the launches.
     """
     if 4 * n * n <= SCORE_LIMIT_BYTES:
         return n
@@ -90,10 +86,8 @@ def single_head_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     math backend they fall back to costs several times these two matmuls.
 
     Both paths write the probabilities over the scores they came from: the same row
-    operation, and a whole score matrix less — 0.5 GiB on an untiled 16384-token grid,
-    one tile per call above that, bit-identical on the machines tried. ``out=`` aliasing
-    is not an ATen promise; were it ever dropped, the answer stays correct and only the
-    footprint returns.
+    operation, a whole score matrix less. ``out=`` aliasing is not an ATen promise — were it
+    ever dropped, the answer stays correct and only the footprint returns.
     """
     n, embed = q.shape[-2], q.shape[-1]
     scale = math.sqrt(embed)

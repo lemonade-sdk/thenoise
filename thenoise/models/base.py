@@ -52,13 +52,19 @@ logger = logging.getLogger(__name__)
 # peak (denoise, VAE decode) plus the pipeline cache. ``--offload-device`` forces it.
 _RESIDENT_VRAM_FRACTION = 0.6
 
-# What one stage of a request asks of that headroom per megapixel of pixels, for the
-# residency decision `MemoryManager.stage` makes before it runs. Measured on gfx1151 at
-# 2048x2048 with the aliased softmax the decoders use now: the VAE's peak sits near
-# 0.7 GiB/Mpx for most codecs and 1.2 for the widest, and no denoise peak has been
-# measured at all. A stage that claims too little gets the device handed back mid-run,
-# so this is above every figure observed.
-_STAGE_BYTES_PER_MEGAPIXEL = 1_500_000_000
+# What one stage of a request asks of that headroom, for the residency decision
+# `MemoryManager.stage` makes before it runs: a part the latency machinery holds at any
+# size (tiles, halos, feature caches) plus a part proportional to the pixels.
+#
+# Both are the worst case across codecs of a least-squares fit to the decode peaks in
+# bench-scripts/snapshots/vae-gfx1151-baseline-linux.json, which reproduces every codec to
+# 4%; the same fit without the fixed part is off by up to 51%, mostly by under-claiming
+# small images. Those peaks include each codec's own weights, so the claim also sits above
+# the transient alone: at 2048x2048 it runs 1.0x the widest codec's need and 3.6x the
+# cheapest one's. A stage that claims too little gets the device handed back mid-run.
+# No denoise peak has been measured, so the sampling loop borrows these two figures.
+_STAGE_FLOOR_BYTES = 967 << 20
+_STAGE_BYTES_PER_MEGAPIXEL = 1_015_000_000
 
 
 @dataclass
@@ -490,21 +496,18 @@ class DiffusionModel(ABC):
     def activation_bytes(self, width: int, height: int) -> int:
         """What a stage moving this many pixels needs beside the weights it runs on.
 
-        The claim a stage makes on the device, which is how a codec tells the residency
-        policy what it actually costs: an over-estimate costs a weight set a round trip,
-        an under-estimate costs the run. Overridable per codec once its own peak is
-        measured; the pipeline asks at the final resolution, because whatever the device
-        holds at the end of a request it holds through the tail that follows.
+        An over-estimate costs a weight set a round trip, an under-estimate costs the
+        run. Overridable per codec once its own peak is measured. The pipeline asks at
+        the final resolution: whatever the device holds at the end of a request it holds
+        through the tail that follows.
         """
-        mpx = max(1.0, width * height / 1_000_000)   # a small stage still has a floor
-        return int(_STAGE_BYTES_PER_MEGAPIXEL * mpx)
+        return _STAGE_FLOOR_BYTES + int(_STAGE_BYTES_PER_MEGAPIXEL * width * height / 1e6)
 
     def denoise_activation_bytes(self, width: int, height: int) -> int:
-        """The sampling loop's claim. The fleet figure, until that loop is measured.
-
-        Its peak really follows token count and head width rather than the pixel count
-        of a VAE's feature maps, so a codec that knows better overrides this and not
-        `activation_bytes`.
+        """The sampling loop's claim: the pixel-stage figures, borrowed, because that
+        loop has never been measured. Its peak follows token count and head width rather
+        than the pixel count of a VAE's feature maps, so a codec that knows better
+        overrides this and not ``activation_bytes``.
         """
         return self.activation_bytes(width, height)
 

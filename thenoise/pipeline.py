@@ -333,8 +333,8 @@ class PipelineController:
                         ]
                     self._cache.reference_store(ref_key, ref_latents)
 
-            # Stage 1: prompt conditioning — text encoder only. What it really works
-            # over is the prompt, and the fleet's per-pixel figure bounds that.
+            # Stage 1: prompt conditioning — text encoder only, bounded by the fleet's
+            # per-pixel figure rather than measured, since it works over the prompt.
             if self._cache.prompt_hit(prompt_key):
                 cond = self._cache.prompt_get()
             else:
@@ -392,9 +392,8 @@ class PipelineController:
                 width: int, height: int) -> torch.Tensor:
         """Decode over the whole device, retrying once if the claim was still short.
 
-        The retry is the reason the estimate can be an estimate: a stage that asked for
-        less than it needed takes back whatever the finished stages left on the device
-        and runs again, instead of losing the image.
+        The retry is what lets the claim be an estimate: a stage that asked for less than
+        it needed takes what the finished stages left and runs again.
         """
         with memory.stage("vae", activations=model.activation_bytes(width, height)):
             try:

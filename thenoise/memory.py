@@ -1,35 +1,30 @@
 """Device placement / residency manager for a model's swappable components.
 
 A ``DiffusionModel`` owns exactly one ``MemoryManager`` and registers its heavy
-components with it (the DiT, the text encoder, the VAE). Callers do not say where a
-component goes; a stage says what it runs on and how much room it needs,
+components (DiT, text encoder, VAE) with it. A stage says what it runs on and how much
+room it needs; the manager decides where everything else is:
 
     with memory.stage("vae", activations=model.activation_bytes(width, height)):
         pixels = model.decode(latents)
 
-and the manager puts those components on the compute device, displacing the ones no
-stage holds when they do not fit beside them.
+Three rules hold the device coherent:
 
-Residency is what things reach and stay in, not something anybody grants: leaving a
-stage moves nothing, and a component gives up its space only when the next request
-cannot be satisfied without it. What bounds that is the hold: a component a stage is
-running never moves, so no stage can lose the weights under itself, and everything
-else is available to whoever asks next. ``squeeze`` is the same statement from a stage
-that ran out anyway — hand over the device except what I am holding.
+* **A held component never moves**, so a stage cannot lose the weights under itself;
+  everything else on the device is offered up when a stage needs the room.
+* **Leaving a stage moves nothing.** A component gives up space only when the next request
+  cannot be satisfied without it, so a move is paid for once.
+* **A component that came up on the compute device is fixed there** (``register``) — the
+  adapters build their VAEs that way and their DiTs on the offload device, which is the one
+  fact separating small always-needed weights from bulk. Fixity stops a VAE being traded
+  away for one claim and uploaded again for the next.
 
-Registering distinguishes the two kinds of weight by where they came up: a component
-already on the compute device when it is registered is *fixed* there (every adapter
-builds its VAE that way, and the pipeline cache lives beside it), and the rest join the
-swappable set. Fixity is what keeps a small always-needed component from being traded
-away for a request that will want it back a moment later.
+``squeeze`` is that policy stated by a stage that ran out anyway: hand over the device
+except what I am holding. When ``offload_device == load_device`` (resident mode) every move
+is a no-op.
 
-When ``offload_device == load_device`` (resident mode) every move is a no-op. Only
-*weights and parameters* are managed here; activations are heard of as a stage's
-``activations`` figure and owned by the pipeline cache.
-
-Registering a component also freezes it (eval mode + ``requires_grad_(False)``), so
-the engine's inference-only contract is stated at the one choke point every
-adapter's weights pass through.
+Only weights are tracked; activations are heard of as a stage's figure and owned by the
+pipeline cache. Registering freezes the module, stating the inference-only contract at the
+choke point every adapter's weights pass through.
 """
 from __future__ import annotations
 
@@ -79,9 +74,8 @@ class MemoryManager:
     def register(self, name: str, module: Optional[nn.Module]) -> None:
         """Register ``module`` under ``name``, freezing it and noting its residency.
 
-        Coming up on the compute device is also what fixes a component there: the
-        adapters load a VAE directly and a DiT or encoder on the offload device, so
-        this is the one place that knows which is which.
+        Where a component came up decides whether it is fixed, and this is the one place
+        that knows which is which.
         """
         if module is not None:
             freeze(module)
@@ -102,19 +96,12 @@ class MemoryManager:
     # ------------------------------------------------------------ placement
     @contextmanager
     def stage(self, *names: str, activations: int) -> Iterator[None]:
-        """Run a stage that needs ``names`` on the device plus ``activations`` bytes.
+        """Run a stage needing ``names`` on the device, plus ``activations`` bytes of room.
 
-        The one thing a caller says about placement. The named components are held for
-        the duration and are never displaced, so a stage cannot lose the weights under
-        itself; everything else on the device is offered up if the stage needs it.
-        Nothing moves on the way out.
-
-        ``activations`` is required because it is the one figure a component cannot
-        account for itself: its weights are known, what they allocate while running is
-        not. With no names it is still a claim on room, which is all a consumer that
-        owns its own weights has to say. A stage that names a component and claims
-        nothing would fill the device to the last byte and fail in the first block, so
-        every stage carries a figure even where it is only a bound.
+        Required ``activations`` is deliberate: weights are knowable, what they allocate
+        while running is not, and a stage that named a component and claimed nothing
+        would fill the device to the last byte. With no names it is a claim on room
+        alone, which is all a consumer that owns its weights has to say.
         """
         self._held.update(names)
         try:
@@ -126,17 +113,15 @@ class MemoryManager:
     def ensure(self, *names: str) -> None:
         """Move each named component to the load device (no-op if already there).
 
-        `stage` is what a caller wants; this is the placement underneath it, without a
-        hold, for the odd consumer with no stage to declare.
+        Placement without a hold; ``stage`` is what a caller with a lifetime wants.
         """
         self._place(names, 0)
 
     def offload(self, *names: str) -> None:
         """Move each named component to the offload device and free compute memory.
 
-        Held and fixed components stay: the first is somebody's running stage, the
-        second was built onto the compute device on purpose. In resident mode this is a
-        no-op that simply marks the components resident.
+        Held and fixed components stay put. In resident mode this only marks them
+        resident.
         """
         if self._load == self._offload:
             self._resident.update(names)
@@ -157,9 +142,7 @@ class MemoryManager:
     def squeeze(self, *, held: Union[str, Sequence[str]] = ()) -> int:
         """Give back every swappable component nobody is holding; return the bytes freed.
 
-        For a stage that ran out of memory anyway: it names what it is running, and the
-        rest of the device is handed over. Zero means there was nothing left to take, so
-        the caller knows a retry would fail the same way.
+        Zero means nothing was left to take, so the caller knows a retry fails alike.
         """
         keep = {held} if isinstance(held, str) else set(held)
         before = self.free_bytes()
@@ -173,8 +156,8 @@ class MemoryManager:
     def free_bytes(self) -> Optional[int]:
         """Bytes of the load device not held by live tensors, None if it will not say.
 
-        Allocator bookkeeping rather than the driver's, so a block another stage
-        released counts as available even before ``empty_cache`` hands it back.
+        Allocator bookkeeping, not the driver's: a block another stage released counts
+        as available before ``empty_cache`` hands it back.
         """
         if self._load.type != "cuda":
             return None
