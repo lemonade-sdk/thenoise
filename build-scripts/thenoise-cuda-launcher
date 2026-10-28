@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Use bundled Python/CUDA libraries; the host provides the NVIDIA driver.
+set -euo pipefail
+BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+unset PYTHONHOME PYTHONPATH VIRTUAL_ENV
+export CC="$BIN_DIR/thenoise-cc"
+export CXX="$BIN_DIR/thenoise-cxx"
+exec "$BIN_DIR/python3" -s -m thenoise "$@"

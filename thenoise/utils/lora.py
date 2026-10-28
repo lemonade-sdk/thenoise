@@ -125,6 +125,28 @@ def _projection_scale(lora_sd: Dict[str, torch.Tensor], alpha_key: str, rank: in
     return 1.0 if alpha is None else float(alpha) / max(rank, 1)
 
 
+def _stack_prefixes(lora_sd: Mapping[str, torch.Tensor], parts: Tuple[str, ...]) -> List[str]:
+    """Every prefix carrying at least one of ``parts``, separator included, sorted.
+
+    A part only counts as a whole path segment, so an already-fused
+    ``...proj.qkv.lora_A.weight`` is not read as part ``v`` under prefix ``...proj.qk``
+    (which would re-fuse it into ``...proj.qkqkv`` and leave it unmatched). The
+    underscore counts as a boundary too, because that is how sd-scripts' ``lora_unet_``
+    names spell the parts.
+    """
+    prefixes = set()
+    for key in lora_sd:
+        if not key.endswith(_FACTOR_A):
+            continue
+        stem = key[: -len(_FACTOR_A)]
+        for part in parts:
+            if stem == part:
+                prefixes.add("")
+            elif any(stem.endswith(f"{sep}{part}") for sep in (".", "_")):
+                prefixes.add(stem[: -len(part)])
+    return sorted(prefixes)
+
+
 def _fuse_stacked(
     lora_sd: Dict[str, torch.Tensor],
     parts: Tuple[str, ...],
@@ -140,15 +162,21 @@ def _fuse_stacked(
 
     Parts the LoRA skips get zero rows in ``B_fused``, which needs the parts to
     share one output width; anything that cannot be laid out unambiguously is logged
-    and left untouched.
+    and left untouched. So is a prefix that already carries ``fused`` factors: the
+    LoRA shipped both spellings and re-stacking one onto the other would be a guess.
     """
-    ends = tuple(f"{p}{_FACTOR_A}" for p in parts)
-    prefixes = sorted({k[: -len(e)] for k in lora_sd for e in ends if k.endswith(e)})
+    prefixes = _stack_prefixes(lora_sd, parts)
     if not prefixes:
         return lora_sd
 
     new_sd = dict(lora_sd)
     for prefix in prefixes:
+        if any(f"{prefix}{fused}{f}" in new_sd for f in (_FACTOR_A, _FACTOR_B)):
+            logger.warning(
+                "LoRA %s already carries fused %s factors; skipping %s fusion",
+                prefix, fused, fused,
+            )
+            continue
         factors = {
             p: (new_sd.get(f"{prefix}{p}{_FACTOR_A}"), new_sd.get(f"{prefix}{p}{_FACTOR_B}"))
             for p in parts

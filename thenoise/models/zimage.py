@@ -78,7 +78,7 @@ class ZImageModel(DiffusionModel):
         )
 
         # Flux VAE (decoder-only).
-        self.vae = load_flux_vae(self.vae_path, device=self.device, dtype=self.dtype)
+        self.vae = load_flux_vae(self.vae_path, device=self.device)
 
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)

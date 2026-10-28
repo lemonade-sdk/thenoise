@@ -4,11 +4,6 @@
 let currentUrl = null;
 let currentMeta = null;
 
-bindRange('film_grain', 'film_grain_val');
-bindRange('sharpening', 'sharpening_val');
-bindRange('edit_film_grain', 'edit_film_grain_val');
-bindRange('edit_sharpening', 'edit_sharpening_val');
-
 function updateFinalRes(prefix) {
   if (prefix === 'edit_') { updateEditFinalRes(); return; }
   const w = parseInt($('width').value, 10);
@@ -98,9 +93,7 @@ function applySettings(prefix, meta) {
     $(p + 'upscale_type').value = 'refined';
   }
   if (meta.upscale_type) $(p + 'upscale_type').value = meta.upscale_type;
-  if (meta.qwen_vae_enhance != null) $(p + 'qwen_vae_enhance').checked = meta.qwen_vae_enhance;
-  if (meta.film_grain != null) setRange(p + 'film_grain', p + 'film_grain_val', meta.film_grain);
-  if (meta.sharpening != null) setRange(p + 'sharpening', p + 'sharpening_val', meta.sharpening);
+  restorePostprocess(p, meta);
   if (Array.isArray(meta.lora_specs)) {
     $(p + 'lora_specs').value = meta.lora_specs.join('\n');
   }
@@ -256,6 +249,7 @@ document.addEventListener('click', e => {
 
 loadLoras();
 loadUpscalers();
+loadPostprocess();
 updateUpscaleMax('');
 updateUpscaleMax('edit_');
 
@@ -325,7 +319,6 @@ let uInputDims = null;     // {w, h} of the input
 let uOutUrl = null;        // object URL of the upscaled result
 let uOutMeta = null;       // upscale metadata
 
-const dzName = $('dz_name');
 function loadUpscaleFile(file) {
   if (!file || !file.type.startsWith('image/')) return;
   const reader = new FileReader();
@@ -339,13 +332,10 @@ function loadUpscaleFile(file) {
       if (uOutUrl) { URL.revokeObjectURL(uOutUrl); uOutUrl = null; }
       uOutMeta = null;
       setStageActions($('udownload'), $('uinfo_btn'), false);
-      $('usingle_img').src = dataUrl;
-      $('usingle').classList.remove('hidden');
-      $('uresult').classList.add('hidden');
-      $('uplaceholder').style.display = 'none';
-      dzName.textContent = file.name;
-      dzName.style.display = 'block';
-      $('dz_hint').style.display = 'none';
+      showInputPreview(dataUrl, file, {
+        singleImg: 'usingle_img', single: 'usingle', result: 'uresult',
+        placeholder: 'uplaceholder', dzName: 'dz_name', dzHint: 'dz_hint',
+      });
       $('upscale').disabled = false;
       applyUpscalerDefaults();
     };
@@ -379,15 +369,14 @@ $('u_factor').addEventListener('input', updateUpscaleTabFactor);
 $('upscaler_model').addEventListener('change', applyUpscalerDefaults);
 
 function renderUpscaleInfo(meta) {
-  const grid = $('info_modal_grid');
-  grid.innerHTML = '';
-  addRow(grid, 'Input resolution', uInputDims ? uInputDims.w + ' × ' + uInputDims.h : '—');
+  const rows = [['Input resolution', uInputDims ? uInputDims.w + ' × ' + uInputDims.h : '—', '']];
   const up = $('u_img');
-  if (up.naturalWidth) addRow(grid, 'Output resolution', up.naturalWidth + ' × ' + up.naturalHeight);
+  if (up.naturalWidth) rows.push(['Output resolution', up.naturalWidth + ' × ' + up.naturalHeight, '']);
   if (meta) {
-    addRow(grid, 'Upscaler model', meta.upscaler_model);
-    addRow(grid, 'Upscale factor', meta.upscale_factor);
+    rows.push(['Upscaler model', meta.upscaler_model, '']);
+    rows.push(['Upscale factor', meta.upscale_factor, '']);
   }
+  renderInfoRows(rows);
 }
 
 $('upscale').addEventListener('click', () => {
@@ -414,11 +403,7 @@ $('upscale').addEventListener('click', () => {
     onSuccess: async (blob) => {
       if (uOutUrl) URL.revokeObjectURL(uOutUrl);
       uOutUrl = URL.createObjectURL(blob);
-      const up = $('u_img');
-      up.src = uOutUrl;
-      $('usingle').classList.add('hidden');
-      $('uplaceholder').style.display = 'none';
-      $('uresult').classList.remove('hidden');
+      showOutputPreview('usingle', 'uresult', 'uplaceholder', 'u_img', uOutUrl);
       setStageActions($('udownload'), $('uinfo_btn'), true);
       uOutMeta = await decodeMeta(blob, 'upscale_data');
       renderUpscaleInfo(uOutMeta);
@@ -553,7 +538,7 @@ $('edit_btn').addEventListener('click', () => {
       eOutUrl = URL.createObjectURL(blob);
       showResult('e_img', 'eplaceholder', eOutUrl);
       setStageActions($('edownload'), $('einfo_btn'), true);
-      eOutMeta = await decodeMeta(blob, 'generation_data');
+      eOutMeta = await decodeMeta(blob, 'edit_data');
       renderInfo(eOutMeta);
       editHist.add(eOutUrl, eOutMeta);
     },

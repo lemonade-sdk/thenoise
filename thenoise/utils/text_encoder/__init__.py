@@ -1,10 +1,11 @@
 """Shared text-encoder / tokenizer loading for the DiT adapters.
 
 The vendored tokenizer data lives under ``configs/``: ``qwen25_tokenizer``, the
-single Qwen BPE tokenizer shared by all Qwen variants (the vocab, merges,
-normalizer, pre/post-processor and decoder are byte-identical across variants; only
-a few ``tokenizer_config.json`` fields differ and are applied as overrides), and
-``t5`` for the LLM-adapter target tokens.
+single Qwen BPE tokenizer shared by the Qwen2/Qwen3 variants (the vocab, merges,
+normalizer, pre/post-processor and decoder are byte-identical across them; only a
+few ``tokenizer_config.json`` fields differ and are applied as overrides),
+``qwen35_tokenizer`` for Qwen3.5 (its own vocabulary, so it cannot share the file),
+and ``t5`` for the LLM-adapter target tokens.
 
 The module also carries the chat-template pieces the conditioners share: the
 system-prompt/suffix pair and :func:`compute_drop_idx`.
@@ -29,6 +30,8 @@ from transformers import (
     Qwen3VLForConditionalGeneration,
     Qwen3VLProcessor,
     Qwen3VLVideoProcessor,
+    Qwen3_5Config,
+    Qwen3_5ForConditionalGeneration,
     T5TokenizerFast,
 )
 
@@ -40,10 +43,12 @@ from thenoise.utils.qwen_configs import (
     QWEN3_0_6B_CONFIG,
     QWEN3_VL_4B_INSTRUCT_CONFIG,
     QWEN3_VL_PREPROCESSOR_CONFIG,
+    QWEN35_9B_CONFIG,
 )
 
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
 QWEN25_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "qwen25_tokenizer")
+QWEN35_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "qwen35_tokenizer")
 T5_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "t5")
 
 # The shared ``qwen25_tokenizer`` config is the Qwen3 one; the fields that differ
@@ -196,6 +201,33 @@ def load_qwen3_text_encoder(
     return qwen3.model, tokenizer
 
 
+def load_qwen35_model(
+    path: str,
+    *,
+    dtype: Optional[torch.dtype],
+    device: Union[str, torch.device],
+    config: Optional[dict] = None,
+) -> Qwen3_5ForConditionalGeneration:
+    """Build a Qwen3.5 text encoder (9B by default) and load a local safetensors into it.
+
+    The checkpoint is already in the ``Qwen3_5ForConditionalGeneration`` layout, so it
+    needs no key map. The ``mtp.`` speculative-decoding block is dropped; the vision
+    tower loads and never runs.
+    """
+    qwen35_config = Qwen3_5Config.from_dict(config or QWEN35_9B_CONFIG)
+    with init_empty_weights():
+        model = Qwen3_5ForConditionalGeneration._from_config(qwen35_config)
+        del model.lm_head
+        replace_linears(model)
+
+    load_text_encoder_weights(
+        model, path, device=device, dtype=dtype, drop_keys=("mtp.",)
+    )
+    if dtype is not None:
+        model.to(dtype)
+    return model
+
+
 def load_qwen3_vl_model(
     path: str,
     *,
@@ -272,6 +304,11 @@ def load_qwen2_tokenizer(
     )
 
 
+def load_qwen35_tokenizer(tokenizer_dir: Optional[str] = None, *, overrides: Optional[dict] = None):
+    """Load the Qwen3.5 tokenizer."""
+    return load_tokenizer(tokenizer_dir or QWEN35_TOKENIZER_CONFIG_DIR, overrides=overrides)
+
+
 def load_qwen3_vl_tokenizer(
     tokenizer_dir: Optional[str] = None, *, max_length: int, overrides: Optional[dict] = None
 ) -> tuple:
@@ -282,16 +319,24 @@ def load_qwen3_vl_tokenizer(
     return tokenizer, tokenizer
 
 
-def load_qwen3_vl_processor(tokenizer):
+def load_qwen3_vl_processor(tokenizer, *, size: Optional[dict] = None):
     """Build a Qwen3-VL processor (image preprocessor + the same tokenizer) locally.
 
     The image config is vendored (``QWEN3_VL_PREPROCESSOR_CONFIG``) so no
     ``preprocessor_config.json`` is fetched. The video processor is built with its
     defaults: this engine feeds the encoder single images only, but the processor
     requires one.
+
+    ``size`` replaces the vendored grid limits, which are areas under the
+    ``shortest_edge``/``longest_edge`` names: a model trained to see a narrower range
+    of pixels gets its own, and the ``smart_resize`` round trip cannot quietly move an
+    image off the grid it was pre-sized to.
     """
+    image_config = dict(QWEN3_VL_PREPROCESSOR_CONFIG)
+    if size is not None:
+        image_config["size"] = dict(size)
     return Qwen3VLProcessor(
-        image_processor=Qwen2VLImageProcessor.from_dict(QWEN3_VL_PREPROCESSOR_CONFIG),
+        image_processor=Qwen2VLImageProcessor.from_dict(image_config),
         tokenizer=tokenizer,
         video_processor=Qwen3VLVideoProcessor(),
     )
@@ -350,6 +395,8 @@ __all__ = [
     "load_tokenizer",
     "load_qwen3_model",
     "load_qwen3_text_encoder",
+    "load_qwen35_model",
+    "load_qwen35_tokenizer",
     "load_qwen3_vl_model",
     "load_qwen2_5_vl_model",
     "load_qwen3_tokenizer",
@@ -359,6 +406,7 @@ __all__ = [
     "load_qwen2_5_vl_processor",
     "load_t5_tokenizer",
     "QWEN25_TOKENIZER_CONFIG_DIR",
+    "QWEN35_TOKENIZER_CONFIG_DIR",
     "T5_TOKENIZER_CONFIG_DIR",
     "QWEN_VL_SYSTEM_PROMPT",
     "QWEN_VL_PROMPT_SUFFIX",

@@ -3,7 +3,7 @@
 The tests cover the 16x encode/decode geometry, the documented latent
 normalisation, the exact single-frame folds of the reference's
 ``AvgDown3D``/``DupUp3D`` shortcuts (checked against a verbatim copy of the
-official 5D code run on a one-frame input), the row-strip conv path, and the
+official 5D code run on a one-frame input), the row-strip walk it borrows, and the
 checkpoint loader's weight collapse + architecture inference for BOTH shipped
 variants (48ch RGB/patchify-2 and 64ch RGBA/patchify-1). A reduced-channel
 instance keeps everything sub-second; the shipped constants are asserted on the
@@ -18,7 +18,7 @@ import torch.nn.functional as F
 
 from conftest import write_safetensors
 from thenoise.vae import AutoencoderKLWan22, load_wan22_vae
-from thenoise.vae import wan22 as wan22_module
+import thenoise.vae.fused as fused_module
 from thenoise.vae.wan22 import (
     LATENT_STATS,
     QWEN_IMAGE21_LATENTS_MEAN,
@@ -28,7 +28,7 @@ from thenoise.vae.wan22 import (
     Wan22AvgDown,
     Wan22DupUp,
     Wan22ResidualBlock,
-    strip_apply,
+    Wan22UpBlock,
     unpatchify,
 )
 
@@ -184,44 +184,6 @@ def test_qwen21_normalises_with_its_own_stats(tiny_qwen21):
 # ------------------------------------------------------------------ row stripping
 
 
-def test_strip_apply_is_a_no_op_below_the_threshold():
-    conv = nn.Conv2d(4, 4, 3, padding=1).eval().requires_grad_(False)
-    x = torch.randn(1, 4, 8, 8)
-    assert strip_apply(conv, x) is not None
-    calls = []
-    strip_apply(lambda s: calls.append(s.shape[-2]) or conv(s), x)
-    assert calls == [8]  # one whole call, no strips
-
-
-def test_strip_apply_matches_the_direct_conv(monkeypatch):
-    """Forced tiny strips must give the same result as one full call."""
-    conv = nn.Conv2d(4, 6, 3, padding=1).eval().requires_grad_(False)
-    x = torch.randn(1, 4, 40, 7)
-    monkeypatch.setattr(wan22_module, "STRIP_ELEMS", 256)
-    assert torch.allclose(strip_apply(conv, x, halo=1), conv(x), atol=1e-5)
-
-
-def test_strip_apply_matches_the_direct_upsample(monkeypatch):
-    fn = nn.Sequential(
-        nn.Upsample(scale_factor=2, mode="nearest-exact"), nn.Conv2d(4, 4, 3, padding=1)
-    ).eval().requires_grad_(False)
-    x = torch.randn(1, 4, 24, 5)
-    monkeypatch.setattr(wan22_module, "STRIP_ELEMS", 128)
-    assert torch.allclose(strip_apply(fn, x, scale=2, halo=1), fn(x), atol=1e-5)
-
-
-def test_strip_apply_out_adds_in_place(monkeypatch):
-    x = torch.randn(1, 4, 24, 5)
-    out = torch.full((1, 4, 48, 5), 3.0)
-    monkeypatch.setattr(wan22_module, "STRIP_ELEMS", 128)
-    got = strip_apply(
-        lambda s: torch.ones(s.shape[0], s.shape[1], s.shape[2] * 2, s.shape[3]),
-        x, scale=2, halo=0, out=out,
-    )
-    assert got is out
-    assert torch.equal(out, torch.full_like(out, 4.0))
-
-
 def test_residual_block_is_strip_invariant():
     """The stripped block (its normal path) equals the plain sequential one."""
     blk = nn.Sequential(*[Wan22ResidualBlock(6, 8)]).eval().requires_grad_(False)
@@ -233,13 +195,52 @@ def test_residual_block_is_strip_invariant():
     assert torch.allclose(blk(x), ref, atol=1e-5)
 
 
+def test_a_width_preserving_block_returns_the_tensor_it_read(monkeypatch):
+    """The block's return identity is what keeps a level at one feature map, not one per block."""
+    monkeypatch.setattr(fused_module, "STRIP_ELEMS", 1 << 8)
+    blk = Wan22ResidualBlock(6, 6).float().eval().requires_grad_(False)
+    x = torch.randn(1, 6, 12, 5)
+    with torch.no_grad():
+        plain = x.clone()
+        for layer in blk.residual:
+            plain = layer(plain)
+        want = plain + x
+        assert blk(x) is x
+    assert torch.allclose(x, want, atol=1e-5)
+
+    wide = Wan22ResidualBlock(6, 9).float().eval().requires_grad_(False)
+    with torch.no_grad():
+        got = wide(x)
+    assert got.shape == (1, 9, 12, 5) and got.data_ptr() != x.data_ptr()
+
+
+# 6 -> 6 opens with a block that updates its input in place; 6 -> 3 opens with one that
+# returns a new buffer, so the two cases differ in whether a copy is needed at all.
+@pytest.mark.parametrize("out_dim", [6, 3])
+def test_up_block_shortcut_reads_the_input_the_block_was_given(out_dim, monkeypatch):
+    """The DupUp reads the block's input after a stack that may have updated it in place.
+
+    Reading the mutated tensor is a wrong picture with no exception, and no
+    strip-invariance test can see it: both runs would read it at the same point.
+    """
+    monkeypatch.setattr(fused_module, "STRIP_ELEMS", 1 << 8)
+    blk = Wan22UpBlock(6, out_dim, num_res_blocks=1, temperal_upsample=False, upsample=True)
+    blk = blk.float().eval().requires_grad_(False)
+    x = torch.randn(1, 6, 8, 5)
+    with torch.no_grad():
+        dup = blk.avg_shortcut(x)  # the block's meaning, unoptimised
+        want = blk.upsamples(x.clone()) + dup
+        got = blk(x)
+    assert torch.allclose(got, want, atol=1e-5)
+
+
 def test_encode_and_decode_are_strip_invariant(tiny_vae, monkeypatch):
     """Strips are a memory device, not an approximation: same numbers either way."""
     z = torch.randn(1, 4, 2, 2)
     pixels = torch.randn(1, 3, 32, 32)
     with torch.no_grad():
         ref_decode, ref_encode = tiny_vae.decode(z), tiny_vae.encode(pixels)
-        monkeypatch.setattr(wan22_module, "STRIP_ELEMS", 64)
+        monkeypatch.setattr(fused_module, "STRIP_ELEMS", 64)
         got_decode, got_encode = tiny_vae.decode(z), tiny_vae.encode(pixels)
     assert torch.allclose(got_decode, ref_decode, atol=1e-4)
     assert torch.allclose(got_encode, ref_encode, atol=1e-4)
@@ -463,6 +464,17 @@ def _as_video_state_dict(
     return out
 
 
+def test_the_wan22_ae_picks_its_own_compute_dtype(tmp_path):
+    """BF16 whatever the file held: FP16 is the one dtype this family cannot run in."""
+    video_sd = _as_video_state_dict(_tiny_vae().state_dict(), enc_flags=[False, True, True],
+                                    dec_flags=[True, True, False], dim=8, dec_dim=8)
+    path = write_safetensors(tmp_path / "wan22.safetensors", video_sd)
+
+    stats = dict(latents_mean=TINY_MEAN, latents_std=TINY_STD)
+    assert load_wan22_vae(path, device="cpu", **stats).dtype is AutoencoderKLWan22.compute_dtype
+    assert load_wan22_vae(path, device="cpu", dtype=torch.float32, **stats).dtype is torch.float32
+
+
 def test_load_wan22_vae_collapses_and_infers(tmp_path):
     source = _tiny_vae()
     video_sd = _as_video_state_dict(
@@ -472,7 +484,8 @@ def test_load_wan22_vae_collapses_and_infers(tmp_path):
     assert any(".time_conv." in k for k in video_sd)
     path = write_safetensors(tmp_path / "wan22.safetensors", video_sd)
 
-    vae = load_wan22_vae(path, device="cpu", latents_mean=TINY_MEAN, latents_std=TINY_STD)
+    vae = load_wan22_vae(path, device="cpu", dtype=torch.float32,
+                         latents_mean=TINY_MEAN, latents_std=TINY_STD)
 
     assert isinstance(vae, AutoencoderKLWan22)
     # architecture inferred from the weights
@@ -507,7 +520,8 @@ def test_load_wan22_vae_infers_the_qwen21_variant(tmp_path):
     )
     path = write_safetensors(tmp_path / "qwen21_vae.safetensors", video_sd)
 
-    vae = load_wan22_vae(path, device="cpu")  # the z_dim=64 stats are picked for us
+    # the z_dim=64 stats are picked for us
+    vae = load_wan22_vae(path, device="cpu", dtype=torch.float32)
 
     assert vae.z_dim == 64
     assert vae.dim_mult == TINY_QWEN_DIM_MULT
@@ -531,7 +545,8 @@ def test_load_wan22_vae_without_temporal_flags(tmp_path):
     video_sd = _as_video_state_dict(source.state_dict(), [False, False, False], [False, False, False], 8, 8)
     path = write_safetensors(tmp_path / "wan22_2d.safetensors", video_sd)
 
-    vae = load_wan22_vae(path, device="cpu", latents_mean=TINY_MEAN, latents_std=TINY_STD)
+    vae = load_wan22_vae(path, device="cpu", dtype=torch.float32,
+                         latents_mean=TINY_MEAN, latents_std=TINY_STD)
     for i in range(3):
         assert vae.encoder.downsamples[i].avg_shortcut.factor_t == 1
         assert vae.decoder.upsamples[i].avg_shortcut.factor_t == 1

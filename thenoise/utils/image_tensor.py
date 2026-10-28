@@ -115,6 +115,24 @@ def center_crop(image: Image.Image, width: int, height: int) -> Image.Image:
     return image.crop((left, top, left + width, top + height))
 
 
+def cover_crop(image: Image.Image, width: int, height: int) -> Image.Image:
+    """Scale ``image`` to cover ``(width, height)``, then center-crop the overhang.
+
+    The fit for an edit that has to line up with its result: nothing is stretched, and
+    whatever falls outside the frame is split evenly between the far edges.
+    """
+    if image.size == (width, height):
+        return image
+    scale = max(width / image.width, height / image.height)
+    filled = (
+        max(width, round(image.width * scale)),
+        max(height, round(image.height * scale)),
+    )
+    if filled != image.size:
+        image = image.resize(filled, Image.LANCZOS)
+    return center_crop(image, width, height)
+
+
 def resize_to_area(image: Image.Image, area: int = 384 * 384) -> Image.Image:
     """Scale a PIL image to ``area`` (area-based, aspect-preserving).
 
@@ -219,6 +237,7 @@ __all__ = [
     "pixels_to_pil",
     "resize_to_target",
     "center_crop",
+    "cover_crop",
     "resize_to_area",
     "resize_to_long_edge",
 ]

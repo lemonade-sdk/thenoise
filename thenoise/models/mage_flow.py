@@ -77,7 +77,7 @@ class MageFlowModel(DiffusionModel):
         )
 
         logger.info("Loading Mage-Flow VAE from %s", self.vae_path)
-        self.vae = load_mage_family_vae(self.vae_path, device=self.device, dtype=config.dtype)
+        self.vae = load_mage_family_vae(self.vae_path, device=self.device)
 
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)

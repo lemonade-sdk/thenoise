@@ -13,15 +13,17 @@ thenoise/                  the package
   models/                  per-model adapters (detect + DEFAULT_PREFS + sampling)
   dit/                     per-model DiT code (lumina — the shared S3-DiT core behind
                            zimage and ming_image; krea2, qwen_image, qwen_image21,
-                           anima, flux2, mage_flow)
+                           anima, flux2, flux3, mage_flow, moss_image)
   vae/                     VAE loaders (Qwen-Image, Flux, Flux.2, Wan 2.2, Mage)
   samplers/                denoising solvers (euler, er_sde)
   upscale/                 latent + pixel upscalers
+  controlmap/              control-map extractors (canny, lineart, softedge, depth, pose)
   postprocess/             grain, sharpening, Qwen-VAE enhance
   ui/                      web UI served by `serve`
   api.py / cli.py          HTTP API and CLI entry points
 scripts/                   download.py — the unified model download helper
 build-scripts/             portable bundle build, archive, GPU qualification
+docker/                    container image, entrypoint, Compose example
 tests/                     test suite (runs without real weights)
 ```
 
@@ -141,6 +143,32 @@ splits it into ≤1.9 GB parts when needed (GitHub's asset limit).
 `qualify_thenoise.sh` runs on a real GPU: import checks, model download, one
 end-to-end generation including the first-run `torch.compile`.
 
+## Building the container image
+
+[`docker/Dockerfile`](../docker/Dockerfile) builds the bundle with the same
+`build_portable.sh` and copies it onto a bare Ubuntu, so the image and the
+portable bundle cannot drift apart. Locally:
+
+```bash
+docker build -f docker/Dockerfile --build-arg GFX_ARCH=gfx1151 -t thenoise:local .
+docker compose -f docker/docker-compose.yml up -d anima
+```
+
+[`build-docker-image.yml`](../.github/workflows/build-docker-image.yml)
+publishes one image per GPU target to GHCR on every `v*` tag — a release is the
+only thing that moves the rolling `gfx<target>` tag the docs point at, while a
+manual run publishes as `edge-gfx<target>` beside it. A pull request builds
+nothing until a reviewer applies the `docker-build` label: that is how you get a
+change to the image, the bundle scripts or the package checked before merging.
+What CI can check without a GPU is the launcher coming up and `import torch`
+resolving every library the wheels expect; the real generation is
+[manual, on whatever hardware you have](docker.md).
+
+Keep them in sync when changing the bundle: `ensure_soname_symlinks` and the
+bundled `clang` are what let the container run with no ROCm and no compiler
+installed, and the image's runtime stage carries the only system libraries the
+wheels do not vendor (`libgomp1`, `libatomic1`).
+
 ## Contributing
 
 PRs are welcome - especially new model support. A model addition typically
@@ -155,6 +183,7 @@ touches:
    usage instructions
 5. **`tests/`** — detection/loading tests that run without real weights
 6. **`pyproject.toml`** — the new `thenoise.dit.<name>` package (if any)
+
 
 General rules:
 

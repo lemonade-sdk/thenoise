@@ -1,9 +1,11 @@
 #!/usr/bin/env python
-"""Say what actually moved between two ``block_bench`` snapshots.
+"""Say what actually moved between two bench snapshots.
 
-``block_bench.py`` photographs; this develops a pair of photographs and hands back the
-rows that changed. Nothing is measured here, so it runs anywhere, in seconds, on two
-JSON files.
+``block_bench.py`` and ``vae_bench.py`` photograph; this develops a pair of photographs
+and hands back the rows that changed. Nothing is measured here, so it runs anywhere, in
+seconds, on two JSON files, and it takes either tool's snapshots — they record the same
+fields per case, so one diff reads DiT blocks and one reads VAE codecs. What it will not
+do is compare a snapshot of one tool against the other.
 
 The design is all about noise. Every case carries its own scatter (``groups``, or
 ``cov_pct`` in a schema-1 snapshot), so a row only counts as slower or faster when the
@@ -13,7 +15,9 @@ counted, not printed: the useful answer from comparing two equal runs is the sen
 
 The headers are compared first. Two snapshots taken with a different ladder, torch
 build, dtype or ``--refs`` are not the same experiment, and the deltas between them are
-decoration — so they are still printed, under a warning that says as much.
+decoration — so they are still printed, under a warning that says as much. The same test
+runs per case, since ``--dtype auto`` lets one codec change dtype between snapshots: that
+row is a different experiment, so it is listed apart and counted nowhere.
 
 Usage
 -----
@@ -35,6 +39,7 @@ import sys
 
 SIGMA_FLOOR = 0.005          # a groups set with zero scatter would flag a 1 ns change
 MIN_COV_FLOOR = 0.1          # ditto for a snapshot that recorded cov_pct == 0.0
+TOOLS = ("block_bench", "vae_bench")     # the snapshot layouts this can read
 
 
 def load(path: str) -> dict:
@@ -43,8 +48,8 @@ def load(path: str) -> dict:
             snap = json.load(fh)
     except (OSError, ValueError) as exc:
         raise SystemExit(f"{path}: {exc}")
-    if snap.get("tool") != "block_bench" or not isinstance(snap.get("cases"), list):
-        raise SystemExit(f"{path}: not a block_bench snapshot")
+    if snap.get("tool") not in TOOLS or not isinstance(snap.get("cases"), list):
+        raise SystemExit(f"{path}: not a {' or '.join(TOOLS)} snapshot")
     return snap
 
 
@@ -92,7 +97,7 @@ def floor_pct(a: dict, b: dict, k: float) -> float:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Diff two block_bench snapshots.")
+    ap = argparse.ArgumentParser(description="Diff two bench snapshots.")
     ap.add_argument("before")
     ap.add_argument("after")
     ap.add_argument("--min", type=float, default=3.0, dest="sigma", metavar="K",
@@ -105,6 +110,9 @@ def main() -> None:
     args = ap.parse_args()
 
     a, b = load(args.before), load(args.after)
+    if a["tool"] != b["tool"]:
+        raise SystemExit(f"{args.before} is a {a['tool']} snapshot and {args.after} a "
+                         f"{b['tool']} one — those are different machines, not a diff")
     diffs = header_diff(a, b)
     if diffs:
         print("these snapshots were taken differently:")
@@ -115,13 +123,18 @@ def main() -> None:
     A = {c["key"]: c for c in a["cases"]}
     B = {c["key"]: c for c in b["cases"]}
     common = sorted(set(A) & set(B))
-    moved, quiet, memory, broke, fixed = [], [], [], [], []
+    moved, quiet, memory, broke, fixed, dtype_split = [], [], [], [], [], []
     for key in common:
         ra, rb = A[key], B[key]
         if ra["status"] != rb["status"]:
             (broke if rb["status"] != "ok" else fixed).append((key, rb.get("error", "")))
             continue
         if ra["status"] != "ok" or not ra.get("ms"):
+            continue
+        # Only if both sides name one: an older snapshot records no dtype per case.
+        da, db = ra.get("dtype"), rb.get("dtype")
+        if da and db and da != db:
+            dtype_split.append((key, da, db, ra, rb))
             continue
         delta = 100 * (rb["ms"] - ra["ms"]) / ra["ms"]
         noise = floor_pct(ra, rb, args.sigma)
@@ -133,13 +146,13 @@ def main() -> None:
             memory.append((dgib, key, ra, rb))
 
     def line(delta: float, noise: float, key: str, ra: dict, rb: dict, mark: str = "") -> None:
-        print(f"  {key:44s} {ra['ms']:9.2f} {rb['ms']:9.2f} {delta:+8.1f} {noise:5.1f} "
-              f"{ra['tflops']:6.1f} -> {rb['tflops']:<6.1f} "
+        print(f"  {key:44s} {ra.get('dtype') or '':>4s} {ra['ms']:9.2f} {rb['ms']:9.2f} "
+              f"{delta:+8.1f} {noise:5.1f} "
               f"{ra['peak_gib']:5.2f} -> {rb['peak_gib']:<5.2f} {mark}".rstrip())
 
     def header() -> None:
-        print(f"  {'case':44s} {'before':>9s} {'after':>9s} {'Δ%':>8s} {'floor':>5s} "
-              f"{'TFLOPS':>16s} {'GiB':>14s}")
+        print(f"  {'case':44s} {'dt':>4s} {'before':>9s} {'after':>9s} {'Δ%':>8s} "
+              f"{'floor':>5s} {'GiB':>14s}")
 
     if args.all:
         print(f"\nevery compared case ({len(moved) + len(quiet)}), [*] clears "
@@ -165,6 +178,11 @@ def main() -> None:
             print(f"  {key:44s} {ra['peak_gib']:6.2f} -> {rb['peak_gib']:6.2f} GiB "
                   f"{dgib:+6.1f}%")
 
+    if dtype_split:
+        print(f"\nnot comparable, different compute dtype ({len(dtype_split)})")
+        for key, da, db, ra, rb in sorted(dtype_split):
+            print(f"  {key:44s} {da:>4s} {ra['ms']:9.2f}  ->  {db:<4s} {rb['ms']:9.2f} ms")
+
     for title, rows in (("now failing", broke), ("no longer failing", fixed)):
         if rows:
             print(f"\n{title} ({len(rows)})")
@@ -183,6 +201,8 @@ def main() -> None:
                f"({args.sigma:g} sigma)")
     if memory:
         summary += f", {len(memory)} memory"
+    if dtype_split:
+        summary += f", {len(dtype_split)} left out for a dtype change"
     if broke:
         summary += f", {len(broke)} broken"
     print(summary)

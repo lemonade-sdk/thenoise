@@ -23,8 +23,15 @@ Models:
                   https://huggingface.co/Comfy-Org/Qwen-Image-2.1
   mage-flow       Microsoft Mage-Flow (t2i + edit; base / RL / turbo)
                   https://huggingface.co/Comfy-Org/Mage-Flow
+  fibo2           Bria Fibo 2.0 edit-turbo / dev (t2i + edit in one DiT)
+                  https://huggingface.co/Comfy-Org/Fibo-2.0
   esrgan          Real-ESRGAN x4 pixel upscaler (optional, for upscaling)
                   https://huggingface.co/Comfy-Org/Real-ESRGAN_repackaged
+  controlmaps      Control-map checkpoints: a Depth-Anything-V2 depth model, or the
+                  ViTPose keypoint model + RT-DETR person detector pose needs.
+                  Default: both kinds' defaults, so depth and pose both work
+                  https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf
+                  https://huggingface.co/usyd-community/vitpose-base-simple
 
 Tokenizer/processor configs are vendored inside the ``thenoise`` package, so no
 tokenizer is ever downloaded; loading is fully offline.
@@ -38,8 +45,11 @@ Usage:
     python scripts/download.py --model zimage --variant base
     python scripts/download.py --model klein --variant 9b
     python scripts/download.py --model klein --variant 4b --int8-convrot
+    python scripts/download.py --model klein --small-decoder
     python scripts/download.py --model ming-image
     python scripts/download.py --model ming-image --int8-convrot
+    python scripts/download.py --model moss-image
+    python scripts/download.py --model moss-image --variant base --small-decoder
     python scripts/download.py --model qwen-image --edit-only
     python scripts/download.py --model qwen-image-2.1
     python scripts/download.py --model qwen-image-2.1 --variant base
@@ -47,7 +57,12 @@ Usage:
     python scripts/download.py --model mage-flow
     python scripts/download.py --model mage-flow --variant base
     python scripts/download.py --model mage-flow --int8-convrot --edit-only
+    python scripts/download.py --model fibo2
+    python scripts/download.py --model fibo2 --variant dev
+    python scripts/download.py --model fibo2 --variant dev --int8-convrot
     python scripts/download.py --model esrgan
+    python scripts/download.py --model controlmaps
+    python scripts/download.py --model controlmaps --variant pose
     python scripts/download.py --model krea2 --dry-run
 """
 from __future__ import annotations
@@ -144,6 +159,10 @@ _KLEIN_TEXT_ENCODERS = {
 #: Shared Flux.2 VAE (both sizes use the same file).
 _KLEIN_VAE = ("Comfy-Org/vae-text-encorder-for-flux-klein-4b",
               "split_files/vae/flux2-vae.safetensors")
+#: BFL's distilled small decoder, in a file that carries the (unchanged) encoder and
+#: the latent stats too: a drop-in --vae, ~1.4x faster decoding for the same latents.
+_SMALL_DECODER_VAE = ("black-forest-labs/FLUX.2-small-decoder",
+                      "full_encoder_small_decoder.safetensors")
 
 
 def _klein_jobs(args: argparse.Namespace) -> list[Artifact]:
@@ -159,11 +178,14 @@ def _klein_jobs(args: argparse.Namespace) -> list[Artifact]:
         dit_repo, dit_path = _KLEIN_DITS[args.variant]
     size = "4b" if args.variant.startswith("4b") else "9b"
     te_repo, te_path = _KLEIN_TEXT_ENCODERS[size]
-    return [
+    jobs = [
         ("dit", dit_repo, dit_path),
         ("vae", *_KLEIN_VAE),
         ("text_encoder", te_repo, te_path),
     ]
+    if args.small_decoder:
+        jobs.append(("vae (small decoder)", *_SMALL_DECODER_VAE))
+    return jobs
 
 
 def _ming_image_jobs(args: argparse.Namespace) -> list[Artifact]:
@@ -175,6 +197,25 @@ def _ming_image_jobs(args: argparse.Namespace) -> list[Artifact]:
         ("text_encoder", repo, f"text_encoders/ming_image_0.1_ling_mini_2.0_{suffix}.safetensors"),
         ("vae", repo, "vae/ming_image_vae_bf16.safetensors"),
     ]
+
+
+def _moss_image_jobs(args: argparse.Namespace) -> list[Artifact]:
+    """MOSS-Image: SFT (default) or base DiT + Qwen3.5-9B TE + Flux.2 AE.
+
+    The text encoder ships only int8-convrot, so ``--int8-convrot`` selects the DiT
+    alone.
+    """
+    repo = "Comfy-Org/MOSS-Image"
+    stem = "moss_image_base" if args.variant == "base" else "moss_image_sft"
+    suffix = "int8_convrot_attn" if args.int8_convrot else "bf16"
+    jobs = [
+        ("dit", repo, f"diffusion_models/{stem}_{suffix}.safetensors"),
+        ("text_encoder", repo, "text_encoders/qwen3.5_9b_int8_convrot.safetensors"),
+        ("vae", repo, "vae/flux2-vae.safetensors"),
+    ]
+    if args.small_decoder:
+        jobs.append(("vae (small decoder)", *_SMALL_DECODER_VAE))
+    return jobs
 
 
 def _qwen_image_jobs(args: argparse.Namespace) -> list[Artifact]:
@@ -273,12 +314,85 @@ def _mage_flow_jobs(args: argparse.Namespace) -> list[Artifact]:
     return jobs
 
 
+#: Fibo 2.0 variant -> DiT file stem. Both releases are the same architecture: dev is
+#: the 50-step model at CFG 5, edit-turbo the 4-step distilled one (the engine's
+#: defaults), and either generates as well as edits.
+_FIBO2_REPO = "Comfy-Org/Fibo-2.0"
+_FIBO2_VARIANTS = {"dev": "fibo2_dev", "edit-turbo": "fibo2_edit_turbo"}
+
+
+def _fibo2_jobs(args: argparse.Namespace) -> list[Artifact]:
+    """Fibo 2.0: one DiT per variant + the shared Qwen3-VL-4B TE + the Flux.2 AE."""
+    stem = _FIBO2_VARIANTS[args.variant]
+    suffix = "int8_convrot" if args.int8_convrot else "bf16"
+    return [
+        ("dit", _FIBO2_REPO, f"diffusion_models/{stem}_{suffix}.safetensors"),
+        ("text_encoder", _FIBO2_REPO, f"text_encoders/qwen3vl_4b_{suffix}.safetensors"),
+        ("vae", _FIBO2_REPO, "vae/flux2-vae.safetensors"),
+    ]
+
+
 def _esrgan_jobs(args: argparse.Namespace) -> list[Artifact]:
     """Real-ESRGAN x4 pixel upscaler (no DiT/TE/VAE)."""
     return [
         ("pixel_upscaler", "Comfy-Org/Real-ESRGAN_repackaged",
          "RealESRGAN_x4plus.safetensors"),
     ]
+
+
+#: Depth-Anything-V2: (variant) -> huggingface repo, with the files a control-map dir
+#: needs (config + weights + processor config).
+_DEPTH_REPOS = {
+    "small": "depth-anything/Depth-Anything-V2-Small-hf",
+    "base": "depth-anything/Depth-Anything-V2-Base-hf",
+    "large": "depth-anything/Depth-Anything-V2-Large-hf",
+}
+#: Pose is two checkpoints: ViTPose measures the joints of one person crop at a time,
+#: so RT-DETR has to say where the people are first. ``pose`` is the default pair,
+#: ``pose-r50vd`` the more accurate detector for crowded or occluded scenes.
+_POSE_ESTIMATOR = "usyd-community/vitpose-base-simple"
+_POSE_DETECTORS = {
+    "pose": ("rtdetr_r18vd", "PekingU/rtdetr_r18vd_coco_o365"),
+    "pose-r50vd": ("rtdetr_r50vd", "PekingU/rtdetr_r50vd_coco_o365"),
+}
+#: What a transformers checkpoint directory needs to be loadable.
+_CHECKPOINT_FILES = ("config.json", "model.safetensors", "preprocessor_config.json")
+#: The variant that fetches what every control-map kind can run with: the smallest depth
+#: model plus both pose checkpoints. Depth and pose are separate downloads otherwise,
+#: and a pool with only one of them silently offers only half of what the engine has.
+_ALL = "all"
+
+
+def _checkpoint(repo: str, directory: str) -> list[Artifact]:
+    """One checkpoint's files, from ``repo`` into ``directory``.
+
+    A control-map pool holds one directory per checkpoint, so the label carries it:
+    a label with a slash lands in that subdirectory of the output directory."""
+    return [(f"{directory}/{name}", repo, name) for name in _CHECKPOINT_FILES]
+
+
+def _depth_jobs(variant: str) -> list[Artifact]:
+    """One Depth-Anything-V2 checkpoint, as ``variant`` names it."""
+    return _checkpoint(_DEPTH_REPOS[variant], f"depth_anything_v2_{variant}")
+
+
+def _pose_jobs(variant: str) -> list[Artifact]:
+    """Both checkpoints a pose map needs: the ViTPose estimator and ``variant``'s
+    RT-DETR person detector to crop with."""
+    detector_dir, detector_repo = _POSE_DETECTORS[variant]
+    return _checkpoint(_POSE_ESTIMATOR, "vitpose_base_simple") + _checkpoint(
+        detector_repo, detector_dir
+    )
+
+
+def _controlmaps_jobs(args: argparse.Namespace) -> list[Artifact]:
+    """Control-map checkpoints: a depth model, the two checkpoints a pose map needs,
+    or the default of each."""
+    if args.variant == _ALL:
+        return _depth_jobs("small") + _pose_jobs("pose")
+    if args.variant in _POSE_DETECTORS:
+        return _pose_jobs(args.variant)
+    return _depth_jobs(args.variant)
 
 
 @dataclass(frozen=True)
@@ -328,6 +442,14 @@ MODELS: dict[str, ModelSpec] = {
         "Ming-Image 0.1 (Design)",
         _ming_image_jobs,
     ),
+    "moss-image": ModelSpec(
+        "moss-image", "./models/moss-image",
+        "MOSS-Image text-to-image (SFT, or base)",
+        _moss_image_jobs,
+        variant_supported=True,
+        variant_choices=("sft", "base"),
+        default_variant="sft",
+    ),
     "qwen-image": ModelSpec(
         "qwen-image", "./models/qwen_image",
         "Qwen-Image / Qwen-Image-Edit (latest dated checkpoints)",
@@ -349,11 +471,28 @@ MODELS: dict[str, ModelSpec] = {
         variant_choices=("base", "rl", "turbo"),
         default_variant="turbo",
     ),
+    "fibo2": ModelSpec(
+        "fibo2", "./models/fibo2",
+        "Bria Fibo 2.0 (t2i + edit in one DiT; edit-turbo by default)",
+        _fibo2_jobs,
+        variant_supported=True,
+        variant_choices=("edit-turbo", "dev"),
+        default_variant="edit-turbo",
+    ),
     "esrgan": ModelSpec(
         "esrgan", "./models/esrgan",
         "Real-ESRGAN x4 pixel upscaler (optional; used for upscaling)",
         _esrgan_jobs,
         has_int8=False,
+    ),
+    "controlmaps": ModelSpec(
+        "controlmaps", "./models/controlmaps",
+        "Control-map checkpoints: Depth-Anything-V2 depth, ViTPose + RT-DETR pose",
+        _controlmaps_jobs,
+        has_int8=False,
+        variant_supported=True,
+        variant_choices=(_ALL, "small", "base", "large", "pose", "pose-r50vd"),
+        default_variant=_ALL,
     ),
 }
 
@@ -371,14 +510,22 @@ def _epilog() -> str:
         "  python scripts/download.py --model krea2 --int8-convrot",
         "  python scripts/download.py --model zimage --variant base",
         "  python scripts/download.py --model klein --variant 9b",
+        "  python scripts/download.py --model klein --small-decoder",
         "  python scripts/download.py --model ming-image",
         "  python scripts/download.py --model ming-image --int8-convrot",
+        "  python scripts/download.py --model moss-image",
+        "  python scripts/download.py --model moss-image --variant base --small-decoder",
         "  python scripts/download.py --model qwen-image --edit-only",
         "  python scripts/download.py --model qwen-image-2.1 --variant base --int8-convrot",
         "  python scripts/download.py --model mage-flow",
         "  python scripts/download.py --model mage-flow --variant base",
         "  python scripts/download.py --model mage-flow --int8-convrot --edit-only",
+        "  python scripts/download.py --model fibo2",
+        "  python scripts/download.py --model fibo2 --variant dev --int8-convrot",
         "  python scripts/download.py --model esrgan",
+        "  python scripts/download.py --model controlmaps            # depth + pose",
+        "  python scripts/download.py --model controlmaps --variant base",
+        "  python scripts/download.py --model controlmaps --variant pose",
     ]
     return "\n".join(lines)
 
@@ -408,12 +555,22 @@ def main() -> None:
             "aesthetic-v1.1) | zimage: turbo | base (default: turbo) | "
             "klein: 4b | 4b-base | 9b | 9b-base (default: 4b) | "
             "qwen-image-2.1: turbo | base (default: turbo) | "
-            "mage-flow: turbo | rl | base (default: turbo)"
+            "mage-flow: turbo | rl | base (default: turbo) | "
+            "fibo2: edit-turbo | dev (default: edit-turbo) | "
+            "controlmaps: all | small | base | large | pose | pose-r50vd "
+            "(default: all, the depth model and both pose checkpoints)"
         ),
     )
     ap.add_argument(
         "--include-raw", action="store_true",
         help="krea2: also download the RAW (non-turbo) DiT",
+    )
+    ap.add_argument(
+        "--small-decoder", action="store_true",
+        help=(
+            "klein / moss-image: also download BFL's small-decoder Flux.2 VAE, a drop-in "
+            "--vae that decodes ~1.4x faster and needs less room at decode time"
+        ),
     )
     ap.add_argument(
         "--image-only", action="store_true",
@@ -444,6 +601,8 @@ def main() -> None:
             )
     if args.include_raw and args.model != "krea2":
         ap.error("--include-raw is only supported by --model krea2")
+    if args.small_decoder and args.model not in ("klein", "moss-image"):
+        ap.error("--small-decoder is only supported by --model klein, moss-image")
     if (args.image_only or args.edit_only) and args.model not in ("qwen-image", "mage-flow"):
         ap.error("--image-only / --edit-only are only supported by --model mage-flow, qwen-image")
     if args.image_only and args.edit_only:
@@ -458,7 +617,7 @@ def main() -> None:
     if args.dry_run:
         print(f"plan for --model {args.model} -> {out_dir}")
         for name, repo, path in jobs:
-            print(f"  {name:14s} {repo} :: {path}")
+            print(f"  {name:34s} {repo} :: {path}")
         return
 
     out = Path(out_dir)
@@ -466,8 +625,13 @@ def main() -> None:
 
     print(f"Downloading {args.model} artifacts -> {out}")
     for name, repo, path in jobs:
-        dest = hf_hub_download(repo, path, local_dir=str(out))
-        print(f"  {name:14s} -> {dest}")
+        # A label naming a directory lands there: a control-map pool keeps one
+        # directory per checkpoint, and --out points at the pool.
+        directory, _, _ = name.rpartition("/")
+        destination = out / directory if directory else out
+        destination.mkdir(parents=True, exist_ok=True)
+        dest = hf_hub_download(repo, path, local_dir=str(destination))
+        print(f"  {name:34s} {repo} :: {path} -> {dest}")
     print(f"done: {args.model} ({len(jobs)} artifact(s))")
 
 

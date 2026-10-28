@@ -349,6 +349,22 @@ Then open a new terminal and try again.
   exit 1
 }
 
+# uv < 0.12 ignores pre-release markers discovered transitively, so it cannot
+# resolve the ROCm graph (torch -> rocm-sdk-* == 10.1.0rc2) without
+# '--prerelease=allow' - which we add to that one install, never elsewhere.
+$UvVerLine = ''
+$UvPrereleaseArgs = @()
+try { $UvVerLine = ((& uv --version) | Select-Object -First 1) } catch {}
+if ($UvVerLine -match '(\d+)\.(\d+)\.(\d+)') {
+  $UvMajor = [int]$Matches[1]; $UvMinor = [int]$Matches[2]
+  if ($UvMajor -eq 0 -and $UvMinor -lt 12) {
+    $UvPrereleaseArgs = @('--prerelease=allow')
+    Write-Host "Note: $UvVerLine is older than 0.12, so the ROCm install below adds"
+    Write-Host "      '--prerelease=allow' (older uv cannot resolve the ROCm"
+    Write-Host "      pre-release dependency graph otherwise). Upgrade with: uv self update" -ForegroundColor Yellow
+  }
+}
+
 # ---- 2. Create the venv if it does not exist ------------------------------
 if (-not (Test-Path $VenvDir)) {
   Write-Host "Creating virtual environment ($VenvDir) with Python 3.13 ..."
@@ -375,12 +391,25 @@ if (-not $torchInstalled) {
   $GFX = Get-GfxArch
   if (-not $GFX) { exit 1 }   # Get-GfxArch has already printed the reason and the fix
 
-  & uv pip install `
-    "torch[device-$GFX]==2.14.0+rocm10.1.0rc2" `
-    "torchvision[device-$GFX]==0.29.0a0+rocm10.1.0rc2" `
-    "triton-windows<3.9" `
-    --extra-index-url https://pypi.org/simple/ `
-    --index-url https://rc.repo.amd.com/rocm/whl-next/
+  # uv ranks the *default* index lowest and otherwise stops at the first index
+  # holding a package, so PyPI must not be --extra-index-url here: it would
+  # shadow the +rocm wheels. --index = AMD, --default-index = PyPI fallback.
+  $TorchArgs = @(
+    'pip', 'install',
+    "torch[device-$GFX]==2.14.0+rocm10.1.0rc2",
+    "torchvision[device-$GFX]==0.29.0a0+rocm10.1.0rc2",
+    '--index', 'https://rc.repo.amd.com/rocm/whl-next/',
+    '--default-index', 'https://pypi.org/simple/'
+  )
+  $TorchArgs += $UvPrereleaseArgs
+  & uv @TorchArgs
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "ROCm torch install failed (uv: $UvVerLine)" -ForegroundColor Red
+    Write-Host "Try upgrading uv ('uv self update') and re-running - 0.12+ resolves this graph natively."
+    exit $LASTEXITCODE
+  }
+
+  & uv pip install "triton-windows<3.9>"
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 

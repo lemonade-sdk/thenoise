@@ -29,6 +29,7 @@ import numpy as np
 
 from thenoise.utils.attention import single_head_attention
 from thenoise.utils.safetensors import load_safetensors
+from thenoise.vae.fused import image_elems, strip_apply, strip_down
 
 from thenoise.utils.setup_logging import setup_logging
 
@@ -108,7 +109,11 @@ class QwenImageRMS_norm(nn.Module):
 
 
 class QwenImageResample(nn.Module):
-    r"""2D spatial resampling: ``upsample2d``, ``downsample2d``, else identity."""
+    r"""2D spatial resampling: ``upsample2d``, ``downsample2d``, else identity.
+
+    Both convolutions run in row strips (:mod:`.fused`). The stride-2 walk does its own
+    padding, so the :class:`nn.ZeroPad2d` is here only to keep the state dict keys.
+    """
 
     def __init__(self, dim: int, mode: str) -> None:
         super().__init__()
@@ -126,6 +131,10 @@ class QwenImageResample(nn.Module):
             self.resample = nn.Identity()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.mode == "upsample2d":
+            return strip_apply(self.resample, x, scale=2, halo=1)
+        if self.mode == "downsample2d":
+            return strip_down(self.resample[1], x)
         return self.resample(x)
 
 
@@ -150,9 +159,8 @@ class QwenImageResidualBlock(nn.Module):
         self.conv2 = nn.Conv2d(out_dim, out_dim, 3, padding=1)
         self.conv_shortcut = nn.Conv2d(in_dim, out_dim, 1) if in_dim != out_dim else nn.Identity()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.conv_shortcut(x)
-
+    def path(self, x: torch.Tensor) -> torch.Tensor:
+        """The two norm/SiLU/conv stages, without the shortcut."""
         x = self.norm1(x)
         x = self.nonlinearity(x)
         x = self.conv1(x)
@@ -160,9 +168,17 @@ class QwenImageResidualBlock(nn.Module):
         x = self.norm2(x)
         x = self.nonlinearity(x)
 
-        x = self.conv2(x)
+        return self.conv2(x)
 
-        return x + h
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # In strips: halo=2 feeds the two 3x3 convs their context. Where the widths match
+        # the shortcut is the identity, so ``accumulate`` supplies the residual term by
+        # adding into ``x`` itself and the level keeps one feature map.
+        if isinstance(self.conv_shortcut, nn.Identity):
+            return strip_apply(self.path, x, halo=2, out=x, accumulate=True)
+        return strip_apply(
+            lambda s: self.path(s) + self.conv_shortcut(s), x, halo=2, out_elems=image_elems(x, self.out_dim)
+        )
 
 
 class QwenImageAttentionBlock(nn.Module):
@@ -268,17 +284,14 @@ class QwenImageEncoder2d(nn.Module):
         self.conv_out = nn.Conv2d(out_dim, z_dim, 3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv_in(x)
+        x = strip_apply(self.conv_in, x, halo=1, out_elems=image_elems(x, self.conv_in.out_channels))
 
         for layer in self.down_blocks:
             x = layer(x)
 
         x = self.mid_block(x)
 
-        x = self.norm_out(x)
-        x = self.nonlinearity(x)
-        x = self.conv_out(x)
-        return x
+        return strip_apply(lambda s: self.conv_out(self.nonlinearity(self.norm_out(s))), x, halo=1)
 
 
 class QwenImageUpBlock(nn.Module):
@@ -371,17 +384,14 @@ class QwenImageDecoder2d(nn.Module):
         self.conv_out = nn.Conv2d(out_dim, output_channels, 3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv_in(x)
+        x = strip_apply(self.conv_in, x, halo=1, out_elems=image_elems(x, self.conv_in.out_channels))
 
         x = self.mid_block(x)
 
         for up_block in self.up_blocks:
             x = up_block(x)
 
-        x = self.norm_out(x)
-        x = self.nonlinearity(x)
-        x = self.conv_out(x)
-        return x
+        return strip_apply(lambda s: self.conv_out(self.nonlinearity(self.norm_out(s))), x, halo=1)
 
 
 #: The Qwen-Image VAE's latent normalisation: a per-channel z-score.
@@ -429,12 +439,17 @@ def _latent_normalisation(
     return torch.tensor(mean_values), 1.0 / torch.tensor(std_values)
 
 
+COMPUTE_DTYPE = torch.float16
+
+
 class AutoencoderKLQwenImage(nn.Module):
     r"""Single-frame (still-image) VAE with KL loss.
 
     Two shipped checkpoints share it and differ only in these knobs: Qwen-Image
     (RGB pixels, per-channel z-scored latent) and Ming-Image (RGBA, scalar scale).
     """
+
+    compute_dtype = COMPUTE_DTYPE
 
     def __init__(
         self,
@@ -725,6 +740,8 @@ def load_qwen_family_vae(
     pick the latent normalisation and declare the pixel width their model needs,
     which the file must confirm.
     """
+    if dtype is None:
+        dtype = COMPUTE_DTYPE
     logger.info(f"Loading VAE from {vae_path}")
     state_dict = load_safetensors(vae_path, device=device, dtype=dtype)
 
@@ -759,7 +776,7 @@ def load_qwen_family_vae(
         " ".join(f"{k}={v}" for k, v in config.items()),
     )
 
-    vae.to(device)
+    vae.to(device, dtype)
     return vae
 
 

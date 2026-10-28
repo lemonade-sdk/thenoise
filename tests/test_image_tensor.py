@@ -15,6 +15,7 @@ from thenoise.utils.image_tensor import (
     ALPHA_BACKGROUND,
     ReferenceSizing,
     align_down,
+    cover_crop,
     flatten_alpha,
     has_alpha,
     load_image,
@@ -203,6 +204,32 @@ def test_apply_resizes_only_when_the_size_changes():
 
     assert sizing.apply(exact) is exact
     assert sizing.apply(Image.new("RGB", (100, 100), "red")).size == (64, 64)
+
+
+def test_cover_crop_takes_the_middle_of_the_overhang():
+    """Nothing is stretched: the parts a centered crop leaves out stay out."""
+    banded = Image.new("RGB", (100, 200), "white")
+    banded.paste("black", (0, 0, 100, 50))      # a quarter of the height at each end,
+    banded.paste("black", (0, 150, 100, 200))   # which is exactly what a crop drops
+
+    crop = cover_crop(banded, 100, 100)         # cut only, no resampling
+    assert crop.getcolors(maxcolors=1024) == [(100 * 100, (255, 255, 255))]
+
+    for side in (50, 20):                        # scaled, and still centred
+        shrunk = cover_crop(banded, side, side)
+        assert shrunk.size == (side, side)
+        assert shrunk.getpixel((side // 2, side // 2)) == (255, 255, 255)
+
+
+def test_cover_crop_grows_an_image_rather_than_padding_it():
+    assert cover_crop(Image.new("RGB", (40, 80), "red"), 100, 100).size == (100, 100)
+    assert cover_crop(Image.new("RGB", (400, 100), "red"), 64, 64).size == (64, 64)
+
+
+def test_cover_crop_passes_an_exact_match_through():
+    exact = Image.new("RGB", (64, 64), "red")
+
+    assert cover_crop(exact, 64, 64) is exact
 
 
 def test_a_sizing_policy_that_cannot_hold_one_cell_is_rejected():

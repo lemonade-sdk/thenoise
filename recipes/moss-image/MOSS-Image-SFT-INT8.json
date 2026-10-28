@@ -1,0 +1,28 @@
+{
+  "checkpoints": {
+    "main": "Comfy-Org/MOSS-Image:diffusion_models/moss_image_sft_int8_convrot.safetensors",
+    "text_encoder": "Comfy-Org/MOSS-Image:text_encoders/qwen3.5_9b_int8_convrot.safetensors",
+    "vae": "Comfy-Org/MOSS-Image:vae/flux2-vae_small.safetensors"
+  },
+  "image_defaults": {
+    "cfg_scale": 3,
+    "height": 1024,
+    "steps": 25,
+    "width": 1024
+  },
+  "labels": [
+    "custom",
+    "image"
+  ],
+  "recipe": "thenoise",
+  "recipe_options": {
+    "cfg_scale": 3,
+    "height": 1024,
+    "steps": 25,
+    "width": 1024
+  },
+  "registry_source": "huggingface",
+  "size": 14.44,
+  "source": "huggingface",
+  "model_name": "user.MOSS-Image-SFT-INT8"
+}

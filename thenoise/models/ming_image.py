@@ -85,7 +85,7 @@ class MingImageModel(DiffusionModel):
         )
 
         logger.info("Loading Ming-Image VAE from %s", config.vae_path)
-        self.vae = load_ming_vae(self.vae_path, device=self.device, dtype=config.dtype)
+        self.vae = load_ming_vae(self.vae_path, device=self.device)
 
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)

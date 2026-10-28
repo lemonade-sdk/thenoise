@@ -1,0 +1,25 @@
+# The image build needs pyproject.toml, README.md (the package readme),
+# thenoise/, scripts/ and build-scripts/. Everything else is left out to keep
+# the build context — which is uploaded to the daemon before the build starts —
+# small.
+.git
+.github
+.pytest_cache
+.benchmarks
+.venv
+venv
+build
+dist
+*.egg-info
+models
+docs
+tests
+bench-scripts
+scripts/convert_esrgan_pth.py
+thenoise.ps1
+thenoise.bat
+thenoise.sh
+thenoise_cuda.sh
+thenoise_macos.sh
+**/__pycache__
+*.py[cod]

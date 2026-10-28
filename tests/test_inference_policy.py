@@ -72,9 +72,9 @@ class _SpyingController(PipelineController):
         super().__init__(*args, **kwargs)
         self.tail_states: list[bool] = []
 
-    def postprocess(self, pixels, **kwargs):
+    def postprocess(self, pixels, options=None):
         self.tail_states.append(torch.is_grad_enabled())
-        return super().postprocess(pixels, **kwargs)
+        return super().postprocess(pixels, options)
 
 
 def _pipeline(model):

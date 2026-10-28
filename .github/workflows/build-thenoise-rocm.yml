@@ -71,6 +71,11 @@ on:
         required: false
         default: false
         type: boolean
+      include_cuda:
+        description: 'Include Linux CUDA in the shared release'
+        required: false
+        default: true
+        type: boolean
 
 env:
   GFX_TARGETS: ${{ github.event.inputs.gfx_target || 'gfx1151,gfx1150,gfx1152,gfx103X,gfx110X,gfx120X' }}
@@ -386,6 +391,16 @@ jobs:
         shell: powershell
         run: Remove-Item -Recurse -Force (Join-Path $env:RUNNER_TEMP "thenoise-qual-win") -ErrorAction SilentlyContinue
 
+  # Reuse the validated CUDA builder. Its standalone publisher is disabled
+  # for this call, and its artifact belongs to the caller's run.
+  build-cuda:
+    if: github.event_name == 'push' || inputs.include_cuda == true
+    uses: ./.github/workflows/build-thenoise-cuda.yml
+    with:
+      create_release: false
+    permissions:
+      contents: write
+
   # Assembles every target's Linux and Windows archives into a single release
   # named after the tag. Depends ONLY on the build jobs, so a GPU runner that is
   # down can never stop a release from being assembled. Release creation is
@@ -401,11 +416,11 @@ jobs:
   # so the release is invisible until the gfx1151 test passes. With
   # skip_qualification, or when gfx1151 was not built, it goes live at once.
   create-release:
-    needs: [prepare-matrix, build-linux, build-windows]
+    needs: [prepare-matrix, build-linux, build-windows, build-cuda]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-    timeout-minutes: 60
+    timeout-minutes: 90
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       thenoise_version: ${{ steps.tag.outputs.thenoise_version }}
@@ -416,6 +431,8 @@ jobs:
       (needs.build-linux.result == 'success' || needs.build-windows.result == 'success') &&
       (needs.build-linux.result == 'success' || needs.build-linux.result == 'skipped') &&
       (needs.build-windows.result == 'success' || needs.build-windows.result == 'skipped') &&
+      (needs.build-cuda.result == 'success' || needs.build-cuda.result == 'skipped') &&
+      (github.event_name != 'push' || needs.build-cuda.result == 'success') &&
       (
         github.event_name == 'push' ||
         (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
@@ -434,6 +451,8 @@ jobs:
           TV_L: ${{ needs.build-linux.outputs.torch_version }}
           VERSION_W: ${{ needs.build-windows.outputs.thenoise_version }}
           TV_W: ${{ needs.build-windows.outputs.torch_version }}
+          CUDA_NV: ${{ needs.build-cuda.outputs.thenoise_version }}
+          CUDA_RESULT: ${{ needs.build-cuda.result }}
         run: |
           # Release tag follows the canonical scheme regardless of trigger:
           # thenoise-<version>-rocm<rocm> (e.g. thenoise-0.9.0-rocm10.1.0).
@@ -445,6 +464,10 @@ jobs:
           VERSION="$VERSION_L"; TV="$TV_L"
           if [ -z "$VERSION" ]; then VERSION="$VERSION_W"; TV="$TV_W"; fi
           [ -n "$VERSION" ] || { echo "::error::no version output from any platform"; exit 1; }
+          if [ "$CUDA_RESULT" = success ] && [ "$CUDA_NV" != "$VERSION" ]; then
+            echo "::error::CUDA TheNoise version $CUDA_NV differs from ROCm $VERSION"
+            exit 1
+          fi
           ROCM=$(printf '%s' "$TV" | grep -oP 'rocm[\d.]+' || echo rocm)
           TAG="thenoise-${VERSION}-${ROCM}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -455,6 +478,7 @@ jobs:
       - name: Create archives per target (split if >1.9 GB for GitHub release limit)
         env:
           GFX_TARGETS: ${{ needs.prepare-matrix.outputs.gfx_targets }}
+          CUDA_RESULT: ${{ needs.build-cuda.result }}
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
           upload_files=""
@@ -511,6 +535,46 @@ jobs:
               echo "::warning::windows artifact for ${target} not found; skipping"
             fi
           done
+          # Rename the already-split CUDA assets under the established ROCm
+          # release tag. Lemonade's existing split-archive format is unchanged.
+          if [ "$CUDA_RESULT" = success ]; then
+            cdir="./artifacts/thenoise-cuda-linux-x64"
+            [ -d "$cdir" ] || { echo "::error::CUDA build artifact missing"; exit 1; }
+            sums=("$cdir"/*.sha256)
+            [ "${#sums[@]}" -eq 1 ] && [ -f "${sums[0]}" ] || {
+              echo "::error::Expected exactly one CUDA checksum file"; exit 1;
+            }
+            old_base="$(basename "${sums[0]}" .sha256)"
+            case "$old_base" in
+              "thenoise-${{ steps.tag.outputs.thenoise_version }}-cuda"*"-cuda-x64") ;;
+              *) echo "::error::Unexpected CUDA artifact name: $old_base"; exit 1 ;;
+            esac
+            (cd "$cdir" && sha256sum -c -- "$(basename "${sums[0]}")")
+            parts=("$cdir/$old_base"*.tar.gz)
+            [ -f "${parts[0]}" ] || { echo "::error::No CUDA tarball"; exit 1; }
+            new_base="${TAG}-cuda-x64"
+            for src in "${parts[@]}"; do
+              suffix="${src##*/}"; suffix="${suffix#"$old_base"}"
+              case "$suffix" in
+                .tar.gz|.part[0-9][0-9]-of-[0-9][0-9].tar.gz) ;;
+                *) echo "::error::Invalid CUDA asset suffix: $suffix"; exit 1 ;;
+              esac
+              mv -- "$src" "${new_base}${suffix}"
+            done
+            if [ -f "$cdir/${old_base}.partcount" ]; then
+              mv -- "$cdir/${old_base}.partcount" "${new_base}.partcount"
+              count=$(cat "${new_base}.partcount")
+              [ "$count" = "${#parts[@]}" ] || {
+                echo "::error::CUDA partcount does not match archive parts"; exit 1;
+              }
+            elif [ "${#parts[@]}" -ne 1 ]; then
+              echo "::error::Missing CUDA partcount manifest"; exit 1
+            fi
+            sha256sum -- "${new_base}"*.tar.gz > "${new_base}.sha256"
+            sha256sum -c -- "${new_base}.sha256"
+            upload_files="${upload_files} ${new_base}".*
+            rm -rf "$cdir"
+          fi
           ls -la ${upload_files} 2>/dev/null || true
           echo "UPLOAD_FILES=$upload_files" >> "$GITHUB_ENV"
 
@@ -540,6 +604,8 @@ jobs:
           TV: ${{ steps.tag.outputs.torch_version }}
           LINUX_RESULT: ${{ needs.build-linux.result }}
           WINDOWS_RESULT: ${{ needs.build-windows.result }}
+          CUDA_RESULT: ${{ needs.build-cuda.result }}
+          CUDA_VERSION: ${{ needs.build-cuda.outputs.cuda_version }}
           DRAFT: ${{ steps.draftflag.outputs.draft }}
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
@@ -552,11 +618,15 @@ jobs:
           platforms=""
           [ "$LINUX_RESULT" = success ] && platforms="Linux (x64)"
           [ "$WINDOWS_RESULT" = success ] && platforms="${platforms:+$platforms + }Windows (x64)"
+          [ "$CUDA_RESULT" = success ] && platforms="${platforms:+$platforms + }CUDA Linux (x64)"
           [ -n "$platforms" ] || platforms="none"
           {
             echo "**GPU Targets**: $GFX_TARGETS"
             echo "**TheNoise Version**: $VERSION"
-            echo "**PyTorch Version**: $TV"
+            echo "**PyTorch Version (ROCm)**: $TV"
+            if [ "$CUDA_RESULT" = success ]; then
+              echo "**CUDA runtime**: $CUDA_VERSION (Linux x86_64; GPU qualification not run)"
+            fi
             echo "**Platforms**: $platforms"
             echo "**Build Date**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
             if [ "$DRAFT" = true ]; then
@@ -565,7 +635,10 @@ jobs:
               echo "**GPU qualification**: skipped — these bundles were NOT GPU-qualified (build-time import checks only)."
             fi
             echo
-            echo 'Portable TheNoise builds for all GPU targets above. Each includes bundled Python, PyTorch ROCm and the ROCm runtime. No separate installation required.'
+            echo 'ROCm bundles contain Python, PyTorch ROCm and the ROCm runtime.'
+            if [ "$CUDA_RESULT" = success ]; then
+              echo 'CUDA Linux contains Python, CUDA PyTorch and a C/C++ compiler; an NVIDIA driver is required.'
+            fi
             echo '* Linux: run `./bin/thenoise`.'
             echo '* Windows: run `thenoise.bat` (torch.compile is disabled on Windows — Triton is Linux-only in the AMD wheel index).'
             if [ "$LINUX_RESULT" != success ]; then

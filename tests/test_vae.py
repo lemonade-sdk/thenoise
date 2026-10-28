@@ -6,8 +6,9 @@ being re-declared by the model adapters — a DiT's own input width is a differe
 number (it patchifies the latent further), and two declarations of one fact is how
 they drift apart.
 
-The second half covers the shared Wan2.1-family loader, which builds ONE
-architecture two ways — Qwen-Image (RGB, per-channel z-scored latent) and
+The middle section covers the two Flux.2 decoders, which the loader likewise tells
+apart from the weights. The last section covers the shared Wan2.1-family loader, which
+builds ONE architecture two ways — Qwen-Image (RGB, per-channel z-scored latent) and
 Ming-Image (RGBA, scalar scale) — deciding which from the weights themselves.
 """
 from __future__ import annotations
@@ -22,7 +23,10 @@ from thenoise.upscale.inference_adaptors import make_wan21
 from thenoise.vae import (
     AutoencoderKLFlux,
     AutoencoderKLFlux2,
+    AutoencoderKLMageFlow,
     AutoencoderKLQwenImage,
+    AutoencoderKLWan22,
+    load_flux2_vae,
     load_ming_vae,
     load_qwen_vae,
 )
@@ -50,6 +54,87 @@ def test_qwen_compression_follows_the_downsampling_stages(dim_mult, compression)
     vae = AutoencoderKLQwenImage(base_dim=4, dim_mult=dim_mult)  # tiny random init
     assert vae.z_dim == 16
     assert vae.spatial_compression == compression
+
+
+# -------------------------------------------------- the Flux.2 decoder variants
+
+
+def _flux2_checkpoint(tmp_path, name: str, *, decoder_ch: int) -> tuple[str, dict]:
+    """A tiny Flux.2 checkpoint, as a file holds it: ``(path, the tensors in it)``."""
+    source = AutoencoderKLFlux2(encoder_ch=32, decoder_ch=decoder_ch).state_dict()
+    path = write_safetensors(tmp_path / name, {k: v.clone() for k, v in source.items()})
+    return path, source
+
+
+@pytest.mark.parametrize("decoder_ch", [32, 64])
+def test_the_flux2_decoder_width_comes_from_the_file(tmp_path, decoder_ch):
+    """Full and small decoders share ``--vae``: the weights say which one is in use.
+
+    The production widths are 128 base channels (full) and 96 (BFL's small decoder);
+    both are one base scaled by ``(1, 2, 4, 4)``, so the loader is exercised here at
+    widths cheap enough to build.
+    """
+    path, source = _flux2_checkpoint(tmp_path, "flux2_vae.safetensors", decoder_ch=decoder_ch)
+
+    vae = load_flux2_vae(path, device="cpu", dtype=torch.float32)  # FP32 to compare verbatim
+
+    assert vae.decoder_ch == decoder_ch
+    loaded = vae.state_dict()
+    assert set(loaded) == set(source)
+    for key, value in source.items():
+        assert torch.equal(loaded[key], value), key
+    # What the DiT sees is identical either way; only the pixels get cheaper.
+    assert (vae.z_dim, vae.spatial_compression, vae.pixel_channels) == (128, 16, 3)
+    with torch.no_grad():
+        assert vae.decode_to_pixels(torch.randn(1, 128, 4, 4)).shape == (1, 3, 64, 64)
+
+
+def test_the_two_categories_of_compute_dtype():
+    """The Wan 2.2 family's activations leave FP16's range; nothing else here does.
+    Neither the checkpoint's format nor the DiT beside a codec decides this.
+    """
+    for cls in (AutoencoderKLFlux, AutoencoderKLFlux2, AutoencoderKLMageFlow, AutoencoderKLQwenImage):
+        assert cls.compute_dtype is torch.float16
+    assert AutoencoderKLWan22.compute_dtype is torch.bfloat16
+
+
+def test_the_flux2_ae_picks_its_own_compute_dtype(tmp_path):
+    """``dtype`` is an override; leaving it out is not a request for FP32."""
+    path, _ = _flux2_checkpoint(tmp_path, "flux2_vae.safetensors", decoder_ch=32)
+
+    assert load_flux2_vae(path, device="cpu").dtype is AutoencoderKLFlux2.compute_dtype
+    assert load_flux2_vae(path, device="cpu", dtype=torch.bfloat16).dtype is torch.bfloat16
+
+
+def test_the_qwen_ae_picks_its_own_compute_dtype(tmp_path, tiny_family_arch):
+    """A BF16 export of this codec runs in FP16; ``dtype`` stays the caller's override."""
+    stored, _ = _family_checkpoint(3)
+    path = write_safetensors(tmp_path / "qwen_vae.safetensors", stored)
+
+    assert load_qwen_vae(path, device="cpu").dtype is AutoencoderKLQwenImage.compute_dtype
+    assert load_qwen_vae(path, device="cpu", dtype=torch.bfloat16).dtype is torch.bfloat16
+
+
+def test_a_flux2_decoder_of_the_wrong_shape_is_refused(tmp_path):
+    """The widths come off the ``conv_in`` of each half, so they get checked: a
+    Qwen-Image VAE has those keys too, and guessing from them would build a nonsense
+    Flux.2 half instead of saying the file is not one.
+    """
+    encoder = {"encoder.conv_in.weight": torch.zeros(128, 3, 3, 3)}
+
+    qwen = write_safetensors(
+        tmp_path / "qwen_image_vae.safetensors",
+        dict(encoder, **{"decoder.conv_in.weight": torch.zeros(512, 16, 3, 3)}),  # 16ch latent
+    )
+    with pytest.raises(ValueError, match="taking 32 channels on its input"):
+        load_flux2_vae(qwen, device="cpu")
+
+    ragged = write_safetensors(
+        tmp_path / "ragged.safetensors",
+        dict(encoder, **{"decoder.conv_in.weight": torch.zeros(510, 32, 3, 3)}),
+    )
+    with pytest.raises(ValueError, match="510-channel decoder input"):
+        load_flux2_vae(ragged, device="cpu")
 
 
 # ------------------------------------------------ the shared Wan2.1-family loader
@@ -108,7 +193,7 @@ def test_load_ming_vae_is_rgba_with_the_scalar_scale(tmp_path, tiny_family_arch)
     stored, expected = _family_checkpoint(4)
     path = write_safetensors(tmp_path / "ming_vae.safetensors", stored)
 
-    vae = load_ming_vae(path, device="cpu")
+    vae = load_ming_vae(path, device="cpu", dtype=torch.float32)
 
     assert (vae.z_dim, vae.spatial_compression, vae.pixel_channels) == (16, 8, 4)
     # The vendor's scalar pair (``canonical = raw * 8.0064``, shift 0), broadcastable.
@@ -122,7 +207,7 @@ def test_load_qwen_vae_is_rgb_with_the_per_channel_z_score(tmp_path, tiny_family
     stored, expected = _family_checkpoint(3)
     path = write_safetensors(tmp_path / "qwen_vae.safetensors", stored)
 
-    vae = load_qwen_vae(path, device="cpu")
+    vae = load_qwen_vae(path, device="cpu", dtype=torch.float32)
 
     assert (vae.z_dim, vae.spatial_compression, vae.pixel_channels) == (16, 8, 3)
     assert torch.equal(vae._latents_mean.view(-1), torch.tensor(QWEN_IMAGE_LATENTS_MEAN))

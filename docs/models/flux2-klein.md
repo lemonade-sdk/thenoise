@@ -22,7 +22,7 @@ Strix Halo, and both have int8-convrot checkpoints.
 |---|---|
 | Architecture | Distilled flow-matching MMDiT (Flux.2 packed 128-ch latent) |
 | Download size | 4B: ~12 GB · 9B: ~25 GB (bf16) |
-| VAE | Flux.2 VAE (shared by both sizes) |
+| VAE | Flux.2 VAE (shared by both sizes) · [small decoder](https://huggingface.co/black-forest-labs/FLUX.2-small-decoder) also accepted |
 | Text encoder | Qwen3-4B (4B models) · Qwen3-8B (9B models) |
 | Editing | ✓ |
 | KV cache | ✓ (see note) |
@@ -89,6 +89,31 @@ recipes for this model - each pins the checkpoints and the generation defaults:
 
 Each fetch lands in `./models/klein/` with the matching text encoder and the
 shared Flux.2 VAE.
+
+### Small decoder (optional)
+
+BFL also publishes a distilled **small decoder** for the Flux.2 VAE
+([black-forest-labs/FLUX.2-small-decoder](https://huggingface.co/black-forest-labs/FLUX.2-small-decoder),
+Apache-2.0): 28M decoder parameters instead of 50M, which decodes **~1.4x
+faster** in ~1.4x less memory — the difference at higher resolutions, where the
+decoder is what does not fit. The encoder and the latents are untouched, so the
+file is a drop-in `--vae` for anything that takes the Flux.2 AE, and the engine
+tells the two apart from the weights rather than the file name:
+
+```bash
+.venv/bin/python scripts/download.py --model klein --small-decoder
+
+./thenoise.sh generate \
+  --dit ./models/klein/split_files/diffusion_models/flux-2-klein-9b.safetensors \
+  --vae ./models/klein/full_encoder_small_decoder.safetensors \
+  --text-encoder ./models/klein/split_files/text_encoders/qwen_3_8b.safetensors \
+  --prompt "a red panda drinking tea" \
+  --out panda.png
+```
+
+That file carries the unchanged encoder too, so editing and image-to-image keep
+working with it. (`small_decoder.safetensors` from the same repo is the decoder
+on its own, with no encoder and no latent stats: not a `--vae`.)
 
 ## Usage
 

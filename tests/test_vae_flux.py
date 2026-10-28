@@ -95,6 +95,15 @@ def test_load_flux_vae_reads_only_the_decoder_side(tmp_path, monkeypatch):
         assert torch.allclose(value.float(), reference[key].float(), atol=1e-2), key
 
 
+def test_the_flux_ae_picks_its_own_compute_dtype(tmp_path, monkeypatch):
+    """``dtype`` is an override; leaving it out is not a request for FP32."""
+    path = _write_decoder_checkpoint(tmp_path, _tiny_vae())
+    monkeypatch.setattr("thenoise.vae.flux.AutoencoderKLFlux", _tiny_vae)
+
+    assert load_flux_vae(path, device="cpu").dtype is AutoencoderKLFlux.compute_dtype
+    assert load_flux_vae(path, device="cpu", dtype=torch.float32).dtype is torch.float32
+
+
 def test_load_flux_vae_rejects_a_file_without_decoder_keys(tmp_path, monkeypatch):
     path = write_safetensors(tmp_path / "wrong.safetensors", {"unet.weight": torch.zeros(1)})
     monkeypatch.setattr("thenoise.vae.flux.AutoencoderKLFlux", _tiny_vae)

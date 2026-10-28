@@ -489,6 +489,9 @@ class DConvDenoiser(nn.Module):
         )
 
 
+COMPUTE_DTYPE = torch.float16
+
+
 class AutoencoderKLMageFlow(nn.Module):
     """Mage-VAE: the 128ch/16x raw-latent codec, encoder + decoder in one module.
 
@@ -496,6 +499,8 @@ class AutoencoderKLMageFlow(nn.Module):
     the canonical latent ``[B, 128, H/16, W/16]``; ``decode_to_pixels`` is its inverse
     and clamps to [-1, 1].
     """
+
+    compute_dtype = COMPUTE_DTYPE
 
     z_dim = 128
     spatial_compression = 16
@@ -548,8 +553,10 @@ def load_mage_vae(
     and the denoiser under ``pipeline.*``.
     """
     device = torch.device(device)
+    if dtype is None:
+        dtype = COMPUTE_DTYPE
     logger.info("Loading Mage-VAE from %s", vae_path)
-    state_dict = load_safetensors(vae_path, device=device)
+    state_dict = load_safetensors(vae_path, device=device, dtype=dtype)
 
     remapped = {}
     for key, tensor in state_dict.items():
@@ -565,12 +572,10 @@ def load_mage_vae(
         raise ValueError(f"No 'student.dconv_encoder.*'/'pipeline.*' keys in {vae_path} (not a Mage-VAE?)")
 
     vae = AutoencoderKLMageFlow()
-    if dtype is not None:
-        remapped = {k: v.to(dtype) for k, v in remapped.items()}
     info = vae.load_state_dict(remapped, strict=True, assign=True)
     logger.info("Loaded Mage-VAE: %s", info)
 
-    vae.to(device)
+    vae.to(device, dtype)
     return vae
 
 
@@ -585,7 +590,11 @@ def load_mage_family_vae(
     device: Union[str, torch.device],
     dtype: Optional[torch.dtype] = None,
 ) -> Union[AutoencoderKLMageFlow, AutoencoderKLFlux2]:
-    """Load whichever codec ``vae_path`` holds: the Mage-VAE or the Flux.2 AE."""
+    """Load whichever codec ``vae_path`` holds: the Mage-VAE or the Flux.2 AE.
+
+    Each runs in its own ``compute_dtype``; ``dtype`` overrides whichever one it turns out
+    to be, not a request for the file's.
+    """
     with MemoryEfficientSafeOpen(vae_path) as f:
         keys = list(f.keys())
 

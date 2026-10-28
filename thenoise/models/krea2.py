@@ -70,7 +70,7 @@ class Krea2Model(DiffusionModel):
             tokenizer_dir=krea2_utils.find_tokenizer_dir(config.text_encoder_path),
         )
 
-        self.vae = load_qwen_vae(self.vae_path, device=self.device).to(self.dtype)
+        self.vae = load_qwen_vae(self.vae_path, device=self.device)
 
         # Cached: the schedule needs the compression per token.
         self._compression = self.vae.spatial_compression

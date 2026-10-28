@@ -9,6 +9,7 @@ def _serve(args) -> None:
     settings = Settings(
         device=args.device, host=args.host, port=args.port,
         upscaler_dir=args.upscaler_dir, offload_device=args.offload_device,
+        controlmap_dir=args.controlmap_dir,
     )
 
     runtime = Runtime(settings)
@@ -39,7 +40,7 @@ def _serve(args) -> None:
         print(f"thenoise serving model '{runtime.model_name}' on {settings.device}")
     else:
         print(f"thenoise serving WITHOUT a model on {settings.device} "
-              f"(only upscaling is available)")
+              f"(only upscaling and control-map extraction are available)")
     uvicorn.run(app, host=settings.host, port=settings.port)
 
 
@@ -56,8 +57,13 @@ def main(argv=None) -> None:
     elif args.command == "upscale":
         from .upscale_cli import run_upscale
         run_upscale(args)
+    elif args.command == "controlmap":
+        from .controlmap_cli import run_controlmap
+        run_controlmap(args)
     else:  # pragma: no cover - argparse requires a subcommand
-        raise SystemExit("choose a subcommand: serve | generate | edit | upscale")
+        raise SystemExit(
+            "choose a subcommand: serve | generate | edit | upscale | controlmap"
+        )
 
 
 if __name__ == "__main__":

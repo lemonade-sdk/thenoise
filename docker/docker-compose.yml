@@ -1,0 +1,128 @@
+# TheNoise on ROCm — Compose example. Run it from the repo root or anywhere
+# else; paths here are relative to this file. See docs/docker.md.
+#
+#   # once: ~10 GB, tens of minutes (or use the prebuilt ghcr.io image below)
+#   docker compose -f docker/docker-compose.yml build
+#
+#   # get a model into the mounted models directory (--profile because the
+#   # download service is not part of `up`)
+#   docker compose -f docker/docker-compose.yml --profile tools run --rm download \
+#     --model anima --out /models/anima
+#
+#   docker compose -f docker/docker-compose.yml up -d anima
+#   # web UI at http://localhost:8000/, API at http://localhost:8000/docs
+#
+# To use the published image instead of building, delete the `build:` block and
+# set `image: ghcr.io/lemonade-sdk/thenoise:gfx1151` (gfx1151 is the only
+# target CI publishes; build any other target yourself with --build-arg).
+
+x-thenoise: &thenoise
+  image: thenoise:local
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+    args:
+      # Must match the GPU. Exact targets only (gfx1151, gfx1150, gfx1152, ...).
+      GFX_ARCH: gfx1151
+  devices:
+    - /dev/kfd
+    - /dev/dri
+  # Docker resolves group_add *names* against the image's /etc/group, so this is a
+  # host GID. The Ubuntu base has no `render` group at all — a name aborts container
+  # creation with "unable to find group render" — and its `video` is GID 44, which is
+  # not the host's. Export it before `up`, or put it in a `.env` next to this file
+  # (compose does not expand commands in `.env`, so write the number):
+  #   export KFD_GID=$(stat -c %g /dev/kfd)   # render on most distros
+  # If /dev/dri/renderD128 is owned by another group, add that GID as a second entry.
+  group_add:
+    - "${KFD_GID:?host GID that owns /dev/kfd — see docs/docker.md, Requirements}"
+  # The ROCm runtime makes ioctls and syscalls the default profile blocks.
+  security_opt:
+    - seccomp=unconfined
+  # AMD's container guidance: share the host's System V IPC / shared memory,
+  # which is what the unified-memory allocator talks through. (If you drop
+  # this, raise `shm_size` instead.)
+  ipc: host
+  # Reaped zombies matter when a swap tool keeps restarting this service.
+  init: true
+  volumes:
+    # Checkpoints. Defaults to the repo's own ./models, the directory
+    # scripts/download.py fills on the host, so host and container share one
+    # copy. Add `:/models:ro` once the downloads are done.
+    - ${THENOISE_MODELS_DIR:-../models}:/models
+    # Where one-shot `generate --out name.png` writes.
+    - ${THENOISE_OUTPUT_DIR:-../output}:/output
+    # MIOpen / Triton / Inductor compiled-kernel caches (the image points them
+    # all at /cache). Without this volume every new container recompiles the
+    # DiT, which is minutes per model.
+    - thenoise-cache:/cache
+  # On stop, Docker sends SIGTERM and uvicorn waits for the request in flight.
+  # After this it sends SIGKILL, which reclaims the GPU immediately. A tool like
+  # llama-swap force-kills on its own `unloadTimeout` — keep that value above
+  # this one so the container, not the tool, decides when the wait is over.
+  stop_grace_period: 30s
+  healthcheck:
+    test: ["CMD", "healthcheck.sh"]
+    interval: 20s
+    timeout: 10s
+    retries: 5
+    # Loading a large model on unified memory takes minutes, and nothing answers
+    # on the port until it is loaded.
+    start_period: 15m
+
+services:
+  # One service per model, since TheNoise holds exactly one at a time. Handing
+  # the GPU over is then `docker compose stop anima && docker compose up -d krea2`.
+  anima:
+    <<: *thenoise
+    ports:
+      - "8000:8000"
+    command:
+      - serve
+      - --dit
+      - /models/anima/split_files/diffusion_models/anima-turbo-v1.0.safetensors
+      - --vae
+      - /models/anima/split_files/vae/qwen_image_vae.safetensors
+      - --text-encoder
+      - /models/anima/split_files/text_encoders/qwen_3_06b_base.safetensors
+      # Optional extras, each needing its own files first: `run --rm download
+      # --model esrgan --out /models/esrgan`, `... --model controlmaps --out
+      # /models/controlmaps`, and LoRAs you copy into /models/loras yourself.
+      # --controlmap-dir is the one that must already exist (the others just
+      # come up empty), so create the directory before uncommenting it.
+      # - --upscaler-dir
+      # - /models/esrgan
+      # - --controlmap-dir
+      # - /models/controlmaps
+      # - --lora-dir
+      # - /models/loras
+
+  # Behind a profile so `up` starts one model, not two fighting for the GPU:
+  # `docker compose --profile krea2 up -d krea2`.
+  krea2:
+    <<: *thenoise
+    profiles: ["krea2"]
+    ports:
+      - "8001:8000"
+    command:
+      - serve
+      - --dit
+      - /models/krea2/diffusion_models/krea2_turbo_bf16.safetensors
+      - --vae
+      - /models/krea2/vae/qwen_image_vae.safetensors
+      - --text-encoder
+      - /models/krea2/text_encoders/qwen3vl_4b_bf16.safetensors
+
+  # Not a server: `docker compose --profile tools run --rm download
+  # --model <name> --out /models/<name>` fills the mounted models directory with
+  # the bundled download helper. Needs no GPU, so devices are taken back off.
+  download:
+    <<: *thenoise
+    profiles: ["tools"]
+    devices: []
+    entrypoint: ["/opt/thenoise/bin/python3", "/opt/thenoise/scripts/download.py"]
+    healthcheck:
+      disable: true
+
+volumes:
+  thenoise-cache:

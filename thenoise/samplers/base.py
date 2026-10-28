@@ -38,5 +38,7 @@ class Sampler(ABC):
         """Run one denoising pass over ``schedule``, returning the denoised latent.
 
         ``x`` is the model-internal latent coming from ``prepare_latent``; the return
-        value goes to ``finalize_latent``.
+        value goes to ``finalize_latent``. Implementations hand ``schedule`` to
+        ``model.begin_sampling`` first, so a model that needs the whole grid sees the
+        one that is actually being run.
         """

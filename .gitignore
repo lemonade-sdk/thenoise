@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
+.env
 dist/
 build/
 
@@ -13,6 +14,9 @@ build/
 
 # Vendored Sesqui upscaler weights ARE committed (bf16, ~6MB).
 !thenoise/upscale/weights/*.safetensors
+
+# Container's default output mount (see docker/docker-compose.yml)
+/output
 
 # Misc
 .DS_Store

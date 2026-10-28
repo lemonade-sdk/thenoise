@@ -21,10 +21,13 @@ from conftest import CATALOG_IDS
 from thenoise.models import (
     MODEL_CATALOG,
     AnimaModel,
+    Fibo2Model,
+    Flux3Model,
     FluxKleinModel,
     Krea2Model,
     MageFlowModel,
     MingImageModel,
+    MossImageModel,
     QwenImageModel,
     QwenImage21Model,
     ZImageModel,
@@ -71,6 +74,9 @@ BARE = {
     "zimage": {"vae": _vae(16, 8), "dit": SimpleNamespace(patch_size=2)},
     "ming_image": {"vae": _vae(16, 8, pixel_channels=4), "dit": SimpleNamespace(patch_size=2)},
     "flux_klein": {"vae": _vae(128, 16)},
+    "flux3": {"vae": _vae(128, 16)},
+    "fibo2": {"vae": _vae(128, 16)},
+    "moss_image": {"vae": _vae(128, 16)},
     "mage_flow": {"vae": _vae(128, 16), "dit": SimpleNamespace(patch_size=1)},
     "qwen_image": {"vae": _vae(16, 8), "dit": SimpleNamespace(patch_size=2)},
     "qwen_image21": {"vae": _vae(64, 16, pixel_channels=4)},
@@ -156,9 +162,12 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
         (ZImageModel, False, False),
         (MingImageModel, False, False),
         (FluxKleinModel, True, True),
+        (Flux3Model, True, False),
         (MageFlowModel, True, False),
         (QwenImageModel, True, True),
         (QwenImage21Model, True, True),
+        (MossImageModel, False, False),
+        (Fibo2Model, True, True),
     ],
     ids=CATALOG_IDS,
 )
@@ -166,7 +175,7 @@ def test_model_capabilities(model_cls, edit, kv_cache):
     """``CAPABILITIES`` must describe the adapter: the pipeline rejects a request the
     model cannot serve and ``/health`` lets the UI grey out what it lacks.
 
-      * ``edit``     -> the reference kernels are really overridden.
+      * ``edit``     -> the reference encoder is really overridden.
       * ``kv_cache`` -> the shared cache protocol really starts a run cache, and
         freezing reference K/V needs a reference latent, so it implies ``edit``.
     """
@@ -174,11 +183,10 @@ def test_model_capabilities(model_cls, edit, kv_cache):
     assert model.capability("edit") is edit
     assert model.capability("kv_cache") is kv_cache
     assert not kv_cache or edit  # freezing reference K/V needs a reference latent
-    overrides_reference_kernels = (
-        model_cls.encode_reference is not DiffusionModel.encode_reference
-        and model_cls.pack_reference_latent is not DiffusionModel.pack_reference_latent
-    )
-    assert overrides_reference_kernels is edit
+    # ``encode_reference`` is the kernel the pipeline calls. ``pack_reference_latent``
+    # is not part of the contract: a model that reads one latent cell per token has no
+    # packing step to override.
+    assert (model_cls.encode_reference is not DiffusionModel.encode_reference) is edit
     model.start_kv_caches(replace(_params(), kv_cache=True), True, True)
     assert (model._kv_caches is not None) is kv_cache
 

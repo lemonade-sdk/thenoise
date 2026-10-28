@@ -15,6 +15,7 @@
   <button class="tab ctrl active" data-tab="generate">Generate</button>
   <button class="tab ctrl" data-tab="edit">Edit</button>
   <button class="tab ctrl" data-tab="upscale">Upscale</button>
+  <button class="tab ctrl" data-tab="controlmap">Control Maps</button>
   <div class="tabs-prefs">
     <button class="pref-btn ctrl" id="sidebar_toggle" title="Move the sidebar to the other side"
       aria-label="Move the sidebar to the other side">
@@ -92,21 +93,13 @@
 
   <div class="divider"></div>
 
-  <div class="range">
-    <div class="range-head">
-      <label class="label" for="film_grain">Film grain</label>
-      <span class="val" id="film_grain_val">0.00</span>
-    </div>
-    <input type="range" id="film_grain" min="0" max="1" step="0.1" value="0">
-  </div>
-
-  <div class="range">
-    <div class="range-head">
-      <label class="label" for="sharpening">Sharpening</label>
-      <span class="val" id="sharpening_val">0.00</span>
-    </div>
-    <input type="range" id="sharpening" min="0" max="1" step="0.05" value="0">
-  </div>
+  <!-- Post-decode controls, filled from the server's declaration (/postprocess).
+       Collapsed by default: it is finishing polish rather than the common path, and
+       the header names whatever is switched on, so nothing hides behind it. -->
+  <details class="collapse" data-pref="thenoise-postprocess-open">
+    <summary class="label">Post-processing <span class="collapse-note" id="postprocess_note"></span></summary>
+    <div class="group" id="postprocess_controls"></div>
+  </details>
 
   <div class="field">
     <label class="label" for="upscale_type">Upscale type</label>
@@ -131,9 +124,6 @@
     <input type="range" id="upscale_factor" min="1" max="8" step="0.25" value="1">
     <span class="final-res" id="final_res"></span>
   </div>
-
-  <label class="check"><input type="checkbox" id="qwen_vae_enhance"> Reduce grid pattern <span
-      class="hint">(enable when needed)</span></label>
 
   <div class="divider"></div>
 
@@ -262,21 +252,11 @@
 
   <div class="divider"></div>
 
-  <div class="range">
-    <div class="range-head">
-      <label class="label" for="edit_film_grain">Film grain</label>
-      <span class="val" id="edit_film_grain_val">0.00</span>
-    </div>
-    <input type="range" id="edit_film_grain" min="0" max="1" step="0.1" value="0">
-  </div>
-
-  <div class="range">
-    <div class="range-head">
-      <label class="label" for="edit_sharpening">Sharpening</label>
-      <span class="val" id="edit_sharpening_val">0.00</span>
-    </div>
-    <input type="range" id="edit_sharpening" min="0" max="1" step="0.05" value="0">
-  </div>
+  <!-- Post-decode controls, filled from the server's declaration (/postprocess). -->
+  <details class="collapse" data-pref="thenoise-postprocess-open">
+    <summary class="label">Post-processing <span class="collapse-note" id="edit_postprocess_note"></span></summary>
+    <div class="group" id="edit_postprocess_controls"></div>
+  </details>
 
   <div class="field">
     <label class="label" for="edit_upscale_type">Upscale type</label>
@@ -301,9 +281,6 @@
     <input type="range" id="edit_upscale_factor" min="1" max="8" step="0.25" value="1">
     <span class="final-res" id="edit_final_res"></span>
   </div>
-
-  <label class="check"><input type="checkbox" id="edit_qwen_vae_enhance"> Reduce grid pattern <span
-      class="hint">(enable when needed)</span></label>
 
   <div class="divider"></div>
 
@@ -390,6 +367,55 @@
   <div class="timer" id="utimer"><span class="dot"></span><span id="utimer_text">idle</span></div>
 </main>
 </div><!-- /view-upscale -->
+
+<div class="view hidden" id="view-controlmap">
+<aside class="sidebar">
+  <div class="field">
+    <label class="label" for="cm_file">Input image</label>
+    <div class="dropzone" id="cm_dropzone">
+      <input type="file" id="cm_file" accept="image/*" hidden>
+      <div class="dz-hint" id="cm_dz_hint">Drag &amp; drop an image here or <span class="kbd">click to browse</span></div>
+      <div class="dz-name" id="cm_dz_name" style="display:none"></div>
+    </div>
+  </div>
+
+  <div class="field">
+    <label class="label" for="cm_type">Detect</label>
+    <select id="cm_type"></select>
+  </div>
+
+  <div class="field" id="cm_model_field">
+    <label class="label" for="cm_model">Method</label>
+    <select id="cm_model"></select>
+  </div>
+
+  <div class="divider"></div>
+
+  <!-- Built at runtime from the chosen kind's field descriptions. -->
+  <div class="opts" id="cm_options"></div>
+
+  <button class="btn" id="cm_run" disabled>Extract</button>
+</aside>
+
+<main class="main">
+  <div class="stage" id="cm_stage">
+    <div class="placeholder" id="cm_placeholder">Drop an image and click <span class="kbd">Extract</span></div>
+    <div class="single hidden" id="cm_single">
+      <img id="cm_single_img" alt="input image">
+    </div>
+    <div class="result hidden" id="cm_result">
+      <img id="cm_img" alt="extracted map">
+    </div>
+    <div class="actions">
+      <button class="dl ctrl" id="cm_download" disabled title="Download PNG">&#8595; Download</button>
+      <button class="info ctrl" id="cm_info_btn" disabled title="Extraction info" aria-label="Extraction info">&#9432;</button>
+    </div>
+    <div class="overlay hidden" id="cm_overlay"><div class="spinner"></div></div>
+  </div>
+
+  <div class="timer" id="cm_timer"><span class="dot"></span><span id="cm_timer_text">idle</span></div>
+</main>
+</div><!-- /view-controlmap -->
 </div><!-- /views -->
 
 <div class="modal hidden" id="info_modal">
@@ -405,5 +431,6 @@
 
 <script src="static/js/helpers.js"></script>
 <script src="static/js/app.js"></script>
+<script src="static/js/controlmap.js"></script>
 </body>
 </html>

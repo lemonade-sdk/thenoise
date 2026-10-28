@@ -85,6 +85,34 @@ def split_half_rope_1d(head_dim: int, theta: float = 10000.0):
     return build
 
 
+def split_half_rope_4d(head_dim: int, theta: float = 10000.0):
+    """Builder for the split-half convention over a 4-axis ``(r, f, h, w)`` position.
+
+    Returns ``pos -> (cos, sin)``, each ``[L, 1, 1, head_dim]``, for ``pos`` an
+    ``[L, 4]`` coordinate tensor (no batch axis, as ``utils.positions`` builds them).
+
+    The head dim splits into 4 axes of ``head_dim // 4`` dims, each carrying
+    ``head_dim // 8`` frequencies. That fixes which pair :func:`apply_rope_split_half`
+    rotates with which angle: ``(j, j + head_dim // 2)`` belongs to axis
+    ``j // (head_dim // 8)``.
+    """
+    if head_dim % 8:
+        raise ValueError(
+            f"a 4-axis split-half rope splits the head dim into 4 x 2 groups, "
+            f"so it needs head_dim divisible by 8, got {head_dim}"
+        )
+    bands = head_dim // 8
+
+    def build(pos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # Frequencies in the coordinates' own precision.
+        scale = 1.0 / theta ** (torch.arange(bands, dtype=pos.dtype, device=pos.device) / bands)
+        angles = (pos[:, :, None] * scale).flatten(-2)  # [L, head_dim/2]
+        angles = torch.cat((angles, angles), dim=-1)  # [L, head_dim]
+        return angles.cos()[:, None, None, :], angles.sin()[:, None, None, :]
+
+    return build
+
+
 def split_half_rope_3d(
     head_dim: int,
     patch_spatial: int,
@@ -177,6 +205,7 @@ __all__ = [
     "apply_rope",
     "apply_rope_split_half",
     "split_half_rope_3d",
+    "split_half_rope_4d",
     "split_half_rope_1d",
     "RopeCache",
 ]

@@ -52,7 +52,7 @@ INT8-ConvRot, Turbo, 768x1024:
 *Generated:*
 
 <img width="45%" alt="thenoise_3758387159" src="https://github.com/user-attachments/assets/68384c4f-bcd7-4260-84d7-50d69b49b289" />
-<img width="45%" alt="thenoise_3144373276" src="https://github.com/user-attachments/assets/eeb66e4d-8c7e-43ad-8964-6ccd991a644e" />
+<img width="45%" alt="thenoise_2579983684" src="https://github.com/user-attachments/assets/54ba4589-c921-4ffd-921b-e0ec560fb341" />
 
 
 *Edited:*

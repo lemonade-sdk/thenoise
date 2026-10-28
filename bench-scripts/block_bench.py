@@ -822,6 +822,308 @@ def register_flux2() -> None:
 
 register_flux2()
 
+def _flux3_pe(ctx: Ctx, params, mode: str, side: int, nref: int) -> torch.Tensor:
+    """The block's rotary frequencies, from the model's own id builders."""
+    from thenoise.dit.flux3.models import image_ids, ref_ids, text_ids
+
+    if mode == "txt":
+        ids = text_ids(ctx.txt, device=ctx.tdev)
+    else:
+        ids = image_ids(side, side, device=ctx.tdev)
+        if mode == "joint":
+            if nref:
+                ids = torch.cat([ids, ref_ids([(side, side)] * nref, device=ctx.tdev)], dim=1)
+            ids = torch.cat([ids, text_ids(ctx.txt, device=ctx.tdev)], dim=1)
+    return pe_one(ctx, params.axes_dim, params.theta, ids)
+
+
+def _flux3_case(ctx: Ctx, mode: str, tokens: int, scenario: str) -> Case:
+    """One Flux.3 block, at the released ``f3-image-small`` width, over ``mode``.
+
+    The three modes are the three shapes that block is ever called with:
+
+      * ``joint`` — ``[target, references, text]``, the 28 blocks of every step. Each
+        mode is modulated and gated by its own row, so this is also the case that pays
+        for the per-span slicing of ``_modulate``/``_gated``: ``plain`` gives it two
+        spans, ``edit`` three;
+      * ``image`` — a target-mode *early* block, the target alone under one span (5 per
+        mode, and the reference early block is this same class at ``refs`` times the
+        length, so its per-token cost is this row's);
+      * ``txt`` — a text-mode early block, whose length follows ``--txt`` and not the
+        ladder.
+    """
+    from thenoise.dit.flux3.models import Block, Flux3Params, ModOut, Span
+    from thenoise.utils.dynamo import mark_token_axis
+
+    params = Flux3Params()
+    name = f"flux3/{mode}"
+    heads, dim = params.num_heads, params.hidden_size
+    side = grid_side(tokens)
+    tokens = side * side
+
+    nref = n_refs(ctx, scenario) if mode == "joint" else 0
+    if mode == "joint":
+        segments = [("img", tokens), ("refs", nref * tokens), ("txt", ctx.txt)]
+    elif mode == "image":
+        segments = [("img", tokens)]
+    else:
+        segments = [("txt", ctx.txt)]
+    seq = sum(length for _, length in segments)
+
+    blk = new_block(ctx, name, Block, dim, heads, mlp_ratio=params.mlp_ratio)
+    seed_inputs(name, scenario, tokens)
+    x = randn(ctx, 1, seq, dim)
+    pe = _flux3_pe(ctx, params, mode, side, nref)
+
+    spans, start = [], 0
+    for _, length in segments:
+        if not length:
+            continue
+        triplet = ModOut(*tuple(randn(ctx, 1, 1, dim) for _ in range(3)))
+        spans.append(Span(start, start + length, triplet))
+        start += length
+
+    def run():
+        mark_token_axis(x, pe)
+        return blk(x, spans, pe)
+
+    flops = gemm_flops((gemm_params(blk), seq)) + attn_flops(heads, dim // heads, ((seq, seq),))
+    detail = " ".join(f"{label}={length}" for label, length in segments if length)
+    return Case(run, flops, seq, detail=f"{detail} spans={len(spans)}")
+
+
+@fixture("flux3", "joint", ("plain", "edit"))
+def flux3_joint(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """The joint block over ``[target, references, text]``: full attention, one row per mode."""
+    return _flux3_case(ctx, "joint", tokens, scenario)
+
+
+@fixture("flux3", "early_image")
+def flux3_early_image(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """A target-mode early block: the mode's own tokens, one span."""
+    return _flux3_case(ctx, "image", tokens, scenario)
+
+
+@fixture("flux3", "early_txt", fixed_seq=True)
+def flux3_early_txt(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """A text-mode early block at ``--txt`` tokens, including the prompt's padding."""
+    return _flux3_case(ctx, "txt", tokens, scenario)
+
+
+def _moss_pe(ctx: Ctx, side: int, txt: int):
+    """Rotary tables for the joint ``[image, prompt]`` run and the text-only one."""
+    from thenoise.dit.moss_image.models import joint_positions
+    from thenoise.utils.rope import split_half_rope_4d
+
+    build = split_half_rope_4d(128, 10000.0)      # MossImageParams defaults
+    ids = joint_positions(side, side, txt, device=ctx.tdev)
+    joint = tuple(t.to(ctx.dtype) for t in build(ids))
+    text = tuple(t.to(ctx.dtype) for t in build(ids[side * side:]))
+    return joint, text
+
+
+@fixture("moss_image", "joint")
+def moss_image_joint(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """The MOSS-Image joint block: prompt and image tokens in one attention."""
+    from thenoise.dit.moss_image.models import Block, MossImageParams
+    from thenoise.utils.dynamo import mark_token_axis
+
+    params = MossImageParams()
+    name = "moss_image/joint"
+    heads, dim = params.num_heads, params.dim
+    side = grid_side(tokens)
+    tokens = side * side
+    seq = tokens + ctx.txt
+
+    blk = new_block(ctx, name, Block, dim, params.ffn_dim, heads)
+    seed_inputs(name, scenario, tokens)
+    x = randn(ctx, 1, seq, dim)
+    # The rows are computed once per step from the timestep and shared by all blocks.
+    mod = tuple(randn(ctx, 1, 1, dim) for _ in range(6))
+    pe, _ = _moss_pe(ctx, side, ctx.txt)
+
+    def run():
+        mark_token_axis(x, *pe)
+        return blk(x, mod, pe)
+
+    flops = gemm_flops((gemm_params(blk), seq)) + attn_flops(heads, dim // heads, ((seq, seq),))
+    return Case(run, flops, seq, detail=f"img={tokens} txt={ctx.txt}")
+
+
+@fixture("moss_image", "text_block", fixed_seq=True)
+def moss_image_text_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """A MOSS-Image front-end block: the prompt alone, once per run rather than per step."""
+    from thenoise.dit.moss_image.models import MossImageParams, TextBlock
+
+    params = MossImageParams()
+    name = "moss_image/text_block"
+    heads, dim = params.num_heads, params.dim
+
+    blk = new_block(ctx, name, TextBlock, dim, params.ffn_dim, heads)
+    seed_inputs(name, scenario, ctx.txt)
+    x = randn(ctx, 1, ctx.txt, dim)
+    _, pe = _moss_pe(ctx, 1, ctx.txt)              # its own positions, no image tokens
+
+    def run():
+        return blk(x, pe)
+
+    flops = gemm_flops((gemm_params(blk), ctx.txt))
+    flops += attn_flops(heads, dim // heads, ((ctx.txt, ctx.txt),))
+    return Case(run, flops, ctx.txt, detail=f"txt={ctx.txt}")
+
+
+def _fibo2_pe(ctx: Ctx, params, num_gist: int, side: int, refs: int):
+    """Rotary table for ``[gist, target, references]``, through the model's own builder.
+
+    ``store`` without a ``dtype``, as ``Fibo2Model`` stores it: the table stays fp32 and
+    the rope kernel casts the activations to match.
+    """
+    from thenoise.dit.fibo2.models import sequence_positions
+
+    ids = sequence_positions(num_gist, side, side, [(side, side)] * refs,
+                             params.max_gist_tokens, device=ctx.tdev)
+    return rope_cache(ctx, list(params.axes_dims), params.rope_theta).store("bench", ids)
+
+
+def _fibo2_case(ctx: Ctx, tokens: int, scenario: str, role: str) -> Case:
+    """One Fibo 2.0 ``Block``, at the released width, over the stream it is called with.
+
+    Fibo 2.0 runs a single stream and reaches the prompt only by cross-attention, so the
+    roles are the shapes that one class is called with: ``block`` (39 of 44, the stream
+    alone), ``injection`` (the 5 that also read a text bundle) and ``noise_refiner``
+    (the 2 that run before the gist joins).
+
+    ``fill`` runs the references and writes their K/V, ``read`` leaves them out of the
+    sequence and attends to the stored ones instead, so only the sequence and the rotary
+    table shorten: the references still hold the clean AdaLN row, which is exactly what
+    makes them cacheable.
+    """
+    from thenoise.dit.fibo2.models import Block, Fibo2Params, gist_count
+    from thenoise.utils.dynamo import mark_token_axis
+
+    params = Fibo2Params()
+    name = f"fibo2/{role}"
+    heads, dim, head_dim = params.num_heads, params.dim, params.head_dim
+    refiner, injection = role == "noise_refiner", role == "injection"
+    side = grid_side(tokens)
+    tokens = side * side
+    nref = n_refs(ctx, scenario)
+    refs = nref * tokens
+    read = scenario == "read"
+
+    blk = new_block(ctx, name, Block, params, params.cap_dim if injection else None)
+    seed_inputs(name, scenario, tokens)
+
+    num_gist = gist_count(ctx.txt, params.max_gist_tokens)
+    if refiner:
+        # Production passes ``pe[:, num_gist:]``. The image rides the plane past every
+        # gist count the model can emit, so a table built without the gist is that slice
+        # exactly rather than an approximation of it.
+        pe_full = _fibo2_pe(ctx, params, 0, side, nref)
+        live = tokens if read else tokens + refs
+    else:
+        pe_full = _fibo2_pe(ctx, params, num_gist, side, nref)
+        live = num_gist + tokens if read else num_gist + tokens + refs
+    x = randn(ctx, 1, live, dim)
+    pe = pe_full[:, :live]
+    full = pe_full.shape[1]     # the sequence the filling pass ran, cached length too
+
+    # Clean and noisy timestep rows stacked on the batch axis: the gist and the
+    # references modulate from the first, the target from the second. A read pass carries
+    # no reference tokens and still takes both rows, because the cached ones were
+    # modulated at timestep zero.
+    if not refs:
+        adaln, span = randn(ctx, 1, params.adaln_dim), None
+    elif refiner:
+        adaln, span = randn(ctx, 2, params.adaln_dim), (0, tokens)
+    else:
+        adaln, span = randn(ctx, 2, params.adaln_dim), (num_gist, num_gist + tokens)
+
+    bufs = None
+    if scenario != "plain":
+        cache = new_cache("suffix")                 # the references are the tail
+        key = ("noise_refiner", 0) if refiner else ("layer", 0)
+        cache_buffers(cache, key, "fill", (1, heads, full, head_dim), ctx)
+        if read:
+            cache.set_filled()
+        bufs = cache_buffers(cache, key, scenario, (1, heads, live, head_dim), ctx,
+                             prime=read)
+
+    context = randn(ctx, 1, ctx.txt, params.cap_dim) if injection else None
+
+    def run():
+        mark_token_axis(x, pe)
+        return blk(x, pe, adaln, span, context, bufs=bufs)
+
+    n = x.shape[1]
+    parts = [(gemm_params(blk.attention) + gemm_params(blk.feed_forward), n),
+             (gemm_params(blk.adaLN_modulation), adaln.shape[0])]
+    # A read pass asks the live tokens' questions of the whole cached sequence.
+    pairs: list[tuple[int, int]] = [(n, full)]
+    if injection:
+        # Only ``to_kv`` reads the bundle; the gate is a scalar, and it is zero in a
+        # block that never loaded one, which costs a multiply but no FLOPs.
+        ca = blk.cross_attention
+        parts.append((gemm_params(ca.to_q) + gemm_params(ca.to_out), n))
+        parts.append((gemm_params(ca.to_kv), ctx.txt))
+        pairs.append((n, ctx.txt))
+
+    bits = ([] if refiner else [("gist", num_gist)]) + [("img", tokens), ("refs", refs)]
+    if injection:
+        bits.append(("txt", ctx.txt))
+    bits.append(("rows", adaln.shape[0]))
+    if scenario != "plain":
+        bits.append(("cache", full))
+    if refiner:
+        bits.append(("span", "none" if span is None else f"{span[0]}-{span[1]}"))
+    flops = gemm_flops(*parts) + attn_flops(heads, head_dim, tuple(pairs))
+    return Case(run, flops, n, detail=" ".join(f"{k}={v}" for k, v in bits))
+
+
+@fixture("fibo2", "block", CACHE_SCENARIOS)
+def fibo2_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """A main block over ``[gist, target, references]``: rotated self-attention, no text."""
+    return _fibo2_case(ctx, tokens, scenario, "block")
+
+
+@fixture("fibo2", "injection", CACHE_SCENARIOS)
+def fibo2_injection(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """An injection block: that stream plus a cross-attention to one bundle of the prompt."""
+    return _fibo2_case(ctx, tokens, scenario, "injection")
+
+
+@fixture("fibo2", "noise_refiner", CACHE_SCENARIOS)
+def fibo2_noise_refiner(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """A refiner block over ``[target, references]``, twice per step, before the gist joins."""
+    return _fibo2_case(ctx, tokens, scenario, "noise_refiner")
+
+
+@fixture("fibo2", "perceiver", fixed_seq=True)
+def fibo2_perceiver(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """One Perceiver layer, twice per CFG branch: the gist queries reading the prompt."""
+    from thenoise.dit.fibo2.models import Fibo2Params, PerceiverLayer, gist_count
+
+    params = Fibo2Params()
+    name = "fibo2/perceiver"
+    heads, dim, head_dim = params.num_heads, params.dim, params.head_dim
+
+    blk = new_block(ctx, name, PerceiverLayer, params)
+    seed_inputs(name, scenario, ctx.txt)
+    num_gist = gist_count(ctx.txt, params.max_gist_tokens)
+    x = randn(ctx, 1, num_gist, dim)
+    context = randn(ctx, 1, ctx.txt, params.cap_dim)
+
+    def run():
+        return blk(x, context)
+
+    cross = blk.cross_attention
+    flops = gemm_flops(
+        (gemm_params(cross.to_q) + gemm_params(cross.to_out)
+         + gemm_params(blk.self_attention) + gemm_params(blk.ffn), num_gist),
+        (gemm_params(cross.to_kv), ctx.txt),
+    ) + attn_flops(heads, head_dim, ((num_gist, ctx.txt), (num_gist, num_gist)))
+    return Case(run, flops, num_gist, detail=f"gist={num_gist} txt={ctx.txt}")
+
 
 # ------------------------------------------------------------------ measurement
 @dataclass
@@ -961,14 +1263,12 @@ def device_slug(info: dict) -> str:
 
 # -------------------------------------------------------------------------- CLI
 def select(models: str) -> list[Fixture]:
-    """Fixtures whose ``model/block`` key matches a comma-separated prefix filter."""
-    wanted = [w.strip() for w in models.split(",") if w.strip()]
-
-    def matches(f: Fixture, w: str) -> bool:
-        key = f"{f.model}/{f.block}"
-        return key.startswith(w) or w.startswith(key) or w == f.block or w == f.model
-
-    keep = [f for f in FIXTURES if any(matches(f, w) for w in wanted)]
+    """The fixtures the comma-separated filter names exactly: a ``model/block`` key, a
+    whole model, or a block name — always the whole name, since a prefix silently changes
+    how many rows a comparison has."""
+    wanted = {w.strip() for w in models.split(",") if w.strip()}
+    keep = [f for f in FIXTURES
+            if f"{f.model}/{f.block}" in wanted or f.model in wanted or f.block in wanted]
     if not keep:
         raise SystemExit(f"no block matches {models}\nknown: "
                          f"{', '.join(f.model + '/' + f.block for f in FIXTURES)}")
@@ -995,12 +1295,14 @@ def main() -> None:
         description="Snapshot the cost of every DiT transformer block.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="blocks: " + ", ".join(f"{f.model}/{f.block}" for f in FIXTURES))
-    ap.add_argument("--models", help="comma-separated model or block filter, e.g. krea2,zimage")
+    ap.add_argument("--models", help="comma-separated model, block or model/block filter, "
+                                    "matched exactly, e.g. krea2,zimage/noise")
     ap.add_argument("--tokens", default=DEFAULT_TOKENS,
                     help="image-token ladder (default %(default)s)")
     ap.add_argument("--txt", type=int, default=512, help="text / context tokens")
     ap.add_argument("--refs", type=int, default=1,
-                    help="reference images per editing case; 0 drops fill and read")
+                    help="reference images per editing case; 0 drops the reference "
+                         "scenarios (fill, read, edit)")
     ap.add_argument("--weights", default=",".join(WEIGHT_MODES),
                     help="weight formats to photograph, comma separated: bf16, and "
                          "int8 (INT8 + ConvRot, what an int8-convrot checkpoint "

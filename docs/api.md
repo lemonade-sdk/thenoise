@@ -21,7 +21,10 @@ Start the server with [`serve`](cli.md#serve-a-model-over-http) and TheNoise exp
 | `GET` | `/health` | Server status, loaded model and its capabilities (see below) |
 | `GET` | `/lora` | List available LoRA names |
 | `GET` | `/upscalers` | List available pixel upscaler names (works even with no model loaded) |
+| `GET` | `/postprocess` | Describe the post-decode knobs, in the order their filters run (works even with no model loaded) |
 | `POST` | `/upscale` | Pixel-upscale an input image (works even with no model loaded) |
+| `GET` | `/controlmaps` | List the extractable control-map types (works even with no model loaded) |
+| `POST` | `/controlmap` | Extract a control map from an input image (works even with no model loaded) |
 | `POST` | `/text2image` | Generate an image |
 | `POST` | `/edit` | Edit an image from an instruction (image + prompt → edited image); requires an editing-capable model |
 
@@ -63,8 +66,12 @@ index_timestep_zero` (see [`/edit`](#post-edit)).
 | `pixel_upscaler` | `string` | `null` | Pixel upscaler name (no `.safetensors` suffix) from `--upscaler-dir` |
 | `sampler` | `string` | model default | Denoising solver: `euler` or `er_sde` |
 | `qwen_vae_enhance` | `bool` | `false` | Nyquist notch post-filter (removes 2px grid artifacts) |
-| `film_grain` | `float` | `0.0` | Film grain strength, 0.0–10.0 |
+| `saturation` | `float` | `0.0` | Colour saturation around neutral `0.0`: -1.0 greyscales, 1.0 doubles |
+| `vibrance` | `float` | `0.0` | Saturation that lifts washed-out pixels and leaves vivid ones alone |
+| `temperature` | `float` | `0.0` | White balance around neutral `0.0`: -1.0 cools to blue, 1.0 warms to amber |
+| `tint` | `float` | `0.0` | White balance across the green–magenta axis: -1.0 greens, 1.0 magentas |
 | `sharpening` | `float` | `0.0` | RCAS sharpening strength, 0.0–1.0 |
+| `film_grain` | `float` | `0.0` | Film grain strength, 0.0–10.0 |
 | `lora_specs` | `string[]` | `null` | LoRA specs, e.g. `["style:0.8"]` |
 
 ### Response
@@ -167,6 +174,99 @@ curl -s localhost:8000/upscale \
   --output /tmp/fox_4x.png
 ```
 
+## `GET /postprocess`
+
+```json
+{
+  "options": [
+    {"name": "qwen_vae_enhance", "label": "Reduce grid pattern", "type": "boolean",
+     "default": false, "hint": "enable when needed"},
+    {"name": "saturation", "label": "Saturation", "type": "number",
+     "default": 0.0, "min": -1.0, "max": 1.0, "step": 0.05}
+  ]
+}
+```
+
+## `GET /controlmaps`
+
+```json
+{
+  "controlmaps": {"canny": ["canny"]},
+  "defaults": {"canny": "canny"},
+  "detectors": [],
+  "options": {
+    "canny": [
+      {"name": "low", "label": "Low edge strength", "type": "number", "default": 100.0, "min": 0, "step": 1},
+      {"name": "high", "label": "High edge strength", "type": "number", "default": 200.0, "min": 0, "step": 1},
+      {"name": "thickness", "label": "Line width", "type": "integer", "default": 1, "min": 1, "step": 1}
+    ]
+  }
+}
+```
+
+`controlmaps` maps each control-map type to the implementations it can choose
+between, `defaults` to the one used when a request does not name one. Both are
+empty when nothing is implemented, and no diffusion model is needed to list them.
+
+`options` describes the request fields of every kind the engine knows - label,
+control type, default, bounds - and `pool` names the list a field is filled from
+(`detectors`, above). It is generated from the option dataclasses the extraction
+itself runs on, which is also where the CLI flags and the web UI form come from, so
+none of the three can show a default the engine would not use.
+
+`detectors` lists the person detectors on disk that a `pose` request crops its people
+with, by name. `pose` appears in `controlmaps` only once both its checkpoints - the
+keypoint model *and* a detector - are in the directory: an estimator with nothing to
+crop with measures nothing.
+
+## `POST /controlmap`
+
+Extracts a conditioning map - Canny or line-art edges, a soft edge field, a
+Depth-Anything-V2 depth map or an openpose-style pose skeleton. Like `/upscale`, this
+needs no diffusion model loaded.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `image_b64` | `string` | *(required)* | Base64-encoded input image (PNG/JPEG) |
+| `type` | `string` | *(required)* | Control-map type, one of those listed by `/controlmaps` |
+| `model` | `string` | type default | Implementation to use for that type |
+| `canny` | `object` | defaults | `low` (100), `high` (200) thresholds in Sobel magnitude units, `thickness` (1) in pixels |
+| `lineart` | `object` | defaults | `threshold` (0.5) line intensity, `thickness` (1) in pixels |
+| `softedge` | `object` | defaults | `threshold` (0.2) soft edge cutoff, `blur` (1.5) smoothing sigma |
+| `depth` | `object` | defaults | `invert` (false: near is bright), `colormap` (`gray` or `turbo`) |
+| `pose` | `object` | defaults | `detector` ("": the first one listed by `/controlmaps`), `threshold` (0.5) for a person to count, `kp_threshold` (0.3) for a joint to be drawn, `line_width` (4), `radius` (4), `background` (`black`, or `green` for the original openpose canvas) |
+| `out` | `string` | `png` | `png` (returns an image) or `json` (returns `b64_json`) |
+
+The map comes back the size of the image it was extracted from, so it can be paired
+with that same image later - whoever conditions on it does its own resizing.
+
+A `depth` request needs its checkpoint on disk (``scripts/download.py --model
+controlmap``) and a `pose` request needs both of its own (``scripts/download.py --model
+controlmap --variant pose``); when either is missing the endpoint answers **HTTP 400**
+naming the command that fetches it. A type the engine does not implement, an unknown `model` or an
+invalid option value is also **HTTP 400**; a `type` outside the implemented set is a
+schema error (**HTTP 422**).
+
+### Response
+
+Returns a PNG image directly (`Content-Type: image/png`), with a `controlmap_data`
+text chunk holding the type, the model and the options that differed from their
+defaults, next to whatever metadata the input image already carried.
+
+### Example
+
+```bash
+curl -s localhost:8000/controlmap \
+  -H 'content-type: application/json' \
+  -d '{"image_b64":"<base64 png>","type":"canny","canny":{"low":30,"high":60}}' \
+  --output /tmp/fox_canny.png
+
+curl -s localhost:8000/controlmap \
+  -H 'content-type: application/json' \
+  -d '{"image_b64":"<base64 png>","type":"pose","pose":{"kp_threshold":0.4}}' \
+  --output /tmp/fox_pose.png
+```
+
 ## Using it from Python
 
 ```python
@@ -192,6 +292,15 @@ req = urllib.request.Request(
 with urllib.request.urlopen(req) as r:
     open("fox_edited.png", "wb").write(r.read())
 ```
+
+## Caching
+
+Pipeline stages cache their output, keyed by the request fields that affect them,
+so a request repeated verbatim — same prompt, guidance, size, steps, seed and
+sampler — is served from the cache: identical bytes, a fraction of the time, no
+resampling. A request that omits `seed` (or passes `-1`) draws a fresh seed
+before the key is built and so never hits it; when timing repeated requests, vary
+the seed or prompt.
 
 ## Error semantics
 

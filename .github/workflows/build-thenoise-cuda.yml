@@ -1,0 +1,241 @@
+name: Build TheNoise + CUDA (portable)
+
+on:
+  push:
+    branches: ['ci/cuda-*']
+  workflow_call:
+    inputs:
+      create_release:
+        type: boolean
+        default: false
+    outputs:
+      thenoise_version:
+        description: TheNoise version in the CUDA bundle
+        value: ${{ jobs.build-linux.outputs.version }}
+      cuda_version:
+        description: CUDA runtime version in the bundle
+        value: ${{ jobs.build-linux.outputs.cuda }}
+  pull_request:
+    paths:
+      - .github/workflows/build-thenoise-cuda.yml
+      - .github/workflows/build-thenoise-rocm.yml
+      - build-scripts/build_portable_cuda.sh
+      - build-scripts/thenoise-cuda-launcher
+      - build-scripts/qualify_thenoise.sh
+      - pyproject.toml
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Publish a CUDA release'
+        type: boolean
+        default: true
+      qualify_nvidia:
+        description: 'Run Anima qualification on an NVIDIA runner'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: thenoise-cuda-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      tag: ${{ steps.archive.outputs.tag }}
+      version: ${{ steps.archive.outputs.version }}
+      cuda: ${{ steps.archive.outputs.cuda }}
+    steps:
+      - name: Checkout TheNoise
+        uses: actions/checkout@v4
+
+      - name: Build CUDA bundle
+        run: bash build-scripts/build_portable_cuda.sh
+
+      - name: Package release archive
+        id: archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="${{ env.THENOISE_ROOT }}"
+          PY="$ROOT/bin/python3"
+          VERSION=$("$PY" -c "import importlib.metadata as m; print(m.version('thenoise'))")
+          CUDA=$("$PY" -c 'import torch; print(torch.version.cuda)')
+          TAG="thenoise-${VERSION}-cuda${CUDA}"
+          if [[ "$GITHUB_REF" != refs/tags/v* ]]; then
+            TAG="${TAG}-${GITHUB_SHA:0:7}"
+          fi
+          BASE="${TAG}-cuda-x64"
+          DEST="${{ runner.temp }}/cuda-release"
+          mkdir -p "$DEST"
+          tar -czf - -C "$ROOT" . | \
+            split -b 1900M --numeric-suffixes=1 -a 2 --additional-suffix=.tar.gz \
+              - "$DEST/${BASE}.part"
+          parts=("$DEST/${BASE}.part"*.tar.gz)
+          total=${#parts[@]}
+          if (( total == 1 )); then
+            mv "${parts[0]}" "$DEST/${BASE}.tar.gz"
+          elif (( total <= 99 )); then
+            for part in "${parts[@]}"; do
+              suffix="${part##*.part}"
+              number="${suffix%%.tar.gz}"
+              mv "$part" "$DEST/${BASE}.part${number}-of-$(printf '%02d' "$total").tar.gz"
+            done
+            echo "$total" > "$DEST/${BASE}.partcount"
+          else
+            echo '::error::CUDA archive exceeds 99 parts'
+            exit 1
+          fi
+          (cd "$DEST" && sha256sum -- *.tar.gz > "${BASE}.sha256")
+          (cd "$DEST" && sha256sum -c -- "${BASE}.sha256")
+          du -sh "$DEST"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "cuda=$CUDA" >> "$GITHUB_OUTPUT"
+          ls -lh "$DEST"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: thenoise-cuda-linux-x64
+          path: ${{ runner.temp }}/cuda-release/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  qualify-nvidia:
+    needs: build-linux
+    if: |
+      (github.event_name == 'workflow_dispatch' && inputs.qualify_nvidia == true) ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/ci/cuda-') &&
+       vars.THENOISE_CUDA_QUALIFY == 'true')
+    runs-on: [self-hosted, Linux, X64, nvidia]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: thenoise-cuda-linux-x64
+          path: ${{ runner.temp }}/cuda-release
+
+      - name: Qualify portable bundle with Anima
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ runner.temp }}/cuda-release"
+          sha256sum -c -- *.sha256
+          ROOT="${{ runner.temp }}/thenoise-cuda-bundle"
+          mkdir -p "$ROOT"
+          if compgen -G '*.partcount' >/dev/null; then
+            cat -- *.part??-of-??.tar.gz | tar -xz -C "$ROOT"
+          else
+            tar -xzf ./*.tar.gz -C "$ROOT"
+          fi
+          "$ROOT/bin/python3" - <<'PY'
+          import torch
+          assert torch.version.cuda is not None and torch.version.hip is None
+          assert torch.cuda.is_available(), 'NVIDIA GPU unavailable'
+          print(torch.cuda.get_device_name(0))
+          PY
+          export TRITON_CACHE_DIR="$(mktemp -d)"
+          export TORCHINDUCTOR_CACHE_DIR="$(mktemp -d)"
+          bash "$GITHUB_WORKSPACE/build-scripts/qualify_thenoise.sh" \
+            --root "$ROOT" \
+            --model-dir "${{ runner.temp }}/anima" \
+            --out "${{ runner.temp }}/qualification.json"
+
+      - name: Upload qualification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qualification-cuda-linux-x64
+          path: ${{ runner.temp }}/qualification.json
+          if-no-files-found: warn
+
+  publish-release:
+    needs: [build-linux, qualify-nvidia]
+    if: |
+      always() &&
+      needs.build-linux.result == 'success' &&
+      (needs.qualify-nvidia.result == 'success' || needs.qualify-nvidia.result == 'skipped') &&
+      ((github.event_name == 'push' && startsWith(github.ref, 'refs/heads/ci/cuda-')) ||
+       (github.event_name == 'workflow_dispatch' && inputs.create_release == true))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: thenoise-cuda-linux-x64
+          path: ./cuda-release
+
+      - name: Publish CUDA release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build-linux.outputs.tag }}
+          VERSION: ${{ needs.build-linux.outputs.version }}
+          CUDA: ${{ needs.build-linux.outputs.cuda }}
+          QUALIFIED: ${{ needs.qualify-nvidia.result }}
+        run: |
+          set -euo pipefail
+          (cd cuda-release && sha256sum -c -- *.sha256)
+          {
+            echo "**TheNoise**: $VERSION"
+            echo "**CUDA runtime**: $CUDA"
+            echo '**Platform**: Linux x86_64'
+            if [ "$QUALIFIED" = success ]; then
+              echo '**GPU qualification**: passed (Anima)'
+            else
+              echo '**GPU qualification**: not run; validate on NVIDIA hardware before deployment'
+            fi
+            echo
+            echo 'Portable Python, CUDA PyTorch and a C/C++ compiler are included.'
+            echo 'An NVIDIA driver is required. Run `./bin/thenoise` after extraction.'
+            echo 'For split archives, concatenate numbered parts before extracting.'
+          } > notes.md
+
+          prerelease=true
+          if [ "$QUALIFIED" = success ] && [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            prerelease=false
+          fi
+
+          # Publish assets in one operation; gh manages its temporary draft.
+          # Include drafts in the check so reruns never overwrite prior assets.
+          existing=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" |
+            jq -sc --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)] | .[0] // empty')
+          if [ -n "$existing" ]; then
+            source_sha=$(jq -r '.target_commitish' <<< "$existing")
+            if [ "$source_sha" != "$GITHUB_SHA" ]; then
+              echo "::error::Release $TAG targets $source_sha, not $GITHUB_SHA"
+              exit 1
+            fi
+            if [ "$(jq -r '.draft' <<< "$existing")" = true ]; then
+              echo "::error::Release $TAG is an incomplete draft; resolve it before rerunning"
+              exit 1
+            fi
+            for file in cuda-release/*; do
+              name="${file##*/}"
+              size=$(stat -c '%s' "$file")
+              jq -e --arg name "$name" --argjson size "$size" \
+                'any(.assets[]?; .name == $name and .size == $size and .state == "uploaded")' \
+                <<< "$existing" >/dev/null || {
+                  echo "::error::Release $TAG has a missing or changed asset: $name"
+                  exit 1
+                }
+            done
+            echo "Release $TAG already exists with the expected assets"
+            exit 0
+          fi
+
+          args=(--repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA"
+                --title "TheNoise $VERSION CUDA $CUDA" --notes-file notes.md --latest=false)
+          if [ "$prerelease" = true ]; then
+            args+=(--prerelease)
+          fi
+          gh release create "$TAG" "${args[@]}" cuda-release/*
+          echo "Release $TAG published"

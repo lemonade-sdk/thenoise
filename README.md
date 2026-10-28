@@ -4,7 +4,7 @@
 
 TheNoise is an open-source image generation / editing engine made specifically to run well on Strix Halo (gfx1151) and other ROCm-capable AMD iGPUs and dGPUs. It is tuned to perform extremely well on the machine it runs on.  
 
-TheNoise loads one model at a time and generates images from text prompts. Editing-capable models - like Qwen-Image 2.1, Qwen-Image-Edit and FLUX.2 Klein, Mage-Flow - can also edit an existing image from a text instruction (image + prompt → edited image).
+TheNoise loads one model at a time and generates images from text prompts. Editing-capable models - like Qwen-Image 2.1, Qwen-Image-Edit, FLUX.2 Klein, Mage-Flow, Flux.3 and Fibo 2.0 - can also edit an existing image from a text instruction (image + prompt → edited image).
 
 TheNoise can be used standalone, from the command line or through a webui or through an OpenAI-compatible server like [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends), with which it is already integrated.
 
@@ -23,6 +23,11 @@ TheNoise can be used standalone, from the command line or through a webui or thr
   <img width="2048" height="1066" alt="thenoise-upscaler" src="https://github.com/user-attachments/assets/f7ce89b7-fd25-4ad9-a3e4-d5e367530ab7" />
 </details>
 
+<details id="shot-controlmap">
+  <summary>Control Maps</summary>
+  <img width="2048" height="1066" alt="thenoise-control-maps" src="https://github.com/user-attachments/assets/c5ce6c59-f975-498a-a1e5-f9af2259a63d" />
+</details>
+
 ---
 ## Features
 
@@ -30,9 +35,12 @@ TheNoise ships:
 
 - image generation / editing support for major open-weights models,
 - [Lemonade Server](https://lemonade-server.ai) integration - TheNoise ships as its `thenoise` backend, see [Using TheNoise with Lemonade Server](docs/lemonade.md),
+- a ROCm container image and Compose example, for lifecycle management and for handing the GPU to other services - see [Docker / Compose](docs/docker.md),
 - a built-in 2× refiner-based (SesquiLSR) upscaler - fast and high-quality upscaling without loading extra model files,
 - pixel-space upscalers (Real-ESRGAN) up to 4× - standard ESRGAN-based models,
-- film grain and RCAS sharpening as post-processing,
+- post-processing in the decode tail - colour grading (saturation, vibrance and a
+  white-balance pair), RCAS sharpening and film grain,
+- control-map extraction for conditioning workflows - canny edges, line-art and soft-edge maps, depth maps and openpose-style pose skeletons,
 - LoRA support - one or more LoRAs per image, each with its own weight.
 
 ## Supported models
@@ -40,13 +48,16 @@ TheNoise ships:
 | Model | Generate | Edit | Details |
 |---|---|---|---|
 | **Anima**, small and fast | ✓ | — | [anima](docs/models/anima.md) |
-| **Mage-Flow / Turbo**, the fastest model, with editing | ✓ | ✓ | [mage-flow](docs/models/mage-flow.md) |
 | **Krea 2**, highest image quality | ✓ | — | [krea2](docs/models/krea2.md) |
+| **Qwen-Image 2.1**, generation and editing in one model | ✓ | ✓ | [qwen-image-2.1](docs/models/qwen-image-2.1.md) |
+| **MOSS-Image**, joint-stream DiT with a Qwen3.5 conditioner | ✓ | — | [moss-image](docs/models/moss-image.md) |
 | **Z-Image / Z-Image-Turbo**, quality at 8 steps | ✓ | — | [zimage](docs/models/zimage.md) |
 | **Flux.2 Klein 4B / 9B**, 4 steps, with editing | ✓ | ✓ | [flux2-klein](docs/models/flux2-klein.md) |
 | **Qwen-Image / Qwen-Image-Edit**, generation and editing | ✓ | ✓ | [qwen-image](docs/models/qwen-image.md) |
-| **Qwen-Image 2.1**, generation and editing in one model | ✓ | ✓ | [qwen-image-2.1](docs/models/qwen-image-2.1.md) |
 | **Ming-Image 0.1**, RGBA output with real transparency | ✓ | — | [ming-image](docs/models/ming-image.md) |
+| **Mage-Flow / Turbo**, the fastest model, with editing | ✓ | ✓ | [mage-flow](docs/models/mage-flow.md) |
+| **Flux.3**, 15 steps with editing | ✓ | ✓ | [flux3](docs/models/flux3.md) |
+| **Fibo 2.0**, Bria's 4-step generate-and-edit model | ✓ | ✓ | [fibo2](docs/models/fibo2.md) |
 
 New models are added over time. PRs adding model support are welcome.
 
@@ -82,6 +93,9 @@ a warmup run.
 | Qwen-Image 2512 · BF16 · 4 steps | 9.7s | 34.9s |
 | Qwen-Image 2.1 Turbo · INT8-ConvRot · 8 steps | 17.8s | 65s |
 | Ming-Image 0.1 · INT8-ConvRot · 12 steps | 21s | 84.8s |
+| Flux 3 Klein · INT8-ConvRot · 15 steps | 13.4s | 75.8s |
+| MOSS-Image · BF16 + [8 step DMD LoRA](https://huggingface.co/lodestones/MOSS-Image-SFT-8-steps-dmd) · 8 steps | 12.6s | 51.2s |
+| Fibo 2.0 Turbo Edit · INT8-ConvRot · 4 steps | 9.2s | 35.6s |
 
 *Image + simple instruction to edited image (editing):*
 
@@ -91,8 +105,10 @@ a warmup run.
 | Qwen-Image-Edit 2511 · BF16 · 4 steps | 21.7s | 14.2s |
 | Qwen-Image 2.1 Turbo · INT8-ConvRot · 8 steps | — | 21.3s |
 | Mage-Flow Turbo · BF16 · 4 steps | 4.9s | — *(no KV cache)* |
+| Flux 3 Klein · INT8-Convrot · 15 steps | 41.8s | — *(no KV cache)* |
+| Fibo 2.0 Turbo Edit · INT8-ConvRot · 4 steps | 15.5s | 20.6s |
 
-<small>TheNoise 0.9.0, Strix Halo (gfx1151, 128 GB unified)</small>
+<small>TheNoise 0.11.0, Strix Halo (gfx1151, 128 GB unified)</small>
 
 ## Quick start
 
@@ -132,9 +148,11 @@ uv pip install -e ".[scripts]"
 
 | If you want to… | Use |
 |---|---|
-| generate an image from the command line | the [CLI](docs/cli.md) - `generate`, `edit`, `upscale` |
+| generate an image from the command line | the [CLI](docs/cli.md) - `generate`, `edit`, `upscale`, `controlmap` |
 | work through a browser | the web UI at `http://localhost:8000/` when running `serve` |
-| call it from other software | the [HTTP API](docs/api.md) - `/text2image`, `/edit`, `/upscale` |
+| call it from other software | the [HTTP API](docs/api.md) - `/text2image`, `/edit`, `/upscale`, `/controlmap` |
+| manage it as a service | the [Docker / Compose](docs/docker.md) image - start, stop, swap models |
+| extract a control map from an image | `controlmap` - the [CLI](docs/cli.md#control-map-a-control-map), the `/controlmap` endpoint or the web UI's Control Maps tab |
 
 ## Documentation
 
@@ -143,6 +161,7 @@ uv pip install -e ".[scripts]"
 | [**Setup**](docs/setup.md) | from a released build to your first image |
 | [**CLI reference**](docs/cli.md) | all `generate` / `edit` / `serve` / `upscale` flags, upscaling, LoRAs |
 | [**HTTP API**](docs/api.md) | endpoints, request/response reference, curl and Python examples |
+| [**Docker / Compose**](docs/docker.md) | running the ROCm container, model + cache volumes, swapping models |
 | [**Development & Contribution**](docs/development.md) | building from source, tests, portable builds, adding models |
 
 ## Acknowledgments

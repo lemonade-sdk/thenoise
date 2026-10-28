@@ -69,8 +69,10 @@ MIN_TILE_ROWS = 64            # thinner than this a tile is launch overhead, not
 def score_tile_rows(n: int) -> int:
     """Query rows to score at once for an ``N x N`` score matrix. ``n`` means: all of it.
 
-    A row of scores costs ``4N`` bytes (two live bf16 matrices ``N`` wide), so a tile is
-    ``SCORE_TILE_BYTES / 4N`` rows, floored at ``MIN_TILE_ROWS``.
+    A row costs ``2N`` bytes since the probabilities overwrite the scores, so the
+    ``4N`` divisor leaves every tile at half of ``SCORE_TILE_BYTES``, and tiling engages
+    at half the token count the limit suggests. Halving rows back would spend the same
+    bytes for half the launches; the footprints decided for the saving.
     """
     if 4 * n * n <= SCORE_LIMIT_BYTES:
         return n
@@ -86,6 +88,12 @@ def single_head_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     pixel of the latent. As of ROCm 10.1.0rc2, the fused SDPA backends do not serve 
     that shape honestly: they refuse it, or accept it and return wrong values, and the 
     math backend they fall back to costs several times these two matmuls.
+
+    Both paths write the probabilities over the scores they came from: the same row
+    operation, and a whole score matrix less — 0.5 GiB on an untiled 16384-token grid,
+    one tile per call above that, bit-identical on the machines tried. ``out=`` aliasing
+    is not an ATen promise; were it ever dropped, the answer stays correct and only the
+    footprint returns.
     """
     n, embed = q.shape[-2], q.shape[-1]
     scale = math.sqrt(embed)
@@ -95,7 +103,7 @@ def single_head_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     if rows >= n:
         scores = q @ k.transpose(-2, -1)
         scores.div_(scale)
-        return scores.softmax(-1) @ v
+        return torch.softmax(scores, -1, out=scores) @ v
 
     rows = max(MIN_TILE_ROWS, rows)
     out = torch.empty((*q.shape[:-1], v.shape[-1]), dtype=q.dtype, device=q.device)
@@ -106,7 +114,8 @@ def single_head_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
         tile = scratch[..., : stop - start, :]
         torch.matmul(q[..., start:stop, :], keys_t, out=tile)
         tile.div_(scale)
-        torch.matmul(tile.softmax(-1), v, out=out[..., start:stop, :])
+        probs = torch.softmax(tile, -1, out=tile)
+        torch.matmul(probs, v, out=out[..., start:stop, :])
     return out
 
 

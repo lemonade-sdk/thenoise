@@ -40,6 +40,9 @@ cat thenoise-*.part*.tar.gz | tar -xz
 
 No installation step: the extracted directory *is* TheNoise.
 
+> Prefer to let a container manager own the process? The same bundle ships as a
+> ROCm image: [Docker / Compose](docker.md).
+
 On Windows, extract into a short folder such as
 `%LOCALAPPDATA%\Programs\thenoise`. With Windows
 long paths disabled (the default), the GPU libraries cannot open their kernel
@@ -67,7 +70,20 @@ All models and options (variants, `--int8-convrot`, ...):
 | Qwen-Image / Edit | `--model qwen-image` | ~40 GB | [model page](models/qwen-image.md) |
 | Qwen-Image 2.1 | `--model qwen-image-2.1` | ~32 GB | [model page](models/qwen-image-2.1.md) |
 | Mage-Flow / Turbo | `--model mage-flow` | 18–25 GB | [model page](models/mage-flow.md) |
+| Flux.3 | not in the script — see below | ~5.8 GB (INT8) | [model page](models/flux3.md) |
+| MOSS-Image | `--model moss-image` | 14–19 GB | [model page](models/moss-image.md) |
+| Fibo 2.0 edit-turbo / dev | `--model fibo2 --int8-convrot` | 14–26 GB | [model page](models/fibo2.md) |
 | Real-ESRGAN x4 *(optional, upscaling)* | `--model esrgan` | ~0.7 GB | [CLI: upscaling](cli.md#upscaling) |
+| Control-map checkpoints *(optional, control-map extraction)* | `--model controlmap` | 99 MB – 425 MB | [CLI: control maps](cli.md#control-map-a-control-map) |
+
+**Flux.3** is the one model the script cannot fetch: the checkpoint sits behind a
+login on Hugging Face, with no mirror to fall back on. Its
+[model page](models/flux3.md) lists the three files to get by hand and the paths to
+pass — two of them (the Flux.2 VAE and Qwen3-VL 4B) are the ones Flux.2 Klein and
+Krea 2 already use.
+
+Canny, line-art and soft-edge maps need **no** download — they are pure `torch`. Depth
+and pose are the two kinds that pull checkpoints.
 
 Models land in `./models/<model>/` next to the bundle.
 
@@ -108,6 +124,7 @@ Upscale tabs, driven by whatever model is loaded.
 ## What next
 
 - [CLI reference](cli.md) - every `generate` / `edit` / `serve` / `upscale` flag
+- [Docker / Compose](docker.md) - run it as a managed service instead of a shell session
 - [HTTP API reference](api.md) - endpoints, request/response formats, curl examples
 - [Model pages](models/) - per-model download options, examples, settings
 - [Upscaling](cli.md#upscaling) - latent refine + Real-ESRGAN pixel upscaling, up to 8×

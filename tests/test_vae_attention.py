@@ -57,6 +57,20 @@ def test_the_tile_policy_leaves_the_small_shapes_alone():
     assert attn.score_tile_rows(262144) == 256    # 4K latents
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_probabilities_written_over_the_scores_answer_the_same(dtype):
+    """What the aliased softmax inside `single_head_attention` rests on.
+
+    A path that read the scores again after the alias would answer differently and the
+    SDPA and tiling tests here would notice; this catches the alias itself moving the
+    numbers, which is what `out=` does not promise not to do.
+    """
+    torch.manual_seed(0)
+    scores = torch.randn(256, 1024, dtype=dtype)
+    ref = torch.softmax(scores, -1)
+    assert torch.equal(torch.softmax(scores, -1, out=scores), ref)
+
+
 @pytest.mark.parametrize("rows", [1, 63, 128, 257, 10_000])
 def test_tiling_the_queries_does_not_change_the_answer(rows):
     """Exact, because a query's output depends on no other query. Odd tile counts are
@@ -87,6 +101,28 @@ def test_flux_decode_never_reaches_for_sdpa(tiny_flux, monkeypatch):
     with torch.no_grad():
         pixels = tiny_flux.decode_to_pixels(torch.randn(1, 16, 4, 4))
     assert pixels.shape == (1, 3, 32, 32)
+
+
+def test_the_flux_attention_head_outlives_its_fp16_queries(tiny_flux):
+    """The shipped AE drives ``q``/``k`` to ~1e3, whose dot product runs the scores past
+    FP16's range, so the head works in FP32 and only its result comes back.
+
+    The direct call is the mechanism of it: the same projections left in FP16 answer NaN.
+    """
+    torch.manual_seed(0)
+    block = tiny_flux.mid.attn_1.to(torch.float16)
+    for name in ("q", "k"):
+        getattr(block, name).weight.mul_(300.0)  # the magnitudes the real weights reach
+    x = torch.randn(1, 8, 6, 6, dtype=torch.float16)
+    with torch.no_grad():
+        q, k, v = (
+            getattr(block, n)(block.norm(x)).flatten(2).transpose(1, 2).unsqueeze(1)
+            for n in ("q", "k", "v")
+        )
+        assert not torch.isfinite(single_head_attention(q, k, v)).all()
+        out = block(x)
+    assert out.dtype == torch.float16
+    assert torch.isfinite(out).all()
 
 
 def _reference_patched_attention(q, k, v):

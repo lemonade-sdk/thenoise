@@ -38,16 +38,10 @@ from thenoise.utils.image_tensor import (
     pixels_to_pil,
     resize_to_target,
 )
-from thenoise.postprocess.film_grain import film_grain
-from thenoise.postprocess.nyquist import nyquist_notch
-from thenoise.postprocess.rcas import rcas
+from thenoise.postprocess import DECODE, PostprocessOptions, apply_stage
 from thenoise.utils.png import build_pnginfo
 
 logger = logging.getLogger(__name__)
-
-
-# Largest side for the edit output when neither width nor height is given.
-_EDIT_DEFAULT_SIZE = 1024
 
 
 @dataclass(frozen=True)
@@ -184,17 +178,18 @@ class PipelineController:
             return ("prompt",) + base
         return ("prompt_edit",) + base + (ref_key,)
 
-    def _cache_key_reference(self, images: list[Image.Image]) -> Tuple:
+    def _cache_key_reference(self, images: list[Image.Image], target: Tuple[int, int]) -> Tuple:
         """Cache key for the encoded reference latent(s) (edit path).
 
         Hashes each image's normalized pixel bytes (RGBA when it carries
         transparency) in order, plus the sizing policy that decided the size each one
-        was encoded at.
+        was encoded at and the canvas size that policy was given: a model may fit a
+        reference to the result (``DiffusionModel.fit_references``).
         """
         digests = tuple(
             hashlib.md5(load_image(img).tobytes()).hexdigest() for img in images
         )
-        return ("reference", self.model.REFERENCE_SIZING, digests)
+        return ("reference", self.model.REFERENCE_SIZING, target, digests)
 
     def _cache_key_sampling(
         self,
@@ -262,26 +257,18 @@ class PipelineController:
         if not images:
             raise ValueError("edit requires an input image")
 
-        # Without explicit width/height the first reference sets the output
-        # aspect ratio, resized to ``_EDIT_DEFAULT_SIZE`` on its largest side.
+        # Without explicit width/height the first reference decides the output size.
         local = request
         if request.width is None and request.height is None:
-            iw, ih = images[0].size
-            target = _EDIT_DEFAULT_SIZE
-            if iw >= ih:
-                w = target
-                h = round(ih * target / iw)
-            else:
-                h = target
-                w = round(iw * target / ih)
-            local = replace(request, width=w, height=h)
+            width, height = model.default_edit_size(*images[0].size)
+            local = replace(request, width=width, height=height)
 
         r = self._resolve_pipeline(local, is_edit=True)
-        ref_key = self._cache_key_reference(images)
+        ref_key = self._cache_key_reference(images, (r.width, r.height))
         with inference():
             return self._finalize(
                 self._run(local, r, ref_key=ref_key, ref_method=r.ref_method),
-                local, r,
+                local, r, source=images[0],
             )
 
     def _edit_images(self, request: GenerateRequest) -> list[Image.Image]:
@@ -335,11 +322,12 @@ class PipelineController:
                 if self._cache.reference_hit(ref_key):
                     ref_latents = self._cache.reference_get()
                 else:
-                    ref_latents = []
-                    for img in self._edit_images(request):
-                        fitted = model.prepare_reference(img)
-                        pixels = pil_to_pixels(fitted, model.pixel_channels)
-                        ref_latents.append(model.encode_reference(pixels))  # [1,C,H,W]
+                    ref_latents = [
+                        model.encode_reference(
+                            pil_to_pixels(fitted, model.pixel_channels))  # [1,C,H,W]
+                        for fitted in model.fit_references(
+                            self._edit_images(request), (r.width, r.height))
+                    ]
                     self._cache.reference_store(ref_key, ref_latents)
 
             # Stage 1: prompt conditioning — text encoder only.
@@ -526,18 +514,20 @@ class PipelineController:
         pixels: torch.Tensor,
         request: GenerateRequest,
         r: _ResolvedRequest,
+        *,
+        source: Optional[Image.Image] = None,
     ) -> Image.Image:
         """Decoded pixels -> final PIL image (shared tail of generate/edit).
 
-        Notch filter -> pixel upscaler -> resize -> postprocess -> PIL -> crop ->
-        PNG metadata.
+        Decode-stage filters -> pixel upscaler -> resize -> final filters -> PIL ->
+        crop -> PNG metadata.
         """
         model = self.model
+        postprocess = request.postprocess_options()
 
-        # The notch filter runs at the native decoded resolution, before any
+        # The decode-stage filters run at the native decoded resolution, before any
         # pixel-domain upscaling.
-        if request.qwen_vae_enhance:
-            pixels = nyquist_notch(pixels)
+        pixels = apply_stage(pixels, postprocess, DECODE)
 
         # Pixel-domain upscaler + GPU resize to target size.
         pixels = self._pixel_upscalers.apply(
@@ -546,11 +536,7 @@ class PipelineController:
         pixels = resize_to_target(pixels, r.target_width, r.target_height)
 
         # Stage 5: postprocess
-        pixels = self.postprocess(
-            pixels,
-            film_grain_strength=request.film_grain,
-            sharpening=request.sharpening,
-        )
+        pixels = self.postprocess(pixels, postprocess)
         image = pixels_to_pil(pixels)
 
         if (image.width, image.height) != (r.target_width, r.target_height):
@@ -570,14 +556,13 @@ class PipelineController:
             upscale_factor=r.factor,
             upscale_type=r.upscale_type,
             sampler=r.effective_sampler,
-            qwen_vae_enhance=request.qwen_vae_enhance,
-            film_grain=request.film_grain,
-            sharpening=request.sharpening,
+            postprocess=postprocess,
             lora_specs=request.lora_specs,
             pixel_upscaler=r.pixel_upscaler,
             sigmas=list(r.sigmas) if r.sigmas else None,
             ref_method=r.ref_method,
             kv_cache=r.kv_cache,
+            source=source,
         )
         image._pnginfo = pnginfo
         return image
@@ -716,16 +701,16 @@ class PipelineController:
     def postprocess(
         self,
         pixels: torch.Tensor,
-        *,
-        film_grain_strength: float = 0.0,
-        sharpening: float = 0.0,
+        options: Optional[PostprocessOptions] = None,
     ) -> torch.Tensor:
-        """Tensor post-processing hook. Runs on the fp32 GPU pixels."""
-        if sharpening > 0.0:
-            pixels = rcas(pixels, strength=sharpening)
-        if film_grain_strength > 0.0:
-            pixels = film_grain(pixels, strength=film_grain_strength / 10.0)
-        return pixels
+        """Tensor post-processing hook. Runs on the fp32 GPU pixels.
+
+        The final stage of the declared chain, in declaration order; nothing asked
+        for leaves the tensor itself untouched.
+        """
+        return apply_stage(
+            pixels, options if options is not None else PostprocessOptions()
+        )
 
 
 __all__ = ["PipelineController"]
