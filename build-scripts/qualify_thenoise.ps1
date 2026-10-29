@@ -85,7 +85,7 @@ $Dit = Join-Path $ModelDir "split_files\diffusion_models\anima-$Variant.safetens
 if (Test-Path $Dit) {
   Write-Host "model already present; using cache"
 } else {
-  & $Py (Join-Path (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) "scripts\download_anima.py") --out $ModelDir --variant $Variant
+  & $Py (Join-Path (Split-Path -Parent (Split-Path -Parent $PSCommandPath)) "scripts\download.py") --model anima --out $ModelDir --variant $Variant
   if ($LASTEXITCODE -ne 0) { Fail-Report "model download failed" }
 }
 $Vae = Join-Path $ModelDir "split_files\vae\qwen_image_vae.safetensors"

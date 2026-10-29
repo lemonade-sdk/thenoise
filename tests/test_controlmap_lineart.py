@@ -32,7 +32,7 @@ def rectangle(size, box, fill="white", background="black") -> Image.Image:
 
 def test_uniform_image_has_no_lines(lineart):
     # The whole canvas stays white: a flat image has no gradient.
-    assert map_of(lineart, Image.new("RGB", (48, 48), "grey")).max() == 0
+    assert map_of(lineart, Image.new("RGB", (48, 48), "grey")).min() == 255
 
 
 def test_a_step_edge_is_one_pixel_wide(lineart):

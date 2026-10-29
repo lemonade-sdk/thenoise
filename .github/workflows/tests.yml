@@ -1,0 +1,59 @@
+name: Test TheNoise
+
+# The unit suite is weight-free and GPU-free (tests/conftest.py), so it runs on a stock
+# runner with a CPU-only torch: ~1 minute warm, ~3 cold. Tests that need a GPU backend
+# skip themselves here; the packaged bundles have their own smoke tests.
+#
+# Unpinned torch, newest on purpose: the suite has to hold on a build nobody has locally,
+# so it pins the numerics that hold on every build rather than the ones one build gives.
+#
+# No `paths:` filter — the suite imports the whole package, so a change anywhere can break
+# it — and only pull requests cancel a run in progress, as in the build workflows.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  pytest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout TheNoise
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        # A full version, not @v10: setup-uv stopped publishing floating major tags.
+        uses: astral-sh/setup-uv@v10.3.3
+
+      - name: Install a CPU torch, then thenoise
+        # torch is not in pyproject.toml (the bundles install their own device build) and
+        # PyPI's Linux wheel is a CUDA build. Before the project, too: installed after it,
+        # transformers' own torch dependency re-resolves the CUDA one from PyPI.
+        run: |
+          set -euo pipefail
+          uv venv --python 3.14 .venv
+          uv pip install --python .venv/bin/python \
+            --index-url https://download.pytorch.org/whl/cpu torch
+          uv pip install --python .venv/bin/python -e '.[dev]'
+          .venv/bin/python - <<'PY'
+          import sys
+
+          import torch
+
+          print("torch", torch.__version__)
+          if torch.version.cuda or torch.version.hip:
+              sys.exit(f"expected a CPU-only torch, got {torch.__version__}")
+          PY
+
+      - name: pytest
+        run: .venv/bin/python -m pytest tests/ -q

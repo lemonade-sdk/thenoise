@@ -31,8 +31,9 @@ def rectangle(size, box, fill="white", background="black") -> Image.Image:
 
 
 def test_uniform_image_has_no_edges(softedge):
-    # The whole canvas stays white: a flat image has no gradient.
-    assert map_of(softedge, Image.new("RGB", (48, 48), "grey")).max() == 0
+    # The whole canvas stays white: a flat image has no gradient, and scaling whatever
+    # the convolution leaves behind would turn that gradient into the whole canvas.
+    assert map_of(softedge, Image.new("RGB", (48, 48), "grey")).min() == 255
 
 
 def test_edges_are_soft_not_binary(softedge):

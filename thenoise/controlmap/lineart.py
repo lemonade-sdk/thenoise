@@ -12,7 +12,7 @@ from PIL import Image
 
 from thenoise.utils.image_tensor import pil_to_pixels
 from .base import ControlMap
-from .canny import _GRAY_SCALE, _blur, _sobel, _suppress, luminance, thicken
+from .canny import _GRAY_SCALE, _NOISE_FLOOR, _blur, _sobel, _suppress, luminance, thicken
 from .options import LineartOptions
 
 
@@ -31,8 +31,9 @@ class LineartControlMap(ControlMap):
         magnitude = _GRAY_SCALE * torch.sqrt(gx * gx + gy * gy)
         thin = _suppress(magnitude, gx, gy)[0]  # [1, H, W]
         hi = thin.max()
-        normalized = thin / hi if hi > 0 else thin
-        lines = thicken((normalized >= options.threshold).to(gray.dtype), options.thickness)
+        if hi < _NOISE_FLOOR:
+            return torch.ones_like(thin)
+        lines = thicken(((thin / hi) >= options.threshold).to(gray.dtype), options.thickness)
         # Inverted palette: white background, dark lines.
         return 1.0 - lines
 

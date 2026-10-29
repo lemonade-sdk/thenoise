@@ -6,13 +6,15 @@ being re-declared by the model adapters — a DiT's own input width is a differe
 number (it patchifies the latent further), and two declarations of one fact is how
 they drift apart.
 
-The middle section covers the two Flux.2 decoders, which the loader likewise tells
-apart from the weights. The last section covers the shared Wan2.1-family loader, which
-builds ONE architecture two ways — Qwen-Image (RGB, per-channel z-scored latent) and
+The middle section covers the Flux.2 AE: the two decoders and the two key layouts it
+ships in, all of which the loader reads off the weights. The last section covers the
+shared Wan2.1-family loader, which builds ONE architecture two ways — Qwen-Image (RGB,
+per-channel z-scored latent) and
 Ming-Image (RGBA, scalar scale) — deciding which from the weights themselves.
 """
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -31,6 +33,7 @@ from thenoise.vae import (
     load_qwen_vae,
 )
 from thenoise.vae import qwen_image as qwen_module
+from thenoise.vae.flux2 import _musubi_key
 from thenoise.vae.qwen_image import (
     MING_IMAGE_SCALE_FACTOR,
     QWEN_IMAGE_LATENTS_MEAN,
@@ -87,6 +90,89 @@ def test_the_flux2_decoder_width_comes_from_the_file(tmp_path, decoder_ch):
     assert (vae.z_dim, vae.spatial_compression, vae.pixel_channels) == (128, 16, 3)
     with torch.no_grad():
         assert vae.decode_to_pixels(torch.randn(1, 128, 4, 4)).shape == (1, 3, 64, 64)
+
+
+_DIFFUSERS_NAMES = (
+    ("encoder.quant_conv.", "quant_conv."),  # outside the half that runs it
+    ("decoder.post_quant_conv.", "post_quant_conv."),
+    (".mid.block_1.", ".mid_block.resnets.0."),
+    (".mid.block_2.", ".mid_block.resnets.1."),
+    (".mid.attn_1.norm.", ".mid_block.attentions.0.group_norm."),
+    (".mid.attn_1.q.", ".mid_block.attentions.0.to_q."),
+    (".mid.attn_1.k.", ".mid_block.attentions.0.to_k."),
+    (".mid.attn_1.v.", ".mid_block.attentions.0.to_v."),
+    (".mid.attn_1.proj_out.", ".mid_block.attentions.0.to_out.0."),
+    (".down.", ".down_blocks."),
+    (".block.", ".resnets."),
+    (".downsample.", ".downsamplers.0."),
+    (".upsample.", ".upsamplers.0."),
+    (".norm_out.", ".conv_norm_out."),
+    (".nin_shortcut.", ".conv_shortcut."),
+)
+
+
+def _as_diffusers(source: dict) -> dict:
+    """``source`` re-keyed the way a diffusers repackage of the same AE holds it.
+
+    The pairs below are the loader's run backwards, the up-blocks flipped back to
+    diffusers' coarsest-first order and the mid attention convs flattened to matrices.
+    """
+    levels = len({key.split(".")[2] for key in source if key.startswith("decoder.up.")})
+    renamed = {}
+    for key, value in source.items():
+        key = re.sub(r"\.up\.(\d+)\.", lambda m: f".up_blocks.{levels - 1 - int(m[1])}.", key)
+        for musubi, diffusers in _DIFFUSERS_NAMES:
+            key = key.replace(musubi, diffusers)
+        if key.endswith((".to_q.weight", ".to_k.weight", ".to_v.weight", ".to_out.0.weight")):
+            value = value.reshape(value.shape[:2])
+        renamed[key] = value.clone().contiguous()
+    return renamed
+
+
+def test_a_flux2_ae_in_the_diffusers_layout_loads(tmp_path):
+    """Repackaged Flux.2 VAEs carry the same tensors under diffusers' names.
+
+    Nothing about the values differs, so the loader just re-keys them: a file in either
+    layout has to produce the very module the musubi-named one does, quant convs and
+    1x1 attention convs included — those are where a rename that only went halfway would
+    drop or mis-shape a tensor.
+    """
+    source = AutoencoderKLFlux2(encoder_ch=32, decoder_ch=64).state_dict()
+    path = write_safetensors(tmp_path / "flux2_vae_diffusers.safetensors", _as_diffusers(source))
+
+    vae = load_flux2_vae(path, device="cpu", dtype=torch.float32)
+
+    assert vae.decoder_ch == 64
+    loaded = vae.state_dict()
+    assert set(loaded) == set(source)
+    # Every level of the decoder is a different width, so matching tensors to keys here
+    # also checks the up-blocks came over in diffusers' order and not musubi's.
+    for key, value in source.items():
+        assert torch.equal(loaded[key], value), key
+
+
+def test_the_diffusers_names_are_the_ones_a_real_file_carries():
+    """Key names copied out of ``flux2-vae_small.safetensors``, so the rewrite is pinned
+    to that file and not to the loader's own idea of it — the decoder's coarsest-first
+    numbering and the mid block's zero-based parts being the two easy ones to get wrong.
+    """
+    pairs = {
+        "decoder.up_blocks.0.resnets.0.conv1.weight": "decoder.up.3.block.0.conv1.weight",
+        "decoder.up_blocks.0.upsamplers.0.conv.weight": "decoder.up.3.upsample.conv.weight",
+        "decoder.up_blocks.2.resnets.0.conv_shortcut.weight": "decoder.up.1.block.0.nin_shortcut.weight",
+        "decoder.up_blocks.3.resnets.2.norm2.weight": "decoder.up.0.block.2.norm2.weight",
+        "encoder.down_blocks.1.downsamplers.0.conv.weight": "encoder.down.1.downsample.conv.weight",
+        "encoder.mid_block.resnets.1.conv2.weight": "encoder.mid.block_2.conv2.weight",
+        "decoder.mid_block.attentions.0.group_norm.weight": "decoder.mid.attn_1.norm.weight",
+        "decoder.mid_block.attentions.0.to_out.0.weight": "decoder.mid.attn_1.proj_out.weight",
+        "encoder.conv_norm_out.weight": "encoder.norm_out.weight",
+        "post_quant_conv.weight": "decoder.post_quant_conv.weight",
+        "quant_conv.bias": "encoder.quant_conv.bias",
+        "bn.running_var": "bn.running_var",
+        "decoder.conv_in.weight": "decoder.conv_in.weight",
+    }
+
+    assert {key: _musubi_key(key) for key in pairs} == pairs
 
 
 def test_the_two_categories_of_compute_dtype():

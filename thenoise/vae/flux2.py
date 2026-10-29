@@ -13,6 +13,7 @@
 # Copyright 2024 Black Forest Labs. Flux is released under the Apache-2.0 License.
 from __future__ import annotations
 
+import re
 from typing import Optional, Union
 
 import torch
@@ -484,12 +485,75 @@ def _half_width(state_dict: dict, half: str, vae_path: str) -> int:
     return weight.shape[0] // scale
 
 
+#: ``quant_conv`` and ``post_quant_conv``, which diffusers keeps at the top level instead
+#: of under the half that runs them.
+_ORPHAN_CONV = {"quant_conv": "encoder", "post_quant_conv": "decoder"}
+
+_REWRITES = (
+    # Diffusers numbers the decoder's up-blocks coarsest first, musubi finest first. The
+    # encoder's down-blocks happen to be numbered the same way in both.
+    (re.compile(r"\.up_blocks\.(\d+)\."), lambda m: f".up.{len(_CH_MULT) - 1 - int(m[1])}."),
+    # And counts a mid block's parts from zero where musubi spells them ``block_1``.
+    (re.compile(r"\.mid_block\.resnets\.(\d+)\."), lambda m: f".mid.block_{int(m[1]) + 1}."),
+    (re.compile(r"\.mid_block\.attentions\.(\d+)\."), lambda m: f".mid.attn_{int(m[1]) + 1}."),
+)
+
+_SEGMENT_NAMES = (
+    ("down_blocks.", "down."),
+    ("mid_block.", "mid."),
+    ("resnets.", "block."),
+    ("downsamplers.0.", "downsample."),
+    ("upsamplers.0.", "upsample."),
+    ("group_norm.", "norm."),
+    ("to_out.0.", "proj_out."),
+    ("to_q.", "q."),
+    ("to_k.", "k."),
+    ("to_v.", "v."),
+    ("conv_norm_out.", "norm_out."),
+    ("conv_shortcut.", "nin_shortcut."),
+)
+
+
+def _musubi_key(key: str) -> str:
+    """``key`` in the names :class:`AutoencoderKLFlux2` gives its modules.
+
+    A Flux.2 AE circulates under two key layouts: the musubi/BFL one the module tree is
+    named after, and diffusers' — same tensors apart from the mid attention projections,
+    which :func:`_restore_1x1_convs` puts back. A key already in the tree's names comes
+    back untouched, so a musubi export passes through and the layout needs no detection.
+    """
+    half = _ORPHAN_CONV.get(key.split(".", 1)[0])
+    if half is not None:
+        key = f"{half}.{key}"
+    for pattern, rewrite in _REWRITES:
+        key = pattern.sub(rewrite, key)
+    for diffusers, musubi in _SEGMENT_NAMES:
+        key = key.replace(diffusers, musubi)
+    return key
+
+
+def _restore_1x1_convs(state_dict: dict, tree: dict) -> dict:
+    """Put back the 1x1 convolutions a repackage flattened to matrices.
+
+    Which weights those are is the module tree's business, not a name list: a 2-D tensor
+    standing in for one of the tree's ``(out, in, 1, 1)`` convs is reshaped to it.
+    """
+    restored = {}
+    for key, tensor in state_dict.items():
+        conv = tree.get(key)
+        matrix_of_a_conv = (
+            tensor.dim() == 2 and conv is not None and conv.shape[:2] == tensor.shape and conv.shape[2:] == (1, 1)
+        )
+        restored[key] = tensor.reshape(conv.shape) if matrix_of_a_conv else tensor
+    return restored
+
+
 def load_flux2_vae(
     vae_path: str,
     device: Union[str, torch.device],
     dtype: Optional[torch.dtype] = None,
 ) -> AutoencoderKLFlux2:
-    """Load the Flux.2 VAE weights from ``vae_path``.
+    """Load the Flux.2 VAE weights from ``vae_path``, in either key layout.
 
     The AE runs in its own :attr:`AutoencoderKLFlux2.compute_dtype`; ``dtype`` is an
     override, not a request for FP32.
@@ -500,17 +564,18 @@ def load_flux2_vae(
     logger.info("Loading Flux.2 VAE from %s", vae_path)
     state_dict = load_safetensors(vae_path, device=device)
 
-    keep = {
-        k: v
-        for k, v in state_dict.items()
-        if k.startswith("encoder.") or k.startswith("decoder.") or k.startswith("bn.")
-    }
+    keep = {}
+    for key, tensor in state_dict.items():
+        key = _musubi_key(key)
+        if key.startswith(("encoder.", "decoder.", "bn.")):
+            keep[key] = tensor
     if not keep:
         raise ValueError(f"No 'encoder.*'/'decoder.*'/'bn.*' keys found in {vae_path} (not a Flux.2 VAE?)")
 
     encoder_ch = _half_width(keep, "encoder", vae_path)
     decoder_ch = _half_width(keep, "decoder", vae_path)
     vae = AutoencoderKLFlux2(encoder_ch=encoder_ch, decoder_ch=decoder_ch)
+    keep = _restore_1x1_convs(keep, vae.state_dict())
     info = vae.load_state_dict(keep, strict=True, assign=True)
     logger.info(
         "Loaded Flux.2 VAE (%s %d-channel decoder): %s",

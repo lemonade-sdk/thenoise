@@ -18,6 +18,8 @@ _SOBEL_X = torch.tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]])
 _BLUR = (5, 1.2)  # kernel size, sigma
 # Gradient magnitude in 8-bit grey levels, so conventional 100/200 thresholds land on edges.
 _GRAY_SCALE = 255.0
+#: One quantisation step of an 8-bit input, in the same Sobel units as the thresholds.
+_NOISE_FLOOR = 1.0
 # The four quantised gradient orientations, as the neighbour offsets they compare with.
 _ORIENTATIONS = ((0, 1), (1, 1), (1, 0), (1, -1))
 # Weak pixels are absorbed one chain-pixel per pass; this only bounds pathological runs.
@@ -95,7 +97,7 @@ def _suppress(magnitude: torch.Tensor, gx: torch.Tensor, gy: torch.Tensor) -> to
         here = index == orientation_index
         keep |= (
             here
-            & (magnitude >= _shift(magnitude, dy, dx))
+            & (magnitude > _shift(magnitude, dy, dx))
             & (magnitude >= _shift(magnitude, -dy, -dx))
         )
     return magnitude * keep

@@ -12,7 +12,7 @@ from PIL import Image
 
 from thenoise.utils.image_tensor import pil_to_pixels
 from .base import ControlMap
-from .canny import _GRAY_SCALE, _sobel, gaussian_blur, luminance
+from .canny import _GRAY_SCALE, _NOISE_FLOOR, _sobel, gaussian_blur, luminance
 from .options import SoftedgeOptions
 
 #: The width of the smooth threshold transition, in normalised magnitude units.
@@ -33,8 +33,9 @@ class SoftedgeControlMap(ControlMap):
         gx, gy = _sobel(gray)  # no pre-blur: a soft edge keeps its gradient
         magnitude = (_GRAY_SCALE * torch.sqrt(gx * gx + gy * gy)).squeeze(1)  # [1, H, W]
         hi = magnitude.max()
-        normalized = magnitude / hi if hi > 0 else magnitude
-        soft = _smoothstep(normalized, options.threshold, options.threshold + _SOFTNESS)
+        if hi < _NOISE_FLOOR:
+            return torch.ones_like(magnitude)
+        soft = _smoothstep(magnitude / hi, options.threshold, options.threshold + _SOFTNESS)
         if options.blur > 0:
             size = max(3, int(round(options.blur * 3)) | 1)
             soft = gaussian_blur(soft.unsqueeze(1), size, options.blur).squeeze(1)
