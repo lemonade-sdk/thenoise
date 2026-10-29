@@ -3,10 +3,22 @@ name: Build TheNoise + CUDA (portable)
 on:
   push:
     branches: ['ci/cuda-*']
-    tags: ['v*']
+  workflow_call:
+    inputs:
+      create_release:
+        type: boolean
+        default: false
+    outputs:
+      thenoise_version:
+        description: TheNoise version in the CUDA bundle
+        value: ${{ jobs.build-linux.outputs.version }}
+      cuda_version:
+        description: CUDA runtime version in the bundle
+        value: ${{ jobs.build-linux.outputs.cuda }}
   pull_request:
     paths:
       - .github/workflows/build-thenoise-cuda.yml
+      - .github/workflows/build-thenoise-rocm.yml
       - build-scripts/build_portable_cuda.sh
       - build-scripts/thenoise-cuda-launcher
       - build-scripts/qualify_thenoise.sh
@@ -99,7 +111,8 @@ jobs:
     needs: build-linux
     if: |
       (github.event_name == 'workflow_dispatch' && inputs.qualify_nvidia == true) ||
-      (github.event_name == 'push' && vars.THENOISE_CUDA_QUALIFY == 'true')
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/ci/cuda-') &&
+       vars.THENOISE_CUDA_QUALIFY == 'true')
     runs-on: [self-hosted, Linux, X64, nvidia]
     timeout-minutes: 90
     steps:
@@ -149,7 +162,7 @@ jobs:
       always() &&
       needs.build-linux.result == 'success' &&
       (needs.qualify-nvidia.result == 'success' || needs.qualify-nvidia.result == 'skipped') &&
-      (github.event_name == 'push' ||
+      ((github.event_name == 'push' && startsWith(github.ref, 'refs/heads/ci/cuda-')) ||
        (github.event_name == 'workflow_dispatch' && inputs.create_release == true))
     runs-on: ubuntu-24.04
     permissions:
