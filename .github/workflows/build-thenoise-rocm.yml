@@ -332,7 +332,7 @@ jobs:
   # disabled on Windows (no Triton), so the generation runs in eager mode.
   qualify-windows:
     needs: [prepare-matrix, build-windows]
-    runs-on: [self-hosted, Linux, devlab-dispatch, strix-halo]
+    runs-on: [self-hosted, Windows, devlab-dispatch, strix-halo]
     if: |
       needs.prepare-matrix.outputs.skip_qualification != 'true' &&
       contains(needs.prepare-matrix.outputs.gfx_targets, 'gfx1151')
