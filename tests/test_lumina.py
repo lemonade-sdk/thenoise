@@ -247,6 +247,55 @@ def test_zero_masked_punches_holes_and_learned_does_not():
     )
 
 
+def test_zero_masked_crops_its_refiners_and_masks_its_unified_stream(monkeypatch):
+    """Both ways of reading the padding, in one forward, answering identically.
+
+    Ming-Image rounds each stream up to 32: a refiner mask is a single run of valid
+    keys and becomes a key crop, while the unified stream keeps the image pad as a
+    hole in its middle and stays a mask.
+    """
+    import thenoise.dit.lumina.models as lumina
+    from thenoise.dit.lumina.models import LuminaTransformer2DModel
+
+    torch.manual_seed(0)
+    model = LuminaTransformer2DModel(
+        pad_mode="zero_masked", **TINY_CONFIG
+    ).double().eval().requires_grad_(False)
+    latent, cap, _ = _inputs(cap_len=37, height=8, width=8)
+    t = torch.tensor([0.5], dtype=torch.float64)
+    model.prepare_rope([latent], [cap])
+
+    seen: list[str] = []
+    real_attention = lumina.attention
+
+    def spy(qkv_or_q, *args, **kwargs):
+        p = kwargs["attn_params"]
+        seen.append(
+            "crop" if p.key_prefix is not None
+            else "mask" if p.attention_mask is not None else "none"
+        )
+        return real_attention(qkv_or_q, *args, **kwargs)
+
+    monkeypatch.setattr(lumina, "attention", spy)
+    cropped = model([latent], t, [cap])[0]
+    assert seen == ["crop", "crop", "mask", "mask"]  # 1+1 refiners, then 2 layers
+
+    seen.clear()
+    monkeypatch.setattr(LuminaTransformer2DModel, "_attn_params", _only_masks)
+    with_mask = model([latent], t, [cap])[0]
+    assert seen == ["mask"] * 4
+    # A misread mask moves a picture by O(1); this is float64 reordering noise.
+    torch.testing.assert_close(cropped, with_mask, rtol=1e-11, atol=1e-12)
+
+
+def _only_masks(self, item_segments, device):
+    """The pre-crop behaviour: expand the [B, S] mask to SDPA's [B, 1, 1, S]."""
+    from thenoise.utils.attention import AttentionParams
+
+    mask = self._attention_mask(item_segments, device)
+    return AttentionParams(None if mask is None else mask[:, None, None, :])
+
+
 # --------------------------------------------------------------- checkpoint naming
 
 

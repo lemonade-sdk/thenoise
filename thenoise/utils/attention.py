@@ -11,6 +11,8 @@ from typing import Optional, Union
 @dataclass
 class AttentionParams:
     attention_mask: Optional[torch.Tensor] = None
+    # A crop of the leading keys, in place of a mask. Compiled blocks guard on this
+    # int by value and automatic dynamic promotes it; ``dynamic=False`` would not.
     key_prefix: Optional[int] = None
 
     @staticmethod
@@ -19,13 +21,17 @@ class AttentionParams:
 
     @staticmethod
     def create_attention_params_from_mask(
-        img_len: Optional[int], attention_mask: Optional[torch.Tensor]
+        img_len: int, attention_mask: Optional[torch.Tensor]
     ) -> "AttentionParams":
+        """Params for a key-padding mask over the text tail of a sequence.
+
+        Reads the mask to choose, so it belongs to the eager side of a compiled block.
+        """
         if attention_mask is None:
             return AttentionParams()
         # The mask covers text tokens only; expand to include the (always valid)
         # image tokens and shape it as an SDPA key-padding mask.
-        attention_mask = F.pad(attention_mask, (img_len or 0, 0), value=1)  # [B, img_len + L]
+        attention_mask = F.pad(attention_mask, (img_len, 0), value=1)  # [B, img_len + L]
         attention_mask = attention_mask[:, None, None, :].to(torch.bool)  # [B, 1, 1, img_len + L]
 
         prefix = shared_key_prefix(attention_mask)
@@ -179,15 +185,17 @@ def attention(
     crops K and V to the keys every query shares and leaves the call unmasked: a
     mask is an operand, not an annotation.
 
-    ``key_prefix`` must stay a view or end in a copy. A GQA fold that merges heads
-    into the batch with ``as_strided`` cannot consume it: Inductor re-derives the
-    folded stride from the uncropped buffer and reads past the crop, silently in a
-    compiled block.
+    ``key_prefix`` must stay a view or end in a copy. The crop leaves K's row pitch
+    that of the uncropped buffer and SDPA reads through it; a GQA fold that merges
+    heads into the batch with ``as_strided`` cannot consume it, because Inductor
+    re-derives the folded stride from that uncropped buffer and reads past the crop,
+    silently in a compiled block.
 
     Returns:
         Attention output tensor [B, L, H*D].
     """
     if isinstance(qkv_or_q, list):
+        assert k is None and v is None, "with a [q, k, v] list, attn_params is keyword-only"
         q, k, v = qkv_or_q
         q: torch.Tensor = q
         qkv_or_q.clear()
@@ -200,8 +208,11 @@ def attention(
         attn_params = AttentionParams.create_attention_params()
 
     if attn_params.key_prefix is not None:
-        k = k[..., : attn_params.key_prefix, :]
-        v = v[..., : attn_params.key_prefix, :]
+        # An oversized prefix slices nothing and attends to the keys the crop replaced.
+        prefix = attn_params.key_prefix
+        assert 0 < prefix <= k.shape[-2], f"key_prefix {prefix} is not a crop of {k.shape[-2]} keys"
+        k = k[..., :prefix, :]
+        v = v[..., :prefix, :]
 
     # GQA: expand k/v to q's head count. ``enable_gqa`` is the same answer and no
     # cheaper: with a mask it reaches no fused kernel at all, only MATH.

@@ -135,6 +135,29 @@ def test_crop_of_a_packed_view_matches_the_mask():
     torch.testing.assert_close(out, reference(q, k, v, mask, 2), atol=1e-5, rtol=1e-5)
 
 
+# ---------------------------------------------------------------- the crop's contract
+
+def test_a_prefix_beyond_the_keys_is_not_a_crop():
+    # A slice that runs off the end would hide nothing, which is the one way a crop
+    # disagrees with the mask it stands for.
+    q, k, v = qkv(1, 4, 4, 16, 12, torch.float32, seed=9)
+    with pytest.raises(AssertionError):
+        attention(q, k, v, attn_params=AttentionParams(key_prefix=13))
+
+
+def test_a_crop_of_every_key_is_the_unmasked_call():
+    q, k, v = qkv(1, 4, 4, 16, 12, torch.float32, seed=9)
+    full = attention(q, k, v, attn_params=AttentionParams(key_prefix=12))
+    torch.testing.assert_close(full, attention(q, k, v, attn_params=AttentionParams()))
+
+
+def test_the_list_form_takes_the_params_by_keyword():
+    # Positionally they land in ``k``, where the list form has already filled them in.
+    q, k, v = qkv(1, 4, 4, 16, 16, torch.float32, seed=9)
+    with pytest.raises(AssertionError):
+        attention([q, k, v], AttentionParams(key_prefix=8))
+
+
 def test_pad_tail_becomes_a_crop_at_block_shapes():
     # The DiT pads the sequence and marks the tail invalid.
     qlen, valid = 20, 15
