@@ -27,6 +27,7 @@ from safetensors.torch import load_file
 from thenoise.dit.kvcache import KVCache
 from thenoise.errors import ModelReloadNeeded
 from thenoise.memory import MemoryManager
+from thenoise.utils.device_patches import apply_device_patches
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.image_tensor import ReferenceSizing
 from thenoise.samplers import Step
@@ -160,6 +161,7 @@ class DiffusionModel(ABC):
         self.memory = MemoryManager(self.device, self.offload_device)
 
         torch._dynamo.config.recompile_limit = 64
+        apply_device_patches(self.device)
 
         # Cached LoRA factors, for clean switching between requests.
         self._active_lora_result: Optional[LoRAApplyResult] = None

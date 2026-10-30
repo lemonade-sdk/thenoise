@@ -1291,6 +1291,8 @@ def case_list(fixtures: list[Fixture], tokens: list[int], refs: int,
 
 def main() -> None:
     torch._dynamo.config.recompile_limit = 256
+    from thenoise.utils.device_patches import apply_device_patches
+
     ap = argparse.ArgumentParser(
         description="Snapshot the cost of every DiT transformer block.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1344,6 +1346,7 @@ def main() -> None:
           f"| txt {ctx.txt} | refs {ctx.refs} | warmup {ctx.warmup} + "
           f"{ctx.repeats}x{ctx.iters} timed | {len(cases)} cases")
 
+    apply_device_patches(args.device)
     results, failed, last_tokens, case = [], 0, None, None
     started = time.perf_counter()
     for f, t, scenario, weights in cases:
