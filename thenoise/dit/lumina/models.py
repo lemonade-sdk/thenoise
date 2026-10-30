@@ -11,6 +11,7 @@ from typing import Optional, Sequence
 
 from thenoise.dit.kvcache import attend
 from thenoise.dit.quantized import QuantizedLinear
+from thenoise.utils.dynamo import mark_token_axis
 from thenoise.utils.attention import AttentionParams, attention
 from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
@@ -73,7 +74,7 @@ class Attention(nn.Module):
         self.out = QuantizedLinear(dim, dim, bias=False)
         self.qk_norm = QKNorm(self.head_dim, eps=eps)
 
-    def forward(self, hidden_states, attention_mask=None, freqs_cis=None, bufs=None):
+    def forward(self, hidden_states, attn_params=None, freqs_cis=None, bufs=None):
         dim = hidden_states.shape[-1]
         q, k, v = self.qkv(hidden_states).split([dim, dim, dim], dim=-1)
 
@@ -86,16 +87,11 @@ class Attention(nn.Module):
         if freqs_cis is not None:
             query, key = apply_rope(query, key, freqs_cis)
 
-        params = None
-        if attention_mask is not None and attention_mask.ndim == 2:
-            # Expand the [B, S] key-padding mask to SDPA's [B, 1, 1, S] (True = attend).
-            params = AttentionParams(attention_mask=attention_mask[:, None, None, :])
-
         if bufs is not None:
             hidden_states = attend(query, key, value, bufs)
         else:
             hidden_states = attention(
-                [query, key, value], attn_params=params, drop_rate=0.0
+                [query, key, value], attn_params=attn_params, drop_rate=0.0
             )
         return self.out(hidden_states)
 
@@ -129,18 +125,18 @@ class LuminaTransformerBlock(nn.Module):
             self.adaLN_modulation = nn.Sequential(QuantizedLinear(min(dim, ADALN_EMBED_DIM), 4 * dim, bias=True))
 
     @torch.compile(fullgraph=True)
-    def forward(self, x, attn_mask, freqs_cis, adaln_input=None):
+    def forward(self, x, attn_params, freqs_cis, adaln_input=None):
         if self.modulation:
             mod = self.adaLN_modulation(adaln_input)
             scale_msa, gate_msa, scale_mlp, gate_mlp = mod.unsqueeze(1).chunk(4, dim=2)
             gate_msa, gate_mlp = gate_msa.tanh(), gate_mlp.tanh()
             scale_msa, scale_mlp = 1.0 + scale_msa, 1.0 + scale_mlp
 
-            attn_out = self.attention(self.attention_norm1(x) * scale_msa, attention_mask=attn_mask, freqs_cis=freqs_cis)
+            attn_out = self.attention(self.attention_norm1(x) * scale_msa, attn_params=attn_params, freqs_cis=freqs_cis)
             x = x + gate_msa * self.attention_norm2(attn_out)
             x = x + gate_mlp * self.ffn_norm2(self.feed_forward(self.ffn_norm1(x) * scale_mlp))
         else:
-            attn_out = self.attention(self.attention_norm1(x), attention_mask=attn_mask, freqs_cis=freqs_cis)
+            attn_out = self.attention(self.attention_norm1(x), attn_params=attn_params, freqs_cis=freqs_cis)
             x = x + self.attention_norm2(attn_out)
             x = x + self.ffn_norm2(self.feed_forward(self.ffn_norm1(x)))
         return x
@@ -344,7 +340,7 @@ class LuminaTransformer2DModel(nn.Module):
         return x_stream, cap_stream
 
     def _prepare_stream(self, feats, stream: TokenStream, pe, device):
-        """Batch a padded stream, split its frequencies and mask it.
+        """Batch a padded stream, split its frequencies and choose how it attends.
 
         ``feats`` are the per-item DiT-width features padded out to
         ``stream.padded``, so the frequencies split in lockstep.
@@ -352,8 +348,20 @@ class LuminaTransformer2DModel(nn.Module):
         # Drop the batch dim of ``pe`` and split the frequencies back per sample.
         positions = list(pe.squeeze(0).split(stream.padded, dim=0))
         feats, positions, _ = pad_to_batch(feats, positions)
-        mask = self._attention_mask([[seg] for seg in stream.segments], device)
-        return feats, positions, mask
+        params = self._attn_params([[seg] for seg in stream.segments], device)
+        return feats, positions, params
+
+    def _attn_params(
+        self, item_segments: Sequence[Sequence[tuple[int, int]]], device
+    ) -> AttentionParams:
+        """How a stream attends: a crop of the keys every query shares, else its mask.
+
+        Choosing reads the mask, so this belongs on the eager side of the compiled
+        blocks that consume the result.
+        """
+        return AttentionParams.create_attention_params_from_mask(
+            0, self._attention_mask(item_segments, device)
+        )
 
     def _attention_mask(self, item_segments: Sequence[Sequence[tuple[int, int]]], device):
         """Attention mask for one stream, from its per-item ``(valid, padded)`` segments.
@@ -365,6 +373,15 @@ class LuminaTransformer2DModel(nn.Module):
         if self.pad_mode == "learned":
             return make_key_padding_mask([sum(p for _, p in segs) for segs in item_segments], device)
         return alignment_padding_mask([list(segs) for segs in item_segments], device)
+
+    def _mark_dynamic(self, feats, freqs, params) -> None:
+        """Declare the token axis of a stream for the compiled block that reads it.
+
+        Under a mask the token axis is its key axis; a crop is a scalar, which only
+        automatic dynamic can symbolise.
+        """
+        mark_token_axis(feats, freqs)
+        mark_token_axis(params.attention_mask, dim=3)
 
     def unpatchify(self, x, size, patch_size, f_patch_size):
         pH = pW = patch_size
@@ -408,11 +425,12 @@ class LuminaTransformer2DModel(nn.Module):
         x = pad_to_length(
             list(x.split(x_stream.valid, dim=0)), x_stream.padded, pad_token=self.x_pad_token
         )
-        x, x_freqs, x_mask = self._prepare_stream(
+        x, x_freqs, x_params = self._prepare_stream(
             x, x_stream, self.rope_embedder[f"img{rope_key}"], device
         )
         for layer in self.noise_refiner:
-            x = layer(x, x_mask, x_freqs, adaln_input)
+            self._mark_dynamic(x, x_freqs, x_params)
+            x = layer(x, x_params, x_freqs, adaln_input)
 
         # Cap embed & refine; extra conditioning is already dim-wide and is spliced
         # in before the block is padded.
@@ -421,11 +439,12 @@ class LuminaTransformer2DModel(nn.Module):
         if cap_stream.extra is not None:
             cap = [torch.cat([c, e], dim=0) for c, e in zip(cap, cap_stream.extra)]
         cap = pad_to_length(cap, cap_stream.padded, pad_token=self.cap_pad_token)
-        cap, cap_freqs, cap_mask = self._prepare_stream(
+        cap, cap_freqs, cap_params = self._prepare_stream(
             cap, cap_stream, self.rope_embedder[f"cap{rope_key}"], device
         )
         for layer in self.context_refiner:
-            cap = layer(cap, cap_mask, cap_freqs)
+            self._mark_dynamic(cap, cap_freqs, cap_params)
+            cap = layer(cap, cap_params, cap_freqs)
 
         # Unified sequence: [x, cap]. Both are already padded to their own multiple,
         # so their segments carry over into the unified mask.
@@ -437,11 +456,12 @@ class LuminaTransformer2DModel(nn.Module):
             unified_segments.append([x_stream.segments[i], cap_stream.segments[i]])
 
         unified, unified_freqs, _ = pad_to_batch(unified, unified_freqs)
-        unified_mask = self._attention_mask(unified_segments, device)
+        unified_params = self._attn_params(unified_segments, device)
 
         # Main transformer layers
         for layer in self.layers:
-            unified = layer(unified, unified_mask, unified_freqs, adaln_input)
+            self._mark_dynamic(unified, unified_freqs, unified_params)
+            unified = layer(unified, unified_params, unified_freqs, adaln_input)
 
         unified = self.final_layer(unified, c=adaln_input)
 
