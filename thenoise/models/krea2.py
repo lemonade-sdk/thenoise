@@ -58,7 +58,7 @@ class Krea2Model(DiffusionModel):
         logger.info("Loading Krea 2 DiT from %s", config.dit_path)
         self.dit = krea2_utils.load_krea2_dit(
             config.dit_path,
-            device=self.offload_device,
+            device=self._load_target(config.dit_path),
             dtype=config.dtype,
         )
 
@@ -66,11 +66,11 @@ class Krea2Model(DiffusionModel):
         self.encoder = krea2_utils.load_krea2_text_encoder(
             config.text_encoder_path,
             dtype=config.dtype,
-            device=self.offload_device,
+            device=self._load_target(config.text_encoder_path),
             tokenizer_dir=krea2_utils.find_tokenizer_dir(config.text_encoder_path),
         )
 
-        self.vae = load_qwen_vae(self.vae_path, device=self.device)
+        self.vae = load_qwen_vae(self.vae_path, device=self._load_target(self.vae_path))
 
         # Cached: the schedule needs the compression per token.
         self._compression = self.vae.spatial_compression

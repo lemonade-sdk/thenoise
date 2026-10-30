@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 import thenoise.models as model_catalog
+from thenoise.errors import ModelReloadNeeded
 from thenoise.runtime import ModelPaths, NotLoadedError, Runtime, Settings
 
 
@@ -77,3 +78,54 @@ def test_upscaler_dir_is_server_config(catalog, tmp_path):
     runtime.load(ModelPaths("dit", "vae", "te"))
     # The pipeline shares the runtime's single upscaler pool (no second copy).
     assert runtime.pipeline._pixel_upscalers is runtime.pixel_upscalers
+
+
+# ------------------------------------------------------------ rebuilding a model
+def test_reload_rebuilds_from_the_same_paths(catalog):
+    """The repair for a state no request can undo from inside: the checkpoints, again."""
+    constructed = catalog()
+    runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
+    runtime.load(ModelPaths("dit", "vae", "te"))
+
+    runtime.reload()
+    assert len(constructed) == 2
+    assert runtime.model_name == "fake"
+    assert runtime.pipeline is not None
+
+
+def test_reload_without_a_model_says_so(catalog):
+    catalog()
+    with pytest.raises(NotLoadedError):
+        Runtime(Settings()).reload()
+
+
+def test_run_retries_once_against_the_rebuilt_model(catalog):
+    """A model that reports itself unfit is rebuilt, and the retry reaches the new one."""
+    constructed = catalog()
+    runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
+    runtime.load(ModelPaths("dit", "vae", "te"))
+    handed: list = []
+
+    def action(pipeline):
+        handed.append(pipeline)
+        if len(handed) == 1:
+            raise ModelReloadNeeded("the DiT holds a half-applied LoRA")
+        return "an image"
+
+    assert runtime.run(action) == "an image"
+    assert len(constructed) == 2
+    assert handed[0] is not handed[1], "the retry cannot run on the instance it left"""
+
+
+def test_run_rebuilds_once_and_no_more(catalog):
+    """One rebuild is the budget; a model unfit twice is somebody else's problem."""
+    constructed = catalog()
+    runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
+    runtime.load(ModelPaths("dit", "vae", "te"))
+
+    def action(_pipeline):
+        raise ModelReloadNeeded("still unfit")
+
+    with pytest.raises(ModelReloadNeeded):
+        runtime.run(action)
+    assert len(constructed) == 2

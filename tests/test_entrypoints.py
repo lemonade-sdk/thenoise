@@ -84,6 +84,10 @@ class _FakeRuntime:
     def load(self, paths):
         self.loaded = paths
 
+    def run(self, action):
+        """As the real one, minus the rebuild the tests here are not about."""
+        return action(self.pipeline)
+
     def available(self):
         return True
 

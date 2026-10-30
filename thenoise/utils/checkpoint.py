@@ -13,6 +13,7 @@ request is always honoured.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, Tuple
 
@@ -35,6 +36,30 @@ CHECKPOINT_MARKERS: Tuple[Marker, ...] = (
 )
 
 CHECKPOINT_MARKER_KEYS: FrozenSet[str] = frozenset(m.key for m in CHECKPOINT_MARKERS)
+
+
+#: The suffixes that hold weights, so a sharded checkpoint's directory sums whole.
+_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".ckpt")
+
+
+def checkpoint_bytes(path: str) -> int:
+    """Bytes of the weight files at ``path``: one file, or every part inside a directory.
+
+    A *hint* for placement, from the file rather than the module it becomes: over-counting
+    costs a component one upload, under-counting a stage its room. 0 leaves the decision
+    to the device.
+    """
+    if not path:
+        return 0
+    if os.path.isfile(path):
+        return os.path.getsize(path)
+    try:
+        entries = os.scandir(path)
+    except OSError:
+        return 0
+    with entries as it:
+        return sum(e.stat().st_size for e in it
+                   if e.is_file() and os.path.splitext(e.name)[1] in _WEIGHT_SUFFIXES)
 
 
 def detect_checkpoint_prefs(dit_path: str) -> Dict[str, Any]:

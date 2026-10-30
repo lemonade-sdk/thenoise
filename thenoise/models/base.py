@@ -17,7 +17,6 @@ request by ``switch_loras()``.
 from __future__ import annotations
 
 import logging
-import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple
@@ -26,10 +25,10 @@ import torch
 from safetensors.torch import load_file
 
 from thenoise.dit.kvcache import KVCache
+from thenoise.errors import ModelReloadNeeded
 from thenoise.memory import MemoryManager
 from thenoise.utils.device_patches import apply_device_patches
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
-from thenoise.utils.device import get_device_memory
 from thenoise.utils.image_tensor import ReferenceSizing
 from thenoise.samplers import Step
 from thenoise.upscale import LatentUpscaler
@@ -41,17 +40,12 @@ from thenoise.utils.model_dir import (
     resolve_in_dir,
     list_safetensors,
 )
-from thenoise.utils.checkpoint import detect_checkpoint_prefs
+from thenoise.utils.checkpoint import checkpoint_bytes, detect_checkpoint_prefs
 from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
 from thenoise.utils.lora import LoRAApplyResult
 from thenoise.utils.safetensors import unwrap_key
 
 logger = logging.getLogger(__name__)
-
-# Fraction of the compute device's VRAM the resident weights (DiT + text encoder +
-# VAE) may occupy while staying resident. The rest is headroom for the activation
-# peak (denoise, VAE decode) plus the pipeline cache. ``--offload-device`` forces it.
-_RESIDENT_VRAM_FRACTION = 0.6
 
 
 @dataclass
@@ -151,7 +145,7 @@ class DiffusionModel(ABC):
 
     def __init__(self, *, config: ModelConfig):
         self.device = config.device
-        self.offload_device = config.offload_device or self._detect_offload_device(config)
+        self.offload_device = config.offload_device
         self.dtype = config.dtype
         self.dit_path = config.dit_path
         self.vae_path = config.vae_path
@@ -163,7 +157,7 @@ class DiffusionModel(ABC):
         self.checkpoint_prefs = detect_checkpoint_prefs(config.dit_path)
 
         # Component placement: subclasses register ``dit`` / ``text_encoder`` /
-        # ``vae``; the pipeline controller ensures/offloads them by name.
+        # ``vae``; the pipeline controller stages them by name.
         self.memory = MemoryManager(self.device, self.offload_device)
 
         torch._dynamo.config.recompile_limit = 64
@@ -172,6 +166,7 @@ class DiffusionModel(ABC):
         # Cached LoRA factors, for clean switching between requests.
         self._active_lora_result: Optional[LoRAApplyResult] = None
         self._active_lora_spec: Optional[str] = None
+        self._lora_state_unfit = False
 
         # Lazy latent upscaler (only built if upscale is requested).
         self._upscaler: Optional[LatentUpscaler] = None
@@ -207,30 +202,9 @@ class DiffusionModel(ABC):
         return self.CAPABILITIES[name]
 
     # ------------------------------------------------------------ devices
-    def _detect_offload_device(self, config: ModelConfig) -> str:
-        """Pick an offload device from safetensors size vs VRAM (or ``device``).
-
-        Resident bytes are estimated from the combined size of the three checkpoint
-        files; if they fit the device VRAM with ``_RESIDENT_VRAM_FRACTION`` headroom
-        left over for activations we stay resident, otherwise offload to CPU.
-        """
-        total_vram = get_device_memory(config.device)
-        if total_vram is None:
-            return config.device
-        resident = sum(
-            self._file_size(p)
-            for p in (config.dit_path, config.vae_path, config.text_encoder_path)
-        )
-        if resident <= _RESIDENT_VRAM_FRACTION * total_vram:
-            return config.device
-        return "cpu"
-
-    @staticmethod
-    def _file_size(path: str) -> int:
-        try:
-            return os.path.getsize(path)
-        except OSError:
-            return 0
+    def _load_target(self, path: str) -> str:
+        """The device to build the weights at ``path`` on, the manager's decision."""
+        return str(self.memory.device_for(checkpoint_bytes(path)))
 
     # ------------------------------------------------------------------ hooks
     @abstractmethod
@@ -425,36 +399,58 @@ class DiffusionModel(ABC):
         """Switch active LoRAs on the DiT (in-place, under the lock).
 
         No-op when the requested config matches the current one.
+
+        Running out of memory part-way leaves some layers merged with nothing recorded to
+        undo them, and undoing the prefix is no repair: a baked delta subtracted from a
+        rounded weight does not return the weight. The instance refuses from then on until
+        it is rebuilt, with ``ModelReloadNeeded``.
         """
+        if self._lora_state_unfit:
+            raise ModelReloadNeeded(
+                f"{self.name}: a LoRA switch ran out of memory on this instance, so it"
+                " will not touch the DiT again. Reload the model."
+            )
+
         new_spec = self._make_lora_spec_hash(lora_specs)
         if new_spec == self._active_lora_spec:
             return
 
-        if self._active_lora_result is not None:
-            logger.debug("Undoing previous LoRA config")
-            undo_lora_on_model(dit, self._active_lora_result)
+        try:
+            if self._active_lora_result is not None:
+                logger.debug("Undoing previous LoRA config")
+                undo_lora_on_model(dit, self._active_lora_result)
+                self._active_lora_result = None
+
+            if lora_specs and self.lora_dir is not None:
+                lora_sds = []
+                multipliers = []
+                for spec in lora_specs:
+                    filename, weight = self._parse_lora_spec(spec)
+                    lora_sds.append(self._get_lora_sd(filename))
+                    multipliers.append(weight)
+
+                self._active_lora_result = apply_lora_to_model(
+                    dit, lora_sds, multipliers,
+                    dit_path=self.dit_path,
+                    key_map=self._lora_key_map,
+                    fusions=self.lora_fusions,
+                )
+                active_names = ", ".join(
+                    self._parse_lora_spec(s)[0] for s in lora_specs
+                )
+                logger.info("Applied LoRA(s): %s", active_names)
+            else:
+                logger.debug("Using base model (no LoRA)")
+        except torch.cuda.OutOfMemoryError:
             self._active_lora_result = None
-
-        if lora_specs and self.lora_dir is not None:
-            lora_sds = []
-            multipliers = []
-            for spec in lora_specs:
-                filename, weight = self._parse_lora_spec(spec)
-                lora_sds.append(self._get_lora_sd(filename))
-                multipliers.append(weight)
-
-            self._active_lora_result = apply_lora_to_model(
-                dit, lora_sds, multipliers,
-                dit_path=self.dit_path,
-                key_map=self._lora_key_map,
-                fusions=self.lora_fusions,
-            )
-            active_names = ", ".join(
-                self._parse_lora_spec(s)[0] for s in lora_specs
-            )
-            logger.info("Applied LoRA(s): %s", active_names)
-        else:
-            logger.debug("Using base model (no LoRA)")
+            self._active_lora_spec = None
+            self._lora_state_unfit = True
+            logger.error("LoRA switch ran out of memory on %s", self.name)
+            raise ModelReloadNeeded(
+                f"{self.name}: applying the LoRAs ran out of memory part-way, so the DiT"
+                " holds weights that are neither the base model nor any LoRA set. Reload"
+                " the model."
+            ) from None
 
         self._active_lora_spec = new_spec
 

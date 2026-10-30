@@ -78,18 +78,20 @@ class FluxKleinModel(DiffusionModel):
         self.params: Flux2Params = detect_klein_params(config.dit_path)
         self.is_8b = self.params.context_in_dim == 12288
         logger.info("Loading Flux Klein DiT (%s) from %s", self.variant_label, config.dit_path)
-        self.dit = load_flux2_dit(config.dit_path, self.params, device=self.offload_device, dtype=config.dtype)
+        self.dit = load_flux2_dit(config.dit_path, self.params,
+                                  device=self._load_target(config.dit_path),
+                                  dtype=config.dtype)
 
         logger.info("Loading Flux Klein text encoder (Qwen3-%s) from %s", self.text_label, config.text_encoder_path)
         self.text_encoder = load_qwen3_embedder(
             config.text_encoder_path,
             is_8b=self.is_8b,
             dtype=config.dtype,
-            device=self.offload_device,
+            device=self._load_target(config.text_encoder_path),
             tokenizer_dir=find_tokenizer_dir(config.text_encoder_path),
         )
 
-        self.vae = load_flux2_vae(self.vae_path, device=self.device)
+        self.vae = load_flux2_vae(self.vae_path, device=self._load_target(self.vae_path))
 
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)

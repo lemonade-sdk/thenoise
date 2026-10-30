@@ -322,28 +322,31 @@ class PipelineController:
                 if self._cache.reference_hit(ref_key):
                     ref_latents = self._cache.reference_get()
                 else:
-                    ref_latents = [
-                        model.encode_reference(
-                            pil_to_pixels(fitted, model.pixel_channels))  # [1,C,H,W]
-                        for fitted in model.fit_references(
-                            self._edit_images(request), (r.width, r.height))
-                    ]
+                    with memory.stage("vae", pixels=r.width * r.height) as s:
+                        fitted = model.fit_references(self._edit_images(request),
+                                                      (r.width, r.height))
+                        ref_latents = s.run(lambda: [
+                            model.encode_reference(
+                                pil_to_pixels(image, model.pixel_channels))  # [1,C,H,W]
+                            for image in fitted
+                        ])
                     self._cache.reference_store(ref_key, ref_latents)
 
             # Stage 1: prompt conditioning — text encoder only.
             if self._cache.prompt_hit(prompt_key):
                 cond = self._cache.prompt_get()
             else:
-                memory.ensure("text_encoder")
-                cond_raw = model.encode_prompt(
-                    EncodePromptArgs(
+                seen = self._edit_images(request)
+                with memory.stage(
+                    "text_encoder",
+                    pixels=sum(image.width * image.height for image in seen),
+                ) as s:
+                    cond_raw = s.run(model.encode_prompt, EncodePromptArgs(
                         prompt=request.prompt,
                         negative_prompt=request.negative_prompt,
                         guidance_scale=r.guidance_scale,
                         image=request.image if is_edit else None,
-                    )
-                )
-                memory.offload("text_encoder")
+                    ))
 
             params = SamplingParams(
                 height=r.height, width=r.width, steps=r.steps, seed=r.seed,
@@ -356,32 +359,32 @@ class PipelineController:
             if self._cache.sampling_hit(sampling_key):
                 latents = self._cache.sampling_get()
             else:
-                memory.ensure("dit")
-                model.switch_loras(request.lora_specs, model.dit)
-                if not self._cache.prompt_hit(prompt_key):
-                    cond = model.fuse_text(cond_raw)
-                    self._cache.prompt_store(prompt_key, cond)
-                latents = self._denoise(
-                    cond, params, ref_latents, ref_method or "index",
-                    sigmas=r.sigmas,
-                )
+                with memory.stage("dit", pixels=r.width * r.height) as s:
+                    model.switch_loras(request.lora_specs, model.dit)
+                    if not self._cache.prompt_hit(prompt_key):
+                        cond = model.fuse_text(cond_raw)
+                        self._cache.prompt_store(prompt_key, cond)
+                    latents = s.run(
+                        self._denoise, cond, params, ref_latents, ref_method or "index",
+                        sigmas=r.sigmas,
+                    )
                 self._cache.sampling_store(sampling_key, latents)
 
             # Stage 3/4: upscale + decode (interleaved so cache hits skip upscale).
-            # The DiT is offloaded first, keeping the decode peak to VAE + activations.
             if self._cache.decode_hit(decode_key):
                 pixels = self._cache.decode_get()
             else:
                 if r.refined:
-                    memory.ensure("dit")
-                    latents = self._upscale_and_refine(latents, cond, params)
-                memory.offload("dit")
-                memory.ensure("vae")
-                pixels = model.decode(latents)  # fp32 GPU [C,H,W]
+                    # the upscaler builds its weights here and may round-trip the VAE;
+                    # nothing moves once a stage has started, so both are held
+                    with memory.stage("dit", "vae",
+                                      pixels=r.target_width * r.target_height) as s:
+                        latents = s.run(self._upscale_and_refine, latents, cond, params)
+                with memory.stage("vae",
+                                  pixels=r.target_width * r.target_height) as s:
+                    pixels = s.run(model.decode, latents)  # fp32 GPU [C,H,W]
                 self._cache.decode_store(decode_key, pixels)
 
-            # Leave every swappable component offloaded at rest.
-            memory.offload("dit")
             return pixels
 
     def _denoise(

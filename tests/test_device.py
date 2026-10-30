@@ -1,8 +1,8 @@
-"""Device helpers and the offload-device auto-detection decision.
+"""Device helpers and where a model builds its weights.
 
 The backend calls are faked (this machine may have no GPU), so what is under test is
-the decision logic: which backend hook runs for a device string, and whether the
-resident weights are judged to fit in VRAM.
+the decision logic: which backend hook runs for a device string, and how a component's
+size reaches the manager that decides where it is built.
 """
 from __future__ import annotations
 
@@ -86,66 +86,35 @@ def test_get_device_memory_only_knows_about_cuda(monkeypatch):
     assert get_device_memory("cpu") is None
 
 
-# ------------------------------------------------- offload device auto-detect
-
-
+# ------------------------------------------------------ load-time admission
 GB = 1024**3
 
 
-def _config(tmp_path, *, dit_size=0, vae_size=0, te_size=0, offload_device=""):
-    """A ModelConfig over three empty checkpoint files, with faked per-file sizes."""
-    paths, sizes = {}, {}
-    for name, size in (("dit", dit_size), ("vae", vae_size), ("te", te_size)):
-        path = tmp_path / f"{name}.safetensors"
-        path.touch()  # empty file, size is faked
-        paths[f"{name}_path"] = str(path)
-        sizes[str(path)] = size
-    config = ModelConfig(
+def _config(tmp_path, *, offload_device="cpu"):
+    return ModelConfig(
         device="cuda",
         offload_device=offload_device,
         dtype=torch.float32,
-        dit_path=paths["dit_path"],
-        vae_path=paths["vae_path"],
-        text_encoder_path=paths["te_path"],
+        dit_path=str(tmp_path / "dit.safetensors"),
+        vae_path=str(tmp_path / "vae.safetensors"),
+        text_encoder_path=str(tmp_path / "te"),
     )
-    return config, sizes
 
 
-@pytest.fixture
-def fake_device(monkeypatch):
-    """Fake VRAM and per-file sizes so the fit/no-fit decision needs no real files."""
-
-    def configure(*, vram=None, sizes=None):
-        monkeypatch.setattr("thenoise.models.base.get_device_memory", lambda dev: vram)
-        sizes = sizes or {}
-        monkeypatch.setattr(
-            "thenoise.models.base.DiffusionModel._file_size",
-            staticmethod(lambda path: sizes.get(path, 0)),
-        )
-
-    return configure
+def test_idle_weights_go_where_the_operator_said(tmp_path):
+    assert StubModel(config=_config(tmp_path)).offload_device == "cpu"
+    assert StubModel(
+        config=_config(tmp_path, offload_device="cuda")).offload_device == "cuda"
 
 
-@pytest.mark.parametrize(
-    "vram,dit_size,expected",
-    [
-        # 8GB of weights against 128GB VRAM leaves plenty of activation headroom.
-        (128 * GB, int(8 * GB), "cuda"),
-        # Weights may occupy at most 60% of VRAM; beyond that they offload to CPU.
-        (8 * GB, int(6 * GB), "cpu"),
-        # No VRAM information (e.g. a cpu-only build) -> no offloading.
-        (None, int(40 * GB), "cuda"),
-    ],
-    ids=["fits", "does-not-fit", "unknown-vram"],
-)
-def test_offload_device_follows_the_weight_estimate(tmp_path, fake_device, vram, dit_size, expected):
-    config, sizes = _config(tmp_path, dit_size=dit_size)
-    fake_device(vram=vram, sizes=sizes)
-    assert StubModel(config=config).offload_device == expected
+def test_a_model_carries_each_checkpoint_to_the_manager(tmp_path, monkeypatch):
+    """The adapter knows the file, the manager owns the answer; nothing decides here."""
+    config = _config(tmp_path)
+    monkeypatch.setattr("thenoise.memory.get_free_memory", lambda _dev: 10 * GB)
+    monkeypatch.setattr("thenoise.memory._RESERVE_BASE_BYTES", GB)
+    model = StubModel(config=config)
+    monkeypatch.setattr("thenoise.models.base.checkpoint_bytes",
+                        {config.dit_path: 12 * GB, config.vae_path: GB}.get)
 
-
-def test_offload_device_is_configurable(tmp_path, fake_device):
-    """``--offload-device`` overrides the size-based decision entirely."""
-    config, sizes = _config(tmp_path, dit_size=int(1 * GB), offload_device="cpu")
-    fake_device(vram=128 * GB, sizes=sizes)
-    assert StubModel(config=config).offload_device == "cpu"
+    assert model._load_target(config.dit_path) == "cpu", "12 GiB into 10 free leaves no floor"
+    assert model._load_target(config.vae_path) == "cuda"
