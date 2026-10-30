@@ -11,6 +11,7 @@ from typing import Optional, Union
 @dataclass
 class AttentionParams:
     attention_mask: Optional[torch.Tensor] = None
+    key_prefix: Optional[int] = None
 
     @staticmethod
     def create_attention_params() -> "AttentionParams":
@@ -24,10 +25,40 @@ class AttentionParams:
             return AttentionParams()
         # The mask covers text tokens only; expand to include the (always valid)
         # image tokens and shape it as an SDPA key-padding mask.
-        attention_mask = F.pad(attention_mask, (img_len, 0), value=1)  # [B, img_len + L]
+        attention_mask = F.pad(attention_mask, (img_len or 0, 0), value=1)  # [B, img_len + L]
         attention_mask = attention_mask[:, None, None, :].to(torch.bool)  # [B, 1, 1, img_len + L]
 
+        prefix = shared_key_prefix(attention_mask)
+        if prefix is not None:
+            if prefix == attention_mask.shape[-1]:
+                # Nothing to crop, and the whole length as an int would be a guard
+                # the block recompiles for.
+                return AttentionParams()
+            return AttentionParams(key_prefix=prefix)
+
         return AttentionParams(attention_mask)
+
+
+def shared_key_prefix(attention_mask: torch.Tensor) -> Optional[int]:
+    """The valid-key count when every query sees exactly the same keys, else None.
+
+    Such a mask constrains keys and never queries, so the same attention is K and V
+    cropped to that run with no mask. Rows that disagree, a hole inside the run, and
+    per-head or per-query structure keep the mask: no single crop expresses them.
+    """
+    if (attention_mask.ndim != 4 or attention_mask.shape[1] != 1
+            or attention_mask.shape[-2] != 1):
+        return None
+    keys = attention_mask.shape[-1]
+    rows = attention_mask.reshape(-1, keys)
+    counts = rows.sum(-1)
+    if not bool((counts == counts[0]).all()):
+        return None
+    valid = int(counts[0])
+    if valid == 0:
+        return None                      # nothing valid is the mask's problem, not a crop
+    ladder = torch.arange(keys, device=rows.device) < valid
+    return valid if bool((rows == ladder).all()) else None
 
 
 def l_major(t: torch.Tensor) -> bool:
@@ -144,7 +175,14 @@ def attention(
     """Compute scaled dot-product attention over a batch of sequences.
 
     The whole batch goes through a single SDPA call; variable sequence lengths are
-    handled by the key-padding mask in ``attn_params`` (no mask = all tokens valid).
+    handled by the key-padding mask in ``attn_params``, or by ``key_prefix``, which
+    crops K and V to the keys every query shares and leaves the call unmasked: a
+    mask is an operand, not an annotation.
+
+    ``key_prefix`` must stay a view or end in a copy. A GQA fold that merges heads
+    into the batch with ``as_strided`` cannot consume it: Inductor re-derives the
+    folded stride from the uncropped buffer and reads past the crop, silently in a
+    compiled block.
 
     Returns:
         Attention output tensor [B, L, H*D].
@@ -161,8 +199,12 @@ def attention(
     if attn_params is None:
         attn_params = AttentionParams.create_attention_params()
 
-    # GQA: expand k/v to q's head count. SDPA's enable_gqa flag forces the math
-    # kernel (~7x slower at large scale); the repeat is numerically identical.
+    if attn_params.key_prefix is not None:
+        k = k[..., : attn_params.key_prefix, :]
+        v = v[..., : attn_params.key_prefix, :]
+
+    # GQA: expand k/v to q's head count. ``enable_gqa`` is the same answer and no
+    # cheaper: with a mask it reaches no fused kernel at all, only MATH.
     enable_gqa = q.shape[1] != k.shape[1]
 
     if enable_gqa:
