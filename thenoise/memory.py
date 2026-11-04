@@ -40,11 +40,8 @@ logger = logging.getLogger(__name__)
 
 
 def _with_index(device: Union[str, torch.device]) -> torch.device:
-    """``device`` with its index filled in.
-
-    ``torch.device("cuda")`` and ``torch.device("cuda:0")`` name one device and compare
-    unequal, while adapters hand over the former and tensors report the latter: taken at
-    face value, resident weights look absent, and then nothing can ever be evicted.
+    """``device`` with its index filled in: ``cuda`` and ``cuda:0`` name one device and
+    compare unequal, so read literally they leave nothing resident to evict.
     """
     device = torch.device(device)
     if device.type == "cuda" and device.index is None:
@@ -72,6 +69,32 @@ def _peak_bucket(pixels: int) -> int:
     """
     megapixels = max(1, -(-pixels // 1_000_000))
     return 1 << (megapixels - 1).bit_length()
+
+
+def _tensor_bytes(tensor: torch.Tensor) -> int:
+    """Device bytes of ``tensor``, from its storage where it will say: a quantized tensor
+    reports the dtype it stands in for, double an int8 weight's footprint.
+    """
+    nbytes = getattr(tensor, "nbytes", None)
+    if isinstance(nbytes, int):
+        return nbytes
+    return tensor.numel() * tensor.element_size()
+
+
+def _weight_bytes(component: Any) -> int:
+    """What ``component``'s weights and buffers occupy, 0 where it reports none. A plain
+    wrapper is counted through the ``nn.Module`` it holds, as ``freeze`` freezes it.
+    """
+    if isinstance(component, nn.Module):
+        tensors = (*component.parameters(), *component.buffers())
+    else:
+        tensors = tuple(
+            tensor
+            for held in getattr(component, "__dict__", {}).values()
+            if isinstance(held, nn.Module)
+            for tensor in (*held.parameters(), *held.buffers())
+        )
+    return sum(_tensor_bytes(tensor) for tensor in tensors)
 
 
 @dataclass
@@ -137,7 +160,10 @@ class MemoryManager:
         if module is not None:
             freeze(module)
         self._components[name] = module
-        self._weights[name] = self._weight_bytes(module)
+        self._weights[name] = _weight_bytes(module)
+        if module is not None and not self._weights[name]:
+            logger.warning(
+                "component %r reports no weights: nothing can be traded for it", name)
         if module is not None and self._module_device(module) == self._load:
             self._resident.add(name)
 
@@ -159,12 +185,13 @@ class MemoryManager:
         """
         if not self.offloads:
             return self._load
-        free = get_free_memory(self._load)
+        free = self.free_bytes()
         if free is None:
             return self._load                      # no figure, no policy
         target = self._load if free - nbytes >= _RESERVE_BASE_BYTES else self._offload
         logger.info(
-            "%.1f GiB of weights -> %s (%.1f GiB free on %s, %.1f GiB kept for a stage)",
+            "%.1f GiB of weights -> %s (%.1f GiB available on %s, "
+            "%.1f GiB kept for a stage)",
             nbytes / (1 << 30), target, free / (1 << 30),
             self._load, _RESERVE_BASE_BYTES / (1 << 30),
         )
@@ -278,17 +305,21 @@ class MemoryManager:
 
     # -------------------------------------------------------------- headroom
     def free_bytes(self) -> Optional[int]:
-        """Bytes of the load device not held by live tensors, None if it will not say.
+        """Bytes this process could make live on the load device now, None if the device
+        will not say.
 
-        Allocator bookkeeping, not the driver's: a block another stage released counts
-        as available before ``empty_cache`` hands it back.
+        Driver free counts what other processes and our own allocator hold; the cached
+        blocks are added back as ours to reuse. The alternative, ``total_memory`` minus
+        live bytes, is blind to other processes.
         """
         if self._load.type != "cuda":
             return None
+        free = get_free_memory(self._load)
+        if free is not None:
+            return free + (torch.cuda.memory_reserved(self._load)
+                           - torch.cuda.memory_allocated(self._load))
         total = get_device_memory(self._load)
-        if total is None:
-            return None
-        return total - torch.cuda.memory_allocated(self._load)
+        return None if total is None else total - torch.cuda.memory_allocated(self._load)
 
     def _place(self, names: Sequence[str], reserve: int) -> None:
         """Put ``names`` on the compute device, with ``reserve`` left over afterwards."""
@@ -313,19 +344,6 @@ class MemoryManager:
             free = self.free_bytes()
             if free is None or free >= nbytes:
                 break
-
-    @staticmethod
-    def _weight_bytes(module: Optional[nn.Module]) -> int:
-        """Resident size of ``module``'s weights and buffers, 0 when it reports none.
-
-        Quantized checkpoints are counted as they sit in memory, not as their files,
-        which is what a placement decision needs.
-        """
-        total = 0
-        for kind in ("parameters", "buffers"):   # a wrapper may expose neither
-            for tensor in getattr(module, kind, lambda: ())():
-                total += tensor.numel() * tensor.element_size()
-        return total
 
     # ------------------------------------------------------------- helpers
     @staticmethod

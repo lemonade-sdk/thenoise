@@ -101,6 +101,8 @@ class Runtime:
         """``action(pipeline)``; once, and once more against a rebuilt model if it reports
         itself unfit. The action is handed the controller because a rebuild replaces it.
         """
+        if self._pipeline is None:
+            raise NotLoadedError("no model loaded")
         try:
             return action(self.pipeline)
         except ModelReloadNeeded:
@@ -113,7 +115,7 @@ class Runtime:
         if self._model is None:
             return
         logger.info("Unloading model '%s'", self._model_name)
-        del self._model
+        self._pipeline = None
         self._model = None
         self._model_name = None
         release_device_memory(self._settings.device)

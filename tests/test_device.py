@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from conftest import StubModel
+from conftest import StubModel, stub_room
 from thenoise.models.config import ModelConfig
 from thenoise.utils import device as device_mod
 from thenoise.utils.device import (
@@ -110,7 +110,7 @@ def test_idle_weights_go_where_the_operator_said(tmp_path):
 def test_a_model_carries_each_checkpoint_to_the_manager(tmp_path, monkeypatch):
     """The adapter knows the file, the manager owns the answer; nothing decides here."""
     config = _config(tmp_path)
-    monkeypatch.setattr("thenoise.memory.get_free_memory", lambda _dev: 10 * GB)
+    stub_room(monkeypatch, 10 * GB)
     monkeypatch.setattr("thenoise.memory._RESERVE_BASE_BYTES", GB)
     model = StubModel(config=config)
     monkeypatch.setattr("thenoise.models.base.checkpoint_bytes",

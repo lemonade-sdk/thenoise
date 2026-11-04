@@ -798,14 +798,26 @@ def flux2_vae():
     return AutoencoderKLFlux2().eval().requires_grad_(False)
 
 
+def stub_room(monkeypatch, free, *, total=None, reserved: int = 0, live: int = 0) -> None:
+    """The room a CUDA device reports, so placement tests decide nothing about the box.
+
+    ``free`` is the driver's figure and ``reserved``/``live`` the allocator's; a device
+    that quotes neither is ``free`` and ``total`` both ``None``.
+    """
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr("thenoise.memory.get_free_memory", lambda _dev: free)
+    monkeypatch.setattr("thenoise.memory.get_device_memory", lambda _dev: total)
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda _dev: reserved)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda _dev: live)
+
+
 class TrackedModule(torch.nn.Module):
     """Weights parked on ``meta`` at a stated size, plus a log of every device move.
 
     ``meta`` is what makes an offload and a reload legal where there is no device, and a
     meta tensor still reports the byte size a placement decision reads — ``nbytes`` is
-    that size. ``device`` is the device the manager is *told* the module sits on, which
-    is what residency follows: pass it differently from how the manager names its own
-    device and the manager will believe the module is elsewhere.
+    that size. ``device`` is the device the manager is *told* the module sits on, which is
+    what residency follows, spelled as the manager spells its own.
     """
 
     def __init__(self, nbytes: int, device: str = "meta"):

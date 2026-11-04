@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 import pytest
-from conftest import TrackedModule
+from conftest import TrackedModule, stub_room
 from thenoise.memory import MemoryManager
 
 
@@ -246,27 +246,33 @@ def test_a_stage_with_no_component_still_claims_room(monkeypatch):
 
 
 # ---------------------------------------------------------------- admission
-def _free(monkeypatch, nbytes) -> None:
-    """What the driver would hand out on the load device."""
-    monkeypatch.setattr("thenoise.memory.get_free_memory", lambda _dev: nbytes)
-
-
 def test_weights_are_admitted_while_the_stage_floor_survives(monkeypatch):
     """The one figure admission keeps free is the fixed part of a stage's reserve."""
     from thenoise import memory as memory_module
 
     floor = memory_module._RESERVE_BASE_BYTES
-    mm = MemoryManager("cpu", "meta")
-    _free(monkeypatch, floor + 5 * (1 << 30))
+    mm = MemoryManager("cuda", "meta")
+    stub_room(monkeypatch, floor + 5 * (1 << 30))
 
     assert mm.device_for(5 * (1 << 30)) == mm.load_device, "exactly the floor left"
     assert mm.device_for(5 * (1 << 30) + 1) == mm.offload_device
 
 
+def test_a_load_admits_into_the_room_its_own_cache_leaves(monkeypatch):
+    """Admission asks what a stage asks. Bytes the allocator holds and is not using are
+    room, so load-time scratch cannot exile a component that fits.
+    """
+    from thenoise import memory as memory_module
+
+    mm = MemoryManager("cuda", "meta")
+    stub_room(monkeypatch, memory_module._RESERVE_BASE_BYTES, reserved=_mib(512))
+    assert mm.device_for(_mib(512)) == mm.load_device
+
+
 def test_a_device_that_gives_no_free_figure_admits(monkeypatch):
     """No figure, no policy: build where the work happens and let the allocator judge."""
-    mm = MemoryManager("cpu", "meta")
-    _free(monkeypatch, None)
+    mm = MemoryManager("cuda", "meta")
+    stub_room(monkeypatch, None)
     assert mm.device_for(1 << 60) == mm.load_device
 
 
@@ -308,8 +314,8 @@ def _measures(monkeypatch, transient: int) -> list:
 
 
 def test_a_device_named_without_its_index_holds_its_weights_resident(monkeypatch):
-    """``cuda`` and ``cuda:0`` are one device. Read them as two and no component is ever
-    resident, which leaves nothing to evict and the device without a second choice.
+    """Read ``cuda`` and ``cuda:0`` as two devices and nothing is ever resident, so
+    nothing can ever be evicted.
     """
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     mm = MemoryManager("cuda", "cpu")     # how the adapters name it
@@ -524,6 +530,17 @@ def test_a_device_that_will_not_report_a_size_has_no_headroom():
     assert MemoryManager("cpu", "meta").free_bytes() is None
 
 
+def test_free_bytes_counts_the_other_tenants_and_ones_own_cache(monkeypatch):
+    """Driver free counts another process's weights; the cache is still ours to reuse."""
+    stub_room(monkeypatch, _mib(40_000), reserved=_mib(4_000), live=_mib(2_000))
+    assert MemoryManager("cuda", "cpu").free_bytes() == _mib(42_000)
+
+
+def test_free_bytes_without_a_driver_figure_is_the_device_total_minus_live_bytes(monkeypatch):
+    stub_room(monkeypatch, None, total=_mib(10_000), live=_mib(3_000))
+    assert MemoryManager("cuda", "cpu").free_bytes() == _mib(7_000)
+
+
 def test_an_unmeasurable_device_is_never_asked_to_move(monkeypatch):
     """Without a figure there is no policy: claims go unenforced, squeeze takes nothing."""
     mm = MemoryManager("cpu", "meta")
@@ -537,6 +554,54 @@ def test_an_unmeasurable_device_is_never_asked_to_move(monkeypatch):
         assert mm.resident() == {"dit"}
     assert other.moves == []
     assert mm.squeeze() == 0
+
+
+class _Wrapper:
+    """A plain object holding a model: no ``parameters``, forwards placement by hand."""
+
+    def __init__(self, model):
+        self.model = model
+
+    @property
+    def device(self):
+        return self.model.device
+
+    def to(self, device):
+        self.model.to(device)
+        return self
+
+
+def test_a_plain_wrapper_weighs_what_the_model_it_holds_weighs():
+    """A wrapper counted at zero asks no room for its upload and is last to be traded."""
+    mm = MemoryManager("cpu", "meta")
+    mm.register("encoder", _Wrapper(TrackedModule(_mib(5))))
+    assert mm.weight_bytes("encoder") == _mib(5)
+
+
+def test_a_quantized_component_weighs_its_storage_not_its_logical_dtype():
+    """The loader's int8 weights report the bf16 they stand in for: double the room they
+    use.
+    """
+    from thenoise.utils.loader import _build_int8_qt
+
+    rows, cols = 2048, 1024
+    quantized = _build_int8_qt(torch.zeros(rows, cols, dtype=torch.int8), torch.ones(1), {})
+    assert quantized.element_size() == 2      # bf16: not what it occupies
+    holder = nn.Module()
+    holder.register_buffer("weight", quantized)
+
+    mm = MemoryManager("cpu", "meta")
+    mm.register("int8", holder)
+    assert mm.weight_bytes("int8") == rows * cols
+
+
+def test_a_component_that_reports_no_weights_says_so(caplog):
+    """A component of unknown size cannot be traded for: worth a line, not a silent 0."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="thenoise.memory"):
+        MemoryManager("cpu", "meta").register("mystery", _MockComp())
+    assert "reports no weights" in caplog.text
 
 
 def test_weight_bytes_counts_a_component_as_it_sits_in_memory():

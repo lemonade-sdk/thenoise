@@ -57,6 +57,39 @@ def test_model_capabilities_are_reported_verbatim(catalog):
     assert runtime.model_capabilities()["edit"] is True
 
 
+def test_a_swap_releases_the_replaced_model_before_building_the_next(monkeypatch):
+    """The pipeline holds the model, so a swap dropping only the runtime's reference has
+    both models resident at once.
+    """
+    events: list[str] = []
+
+    class Fake:
+        name = "fake"
+        CAPABILITIES: dict = {}
+        detect = staticmethod(lambda path: False)
+
+        def __init__(self, **kwargs):
+            events.append("built")
+
+        def __del__(self):
+            events.append("released")
+
+    monkeypatch.setattr(model_catalog, "MODEL_CATALOG", [Fake])
+    monkeypatch.setattr(model_catalog, "resolve", lambda path: Fake)
+
+    runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
+    runtime.load(ModelPaths("dit", "vae", "te"))
+    runtime.load(ModelPaths("dit", "vae", "te"))
+
+    assert events == ["built", "released", "built"]
+
+
+def test_running_without_a_model_says_so(catalog):
+    catalog()
+    with pytest.raises(NotLoadedError):
+        Runtime(Settings()).run(lambda pipeline: pipeline)
+
+
 def test_loading_swaps_the_single_resident_model(catalog):
     constructed = catalog()
     runtime = Runtime(Settings())
