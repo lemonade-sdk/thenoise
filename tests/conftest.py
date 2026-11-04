@@ -798,6 +798,11 @@ def flux2_vae():
     return AutoencoderKLFlux2().eval().requires_grad_(False)
 
 
+# A CPU-only torch raises where these tests ask the device; the suite's own figures are
+# stubbed (``stub_room``), so only a test that names a real card needs one.
+cuda_only = pytest.mark.skipif(not torch.cuda.is_available(), reason="a CUDA device")
+
+
 def stub_room(monkeypatch, free, *, total=None, reserved: int = 0, live: int = 0) -> None:
     """The room a CUDA device reports, so placement tests decide nothing about the box.
 

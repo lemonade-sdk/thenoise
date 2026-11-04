@@ -92,7 +92,7 @@ def test_running_without_a_model_says_so(catalog):
 
 def test_loading_swaps_the_single_resident_model(catalog):
     constructed = catalog()
-    runtime = Runtime(Settings())
+    runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
     runtime.load(ModelPaths("dit", "vae", "te"))
     # Loading a second model unloads the first -- still exactly one resident.
     runtime.load(ModelPaths("dit2", "vae2", "te2"))

@@ -10,7 +10,7 @@ import torch
 from torch import nn
 
 import pytest
-from conftest import TrackedModule, stub_room
+from conftest import TrackedModule, cuda_only, stub_room
 from thenoise.memory import MemoryManager
 
 
@@ -326,6 +326,7 @@ def test_a_device_named_without_its_index_holds_its_weights_resident(monkeypatch
     assert not MemoryManager("cuda", "cuda:0").offloads
 
 
+@cuda_only
 def test_a_card_of_the_reported_size_swaps_the_encoder_for_the_dit(monkeypatch):
     """6.8 GiB DiT + 8.7 GiB encoder + 0.6 GiB VAE on a 15.5 GiB card: the encoder's
     stage takes the DiT's place and leaves the VAE alone.
