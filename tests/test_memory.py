@@ -307,6 +307,43 @@ def _measures(monkeypatch, transient: int) -> list:
     return begins
 
 
+def test_a_device_named_without_its_index_holds_its_weights_resident(monkeypatch):
+    """``cuda`` and ``cuda:0`` are one device. Read them as two and no component is ever
+    resident, which leaves nothing to evict and the device without a second choice.
+    """
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    mm = MemoryManager("cuda", "cpu")     # how the adapters name it
+    assert mm.load_device == torch.device("cuda", 0)
+    mm.register("dit", TrackedModule(_mib(4), device="cuda:0"))   # as a tensor reports it
+    assert mm.resident() == {"dit"}
+    # Same resolution the other way: naming both devices alike is resident mode.
+    assert not MemoryManager("cuda", "cuda:0").offloads
+
+
+def test_a_card_of_the_reported_size_swaps_the_encoder_for_the_dit(monkeypatch):
+    """6.8 GiB DiT + 8.7 GiB encoder + 0.6 GiB VAE on a 15.5 GiB card: the encoder's
+    stage takes the DiT's place and leaves the VAE alone.
+    """
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    mm = MemoryManager("cuda", "cpu")
+    dit = TrackedModule(_mib(6800), device="cuda:0")
+    encoder = TrackedModule(_mib(8700), device="meta")
+    vae = TrackedModule(_mib(600), device="cuda:0")
+    for name, module in (("dit", dit), ("text_encoder", encoder), ("vae", vae)):
+        mm.register(name, module)
+    _capacity(monkeypatch, mm, _mib(15480))
+    _reserve(monkeypatch, _mib(2048))
+
+    with mm.stage("text_encoder", pixels=0):
+        assert dit.moves == ["cpu"], "the DiT was the only thing big enough to displace"
+        assert encoder.moves == ["cuda"]
+        assert vae.moves == []
+
+    with mm.stage("dit", pixels=0):
+        assert encoder.moves == ["cuda", "cpu"], "and the way back takes the encoder"
+        assert vae.moves == []
+
+
 def test_a_stage_counts_from_after_its_own_placement(monkeypatch):
     """What the manager uploaded for a stage is resident, not the stage's transient."""
     order: list[str] = []

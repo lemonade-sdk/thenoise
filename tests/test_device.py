@@ -117,4 +117,4 @@ def test_a_model_carries_each_checkpoint_to_the_manager(tmp_path, monkeypatch):
                         {config.dit_path: 12 * GB, config.vae_path: GB}.get)
 
     assert model._load_target(config.dit_path) == "cpu", "12 GiB into 10 free leaves no floor"
-    assert model._load_target(config.vae_path) == "cuda"
+    assert model._load_target(config.vae_path) == str(model.memory.load_device)

@@ -38,6 +38,22 @@ from thenoise.utils.device import (
 
 logger = logging.getLogger(__name__)
 
+
+def _with_index(device: Union[str, torch.device]) -> torch.device:
+    """``device`` with its index filled in.
+
+    ``torch.device("cuda")`` and ``torch.device("cuda:0")`` name one device and compare
+    unequal, while adapters hand over the former and tensors report the latter: taken at
+    face value, resident weights look absent, and then nothing can ever be evicted.
+    """
+    device = torch.device(device)
+    if device.type == "cuda" and device.index is None:
+        try:
+            return torch.device("cuda", torch.cuda.current_device())
+        except Exception:
+            return device           # no CUDA to resolve against: a meta or CPU-only run
+    return device
+
 # A stage's room beside its weights: a fixed part (tiles, halos, feature caches) plus a
 # part per pixel, the sampling loop being the same order as a decode. Coarse because the
 # peaks are: two APUs of one generation measured 1.2-1.4x apart, nothing here on CUDA.
@@ -86,8 +102,8 @@ class MemoryManager:
         load_device: Union[str, torch.device],
         offload_device: Union[str, torch.device],
     ):
-        self._load = torch.device(load_device)
-        self._offload = torch.device(offload_device)
+        self._load = _with_index(load_device)
+        self._offload = _with_index(offload_device)
         self._components: Dict[str, Optional[nn.Module]] = {}
         self._weights: Dict[str, int] = {}
         self._resident: Set[str] = set()
@@ -316,17 +332,18 @@ class MemoryManager:
     def _module_device(module: nn.Module) -> Optional[torch.device]:
         """Current device of ``module`` (an ``nn.Module`` or a wrapper).
 
-        Wrappers expose a ``device`` attribute/property; plain modules are probed
-        via their first parameter or buffer."""
+        Wrappers expose a ``device`` attribute/property; plain modules are probed via
+        their first parameter or buffer. Resolved through the same index a tensor
+        carries, so it is comparable with the manager's own devices."""
+        found: Union[str, torch.device, None] = None
         if hasattr(module, "device"):
-            return module.device
-        for p in module.parameters():
-            if p is not None:
-                return p.device
-        for b in module.buffers():
-            if b is not None:
-                return b.device
-        return None
+            found = module.device
+        else:
+            for tensor in (*module.parameters(), *module.buffers()):
+                if tensor is not None:
+                    found = tensor.device
+                    break
+        return None if found is None else _with_index(found)
 
 
 __all__ = ["MemoryManager"]

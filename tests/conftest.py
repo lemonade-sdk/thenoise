@@ -804,7 +804,8 @@ class TrackedModule(torch.nn.Module):
     ``meta`` is what makes an offload and a reload legal where there is no device, and a
     meta tensor still reports the byte size a placement decision reads — ``nbytes`` is
     that size. ``device`` is the device the manager is *told* the module sits on, which
-    is what residency and fixity follow.
+    is what residency follows: pass it differently from how the manager names its own
+    device and the manager will believe the module is elsewhere.
     """
 
     def __init__(self, nbytes: int, device: str = "meta"):
