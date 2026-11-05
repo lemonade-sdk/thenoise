@@ -1,10 +1,14 @@
 """Runtime tests using fake catalog entries (no adapters, no real weights)."""
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
 import thenoise.models as model_catalog
 from thenoise.errors import ModelReloadNeeded
+from thenoise.inference import inference_lock
 from thenoise.runtime import ModelPaths, NotLoadedError, Runtime, Settings
 
 
@@ -57,11 +61,8 @@ def test_model_capabilities_are_reported_verbatim(catalog):
     assert runtime.model_capabilities()["edit"] is True
 
 
-def test_a_swap_releases_the_replaced_model_before_building_the_next(monkeypatch):
-    """The pipeline holds the model, so a swap dropping only the runtime's reference has
-    both models resident at once.
-    """
-    events: list[str] = []
+def _counting_model(events: list):
+    """A catalog entry that records its own construction and collection."""
 
     class Fake:
         name = "fake"
@@ -74,14 +75,97 @@ def test_a_swap_releases_the_replaced_model_before_building_the_next(monkeypatch
         def __del__(self):
             events.append("released")
 
-    monkeypatch.setattr(model_catalog, "MODEL_CATALOG", [Fake])
-    monkeypatch.setattr(model_catalog, "resolve", lambda path: Fake)
+    return Fake
 
+
+def _install(monkeypatch, cls) -> Runtime:
+    monkeypatch.setattr(model_catalog, "MODEL_CATALOG", [cls])
+    monkeypatch.setattr(model_catalog, "resolve", lambda path: cls)
     runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
     runtime.load(ModelPaths("dit", "vae", "te"))
+    return runtime
+
+
+def test_a_swap_releases_the_replaced_model_before_building_the_next(monkeypatch):
+    """The pipeline holds the model, so a swap dropping only the runtime's reference has
+    both models resident at once.
+    """
+    events: list[str] = []
+    runtime = _install(monkeypatch, _counting_model(events))
     runtime.load(ModelPaths("dit", "vae", "te"))
 
     assert events == ["built", "released", "built"]
+
+
+def test_a_rebuild_after_a_refusal_frees_the_model_it_replaces(monkeypatch):
+    """Same hazard as the swap, one layer up: the exception that asked for the rebuild
+    holds the frames of the request, and one of them holds the old model.
+    """
+    events: list[str] = []
+    runtime = _install(monkeypatch, _counting_model(events))
+
+    def action(pipeline):
+        if len(events) == 1:
+            raise ModelReloadNeeded("the DiT holds a half-applied LoRA")
+        return "an image"
+
+    assert runtime.run(action) == "an image"
+    assert events == ["built", "released", "built"]
+
+
+def test_a_rebuild_waits_for_the_request_that_holds_the_device(catalog):
+    """A rebuild loads weights: beside a request still using the device that is two models
+    on a box that just ran out of one.
+    """
+    constructed = catalog()
+    runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
+    runtime.load(ModelPaths("dit", "vae", "te"))
+
+    def action(_pipeline):
+        raise ModelReloadNeeded("the DiT holds a half-applied LoRA")
+
+    with inference_lock:
+        worker = threading.Thread(target=lambda: runtime.run(action), daemon=True)
+        worker.start()
+        worker.join(timeout=0.3)
+        assert worker.is_alive(), "the rebuild waits behind the device's owner"
+        assert len(constructed) == 1
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert len(constructed) == 2
+
+
+def test_requests_refused_by_one_instance_rebuild_it_once(catalog):
+    """Refused at the same instant: one rebuild is enough for both, and the second request
+    is not a second model loaded in the same bytes.
+    """
+    constructed = catalog()
+    runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
+    runtime.load(ModelPaths("dit", "vae", "te"))
+    refused = runtime.model
+    outcomes: list = []
+    attempts: list[int] = []
+
+    def action(_pipeline):
+        attempts.append(1)
+        if runtime.model is refused:
+            raise ModelReloadNeeded("the DiT holds a half-applied LoRA")
+        return "an image"
+
+    with inference_lock:
+        workers = [threading.Thread(
+            target=lambda: outcomes.append(_run(runtime, action)), daemon=True)
+            for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        deadline = time.monotonic() + 5.0
+        while len(attempts) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+    for worker in workers:
+        worker.join(timeout=10)
+
+    assert outcomes == ["an image", "an image"], outcomes
+    assert len(constructed) == 2, "one rebuild for both requests"
 
 
 def test_running_without_a_model_says_so(catalog):
@@ -162,3 +246,11 @@ def test_run_rebuilds_once_and_no_more(catalog):
     with pytest.raises(ModelReloadNeeded):
         runtime.run(action)
     assert len(constructed) == 2
+
+
+def _run(runtime, action):
+    """``action`` through the runtime, or the error it raised, for a worker thread."""
+    try:
+        return runtime.run(action)
+    except Exception as error:           # noqa: BLE001 - reported through the outcome
+        return error

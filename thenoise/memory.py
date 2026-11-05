@@ -97,6 +97,16 @@ def _weight_bytes(component: Any) -> int:
     return sum(_tensor_bytes(tensor) for tensor in tensors)
 
 
+def _attempt(fn, args, kwargs):
+    """``(value, None)``, or ``(None, the out-of-memory)`` with its traceback dropped: a
+    traceback references the frames it fell through, and their tensors with them.
+    """
+    try:
+        return fn(*args, **kwargs), None
+    except torch.cuda.OutOfMemoryError as error:
+        return None, error.with_traceback(None)
+
+
 @dataclass
 class _Stage:
     """The handle a stage runs its work through."""
@@ -108,13 +118,19 @@ class _Stage:
 
         Nothing freed means the device cannot hold this stage at all and the error stands.
         ``fn`` runs at most twice and must be a function of its inputs.
+
+        The squeeze and the retry sit outside a handler: a live exception keeps the failed
+        attempt's locals, which are the bytes the retry is asking for.
         """
-        try:
-            return fn(*args, **kwargs)
-        except torch.cuda.OutOfMemoryError:
-            if self.manager.squeeze() == 0:
-                raise
-            return fn(*args, **kwargs)
+        value, short = _attempt(fn, args, kwargs)
+        if short is None:
+            return value
+        if self.manager.squeeze() == 0:
+            raise short
+        value, short = _attempt(fn, args, kwargs)
+        if short is not None:
+            raise short
+        return value
 
 
 class MemoryManager:
@@ -257,7 +273,7 @@ class MemoryManager:
         Wrap the work in the yielded handle's ``run`` for a squeeze-and-retry. The stage
         is measured on the way out, so the next one of its size reserves what this used.
         """
-        self._held.update(names)
+        held, self._held = self._held, self._held | set(names)
         depth, self._depth = self._depth, self._depth + 1
         baseline = None
         try:
@@ -265,8 +281,7 @@ class MemoryManager:
             baseline = self._peak_begin(self._load) if depth == 0 else None
             yield _Stage(self)
         finally:
-            self._held.difference_update(names)
-            self._depth = depth
+            self._held, self._depth = held, depth
             if depth == 0 and baseline is not None:
                 self._learn(names, pixels, baseline)
 

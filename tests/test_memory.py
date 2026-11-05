@@ -499,6 +499,45 @@ def test_a_stage_that_runs_out_hands_over_the_device_and_runs_again(monkeypatch)
     assert vae.moves == ["cpu"], "a stage never loses what it is running"
 
 
+def test_the_retry_squeezes_after_the_failed_attempt_left_the_stack(monkeypatch):
+    """A live exception holds the frames the attempt ran through, and their locals are the
+    tensors that filled the device: squeezed beside them, less room comes back.
+    """
+    events: list[str] = []
+
+    class Temporary:
+        def __del__(self):
+            events.append("released")
+
+    mm = MemoryManager("cpu", "meta")
+    monkeypatch.setattr(mm, "squeeze", lambda: events.append("squeezed") or (1 << 30))
+
+    def work() -> str:
+        if "squeezed" in events:
+            return "pixels"
+        temporary = Temporary()
+        raise torch.cuda.OutOfMemoryError(f"no room beside {temporary!r}")
+
+    with mm.stage("vae", pixels=0) as s:
+        assert s.run(work) == "pixels"
+    assert events == ["released", "squeezed"]
+
+
+def test_an_inner_stage_leaves_the_outer_stays_hold_intact(monkeypatch):
+    """An inner stage that names a held component must not hand it over on its way out."""
+    mm = MemoryManager("cpu", "meta")
+    dit, vae = TrackedModule(_mib(4), device="cpu"), TrackedModule(_mib(1), device="cpu")
+    mm.register("dit", dit)
+    mm.register("vae", vae)
+    _reserve(monkeypatch, 0)
+
+    with mm.stage("dit", "vae", pixels=0):
+        with mm.stage("vae", pixels=0):
+            pass
+        mm.squeeze()
+        assert vae.moves == [], "the outer stage is still running with the VAE"
+
+
 def test_a_stage_with_nothing_left_to_take_does_not_retry(monkeypatch):
     """No room to be had: the error stands rather than failing the same way twice."""
     mm = MemoryManager("cpu", "meta")

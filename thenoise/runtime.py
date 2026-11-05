@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from thenoise.errors import ModelReloadNeeded
-from thenoise.inference import inference
+from thenoise.inference import inference, inference_lock
 from thenoise.utils.device import release_device_memory
 
 logger = logging.getLogger(__name__)
@@ -103,13 +103,21 @@ class Runtime:
         """
         if self._pipeline is None:
             raise NotLoadedError("no model loaded")
+
+        attempted = self._model
         try:
             return action(self.pipeline)
-        except ModelReloadNeeded:
-            logger.warning("%s: rebuilding the model, which reported itself unfit",
-                           self._model_name)
-            self.reload()
-            return action(self.pipeline)
+        except ModelReloadNeeded as needed:
+            reason = str(needed)
+
+        with inference_lock:
+            stale = self._model is attempted
+            attempted = None
+            if stale:
+                logger.warning("%s: rebuilding a model that reported itself unfit: %s",
+                               self._model_name, reason)
+                self.reload()
+        return action(self.pipeline)
 
     def _unload(self) -> None:
         if self._model is None:
