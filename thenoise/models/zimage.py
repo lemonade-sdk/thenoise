@@ -67,18 +67,20 @@ class ZImageModel(DiffusionModel):
         super().__init__(config=config)
 
         logger.info("Loading Z-Image DiT from %s", config.dit_path)
-        self.dit = load_zimage_dit(config.dit_path, device=self.offload_device, dtype=config.dtype)
+        self.dit = load_zimage_dit(config.dit_path,
+                                   device=self._load_target(config.dit_path),
+                                   dtype=config.dtype)
 
         logger.info("Loading Z-Image text encoder from %s", config.text_encoder_path)
         self.text_encoder, self.tokenizer = load_zimage_text_encoder(
             config.text_encoder_path,
             dtype=config.dtype,
-            device=self.offload_device,
+            device=self._load_target(config.text_encoder_path),
             tokenizer_dir=find_tokenizer_dir(config.text_encoder_path),
         )
 
         # Flux VAE (decoder-only).
-        self.vae = load_flux_vae(self.vae_path, device=self.device)
+        self.vae = load_flux_vae(self.vae_path, device=self._load_target(self.vae_path))
 
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)

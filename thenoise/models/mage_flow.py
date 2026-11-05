@@ -68,16 +68,16 @@ class MageFlowModel(DiffusionModel):
         self.params: MageFlowParams = detect_params(config.dit_path)
         logger.info("Loading Mage-Flow DiT from %s", config.dit_path)
         self.dit = load_mage_flow_dit(
-            config.dit_path, self.params, device=self.offload_device, dtype=config.dtype
+            config.dit_path, self.params, device=self._load_target(config.dit_path), dtype=config.dtype
         )
 
         logger.info("Loading Mage-Flow text encoder (Qwen3-VL-4B) from %s", config.text_encoder_path)
         self.text_encoder = load_mage_flow_text_encoder(
-            config.text_encoder_path, dtype=config.dtype, device=self.offload_device
+            config.text_encoder_path, dtype=config.dtype, device=self._load_target(config.text_encoder_path)
         )
 
         logger.info("Loading Mage-Flow VAE from %s", self.vae_path)
-        self.vae = load_mage_family_vae(self.vae_path, device=self.device)
+        self.vae = load_mage_family_vae(self.vae_path, device=self._load_target(self.vae_path))
 
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)

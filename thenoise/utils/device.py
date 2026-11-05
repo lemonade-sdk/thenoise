@@ -37,6 +37,24 @@ def get_device_memory(device: Optional[Union[str, torch.device]]) -> Optional[in
         return torch.cuda.get_device_properties(device).total_memory
     return None
 
+
+def get_free_memory(device: Optional[Union[str, torch.device]]) -> Optional[int]:
+    """Bytes the driver would hand out on ``device`` right now, None if it will not say.
+
+    Unlike the allocator's measure, this counts the compute context and other processes.
+    """
+    if device is None:
+        return None
+    if isinstance(device, str):
+        device = torch.device(device)
+    if device.type != "cuda":
+        return None
+    try:
+        return torch.cuda.mem_get_info(device)[0]
+    except (RuntimeError, AttributeError):
+        return None
+
+
 def synchronize_device(device: Optional[Union[str, torch.device]]):
     if device is None:
         return

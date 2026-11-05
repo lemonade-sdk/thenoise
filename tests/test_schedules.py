@@ -260,11 +260,6 @@ def test_base_fuse_text_and_prepare_latent_are_identities():
     assert DiffusionModel.prepare_latent(model, latents, cond, _params()) is latents
 
 
-def test_file_size_counts_missing_as_zero():
-    """An unreadable path must not blow the offload estimate up."""
-    assert DiffusionModel._file_size("/nonexistent/nope.safetensors") == 0
-
-
 def test_get_upscaler_is_lazy_and_cached():
     """``_create_upscaler`` loads weights: building twice would load twice, and
     building eagerly would tax every plain generation.

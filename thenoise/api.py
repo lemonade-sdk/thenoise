@@ -285,24 +285,24 @@ def create_app(runtime) -> FastAPI:
 
     @app.post("/text2image")
     def text2image(req: Text2ImageRequest):
-        pipeline = runtime.pipeline
-        if pipeline is None:
+        if runtime.pipeline is None:
             return Response(status_code=503, content="no model is loaded")
         return image_job(
             "generation",
-            lambda: pipeline.generate(req.to_request()),
+            lambda: runtime.run(lambda pipeline: pipeline.generate(req.to_request())),
             req.out,
         )
 
     @app.post("/edit")
     def edit(req: EditRequest):
         """Reference-latent instruction editing (image + prompt -> edited image)."""
-        pipeline = runtime.pipeline
-        if pipeline is None:
+        if runtime.pipeline is None:
             return Response(status_code=503, content="no model is loaded")
         # A ValueError here is "this model does not edit" or "an edit needs an image".
         return image_job(
-            "edit", lambda: pipeline.edit(req.to_edit_request()), req.out
+            "edit",
+            lambda: runtime.run(lambda pipeline: pipeline.edit(req.to_edit_request())),
+            req.out,
         )
 
     @app.post("/upscale")

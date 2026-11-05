@@ -25,8 +25,8 @@ class ModelConfig:
     dit_path: str
     vae_path: str
     text_encoder_path: str
+    offload_device: str      # where idle weights wait; the compute device offloads nothing
     device: str = "cuda"
-    offload_device: str = ""  # empty = auto-detect from safetensors size vs VRAM
     dtype: torch.dtype = torch.bfloat16
     lora_dir: Optional[str] = None
 

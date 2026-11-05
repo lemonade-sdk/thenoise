@@ -79,18 +79,18 @@ class Flux3Model(DiffusionModel):
 
         logger.info("Loading Flux.3 DiT from %s", config.dit_path)
         self.dit = load_flux3_dit(
-            config.dit_path, self.params, device=self.offload_device, dtype=config.dtype
+            config.dit_path, self.params, device=self._load_target(config.dit_path), dtype=config.dtype
         )
 
         logger.info(
             "Loading Flux.3 text encoder (Qwen3-VL-4B) from %s", config.text_encoder_path
         )
         self.text_encoder = load_flux3_text_encoder(
-            config.text_encoder_path, dtype=config.dtype, device=self.offload_device
+            config.text_encoder_path, dtype=config.dtype, device=self._load_target(config.text_encoder_path)
         )
 
         logger.info("Loading Flux.3 VAE (Flux.2) from %s", self.vae_path)
-        self.vae = load_flux2_vae(self.vae_path, device=self.device)
+        self.vae = load_flux2_vae(self.vae_path, device=self._load_target(self.vae_path))
 
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)

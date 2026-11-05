@@ -92,7 +92,7 @@ class QwenImage21Model(DiffusionModel):
         super().__init__(config=config)
 
         self.dit = load_qwen_image21_dit(
-            config.dit_path, device=self.offload_device, dtype=config.dtype
+            config.dit_path, device=self._load_target(config.dit_path), dtype=config.dtype
         )
 
         # A fused-MLP checkpoint needs a LoRA's split SwiGLU names fused onto gate_up.
@@ -103,10 +103,10 @@ class QwenImage21Model(DiffusionModel):
 
         logger.info("Loading Qwen-Image 2.1 text encoder (Qwen3-VL-8B) from %s", config.text_encoder_path)
         self.text_encoder: QwenImage21TextEncoder = load_qwen_image21_text_encoder(
-            config.text_encoder_path, dtype=config.dtype, device=self.offload_device
+            config.text_encoder_path, dtype=config.dtype, device=self._load_target(config.text_encoder_path)
         )
 
-        self.vae = load_wan22_vae(self.vae_path, device=self.device)
+        self.vae = load_wan22_vae(self.vae_path, device=self._load_target(self.vae_path))
         if self.vae.z_dim != self.dit.in_channels:
             raise ValueError(
                 f"the VAE's {self.vae.z_dim}ch latent does not feed this DiT's "

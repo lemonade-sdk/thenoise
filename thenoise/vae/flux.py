@@ -260,8 +260,7 @@ class AutoencoderKLFlux(nn.Module):
                         n = block.out_channels * h.shape[2] * h.shape[3]
                         room = buf.numel() - (h.numel() if i_level < levels - 1 else 0)
                         # A stream that fills the buffer leaves this level's blocks to
-                        # allocate. No shipped width reaches it: they halve twice, the
-                        # second time at the last level.
+                        # allocate, which the fallback below allows.
                         hidden = (
                             region(buf, room, block.out_channels, h.shape[2], h.shape[3])
                             if room >= n

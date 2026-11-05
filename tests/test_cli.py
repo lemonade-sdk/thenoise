@@ -42,7 +42,7 @@ def test_cli_serve_parses_model_paths_and_defaults(parse):
     bare = parse(["serve"])
     assert (bare.host, bare.port, bare.device) == ("127.0.0.1", 8000, "cuda")
     assert bare.dit is None and bare.vae is None and bare.text_encoder is None
-    assert bare.upscaler_dir == "" and bare.offload_device == ""
+    assert bare.upscaler_dir == "" and bare.offload_device == "cpu"
     assert bare.controlmap_dir == ""
     # A one-shot server has no pixel-upscaler flag (it takes a directory instead).
     assert not hasattr(bare, "pixel_upscaler")

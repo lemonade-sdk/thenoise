@@ -78,16 +78,16 @@ class Fibo2Model(DiffusionModel):
 
         logger.info("Loading Fibo 2.0 DiT from %s", config.dit_path)
         self.dit = load_fibo2_dit(
-            config.dit_path, self.params, device=self.offload_device, dtype=config.dtype
+            config.dit_path, self.params, device=self._load_target(config.dit_path), dtype=config.dtype
         )
 
         logger.info("Loading Fibo 2.0 text encoder (Qwen3-VL-4B) from %s", config.text_encoder_path)
         self.text_encoder = load_fibo2_text_encoder(
-            config.text_encoder_path, dtype=config.dtype, device=self.offload_device
+            config.text_encoder_path, dtype=config.dtype, device=self._load_target(config.text_encoder_path)
         )
 
         logger.info("Loading Fibo 2.0 VAE (Flux.2) from %s", self.vae_path)
-        self.vae = load_flux2_vae(self.vae_path, device=self.device)
+        self.vae = load_flux2_vae(self.vae_path, device=self._load_target(self.vae_path))
 
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)

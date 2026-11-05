@@ -1,26 +1,23 @@
 """Kitchen-fused, strip-wise convolution for the AutoencoderKL-family VAEs.
 
 Each ``GroupNorm -> SiLU -> 3x3 conv`` of a decode is one kernel —
-``comfy_kitchen.group_norm_silu_pad3d`` normalises, activates and pads, and
-``comfy_kitchen.fp16_conv3d`` folds the conv in, accumulating in FP32 — and the image is
-walked in strips of rows with one halo row each side so no conv sees a synthetic edge.
+``comfy_kitchen.group_norm_silu_pad3d`` normalises, activates and pads,
+``fp16_conv3d`` folds the conv in accumulating FP32 — and the image is walked in strips of
+rows with one halo row each side so no conv sees a synthetic edge.
 
-GroupNorm is global, so a strip cannot normalise itself: the statistics are taken once
-for the whole frame with ``group_norm_stats3d`` and handed to every strip. That is the
-only state a strip needs from outside itself, and what makes a stripped decode match an
-unstripped one rather than approximate it.
+GroupNorm is global, so a strip cannot normalise itself: ``group_norm_stats3d`` takes the
+statistics once for the frame and every strip uses them. That is the only state a strip
+needs from outside itself, and what makes a stripped decode match an unstripped one rather
+than approximate it.
 
-Strips also let a residual block update its input in place, so a decoder needs no other
-full-size allocation: one buffer the size of its largest feature map, each level writing
-over the front of it while reading the previous level from the back (:func:`region`).
+Strips let a residual block update its input in place, so a decoder allocates no other
+full-size buffer: one, the size of its largest feature map, each level writing over the
+front while reading the previous level from the back (:func:`region`).
 
-The 1x1s — a shortcut, an attention block's projections — go to :func:`pointwise` rather
-than to a conv, because on ROCm MIOpen costs more for a channels-last 1x1 than the GEMM
-over channel rows that the layout already offers.
-
-:func:`strip_apply` is the same walk without the kernels, for a codec whose convolutions
-stay with torch: it takes any chain of them, given only how many there are to read context
-for, and it is what lets such a block update its own input in place.
+1x1s go to :func:`pointwise` — a GEMM over the channel rows channels-last already lays
+out — because MIOpen costs more for a channels-last 1x1 than that does. And
+:func:`strip_apply` is the walk without the kernels: any chain of torch convolutions, given
+only how many of them there are to read context for.
 
 Opt-in per VAE (``fused=True``) and only where :func:`fused_available` agrees.
 """
@@ -55,9 +52,9 @@ STRIP_ELEMS = 2**24
 def fused_available(device: torch.device, dtype: torch.dtype) -> bool:
     """Whether the fused path is worth taking here.
 
-    FP16 only on ROCm: a BF16 conv would go to MIOpen, which runs a ``channels_last``
-    conv through NCHW and gives the gain back. CUDA keeps BF16, where cuDNN's NHWC conv
-    is the faster one either way.
+    FP16 only on ROCm: a BF16 conv there falls back to MIOpen, which runs a
+    ``channels_last`` conv through NCHW and gives the gain back. CUDA keeps BF16, where
+    cuDNN's NHWC conv is the faster one either way.
     """
     hip = torch.version.hip is not None
     backend = "hip" if hip else "cuda"
@@ -96,17 +93,16 @@ def _strip_rows(
 ) -> torch.Tensor:
     """Walk ``x`` in strips of rows, ``fn(strip, top, bottom, dst)`` each, into one result.
 
-    A strip is read ``halo`` rows beyond what it keeps and hands back either ``dst`` — a
-    kernel writing in place, which moves nothing — or the rows it computed. Its first kept
-    row is ``scale * (a - lo) + top - halo``, ``top`` counting zero rows standing in for
-    context the image does not have: one at an image edge for a kernel that pads only
-    there, all of them for a chain that pads itself and answers one row per row handed it.
+    A strip is read ``halo`` rows beyond what it keeps and returns either ``dst`` — a kernel
+    writing in place, which moves nothing — or the rows it computed. Its first kept row is
+    ``scale * (a - lo) + top - halo``, ``top`` counting the zero rows standing in for context
+    the image does not have: one at an image edge for a kernel that pads only there, all of
+    them for a chain that pads itself and answers one row per row handed it.
 
-    ``out`` is a preallocated result, ADDED into when ``accumulate``, and may be the tail
-    of the buffer ``x`` lives in — strips write further forward than they read. When it
-    shares rows being read it is written a strip late, because the next strip reads this
-    strip's last ``halo`` rows as its own halo; the deferral costs the kernel its in-place
-    write, so it is taken only where the two really overlap.
+    ``out`` may be the tail of the buffer ``x`` lives in, since strips write further forward
+    than they read. When the two share rows, output is written one strip late — the next
+    strip reads this one's last ``halo`` rows as its own halo — which costs the kernel its
+    in-place write, so the deferral is taken only where they really overlap.
     """
     size = x.shape[-2]
     step = _strip_step(x, out_elems)
@@ -131,8 +127,8 @@ def _strip_rows(
         if rows is dst:
             continue
         if out is None:
-            # The caller states a layout because the wrong one costs a magnitude, not a
-            # rounding; with none asked for, the strip's own is the only honest answer.
+            # The caller states a layout because the wrong one costs an order of magnitude,
+            # not a rounding; with none asked, the strip's own is the only honest answer.
             shape = (x.shape[0], rows.shape[1], size * scale, x.shape[-1] * scale)
             out = (
                 rows.new_empty(shape)
@@ -169,10 +165,10 @@ def strip_apply(
 
     ``halo`` is the number of 3x3 convolutions inside ``fn``, each padding by itself and so
     reading a synthetic edge at a strip's inner border; that many rows more than the strip
-    keeps makes the kept rows what the whole image would have given. ``out_elems`` gives
-    the result's size for an ``fn`` that changes the channel count (:func:`image_elems`).
-    ``out`` and ``accumulate`` are :func:`_strip_rows`', which is what makes ``out=x`` — a
-    block updating its own input — as exact as any other use.
+    keeps makes the kept rows what the whole image would have given. ``out_elems`` states the
+    result's size when ``fn`` changes the channel count (:func:`image_elems`). ``out`` and
+    ``accumulate`` are :func:`_strip_rows`', which is what makes ``out=x`` exact like any
+    other use.
     """
     return _strip_rows(
         lambda rows, top, bottom, dst: fn(rows),
@@ -187,10 +183,8 @@ def strip_apply(
 
 
 def group_norm_only(x: torch.Tensor, norm: torch.nn.GroupNorm) -> torch.Tensor:
-    """``norm(x)`` with no activation and no pad.
-
-    The one stage that wants neither, and torch's GroupNorm reads a channels-last image
-    strided doing it.
+    """``norm(x)`` with no activation and no pad: the one stage wanting neither, which
+    torch's GroupNorm does by reading a channels-last image strided.
     """
     return group_norm_silu_pad3d(
         x.unsqueeze(2), norm.weight, norm.bias, norm.num_groups, norm.eps,
@@ -201,9 +195,9 @@ def group_norm_only(x: torch.Tensor, norm: torch.nn.GroupNorm) -> torch.Tensor:
 def pointwise(conv: torch.nn.Conv2d, x: torch.Tensor) -> torch.Tensor:
     """A 1x1 conv as a GEMM over the channel row of a channels-last image.
 
-    MIOpen takes a channels-last 1x1 the way it takes any other conv, which costs far
-    more than the matrix product it is. The channel rows are already the GEMM's rows, so
-    neither end of this needs a copy.
+    The channel rows are already the GEMM's rows, so neither end needs a copy; MIOpen takes
+    a channels-last 1x1 the way it takes any conv, which costs far more than the matrix
+    product it is.
     """
     b, c, h, w = x.shape
     y = F.linear(x.permute(0, 2, 3, 1).reshape(b, h * w, c), conv.weight.flatten(1), conv.bias)
@@ -213,10 +207,9 @@ def pointwise(conv: torch.nn.Conv2d, x: torch.Tensor) -> torch.Tensor:
 def _conv_weight(weight: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
     """The 5D form of a 3x3 weight when the kitchen conv is to take it, else as it is.
 
-    Only on ROCm, and only for a channels-last image: that kernel reads NHWC, so a 5D
-    weight doubles as the answer to "is the kitchen conv in charge here". Its CUDA twin
-    accumulates in FP16 behind an opt-in this engine has no knob for, so there cuDNN keeps
-    the conv, and FP32 with it.
+    ROCm and channels-last only; that kernel reads NHWC, so a 5D weight doubles as the
+    answer to "is the kitchen conv in charge here". Its CUDA twin accumulates in FP16 behind
+    a knob this engine does not expose, so there cuDNN keeps the conv, and FP32 with it.
     """
     if (
         x.dtype is torch.float16
@@ -235,11 +228,10 @@ def _padded_conv(
 ) -> torch.Tensor:
     """The conv of a strip the fused kernel has already padded (a 5D weight says which).
 
-    Given ``dst`` the kitchen conv writes its rows there: a strip that padded by reading
-    a halo has exactly ``dst``'s rows left after the conv, so a level's buffer takes the
-    write with no staging copy. That kernel declines a row-strided ``dst``, and one that
-    also holds the residual to be added, so callers hand it neither; a 2D weight has no
-    hook at all and returns rows for the caller to move.
+    Given ``dst`` the kitchen conv writes its rows there — a strip that padded by reading a
+    halo has exactly ``dst``'s rows left afterwards, so a level's buffer takes the write with
+    no staging copy. That kernel declines a row-strided ``dst`` and one that also holds the
+    residual to add, so callers hand it neither; a 2D weight has no hook and returns rows.
     """
     if weight.ndim == 5:
         if dst is not None:
@@ -291,9 +283,9 @@ def strip_down(conv: torch.nn.Conv2d, x: torch.Tensor) -> torch.Tensor:
     """A stride-2 conv with its ``(0, 1, 0, 1)`` pad, in strips.
 
     Output rows ``[a, b)`` read input rows ``[2a, 2b + 1)``, so a strip needs one input row
-    more than it produces rather than a halo on both sides — and no norm, so no whole-frame
-    statistics either. Only the image's own last row is short one, and both pads are told
-    where the image ends; a strip ending inside it must not be padded at its bottom.
+    more than it produces rather than a halo either side — and no norm, so no frame-wide
+    statistics either. Only the image's own last row is short one, so a strip ending inside
+    it must not pad at its bottom: the pads are told where the image ends.
     """
     rows = x.shape[2] // 2
     step = _strip_step(x, x.shape[0] * conv.out_channels * rows * x.shape[3])
@@ -333,10 +325,9 @@ def region(buf: torch.Tensor, end: int, channels: int, h: int, w: int) -> torch.
 def interleaved_view(x: torch.Tensor, channels: int, part: int) -> torch.Tensor:
     """``x``'s storage as two ``channels``-wide images alternating per row slot.
 
-    ``part`` 0 takes the front half of every row slot and 1 the back, the pair covering
-    ``x`` exactly and each one a row-strided NHWC image. A block halving ``x``'s channels
-    keeps its hidden state in one half and its result in the other, so it allocates
-    nothing — and writes the half the next level reads last.
+    ``part`` 0 takes the front half of every row slot and 1 the back; the pair covers ``x``
+    exactly and each is a row-strided NHWC image. A block halving ``x``'s channels keeps its
+    hidden state in one half and its result in the other, so it allocates nothing.
     """
     b, c, h, w = x.shape
     flat = x.permute(0, 2, 3, 1).reshape(-1)

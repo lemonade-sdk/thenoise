@@ -80,7 +80,7 @@ def run_generate(args) -> None:
         ref_method=args.ref_method,
     )
 
-    image = runtime.pipeline.generate(request)
+    image = runtime.run(lambda pipeline: pipeline.generate(request))
 
     out_path = save_output(image, args.out)
     logger.info("saved %s (model=%s, seed=%s)", out_path, runtime.model_name, seed)
@@ -119,7 +119,7 @@ def run_edit(args) -> None:
     # ``--image`` is repeatable; the first one sets the output size. Opened
     # without flattening: an alpha is the model's call.
     request.image = [load_image(p) for p in args.image]
-    image = runtime.pipeline.edit(request)
+    image = runtime.run(lambda pipeline: pipeline.edit(request))
 
     out_path = save_output(image, args.out)
     logger.info("saved %s (model=%s, seed=%s)", out_path, runtime.model_name, seed)

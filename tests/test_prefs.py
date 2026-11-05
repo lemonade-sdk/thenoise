@@ -15,7 +15,11 @@ from conftest import EditingStubModel, StubModel, write_safetensors
 from thenoise.models.config import GenerateRequest
 from thenoise.pipeline import PipelineController
 from thenoise.upscale.pixel import PixelUpscalerManager
-from thenoise.utils.checkpoint import CHECKPOINT_MARKERS, detect_checkpoint_prefs
+from thenoise.utils.checkpoint import (
+    CHECKPOINT_MARKERS,
+    checkpoint_bytes,
+    detect_checkpoint_prefs,
+)
 from thenoise.utils.loader import drop_checkpoint_markers
 
 ZERO_COND_KEY = "__index_timestep_zero__"
@@ -199,3 +203,19 @@ def test_edit_passes_the_resolved_method_to_the_model():
     controller = _controller(model)
     controller.edit(_request(image=Image.new("RGB", (64, 64), "white"), steps=1))
     assert model.prepared[-1]["method"] == "index_timestep_zero"
+
+
+# ------------------------------------------------------------ checkpoint size
+def test_a_checkpoint_directory_sums_its_weight_files(tmp_path):
+    """Sharded checkpoints arrive as a directory; the tokenizer is not weights."""
+    (tmp_path / "model-00001-of-00002.safetensors").write_bytes(b"x" * 700)
+    (tmp_path / "model-00002-of-00002.safetensors").write_bytes(b"x" * 300)
+    (tmp_path / "tokenizer.json").write_bytes(b"x" * 9_000)
+    (tmp_path / "sub").mkdir()
+    assert checkpoint_bytes(str(tmp_path)) == 1000
+
+
+def test_silence_about_a_path_counts_as_no_weights():
+    """Admission falls back to the device's own figures, so a missing path is not a size."""
+    assert checkpoint_bytes("") == 0
+    assert checkpoint_bytes("/nonexistent/nope.safetensors") == 0

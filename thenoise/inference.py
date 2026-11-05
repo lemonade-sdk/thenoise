@@ -28,8 +28,9 @@ from torch import nn
 
 # One process-wide lock shared by every inference entry point. The generate
 # pipeline and the standalone pixel upscale controller mutate the same on-device
-# upscaler pool and model state, so the lock must be process-global.
-inference_lock = threading.Lock()
+# upscaler pool and model state, so the lock must be process-global. Reentrant:
+# ``Runtime.run`` holds it around the pipeline's own acquisition.
+inference_lock = threading.RLock()
 
 
 def inference():

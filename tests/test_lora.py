@@ -13,6 +13,7 @@ import torch.nn as nn
 
 from conftest import StubModel, write_safetensors
 from thenoise.dit.quantized import QuantizedLinear
+from thenoise.errors import ModelReloadNeeded
 from thenoise.models.flux_klein import FluxKleinModel
 from thenoise.utils.lora import (
     FUSE_GATE_UP,
@@ -747,6 +748,47 @@ def test_switch_loras_reuses_the_same_spec_and_undoes_before_reapplying(switch_m
     # Switching back to base undoes and applies nothing.
     model.switch_loras(None, dit)
     assert [e[0] for e in events] == ["apply", "undo", "apply", "undo"]
+
+
+def test_a_switch_that_runs_out_of_memory_refuses_the_model_until_a_reload(
+    switch_model, monkeypatch
+):
+    """A half-merged DiT is neither base nor LoRA; nothing may build on it again."""
+    import thenoise.models.base as model_base
+
+    model, _events = switch_model
+    dit = _TinyNet()
+    attempts = []
+
+    def short(*_args, **_kwargs):
+        attempts.append(1)
+        raise torch.cuda.OutOfMemoryError("no room for the LoRA")
+
+    monkeypatch.setattr(model_base, "apply_lora_to_model", short)
+
+    with pytest.raises(ModelReloadNeeded):
+        model.switch_loras(["style.safetensors:1.0"], dit)
+    with pytest.raises(ModelReloadNeeded):
+        model.switch_loras(["pose.safetensors:1.0"], dit)
+    with pytest.raises(ModelReloadNeeded):
+        model.switch_loras(None, dit)
+    assert len(attempts) == 1, "the refusal leaves the DiT alone"
+
+
+def test_an_undo_that_runs_out_of_memory_refuses_the_model_too(switch_model, monkeypatch):
+    """An interrupted way out corrupts as much as the way in."""
+    import thenoise.models.base as model_base
+
+    model, _events = switch_model
+    dit = _TinyNet()
+    model.switch_loras(["style.safetensors:1.0"], dit)
+
+    def short(*_args, **_kwargs):
+        raise torch.cuda.OutOfMemoryError("no room to restore")
+
+    monkeypatch.setattr(model_base, "undo_lora_on_model", short)
+    with pytest.raises(ModelReloadNeeded):
+        model.switch_loras(["pose.safetensors:1.0"], dit)
 
 
 def test_switch_loras_restores_the_base_weights(switch_model):

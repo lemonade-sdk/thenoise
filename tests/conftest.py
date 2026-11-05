@@ -637,7 +637,7 @@ class StubModel(DiffusionModel):
             config=config
             or ModelConfig(
                 dit_path="dit", vae_path="vae", text_encoder_path="te",
-                device="cpu", dtype=torch.float32, lora_dir=lora_dir,
+                offload_device="cpu", device="cpu", dtype=torch.float32, lora_dir=lora_dir,
             )
         )
         if capabilities is not None:
@@ -796,3 +796,43 @@ def editing_stub_model():
 def flux2_vae():
     """One random-init Flux.2 VAE per module (building it costs ~0.2s)."""
     return AutoencoderKLFlux2().eval().requires_grad_(False)
+
+
+# For a test that asks a real card, not the figures ``stub_room`` supplies: a CPU-only
+# torch raises here.
+cuda_only = pytest.mark.skipif(not torch.cuda.is_available(), reason="a CUDA device")
+
+
+def stub_room(monkeypatch, free, *, total=None, reserved: int = 0, live: int = 0) -> None:
+    """The room a CUDA device reports: driver ``free``, allocator ``reserved``/``live``.
+    ``free`` and ``total`` both None for a device that quotes nothing.
+    """
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr("thenoise.memory.get_free_memory", lambda _dev: free)
+    monkeypatch.setattr("thenoise.memory.get_device_memory", lambda _dev: total)
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda _dev: reserved)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda _dev: live)
+
+
+class TrackedModule(torch.nn.Module):
+    """Weights parked on ``meta`` at a stated size, plus a log of every device move.
+
+    ``meta`` makes an offload legal where there is no device, and a meta tensor still
+    reports the byte size a placement decision reads. ``device`` is what the manager is
+    *told* the module sits on, spelled as the manager spells its own.
+    """
+
+    def __init__(self, nbytes: int, device: str = "meta"):
+        super().__init__()
+        self.p = torch.nn.Parameter(torch.empty(max(nbytes // 4, 1), device="meta"))
+        self._at = torch.device(device)
+        self.moves: list[str] = []
+
+    @property
+    def device(self):
+        return self._at
+
+    def to(self, device=None, *args, **kwargs):  # noqa: D102
+        self._at = torch.device(device)
+        self.moves.append(self._at.type)
+        return self

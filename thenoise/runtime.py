@@ -7,7 +7,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from thenoise.inference import inference
+from thenoise.errors import ModelReloadNeeded
+from thenoise.inference import inference, inference_lock
 from thenoise.utils.device import release_device_memory
 
 logger = logging.getLogger(__name__)
@@ -19,7 +20,7 @@ class Settings:
     ``upscaler_dir`` is server configuration: pixel upscaling needs no diffusion model.
     """
     device: str = "cuda"      # ROCm torch aliases cuda -> hip
-    offload_device: str = ""   # empty = auto-detect from safetensors size vs VRAM
+    offload_device: str = "cpu"   # the compute device itself keeps every weight set
     host: str = "127.0.0.1"
     port: int = 8000
     upscaler_dir: str = ""     # directory of pixel-domain upscaler models
@@ -50,6 +51,7 @@ class Runtime:
         from .upscale_controller import PixelUpscaleController
 
         self._settings = settings
+        self._paths: Optional[ModelPaths] = None
         self._model: Any = None
         self._model_name: Optional[str] = None
         # Shared pixel-domain upscaler pool (model-free, server-level).
@@ -86,13 +88,47 @@ class Runtime:
         with inference():
             self._model = cls(config=config)
         self._model_name = name
+        self._paths = paths
         self._pipeline = PipelineController(self._model, self._pixel_upscalers)
+
+    def reload(self) -> None:
+        """Rebuild the loaded model from its checkpoints, which clears an unfit state."""
+        if self._paths is None:
+            raise NotLoadedError("no model loaded")
+        self.load(self._paths)
+
+    def run(self, action):
+        """``action(pipeline)``; again against a rebuilt model if it reports itself unfit.
+        The action gets the controller, which a rebuild replaces.
+
+        Under the inference lock throughout: a request keeps the model alive until it
+        returns, so only a rebuild inside the lock gets its memory back.
+        """
+        with inference_lock:
+            if self._pipeline is None:
+                raise NotLoadedError("no model loaded")
+
+            attempted = self._model
+            try:
+                return action(self.pipeline)
+            except ModelReloadNeeded as needed:
+                reason = str(needed)
+
+            # Out of the handler, whose frames hold the old model. A changed instance
+            # means somebody else already rebuilt it.
+            stale = self._model is attempted
+            attempted = None
+            if stale:
+                logger.warning("%s: rebuilding a model that reported itself unfit: %s",
+                               self._model_name, reason)
+                self.reload()
+            return action(self.pipeline)
 
     def _unload(self) -> None:
         if self._model is None:
             return
         logger.info("Unloading model '%s'", self._model_name)
-        del self._model
+        self._pipeline = None
         self._model = None
         self._model_name = None
         release_device_memory(self._settings.device)

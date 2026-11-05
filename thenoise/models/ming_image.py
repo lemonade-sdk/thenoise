@@ -74,18 +74,20 @@ class MingImageModel(DiffusionModel):
         super().__init__(config=config)
 
         logger.info("Loading Ming-Image DiT from %s", config.dit_path)
-        self.dit = load_ming_dit(config.dit_path, device=self.offload_device, dtype=config.dtype)
+        self.dit = load_ming_dit(config.dit_path,
+                                 device=self._load_target(config.dit_path),
+                                 dtype=config.dtype)
 
         # The BailingMM2 conditioner; its tokenizer travels inside the file.
         logger.info("Loading Ming-Image text encoder from %s", config.text_encoder_path)
         self.text_encoder, self.tokenizer = load_ming_text_encoder(
             config.text_encoder_path,
-            device=self.offload_device,
+            device=self._load_target(config.text_encoder_path),
             dtype=config.dtype,
         )
 
         logger.info("Loading Ming-Image VAE from %s", config.vae_path)
-        self.vae = load_ming_vae(self.vae_path, device=self.device)
+        self.vae = load_ming_vae(self.vae_path, device=self._load_target(self.vae_path))
 
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)
