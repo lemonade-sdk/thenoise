@@ -798,16 +798,14 @@ def flux2_vae():
     return AutoencoderKLFlux2().eval().requires_grad_(False)
 
 
-# A CPU-only torch raises where these tests ask the device; the suite's own figures are
-# stubbed (``stub_room``), so only a test that names a real card needs one.
+# For a test that asks a real card, not the figures ``stub_room`` supplies: a CPU-only
+# torch raises here.
 cuda_only = pytest.mark.skipif(not torch.cuda.is_available(), reason="a CUDA device")
 
 
 def stub_room(monkeypatch, free, *, total=None, reserved: int = 0, live: int = 0) -> None:
-    """The room a CUDA device reports, so placement tests decide nothing about the box.
-
-    ``free`` is the driver's figure and ``reserved``/``live`` the allocator's; a device
-    that quotes neither is ``free`` and ``total`` both ``None``.
+    """The room a CUDA device reports: driver ``free``, allocator ``reserved``/``live``.
+    ``free`` and ``total`` both None for a device that quotes nothing.
     """
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     monkeypatch.setattr("thenoise.memory.get_free_memory", lambda _dev: free)
@@ -819,10 +817,9 @@ def stub_room(monkeypatch, free, *, total=None, reserved: int = 0, live: int = 0
 class TrackedModule(torch.nn.Module):
     """Weights parked on ``meta`` at a stated size, plus a log of every device move.
 
-    ``meta`` is what makes an offload and a reload legal where there is no device, and a
-    meta tensor still reports the byte size a placement decision reads — ``nbytes`` is
-    that size. ``device`` is the device the manager is *told* the module sits on, which is
-    what residency follows, spelled as the manager spells its own.
+    ``meta`` makes an offload legal where there is no device, and a meta tensor still
+    reports the byte size a placement decision reads. ``device`` is what the manager is
+    *told* the module sits on, spelled as the manager spells its own.
     """
 
     def __init__(self, nbytes: int, device: str = "meta"):

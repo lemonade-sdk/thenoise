@@ -259,8 +259,8 @@ def test_weights_are_admitted_while_the_stage_floor_survives(monkeypatch):
 
 
 def test_a_load_admits_into_the_room_its_own_cache_leaves(monkeypatch):
-    """Admission asks what a stage asks. Bytes the allocator holds and is not using are
-    room, so load-time scratch cannot exile a component that fits.
+    """The bytes our allocator holds unused are room: load-time scratch must not exile a
+    component that fits.
     """
     from thenoise import memory as memory_module
 
@@ -500,9 +500,7 @@ def test_a_stage_that_runs_out_hands_over_the_device_and_runs_again(monkeypatch)
 
 
 def test_the_retry_squeezes_after_the_failed_attempt_left_the_stack(monkeypatch):
-    """A live exception holds the frames the attempt ran through, and their locals are the
-    tensors that filled the device: squeezed beside them, less room comes back.
-    """
+    """The failed attempt's frames are the memory the retry needs: squeeze after them."""
     events: list[str] = []
 
     class Temporary:
@@ -636,7 +634,7 @@ def test_a_quantized_component_weighs_its_storage_not_its_logical_dtype():
 
 
 def test_a_component_that_reports_no_weights_says_so(caplog):
-    """A component of unknown size cannot be traded for: worth a line, not a silent 0."""
+    """A component of unknown size cannot be traded for, so it says so."""
     import logging
 
     with caplog.at_level(logging.WARNING, logger="thenoise.memory"):

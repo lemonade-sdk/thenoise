@@ -40,8 +40,8 @@ logger = logging.getLogger(__name__)
 
 
 def _with_index(device: Union[str, torch.device]) -> torch.device:
-    """``device`` with its index filled in: ``cuda`` and ``cuda:0`` name one device and
-    compare unequal, so read literally they leave nothing resident to evict.
+    """``device`` with its index filled in: ``cuda`` and ``cuda:0`` compare unequal, and
+    taking them as two leaves nothing resident to evict.
     """
     device = torch.device(device)
     if device.type == "cuda" and device.index is None:
@@ -72,8 +72,8 @@ def _peak_bucket(pixels: int) -> int:
 
 
 def _tensor_bytes(tensor: torch.Tensor) -> int:
-    """Device bytes of ``tensor``, from its storage where it will say: a quantized tensor
-    reports the dtype it stands in for, double an int8 weight's footprint.
+    """Device bytes of ``tensor``. A quantized tensor reports the dtype it stands in for,
+    so ask its storage.
     """
     nbytes = getattr(tensor, "nbytes", None)
     if isinstance(nbytes, int):
@@ -82,8 +82,8 @@ def _tensor_bytes(tensor: torch.Tensor) -> int:
 
 
 def _weight_bytes(component: Any) -> int:
-    """What ``component``'s weights and buffers occupy, 0 where it reports none. A plain
-    wrapper is counted through the ``nn.Module`` it holds, as ``freeze`` freezes it.
+    """Bytes of ``component``'s weights and buffers, 0 where it reports none. A plain
+    wrapper is counted through the module it holds, as ``freeze`` does.
     """
     if isinstance(component, nn.Module):
         tensors = (*component.parameters(), *component.buffers())
@@ -98,8 +98,8 @@ def _weight_bytes(component: Any) -> int:
 
 
 def _attempt(fn, args, kwargs):
-    """``(value, None)``, or ``(None, the out-of-memory)`` with its traceback dropped: a
-    traceback references the frames it fell through, and their tensors with them.
+    """``(value, None)`` or ``(None, error)``, the error's traceback dropped: it holds the
+    frames it fell through, and their tensors.
     """
     try:
         return fn(*args, **kwargs), None
@@ -114,13 +114,12 @@ class _Stage:
     manager: "MemoryManager"
 
     def run(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        """``fn(*args, **kwargs)``, squeezing the device and trying again if it ran out.
+        """``fn(*args, **kwargs)``, squeezing and retrying once if the device runs out.
+        Nothing freed means the stage cannot fit at all and the error stands; ``fn`` must
+        be a function of its inputs.
 
-        Nothing freed means the device cannot hold this stage at all and the error stands.
-        ``fn`` runs at most twice and must be a function of its inputs.
-
-        The squeeze and the retry sit outside a handler: a live exception keeps the failed
-        attempt's locals, which are the bytes the retry is asking for.
+        Out of the handler: a live exception keeps the failed attempt's locals, which are
+        the bytes the retry asks for.
         """
         value, short = _attempt(fn, args, kwargs)
         if short is None:
@@ -320,12 +319,10 @@ class MemoryManager:
 
     # -------------------------------------------------------------- headroom
     def free_bytes(self) -> Optional[int]:
-        """Bytes this process could make live on the load device now, None if the device
-        will not say.
+        """What this process could make live on the load device now, None if unknowable.
 
-        Driver free counts what other processes and our own allocator hold; the cached
-        blocks are added back as ours to reuse. The alternative, ``total_memory`` minus
-        live bytes, is blind to other processes.
+        Driver free counts other processes and our cached blocks; the cache is added back
+        because torch hands it out without allocating.
         """
         if self._load.type != "cuda":
             return None
@@ -366,8 +363,7 @@ class MemoryManager:
         """Current device of ``module`` (an ``nn.Module`` or a wrapper).
 
         Wrappers expose a ``device`` attribute/property; plain modules are probed via
-        their first parameter or buffer. Resolved through the same index a tensor
-        carries, so it is comparable with the manager's own devices."""
+        their first parameter or buffer."""
         found: Union[str, torch.device, None] = None
         if hasattr(module, "device"):
             found = module.device

@@ -98,26 +98,31 @@ class Runtime:
         self.load(self._paths)
 
     def run(self, action):
-        """``action(pipeline)``; once, and once more against a rebuilt model if it reports
-        itself unfit. The action is handed the controller because a rebuild replaces it.
+        """``action(pipeline)``; again against a rebuilt model if it reports itself unfit.
+        The action gets the controller, which a rebuild replaces.
+
+        Under the inference lock throughout: a request keeps the model alive until it
+        returns, so only a rebuild inside the lock gets its memory back.
         """
-        if self._pipeline is None:
-            raise NotLoadedError("no model loaded")
-
-        attempted = self._model
-        try:
-            return action(self.pipeline)
-        except ModelReloadNeeded as needed:
-            reason = str(needed)
-
         with inference_lock:
+            if self._pipeline is None:
+                raise NotLoadedError("no model loaded")
+
+            attempted = self._model
+            try:
+                return action(self.pipeline)
+            except ModelReloadNeeded as needed:
+                reason = str(needed)
+
+            # Out of the handler, whose frames hold the old model. A changed instance
+            # means somebody else already rebuilt it.
             stale = self._model is attempted
             attempted = None
             if stale:
                 logger.warning("%s: rebuilding a model that reported itself unfit: %s",
                                self._model_name, reason)
                 self.reload()
-        return action(self.pipeline)
+            return action(self.pipeline)
 
     def _unload(self) -> None:
         if self._model is None:

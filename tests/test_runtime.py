@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import threading
-import time
 
 import pytest
 
@@ -98,9 +97,7 @@ def test_a_swap_releases_the_replaced_model_before_building_the_next(monkeypatch
 
 
 def test_a_rebuild_after_a_refusal_frees_the_model_it_replaces(monkeypatch):
-    """Same hazard as the swap, one layer up: the exception that asked for the rebuild
-    holds the frames of the request, and one of them holds the old model.
-    """
+    """The refused request's own frames hold the model the rebuild must replace."""
     events: list[str] = []
     runtime = _install(monkeypatch, _counting_model(events))
 
@@ -113,59 +110,65 @@ def test_a_rebuild_after_a_refusal_frees_the_model_it_replaces(monkeypatch):
     assert events == ["built", "released", "built"]
 
 
-def test_a_rebuild_waits_for_the_request_that_holds_the_device(catalog):
-    """A rebuild loads weights: beside a request still using the device that is two models
-    on a box that just ran out of one.
+def test_a_request_touches_no_model_outside_the_inference_lock(catalog):
+    """``finalize`` runs after the pipeline released the lock and still holds the model:
+    a rebuild beside it stacks two models.
     """
-    constructed = catalog()
+    catalog()
+    runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
+    runtime.load(ModelPaths("dit", "vae", "te"))
+    attempts: list[int] = []
+
+    worker = threading.Thread(
+        target=lambda: runtime.run(lambda _pipeline: attempts.append(1)), daemon=True)
+    with inference_lock:
+        worker.start()
+        worker.join(timeout=0.3)
+        assert worker.is_alive(), "the request waits for the device's owner"
+        assert attempts == []
+    worker.join(timeout=5)
+    assert attempts == [1]
+
+
+def test_a_generation_runs_under_the_lock_the_request_holds(catalog):
+    """A non-blocking acquire from the owner answers for reentrancy; a plain lock fails
+    here rather than hanging the suite.
+    """
+    catalog()
     runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
     runtime.load(ModelPaths("dit", "vae", "te"))
 
     def action(_pipeline):
-        raise ModelReloadNeeded("the DiT holds a half-applied LoRA")
+        assert inference_lock.acquire(timeout=0), "the request must hold the lock"
+        inference_lock.release()
+        return "an image"
 
-    with inference_lock:
-        worker = threading.Thread(target=lambda: runtime.run(action), daemon=True)
-        worker.start()
-        worker.join(timeout=0.3)
-        assert worker.is_alive(), "the rebuild waits behind the device's owner"
-        assert len(constructed) == 1
-    worker.join(timeout=5)
-    assert not worker.is_alive()
-    assert len(constructed) == 2
+    assert runtime.run(action) == "an image"
 
 
 def test_requests_refused_by_one_instance_rebuild_it_once(catalog):
-    """Refused at the same instant: one rebuild is enough for both, and the second request
-    is not a second model loaded in the same bytes.
-    """
+    """Requests refused in succession rebuild once between them."""
     constructed = catalog()
     runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
     runtime.load(ModelPaths("dit", "vae", "te"))
     refused = runtime.model
     outcomes: list = []
-    attempts: list[int] = []
 
     def action(_pipeline):
-        attempts.append(1)
         if runtime.model is refused:
             raise ModelReloadNeeded("the DiT holds a half-applied LoRA")
         return "an image"
 
-    with inference_lock:
-        workers = [threading.Thread(
-            target=lambda: outcomes.append(_run(runtime, action)), daemon=True)
-            for _ in range(2)]
-        for worker in workers:
-            worker.start()
-        deadline = time.monotonic() + 5.0
-        while len(attempts) < 2 and time.monotonic() < deadline:
-            time.sleep(0.01)
+    workers = [threading.Thread(
+        target=lambda: outcomes.append(_run(runtime, action)), daemon=True)
+        for _ in range(2)]
+    for worker in workers:
+        worker.start()
     for worker in workers:
         worker.join(timeout=10)
 
     assert outcomes == ["an image", "an image"], outcomes
-    assert len(constructed) == 2, "one rebuild for both requests"
+    assert len(constructed) == 2, "one rebuild between them"
 
 
 def test_running_without_a_model_says_so(catalog):

@@ -251,6 +251,15 @@ def test_inference_helper_works_as_a_decorator():
     assert torch.is_grad_enabled() is True
 
 
+def test_the_lock_admits_the_thread_holding_it_again():
+    """A plain lock deadlocks the first generation: ``run`` nests the pipeline's
+    acquisition inside its own.
+    """
+    with inference_lock:
+        assert inference_lock.acquire(timeout=0.05), "the lock must be reentrant"
+        inference_lock.release()
+
+
 def test_both_controllers_share_the_one_process_wide_lock():
     pipeline = _pipeline(_SpyingModel())
     upscaler = PixelUpscaleController(PixelUpscalerManager("", "cpu"))
