@@ -1,0 +1,41 @@
+{
+  "name": "TheNoise (ROCm)",
+  "build": {
+    "dockerfile": "../Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspaces/thenoise",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/thenoise,type=bind,consistency=cached",
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
+  "overrideCommand": false,
+  "runArgs": [
+    "--init",
+    "--device=/dev/kfd",
+    "--device=/dev/dri",
+    "--security-opt=seccomp=unconfined",
+    "--ipc=host"
+  ],
+  "mounts": [
+    "source=thenoise-dev-rocm-venv,target=/workspaces/thenoise/.venv,type=volume",
+    "source=thenoise-dev-rocm-cache,target=/home/vscode/.cache,type=volume"
+  ],
+  "containerEnv": {
+    "UV_LINK_MODE": "copy",
+    "HF_HOME": "/home/vscode/.cache/huggingface",
+    "MIOPEN_USER_DB_PATH": "/home/vscode/.cache/miopen",
+    "MIOPEN_CUSTOM_CACHE_DIR": "/home/vscode/.cache/miopen",
+    "TRITON_CACHE_DIR": "/home/vscode/.cache/triton",
+    "TORCHINDUCTOR_CACHE_DIR": "/home/vscode/.cache/inductor"
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh rocm",
+  "forwardPorts": [8000],
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "python.defaultInterpreterPath": "/workspaces/thenoise/.venv/bin/python"
+      },
+      "extensions": ["ms-python.python", "ms-python.vscode-pylance", "ms-python.debugpy"]
+    }
+  }
+}

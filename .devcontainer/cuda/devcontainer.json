@@ -1,0 +1,37 @@
+{
+  "name": "TheNoise (CUDA)",
+  "build": {
+    "dockerfile": "../Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspaces/thenoise",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/thenoise,type=bind,consistency=cached",
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
+  "overrideCommand": false,
+  "runArgs": [
+    "--init",
+    "--gpus=all",
+    "--ipc=host"
+  ],
+  "mounts": [
+    "source=thenoise-dev-cuda-venv,target=/workspaces/thenoise/.venv,type=volume",
+    "source=thenoise-dev-cuda-cache,target=/home/vscode/.cache,type=volume"
+  ],
+  "containerEnv": {
+    "UV_LINK_MODE": "copy",
+    "HF_HOME": "/home/vscode/.cache/huggingface",
+    "TRITON_CACHE_DIR": "/home/vscode/.cache/triton",
+    "TORCHINDUCTOR_CACHE_DIR": "/home/vscode/.cache/inductor"
+  },
+  "postCreateCommand": "bash .devcontainer/post-create.sh cuda",
+  "forwardPorts": [8000],
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "python.defaultInterpreterPath": "/workspaces/thenoise/.venv/bin/python"
+      },
+      "extensions": ["ms-python.python", "ms-python.vscode-pylance", "ms-python.debugpy"]
+    }
+  }
+}

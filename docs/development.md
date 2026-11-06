@@ -6,6 +6,32 @@ the test suite, building the portable release bundles, and contributing.
 > End users should follow [Setup](setup.md) instead — the released portable
 > bundles need none of this.
 
+## VS Code Dev Containers
+
+With Docker and the VS Code Dev Containers extension installed, open the repo
+and select **Dev Containers: Reopen in Container**. Choose either:
+
+- **TheNoise (ROCm)** on Linux with AMD GPU devices `/dev/kfd` and `/dev/dri`.
+- **TheNoise (CUDA)** on Linux with an NVIDIA GPU and the NVIDIA Container Toolkit
+  (Docker must support `--gpus all`).
+
+The container uses the existing `thenoise.sh` / `thenoise_cuda.sh` bootstrap to
+install the correct GPU PyTorch wheel, then installs the editable package and
+the `dev` extras with `uv pip install -e '.[dev]'`. First setup downloads several
+GB of dependencies, but **no models**. Do not use `uv sync`.
+
+The checkout is bind-mounted; each backend has its own persistent `.venv` and
+cache Docker volumes, so it neither replaces a host `.venv` nor mixes CUDA and
+ROCm wheels. Local `models/` remains available through the checkout mount.
+The VS Code terminal runs as `vscode` rather than root.
+
+Check the setup or run the tests without downloading any model weights:
+
+```bash
+.venv/bin/python -c 'import torch; print(torch.__version__)'
+.venv/bin/python -m pytest tests/ -q
+```
+
 ## Repository layout
 
 ```
