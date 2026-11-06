@@ -297,11 +297,19 @@ class PipelineController:
         model = self.model
         is_edit = ref_key is not None
 
-        # The KV cache is a reference-latent optimization: it needs an edit request.
-        if r.kv_cache and not is_edit:
-            raise ValueError("kv_cache requires an edit request (a reference image)")
-        if r.kv_cache and is_edit and not model.capability("kv_cache"):
-            raise ValueError(f"model '{model.name}' does not support the reference-latent KV cache")
+        # Most models cache reference tokens. Qwen-Image 2.1 also supports the
+        # mathematically invariant text prefix in text-to-image runs.
+        if (
+            r.kv_cache
+            and not is_edit
+            and not model.KV_CACHE_WITHOUT_REFERENCE
+        ):
+            raise ValueError(
+                model.KV_CACHE_WITHOUT_REFERENCE_REASON
+                or "kv_cache without a reference image is not supported for this model/checkpoint"
+            )
+        if r.kv_cache and not model.capability("kv_cache"):
+            raise ValueError(f"model '{model.name}' does not support the KV cache")
 
         prompt_key = self._cache_key_prompt(
             request.prompt, request.negative_prompt, r.guidance_scale,
@@ -464,6 +472,13 @@ class PipelineController:
         else:
             kv_cache = request.kv_cache
 
+        # Qwen's T2I cache is qualified for a specific runtime. Check only the
+        # static eligibility here; the current LoRA is applied and checked later.
+        if kv_cache and not is_edit:
+            resolve_text_cache = getattr(model, "resolve_text_prefix_cache", None)
+            if resolve_text_cache is not None:
+                kv_cache = bool(model.KV_CACHE_WITHOUT_REFERENCE)
+
         pixel_upscaler = request.pixel_upscaler
         if pixel_upscaler and self._pixel_upscalers.upscaler_dir:
             pixel_upscaler = self._pixel_upscalers.validate(pixel_upscaler)
@@ -487,11 +502,11 @@ class PipelineController:
             factor, upscale_type, pixel_upscaler
         )
 
-        # An explicit cache with the method on auto picks the method that makes it
-        # valid; an explicit ``index`` stays explicit and is rejected below.
-        if kv_cache and request.ref_method is None:
+        # An explicit reference cache with the method on auto picks the method that
+        # makes it valid; an explicit ``index`` stays explicit and is rejected below.
+        if kv_cache and is_edit and request.ref_method is None:
             ref_method = "index_timestep_zero"
-        if kv_cache and ref_method != "index_timestep_zero":
+        if kv_cache and is_edit and ref_method != "index_timestep_zero":
             raise ValueError(
                 "kv_cache requires ref_method='index_timestep_zero': the cached "
                 "reference K/V are only step-invariant when the reference tokens are "

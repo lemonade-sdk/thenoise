@@ -6,11 +6,18 @@ Qwen-Image 2.1 is the newest generation: a single-stream DiT that does
 text-to-image **and** instruction-based editing from one checkpoint, with a full
 Qwen3-VL-8B conditioner and the engine's first RGBA VAE (Wan 2.2 layout — the
 pipeline composites alpha onto white at the boundaries that can't carry it).
-The reference-latent KV cache is architectural here, so it is exact and on by
-default.
+The causal prefix is mathematically step-invariant. Eligible edits use the existing
+cache by default. Text-to-image caching is available on INT8-ConvRot checkpoints;
+the opt-in is qualified only for gfx1151 with PyTorch 2.14.0, ROCm 10.1 / HIP 7.16,
+and comfy-kitchen 0.2.40's HIP `int8_linear` backend. Unsupported runtime configurations
+fall back to uncached T2I sampling. BF16 T2I caching stays disabled because gfx1151
+changes BF16 GEMM rounding when the cached path shortens the token dimension, which
+produced measurable final-latent and pixel differences in A/B runs. A quantized
+LoRA that uses runtime low-rank projections also disables T2I prefix caching;
+reference-image editing retains its existing cache behavior.
 
 - Text-to-image **and editing** (one DiT, both jobs)
-- Reference-latent **KV cache** — exact, enabled by default
+- Step-invariant prefix **KV cache** — automatic for eligible edits; opt-in for the validated INT8-ConvRot gfx1151 runtime
 - int8-convrot variant available (~16 GB instead of ~30 GB total)
 - Built-in defaults: the **Turbo sigma grid** (8 steps), guidance 1.0, euler
 
@@ -27,7 +34,7 @@ default.
 | VAE | Wan 2.2-layout 64-ch/16× RGBA VAE (never quantized) |
 | Text encoder | Qwen3-VL-8B (LM *and* vision tower) |
 | Editing | ✓ |
-| KV cache | ✓ (exact, on by default) |
+| KV cache | ✓ (automatic for eligible edits; INT8-ConvRot text-to-image opt-in) |
 | Default settings | 1024×1024, Turbo sigma grid (8 steps), guidance 1.0, euler |
 
 ## Lemonade recipes
@@ -41,6 +48,10 @@ recipes for this model - each pins the checkpoints and the generation defaults:
 - [Qwen-Image-2.1-INT8.json](../../recipes/qwen-image2.1/Qwen-Image-2.1-INT8.json) - INT8-ConvRot, 28 steps
 
 ## Performance (Strix Halo)
+
+See the [gfx1151 sampling profile and cache A/B results](../performance/qwen-image-2.1-gfx1151.md)
+for the repeatable 2026-11 measurements, latent/image comparisons, and
+profiling breakdown.
 
 INT8-ConvRot, Turbo, 768x1024:
 
@@ -100,7 +111,22 @@ Generate:
   --out forest.png
 ```
 
-Edit (`--image` is repeatable; the KV cache is on by default for this model):
+INT8-ConvRot text-to-image can opt into prefix caching with `--kv-cache` on the
+validated gfx1151 runtime (extra buffer memory is used for the run). Other GPUs,
+PyTorch/ROCm builds, comfy-kitchen versions, selected GEMM backends, and runtime-LoRA
+branches fall back to uncached sampling. BF16 text-to-image also falls back because
+the changed GEMM shape produced output differences on gfx1151:
+
+```bash
+./thenoise.sh generate \
+  --dit ./models/qwen_image21/diffusion_models/qwen_image_2.1_turbo_int8_convrot.safetensors \
+  --vae ./models/qwen_image21/vae/qwen_image_2.1_vae_bf16.safetensors \
+  --text-encoder ./models/qwen_image21/text_encoders/qwen3vl_8b_int8_convrot.safetensors \
+  --prompt "a bioluminescent forest at night" --kv-cache \
+  --out forest_cached.png
+```
+
+Edit (`--image` is repeatable; the KV cache is on by default for eligible references):
 
 ```bash
 ./thenoise.sh edit \

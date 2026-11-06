@@ -1,20 +1,19 @@
-"""Step-invariant prefix KV cache for editing diffusion models.
+"""Step-invariant prefix/suffix KV cache for diffusion models.
 
 An editing DiT can make a set of *reference* tokens step-independent through their
-AdaLN modulation; their K/V in every attention block then only change through
-attention over the changing image tokens, so freezing them for the rest of a
-sampling run is a small, controllable approximation. The cache is filled on the first
-denoise step (which still runs the full sequence, so it is exact) and read on every
-later step.
+AdaLN modulation. Qwen-Image 2.1 can also make its text prefix step-independent. When
+the prefix is causal and has fixed modulation, target tokens cannot change its hidden
+states; reusing its K/V is therefore mathematically exact, without approximation.
+The target-only path can nevertheless select different low-precision GEMM kernels
+when its token shape changes. The cache is filled on the first denoise step (which
+still runs the full sequence) and read on every later step.
 
 The storage is one pair of preallocated K/V buffers per attention block, sized to the
-block's full sequence length for the whole run. Each step rewrites only the leading
-tokens it recomputed, leaving the cached reference suffix in place. That fixes the
-token layout a model must use: the frozen slice has to be contiguous with the tokens a
-step writes, so a model attending ``text, target, references`` keeps the recomputed
-tokens at the front of the buffer and one attending ``text + references, target`` at
-the back — ``KVBuffers.cached_slice`` picks the end, and the fill step writes the whole
-buffer either way.
+block's full sequence length for the whole run. On a fill step, the full sequence is
+written. On later steps, ``cached_slice`` determines where new K/V go: a cached suffix
+leaves recomputed tokens at the front, while a cached prefix (Qwen-Image 2.1) leaves
+the invariant tokens at the front and writes recomputed target tokens at the back. In
+either layout the active tokens and frozen slice stay contiguous for attention.
 
 Writing is deliberately ``cat``-free: a concatenation whose split point depends on the
 (dynamic) token count is something Inductor's tiling analysis cannot handle.

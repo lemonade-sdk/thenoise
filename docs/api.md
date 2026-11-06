@@ -65,6 +65,7 @@ index_timestep_zero` (see [`/edit`](#post-edit)).
 | `upscale_type` | `string` | `refined` | `refined` (latent 2x + refiner) or `no-refiner` (pixel upscaler only) |
 | `pixel_upscaler` | `string` | `null` | Pixel upscaler name (no `.safetensors` suffix) from `--upscaler-dir` |
 | `sampler` | `string` | model default | Denoising solver: `euler` or `er_sde` |
+| `kv_cache` | `boolean` | model default | Reuse mathematically step-invariant prefix K/V where supported. Qwen-Image 2.1 T2I caching is opt-in for INT8-ConvRot on gfx1151 with PyTorch 2.14.0, ROCm 10.1 / HIP 7.16, and comfy-kitchen 0.2.40's HIP `int8_linear` backend. BF16, unsupported runtimes, and runtime-LoRA branches fall back to uncached T2I sampling; eligible edits retain their existing cache behavior. It uses additional GPU memory |
 | `qwen_vae_enhance` | `bool` | `false` | Nyquist notch post-filter (removes 2px grid artifacts) |
 | `saturation` | `float` | `0.0` | Colour saturation around neutral `0.0`: -1.0 greyscales, 1.0 doubles |
 | `vibrance` | `float` | `0.0` | Saturation that lifts washed-out pixels and leaves vivid ones alone |
@@ -128,7 +129,7 @@ Accepts all `/text2image` fields plus:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `image` | `string` \| `string[]` | *(required)* | One or more base64-encoded reference images (OpenAI-style; first sets the output size when `width`/`height` omitted) |
-| `kv_cache` | `boolean` | auto | Reference-latent KV cache (freeze the reference tokens' K/V across denoise steps for faster editing). Auto = on when the resolved `ref_method` is `index_timestep_zero` and the model implements the cache, off otherwise. Forcing it to `true` also selects that method when `ref_method` is left on auto |
+| `kv_cache` | `boolean` | auto | Prefix KV cache (reuse mathematically step-invariant reference/text tokens' K/V across denoise steps). Auto = on when the resolved `ref_method` is `index_timestep_zero` and the model implements the cache, off otherwise. Forcing it to `true` also selects that method when `ref_method` is left on auto |
 | `ref_method` | `string` | auto | Reference conditioning: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index`. The cache default follows it |
 
 > **Reference method.** Checkpoints trained to condition their reference tokens

@@ -192,7 +192,7 @@ def test_an_explicit_false_wins_over_the_derived_default():
 def test_an_explicit_kv_cache_without_a_reference_is_still_refused():
     """Only the derived default yields to a plain generation; a request does not."""
     controller = _controller(_ZeroCondModel())
-    with pytest.raises(ValueError, match="requires an edit request"):
+    with pytest.raises(ValueError, match="without a reference image is not supported"):
         controller.generate(_request(kv_cache=True, steps=1))
 
 

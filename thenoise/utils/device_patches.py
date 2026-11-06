@@ -21,7 +21,7 @@ Device = Optional[Union[str, torch.device]]
 _MARK = "_thenoise_device_patch"
 
 # comfy_kitchen picks its INT8 GEMM tile schedule by architecture. gfx1150 measured
-# ~1.5x faster on the tiled one, bitwise identical; gfx1151 measured a wash.
+# ~1.5x faster on the tiled one, bitwise identical; gfx1151's full edit run diverged.
 TILED_INT8_ARCHES = ("gfx1150",)
 
 

@@ -854,10 +854,39 @@ def test_pnginfo_of_an_image_that_carries_none():
 
 
 def test_kv_cache_requires_an_edit_request():
-    """``kv_cache`` is a reference-latent optimization: it needs a reference image."""
+    """A model must explicitly support text-prefix caching for text-to-image."""
     controller = _controller()
-    with pytest.raises(ValueError, match="requires an edit request"):
+    with pytest.raises(ValueError, match="without a reference image is not supported"):
         controller.generate(_request(kv_cache=True))
+
+
+def test_declared_text_prefix_cache_can_run_without_a_reference():
+    """Adapters that declare a fixed prefix may opt into it during text-to-image."""
+    model = StubModel()
+    model.KV_CACHE_WITHOUT_REFERENCE = True
+    model.CAPABILITIES = {**StubModel.CAPABILITIES, "kv_cache": True}
+    controller = _controller(model)
+
+    controller.generate(_request(width=64, height=64, steps=2, kv_cache=True))
+
+    assert model.params_seen[-1].kv_cache is True
+
+
+def test_qwen_t2i_cache_resolver_can_fall_back_to_uncached_sampling():
+    """An adapter-specific numerical gate resolves before cache keys are built."""
+
+    class CacheFallbackStub(StubModel):
+        KV_CACHE_WITHOUT_REFERENCE = True
+        CAPABILITIES = {**StubModel.CAPABILITIES, "kv_cache": True}
+
+        def resolve_text_prefix_cache(self):
+            return False
+
+    r = _controller(CacheFallbackStub())._resolve_pipeline(
+        _request(kv_cache=True), is_edit=False
+    )
+
+    assert r.kv_cache is False
 
 
 def test_kv_cache_requires_a_model_that_supports_it():
@@ -872,7 +901,7 @@ def test_kv_cache_requires_a_model_that_supports_it():
     from conftest import EditingStubModel
 
     controller = _controller(EditingStubModel())
-    with pytest.raises(ValueError, match="does not support the reference-latent KV cache"):
+    with pytest.raises(ValueError, match="does not support the KV cache"):
         controller.edit(
             _request(image=Image.new("RGB", (64, 64), "white"), steps=1, kv_cache=True)
         )

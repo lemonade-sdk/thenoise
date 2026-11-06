@@ -630,7 +630,52 @@ def test_a_quantized_component_weighs_its_storage_not_its_logical_dtype():
 
     mm = MemoryManager("cpu", "meta")
     mm.register("int8", holder)
-    assert mm.weight_bytes("int8") == rows * cols
+    assert mm.weight_bytes("int8") == rows * cols + quantized.params.scale.nbytes
+
+
+def test_weight_bytes_deduplicates_shared_quantized_views_and_counts_scales():
+    """Fused QKV owns one payload and one row-scale allocation, not four copies."""
+    from comfy_kitchen.tensor import QuantizedTensor
+    from comfy_kitchen.tensor.int8 import TensorWiseINT8Layout
+
+    rows, cols = 6, 8
+    qdata = torch.arange(rows * cols, dtype=torch.int8).reshape(rows, cols)
+    scale = torch.ones(rows, 1, dtype=torch.float32)
+    params = TensorWiseINT8Layout.Params(
+        scale=scale,
+        orig_dtype=torch.bfloat16,
+        orig_shape=(rows, cols),
+        is_weight=True,
+        convrot=True,
+        convrot_groupsize=256,
+    )
+    fused = QuantizedTensor(qdata, "TensorWiseINT8Layout", params)
+    parts = []
+    for start in range(0, rows, 2):
+        part = nn.Module()
+        part.register_buffer(
+            "weight",
+            QuantizedTensor(
+                qdata.narrow(0, start, 2),
+                "TensorWiseINT8Layout",
+                TensorWiseINT8Layout.Params(
+                    scale=scale.narrow(0, start, 2),
+                    orig_dtype=torch.bfloat16,
+                    orig_shape=(2, cols),
+                    is_weight=True,
+                    convrot=True,
+                    convrot_groupsize=256,
+                ),
+            ),
+        )
+        parts.append(part)
+    owner = nn.Module()
+    owner.register_buffer("weight", fused)
+    holder = nn.ModuleList([owner, *parts])
+
+    mm = MemoryManager("cpu", "meta")
+    mm.register("qkv", holder)
+    assert mm.weight_bytes("qkv") == qdata.nbytes + scale.nbytes
 
 
 def test_a_component_that_reports_no_weights_says_so(caplog):

@@ -14,8 +14,8 @@ The sequence layout is ``[text … references … target]``:
   prefix modulation is what makes its K/V cacheable.
 * Attention is block-causal: a text segment attends causally to what precedes it and
   an image segment reads everything up to its own end, so no prefix token ever sees
-  the target. The cached prefix is therefore exact, and the target-only steps after
-  the fill need no mask at all.
+  the target. Prefix K/V are mathematically step-invariant; cached target projections
+  can still select different shape-dependent low-precision GEMM results.
 """
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from typing import Optional, Sequence
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
+from comfy_kitchen.tensor import QuantizedTensor, TensorWiseINT8Layout
 
 from thenoise.dit.kvcache import KVBuffers, KVCache, attend, cache_mode
 from thenoise.dit.quantized import QuantizedLinear
@@ -172,12 +173,188 @@ class Attention(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         inner = num_heads * head_dim
+        self.inner_dim = inner
         self.to_q = QuantizedLinear(dim, inner, bias=False)
         self.to_k = QuantizedLinear(dim, inner, bias=False)
         self.to_v = QuantizedLinear(dim, inner, bias=False)
+        self.to_qkv: Optional[QuantizedLinear] = None
+        self._qkv_scale_shapes: Optional[tuple[tuple[int, ...], ...]] = None
         self.qk_norm = QKNorm(head_dim, eps=eps)
         # ``to_out`` is a ModuleList to match the checkpoint's ``to_out.0`` key.
         self.to_out = nn.ModuleList([QuantizedLinear(inner, dim, bias=False)])
+
+    def fuse_qkv_projections(self) -> bool:
+        """Join the loaded Q/K/V rows for one larger, equivalent GEMM.
+
+        The checkpoint and the three named projection modules remain intact. Their
+        weights become views into the joined storage, so existing LoRA bake targets
+        still address the original Q/K/V names and values.
+        """
+        if self.to_qkv is not None:
+            return True
+
+        projections = (self.to_q, self.to_k, self.to_v)
+        weights = tuple(module.weight for module in projections)
+        if all(isinstance(weight, QuantizedTensor) for weight in weights):
+            first = weights[0]
+            if not all(weight.layout_cls is TensorWiseINT8Layout for weight in weights):
+                return False
+            params = first.params
+            expected_shape = (self.inner_dim, self.to_q.in_features)
+            if params.scale.numel() != self.inner_dim:
+                return False
+            if params.transposed:
+                return False
+            if not all(
+                tuple(weight.shape) == expected_shape
+                and tuple(weight.storage_shape) == expected_shape
+                and weight.storage_dtype == first.storage_dtype
+                and weight.dtype == first.dtype
+                and weight.params.orig_dtype == params.orig_dtype
+                and tuple(weight.params.orig_shape) == expected_shape
+                and weight.params.is_weight == params.is_weight
+                and weight.params.transposed == params.transposed
+                and weight.params.scale.dtype == params.scale.dtype
+                and weight.params.scale.device == params.scale.device
+                and weight.params.convrot == params.convrot
+                and weight.params.convrot_groupsize == params.convrot_groupsize
+                and weight.params.scale.numel() == self.inner_dim
+                for weight in weights
+            ):
+                return False
+
+            qdata = torch.cat([weight._qdata for weight in weights], dim=0)
+            scale = torch.cat([weight.params.scale.reshape(-1) for weight in weights])
+            layout_name = first._layout_cls
+            fused_weight = QuantizedTensor(
+                qdata,
+                layout_name,
+                replace(params, scale=scale, orig_shape=tuple(qdata.shape)),
+            )
+            fused_projection = QuantizedLinear(
+                self.to_q.in_features, 3 * self.inner_dim, bias=False
+            )
+            fused_projection.load_quantized(fused_weight)
+
+            for index, module in enumerate(projections):
+                start = index * self.inner_dim
+                view = QuantizedTensor(
+                    qdata.narrow(0, start, self.inner_dim),
+                    layout_name,
+                    replace(
+                        params,
+                        scale=scale.narrow(0, start, self.inner_dim).reshape(
+                            weights[index].params.scale.shape
+                        ),
+                        orig_shape=tuple(module.weight.shape),
+                    ),
+                )
+                module.load_quantized(view)
+            self._qkv_scale_shapes = tuple(
+                tuple(weight.params.scale.shape) for weight in weights
+            )
+        elif all(isinstance(weight, nn.Parameter) for weight in weights):
+            first = weights[0]
+            expected_shape = (self.inner_dim, self.to_q.in_features)
+            if not all(
+                tuple(weight.shape) == expected_shape
+                and weight.dtype == first.dtype
+                and weight.device == first.device
+                and weight.requires_grad == first.requires_grad
+                for weight in weights
+            ):
+                return False
+            fused_data = torch.cat([weight.detach() for weight in weights], dim=0)
+            fused_projection = QuantizedLinear(
+                self.to_q.in_features, 3 * self.inner_dim, bias=False
+            )
+            fused_projection.weight = nn.Parameter(
+                fused_data, requires_grad=weights[0].requires_grad
+            )
+            for index, module in enumerate(projections):
+                start = index * self.inner_dim
+                module.weight = nn.Parameter(
+                    fused_data.narrow(0, start, self.inner_dim),
+                    requires_grad=module.weight.requires_grad,
+                )
+            self._qkv_scale_shapes = None
+        else:
+            return False
+
+        self.to_qkv = fused_projection
+        return True
+
+    def _restore_qkv_views(self, requires_grad: tuple[bool, ...]) -> None:
+        """Rebuild the named Q/K/V weights as views of the moved fused weight."""
+        if self.to_qkv is None:
+            return
+        fused = self.to_qkv.weight
+        projections = (self.to_q, self.to_k, self.to_v)
+        if isinstance(fused, QuantizedTensor):
+            qdata = fused._qdata
+            params = fused.params
+            scale = params.scale
+            shapes = self._qkv_scale_shapes or (
+                (self.inner_dim,), (self.inner_dim,), (self.inner_dim,)
+            )
+            for index, module in enumerate(projections):
+                start = index * self.inner_dim
+                module.weight = QuantizedTensor(
+                    qdata.narrow(0, start, self.inner_dim),
+                    fused._layout_cls,
+                    replace(
+                        params,
+                        scale=scale.reshape(-1).narrow(0, start, self.inner_dim).reshape(
+                            shapes[index]
+                        ),
+                        orig_shape=(self.inner_dim, module.in_features),
+                    ),
+                )
+        elif isinstance(fused, nn.Parameter):
+            for index, (module, grad) in enumerate(zip(projections, requires_grad)):
+                start = index * self.inner_dim
+                module.weight = nn.Parameter(
+                    fused.detach().narrow(0, start, self.inner_dim),
+                    requires_grad=grad,
+                )
+
+    def unfuse_qkv_projections(self) -> None:
+        """Use the named projections again while retaining their current weights."""
+        self.to_qkv = None
+        self._qkv_scale_shapes = None
+
+    def _apply(self, fn, recurse: bool = True):
+        """Move the fused weight once, then restore Q/K/V views on the destination.
+
+        ``Module._apply`` normally transfers every registered buffer/parameter
+        independently. That is correct for ordinary modules but duplicates a fused
+        QKV allocation and severs its aliases to the named Q/K/V weights. Temporarily
+        leave those three registered slots empty while the canonical fused projection
+        moves, then recreate their views. LoRA buffers on the named projections still
+        follow the ordinary recursive transfer.
+        """
+        if self.to_qkv is None or not recurse:
+            return super()._apply(fn, recurse)
+
+        projections = (self.to_q, self.to_k, self.to_v)
+        weights = tuple(module.weight for module in projections)
+        if all(isinstance(weight, QuantizedTensor) for weight in weights):
+            requires_grad = (False, False, False)
+        elif all(isinstance(weight, nn.Parameter) for weight in weights):
+            requires_grad = tuple(weight.requires_grad for weight in weights)
+        else:
+            return super()._apply(fn, recurse)
+
+        for module in projections:
+            module.weight = None
+        try:
+            result = super()._apply(fn, recurse)
+        except BaseException:
+            # Keep the module structurally usable if a transfer fails part-way.
+            self._restore_qkv_views(requires_grad)
+            raise
+        self._restore_qkv_views(requires_grad)
+        return result
 
     def forward(self, x: Tensor, pe: Tensor, plan: AttentionPlan) -> Tensor:
         B, N, _ = x.shape
@@ -185,9 +362,21 @@ class Attention(nn.Module):
         def split(t: Tensor) -> Tensor:
             return t.view(B, N, self.num_heads, -1).transpose(1, 2)
 
-        q = split(self.to_q(x))
-        k = split(self.to_k(x))
-        v = split(self.to_v(x))
+        if self.to_qkv is None:
+            q, k, v = self.to_q(x), self.to_k(x), self.to_v(x)
+        else:
+            qkv = self.to_qkv(x)
+            q, k, v = qkv.split(self.inner_dim, dim=-1)
+            for projection, value in zip((self.to_q, self.to_k, self.to_v), (q, k, v)):
+                if projection._lora_down is not None:
+                    value = value + projection._lora_branch(x)
+                if projection is self.to_q:
+                    q = value
+                elif projection is self.to_k:
+                    k = value
+                else:
+                    v = value
+        q, k, v = split(q), split(k), split(v)
         q, k = self.qk_norm(q, k)
         q, k = apply_rope(q, k, pe)
         return self.to_out[0](plan.run(q, k, v))
@@ -378,6 +567,41 @@ class QwenImage21Transformer2DModel(nn.Module):
         )
 
     # -------------------------------------------------------------------- forward
+    def fuse_qkv_projections(self) -> bool:
+        """Fuse each block's Q/K/V projection rows when their layout supports it."""
+        states = [
+            (
+                block.attn,
+                block.attn.to_qkv,
+                block.attn._qkv_scale_shapes,
+                tuple(module.weight for module in (
+                    block.attn.to_q, block.attn.to_k, block.attn.to_v
+                )),
+            )
+            for block in self.transformer_blocks
+        ]
+
+        def restore() -> None:
+            for attn, fused, scale_shapes, weights in states:
+                attn.to_qkv = fused
+                attn._qkv_scale_shapes = scale_shapes
+                for module, weight in zip((attn.to_q, attn.to_k, attn.to_v), weights):
+                    module.weight = weight
+
+        try:
+            if not all(attn.fuse_qkv_projections() for attn, _, _, _ in states):
+                restore()
+                return False
+        except BaseException:
+            restore()
+            raise
+        return True
+
+    def unfuse_qkv_projections(self) -> None:
+        """Return to the three named projection calls, retaining shared weight views."""
+        for block in self.transformer_blocks:
+            block.attn.unfuse_qkv_projections()
+
     def forward(
         self,
         x: Tensor,

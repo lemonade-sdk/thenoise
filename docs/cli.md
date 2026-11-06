@@ -79,11 +79,13 @@ Then open <http://localhost:8000/> for the web UI. Full endpoint reference:
 | `--tint` | no | `0.0` | White balance across the green–magenta axis: -1.0 greens, 1.0 magentas (-1.0–1.0) |
 | `--sharpening` | no | `0.0` | RCAS sharpening strength (0.0–1.0) |
 | `--film-grain` | no | `0.0` | Film grain strength (0.0–10.0) |
-| `--kv-cache` / `--no-kv-cache` | no | auto | Reference-latent KV cache (edit only): freeze the reference tokens' K/V across denoise steps for faster editing. Auto = on for `index_timestep_zero` reference conditioning on models implementing the cache. `--kv-cache` also selects that method when `--ref-method` is left unset |
+| `--kv-cache` / `--no-kv-cache` | no | auto | Reuse mathematically step-invariant prefix K/V where supported. Qwen-Image 2.1 T2I caching is opt-in for INT8-ConvRot on gfx1151 with PyTorch 2.14.0, ROCm 10.1 / HIP 7.16, and comfy-kitchen 0.2.40's HIP `int8_linear` backend; unsupported runtimes, BF16, and runtime-LoRA branches fall back to uncached T2I sampling. Eligible edits still enable caching automatically. `--kv-cache` selects `index_timestep_zero` when editing and `--ref-method` is unset |
 | `--ref-method` | no | auto | Reference conditioning for editing: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index`. The cache default follows it |
 
-> **Note:** `--kv-cache` is a reference-latent optimization and only applies to
-> `edit` (it needs a reference image). On `generate` it raises an error.
+> **Note:** On most models `--kv-cache` applies only to `edit`. Qwen-Image 2.1
+> also accepts it for INT8-ConvRot `generate` on its validated gfx1151 runtime, where
+> it caches the fixed text prefix. Unsupported configurations log a warning and run
+> without the T2I cache.
 
 ## Edit an image
 

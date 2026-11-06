@@ -86,11 +86,12 @@ def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png
     p.add_argument("--sampler", choices=["euler", "er_sde"], default=None,
                    help="denoising solver (default: auto)")
     p.add_argument("--kv-cache", dest="kv_cache", action="store_true",
-                   help="reference-latent KV cache (edit only): freeze the reference "
-                        "tokens' K/V across denoise steps for faster editing "
-                        "(implies --ref-method index_timestep_zero unless given)")
+                   help="freeze step-invariant prefix K/V where supported; Qwen-Image "
+                        "2.1 INT8-ConvRot also supports text-to-image (BF16 T2I is "
+                        "disabled; reference edits imply --ref-method "
+                        "index_timestep_zero unless given)")
     p.add_argument("--no-kv-cache", dest="kv_cache", action="store_false",
-                   help="disable the reference-latent KV cache (auto: on for "
+                   help="disable prefix caching (auto: on for supported "
                         "'index_timestep_zero' reference conditioning)")
     p.set_defaults(kv_cache=None)
     p.add_argument("--ref-method", choices=["index", "index_timestep_zero"],

@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Set, Union
 
 import torch
 from torch import nn
+from comfy_kitchen.tensor import QuantizedTensor
 
 from thenoise.inference import freeze
 from thenoise.utils.device import (
@@ -81,6 +82,37 @@ def _tensor_bytes(tensor: torch.Tensor) -> int:
     return tensor.numel() * tensor.element_size()
 
 
+def _tensor_storage(tensor: torch.Tensor) -> tuple[tuple, int]:
+    """The allocation behind a tensor and its physical size, including views."""
+    try:
+        storage = tensor.untyped_storage()
+        return (tensor.device.type, tensor.device.index, storage._cdata), storage.nbytes()
+    except (AttributeError, RuntimeError, NotImplementedError):
+        # Meta tensors and custom wrappers can lack a usable Storage. Their objects
+        # are still counted once each using the best size they expose.
+        return ("tensor", id(tensor)), _tensor_bytes(tensor)
+
+
+def _physical_tensors(tensor: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    """Expose quantized payload and metadata tensors for physical accounting.
+
+    ``QuantizedTensor`` is a wrapper subclass: its logical tensor storage is the
+    int8 payload, while row scales live in its layout parameters and are not
+    registered as module buffers. Include both here. The same helper also lets
+    shared views of either allocation be deduplicated below.
+    """
+    if not isinstance(tensor, QuantizedTensor):
+        return (tensor,)
+    tensors = [tensor._qdata]
+    params = tensor.params
+    names = params._tensor_fields() if hasattr(params, "_tensor_fields") else ()
+    tensors.extend(
+        value for name in names
+        if isinstance((value := getattr(params, name, None)), torch.Tensor)
+    )
+    return tuple(tensors)
+
+
 def _weight_bytes(component: Any) -> int:
     """Bytes of ``component``'s weights and buffers, 0 where it reports none. A plain
     wrapper is counted through the module it holds, as ``freeze`` does.
@@ -94,7 +126,12 @@ def _weight_bytes(component: Any) -> int:
             if isinstance(held, nn.Module)
             for tensor in (*held.parameters(), *held.buffers())
         )
-    return sum(_tensor_bytes(tensor) for tensor in tensors)
+    storages: dict[tuple, int] = {}
+    for tensor in tensors:
+        for physical in _physical_tensors(tensor):
+            key, size = _tensor_storage(physical)
+            storages[key] = max(storages.get(key, 0), size)
+    return sum(storages.values())
 
 
 def _attempt(fn, args, kwargs):

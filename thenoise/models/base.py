@@ -116,6 +116,11 @@ class DiffusionModel(ABC):
     # without ``__init__``.
     _kv_caches: Optional[Dict[str, KVCache]] = None
 
+    # Most adapters need an image reference before they can cache a prefix.
+    # Qwen-Image 2.1 may also cache its step-invariant text prefix for T2I.
+    KV_CACHE_WITHOUT_REFERENCE: ClassVar[bool] = False
+    KV_CACHE_WITHOUT_REFERENCE_REASON: ClassVar[Optional[str]] = None
+
     # Preferences implied by the loaded checkpoint's markers; replaced per instance
     # in ``__init__``, with the empty class default covering adapters built without it.
     checkpoint_prefs: Dict[str, Any] = {}
