@@ -83,8 +83,8 @@ a warmup run.
 
 | Model & settings | 1024×1024 | 1536x2048 |
 |---|---|---|
-| Krea 2 Turbo · BF16 · 8 steps | 33.8s | 117.6s |
-| Krea 2 Turbo · INT8-ConvRot · 8 steps | 26.7s | 99s |
+| Krea 2 Turbo · BF16 · 8 steps | 33s | 112s |
+| Krea 2 Turbo · INT8-ConvRot · 8 steps | 25.3s | 90.5s |
 | Anima Base · 20 steps · CGF 3 | 29.7s | 111s |
 | Anima Turbo · 8 steps | 6.6s | 25.1s |
 | Mage-Flow Turbo · BF16 · 4 steps | 2.4s | 8.4s |
