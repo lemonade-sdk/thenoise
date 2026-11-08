@@ -44,8 +44,8 @@ recipes for this model - each pins the checkpoints and the generation defaults:
 
 ## Performance (Strix Halo)
 
-- Turbo BF16 @ 8 steps: ~26 s (1024×768)
-- Turbo INT8-ConvRot @ 8 steps: **~19 s**
+- Turbo BF16 @ 8 steps: ~25.3 s (1024×768)
+- Turbo INT8-ConvRot @ 8 steps: **~18.7 s**
 
 ## Examples
 
