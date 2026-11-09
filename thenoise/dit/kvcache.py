@@ -81,6 +81,7 @@ class KVCache:
             )
         self._label = label
         self.cached_slice = cached_slice
+        self.strided_values = False
         self._buffers: dict[Hashable, KVBuffers] = {}
         self._filled = False
 
@@ -102,9 +103,12 @@ class KVCache:
         """
         got = self._buffers.get(key)
         if got is None or got.capacity != shape[2]:
+            v_shape = (shape[0], shape[2], shape[1], shape[3]) if self.strided_values else shape
+            value = torch.empty(v_shape, dtype=dtype, device=device)
+            if self.strided_values:
+                value = value.transpose(1, 2)
             got = KVBuffers(torch.empty(shape, dtype=dtype, device=device),
-                            torch.empty(shape, dtype=dtype, device=device),
-                            self.cached_slice)
+                            value, self.cached_slice)
             self._buffers[key] = got
         return got
 
@@ -161,7 +165,8 @@ def cache_mode(kv: Optional[KVCache], refs_present: bool) -> str:
 
 
 def attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-           bufs: Optional[KVBuffers] = None) -> torch.Tensor:
+           bufs: Optional[KVBuffers] = None,
+           attn_params=None) -> torch.Tensor:
     """SDPA over ``q``/``k``/``v``, refreshed through ``bufs`` when the run has a cache.
 
     ``bufs`` are this block's run-long buffers (``[B, H, L_total, D]``, same layout
@@ -176,5 +181,5 @@ def attend(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     if bufs is not None:
         bufs.write(k, v, bufs.write_offset(k.shape[2]))
         k, v = bufs.k, bufs.v
-        return eager_sdpa_attention([q, k, v])
-    return sdpa_attention([q, k, v])
+        return eager_sdpa_attention([q, k, v], attn_params=attn_params)
+    return sdpa_attention([q, k, v], attn_params=attn_params)

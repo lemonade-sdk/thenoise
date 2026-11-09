@@ -14,6 +14,7 @@ class AttentionParams:
     # A crop of the leading keys, in place of a mask. Compiled blocks guard on this
     # int by value and automatic dynamic promotes it; ``dynamic=False`` would not.
     key_prefix: Optional[int] = None
+    allow_strided_v: bool = False
 
     @staticmethod
     def create_attention_params() -> "AttentionParams":
@@ -77,7 +78,7 @@ def l_major(t: torch.Tensor) -> bool:
 
 
 def uniform_layout(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, *, allow_strided_v: bool = False
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Put ``q``/``k``/``v`` in the ``L``-major layout SDPA's fast kernels require.
 
@@ -91,7 +92,7 @@ def uniform_layout(
         q = q.contiguous()
     if not l_major(k):
         k = k.contiguous()
-    if not l_major(v):
+    if not l_major(v) and not allow_strided_v:
         v = v.contiguous()
     return q, k, v
 
@@ -217,7 +218,9 @@ def attention(
         k = k.repeat_interleave(g, dim=1)
         v = v.repeat_interleave(g, dim=1)
 
-    q, k, v = uniform_layout(q, k, v)
+    q, k, v = uniform_layout(
+        q, k, v, allow_strided_v=attn_params.allow_strided_v
+    )
 
     x = F.scaled_dot_product_attention(
         q, k, v, attn_mask=attn_params.attention_mask, dropout_p=drop_rate

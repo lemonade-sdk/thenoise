@@ -71,6 +71,7 @@ class QwenImage21Sequence:
     segments: tuple[tuple[int, int, Optional[Tensor]], ...] = ()
     prefix_len: int = 0
     target_len: int = 0
+    strided_v: bool = False
     height: int = 0
     width: int = 0
 
@@ -87,11 +88,14 @@ class AttentionPlan:
     mode: str
     segments: Sequence[tuple[int, int, Optional[Tensor]]] = ()
     bufs: Optional[KVBuffers] = None
+    strided_v: bool = False
+    target_len: int = 0
 
     def run(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
         """Attention for one block; ``q``/``k``/``v`` are ``[B, H, N, D]`` post-RoPE."""
         if self.mode == "read":
-            return attend(q, k, v, self.bufs)
+            return attend(q, k, v, self.bufs,
+                          attn_params=AttentionParams(allow_strided_v=self.strided_v))
         if self.bufs is not None:
             self.bufs.write(k, v)
             k, v = self.bufs.k, self.bufs.v
@@ -99,7 +103,10 @@ class AttentionPlan:
         outs = [
             eager_sdpa_attention(
                 [q[:, :, start:end], k[:, :, :end], v[:, :, :end]],
-                attn_params=None if mask is None else AttentionParams(mask),
+                attn_params=AttentionParams(
+                    mask, allow_strided_v=(self.strided_v and mask is None
+                        and start == q.shape[2] - self.target_len and end == q.shape[2])
+                ),
             )
             for start, end, mask in self.segments
         ]
@@ -503,7 +510,8 @@ class QwenImage21Transformer2DModel(nn.Module):
 
         mods = (rows(scale1), rows(gate1.tanh()), rows(scale2), rows(gate2.tanh()))
 
-        plan = AttentionPlan(mode=mode, segments=seq.segments)
+        plan = AttentionPlan(mode=mode, segments=seq.segments,
+                             strided_v=seq.strided_v, target_len=seq.target_len)
         cached = mode in ("fill", "read")
         for i, block in enumerate(self.transformer_blocks):
             bufs = None
