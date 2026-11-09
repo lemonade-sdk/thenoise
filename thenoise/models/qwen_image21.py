@@ -123,7 +123,6 @@ class QwenImage21Model(DiffusionModel):
         self.memory.register("vae", self.vae)
 
         logger.info("Qwen-Image 2.1 model ready on %s (%s)", config.device, config.dtype)
-
     @staticmethod
     def _supports_text_prefix_cache(dit) -> bool:
         blocks = getattr(dit, "transformer_blocks", ())
@@ -152,6 +151,23 @@ class QwenImage21Model(DiffusionModel):
         super().switch_loras(lora_specs, dit)
         if was_fused and not self._lora_state_unfit:
             dit.fuse_qkv_projections()
+
+    def _use_strided_v(self, target_len: int) -> bool:
+        """Only the measured gfx1151 INT8 T2I shapes use non-contiguous V."""
+        if (target_len not in (3072, 4096) or not getattr(torch.version, "hip", None)
+                or torch.device(self.device).type != "cuda"
+                or not self._supports_text_prefix_cache(self.dit)):
+            return False
+        if any(block.attn.to_qkv is None for block in self.dit.transformer_blocks):
+            return False
+        if any(getattr(m, "_lora_down", None) is not None
+               or getattr(m, "_lora_up", None) is not None for m in self.dit.modules()):
+            return False
+        try:
+            return (torch.cuda.get_device_properties(self.device)
+                    .gcnArchName.split(":", 1)[0] == "gfx1151")
+        except (AttributeError, RuntimeError):
+            return False
 
     # ------------------------------------------------------------ kernels
     def _encoder_images(self, args: EncodePromptArgs) -> Optional[list]:
@@ -233,6 +249,11 @@ class QwenImage21Model(DiffusionModel):
                 name="seq_uncond", dtype=self.dtype,
             )
 
+        # Configure V's physical strides once per run, after switching LoRAs.
+        strided = ref is None and self._use_strided_v(self._seqs["cond"].target_len)
+        if strided:
+            self._seqs = {key: replace(seq, strided_v=True)
+                          for key, seq in self._seqs.items()}
         self.start_kv_caches(
             params,
             has_reference=(
@@ -241,6 +262,9 @@ class QwenImage21Model(DiffusionModel):
             ),
             has_uncond=params.guidance_scale > 1.0 and "uncond" in self._seqs,
         )
+        if strided and self._kv_caches:
+            for cache in self._kv_caches.values():
+                cache.strided_values = True
         return x
 
     def schedule(self, params: SamplingParams) -> list[Step]:
