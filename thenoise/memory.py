@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Set, Union
 
 import torch
 from torch import nn
+from comfy_kitchen.tensor import QuantizedTensor
 
 from thenoise.inference import freeze
 from thenoise.utils.device import (
@@ -82,9 +83,7 @@ def _tensor_bytes(tensor: torch.Tensor) -> int:
 
 
 def _weight_bytes(component: Any) -> int:
-    """Bytes of ``component``'s weights and buffers, 0 where it reports none. A plain
-    wrapper is counted through the module it holds, as ``freeze`` does.
-    """
+    """Device bytes of unique underlying weights, including quantization scales."""
     if isinstance(component, nn.Module):
         tensors = (*component.parameters(), *component.buffers())
     else:
@@ -94,7 +93,22 @@ def _weight_bytes(component: Any) -> int:
             if isinstance(held, nn.Module)
             for tensor in (*held.parameters(), *held.buffers())
         )
-    return sum(_tensor_bytes(tensor) for tensor in tensors)
+    seen = {}
+    for t in tensors:
+        if isinstance(t, QuantizedTensor):
+            fields = t.params._tensor_fields() if hasattr(t.params, "_tensor_fields") else ()
+            physical = (t._qdata, *(getattr(t.params, n) for n in fields
+                                   if isinstance(getattr(t.params, n), torch.Tensor)))
+        else:
+            physical = (t,)
+        for value in physical:
+            try:
+                storage = value.untyped_storage()
+                key, size = (value.device, storage._cdata), storage.nbytes()
+            except (AttributeError, RuntimeError, NotImplementedError):
+                key, size = id(value), _tensor_bytes(value)
+            seen[key] = max(seen.get(key, 0), size)
+    return sum(seen.values())
 
 
 def _attempt(fn, args, kwargs):

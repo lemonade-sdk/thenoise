@@ -3,10 +3,15 @@ from __future__ import annotations
 
 import torch
 from PIL import Image
+from comfy_kitchen.tensor import QuantizedTensor, TensorWiseINT8Layout
 
+from thenoise.dit.qwen_image21.models import (
+    Attention, QwenImage21Params, QwenImage21Transformer2DModel,
+)
 from thenoise.models import QwenImage21Model
-from thenoise.models.base import DiffusionModel
-from thenoise.models.config import EncodePromptArgs
+from thenoise.memory import _weight_bytes
+from thenoise.models.base import Conditioning, DiffusionModel
+from thenoise.models.config import EncodePromptArgs, SamplingParams
 from thenoise.upscale import LatentTranscodeNet, Qwen21TranscodeUpscaler
 from thenoise.upscale import qwen21_transcode
 
@@ -91,3 +96,57 @@ def test_the_adapter_upscales_with_the_trained_transcoder(monkeypatch):
     assert upscaler.scale == QwenImage21Model.UPSCALE_SCALE
     assert loaded == [(torch.device("cpu"), torch.float32)]
     assert model.get_upscaler() is upscaler  # built once, then cached
+
+
+def test_qkv_fusion_shares_weights_and_survives_move():
+    attn = Attention(256, 1, 256)
+    assert not attn.fuse_qkv_projections()  # BF16 is intentionally unsupported
+    for proj in (attn.to_q, attn.to_k, attn.to_v):
+        data = torch.randint(-127, 127, (256, 256), dtype=torch.int8)
+        params = TensorWiseINT8Layout.Params(
+            scale=torch.full((256, 1), 0.01), orig_dtype=torch.bfloat16,
+            orig_shape=(256, 256), is_weight=True,
+            convrot=True, convrot_groupsize=256,
+        )
+        proj.load_quantized(QuantizedTensor(data, "TensorWiseINT8Layout", params))
+    assert attn.fuse_qkv_projections()
+    devices = ["cpu", "cuda", "cpu"] if torch.cuda.is_available() else ["cpu"]
+    for device in devices:
+        attn.to(device)
+        fused = attn.to_qkv.weight._qdata.untyped_storage()._cdata
+        assert all(p.weight._qdata.untyped_storage()._cdata == fused
+                   for p in (attn.to_q, attn.to_k, attn.to_v))
+        weight = attn.to_qkv.weight
+        layers = torch.nn.ModuleList([attn.to_q, attn.to_k, attn.to_v, attn.to_qkv])
+        assert _weight_bytes(layers) == weight._qdata.nbytes + weight.params.scale.nbytes
+        x = torch.randn(1, 128, 256, dtype=torch.bfloat16, device=device)
+        separate = torch.cat([p(x) for p in (attn.to_q, attn.to_k, attn.to_v)], -1)
+        assert torch.equal(attn.to_qkv(x), separate)
+
+
+def test_t2i_prefix_cache_matches_uncached_and_rejects_runtime_lora(monkeypatch):
+    torch.manual_seed(3)
+    dit = QwenImage21Transformer2DModel(QwenImage21Params(
+        in_channels=2, out_channels=2, num_layers=2,
+        attention_head_dim=8, num_attention_heads=1, context_in_dim=4,
+        mlp_ratio=2, axes_dims_rope=(2, 2, 4),
+    )).eval().requires_grad_(False)
+    assert not QwenImage21Model._supports_text_prefix_cache(dit)  # BF16
+    monkeypatch.setattr(QwenImage21Model, "_supports_text_prefix_cache",
+                        staticmethod(lambda d: True))  # exercise cache math on CPU
+    model = _bare(dit=dit, _kv_caches=None, _seqs={})
+    x = torch.randn(1, 2, 2, 3)
+    cond = Conditioning(cond=torch.randn(1, 4, 4))
+    params = SamplingParams(height=32, width=48, steps=3, seed=0,
+                            guidance_scale=1.0, sampler="euler", kv_cache=True)
+    model.prepare_latent(x, cond, params)
+    cache = model.kv_cache("cond")
+    assert cache is not None and cache.cached_slice == "prefix"
+    with torch.no_grad():
+        model.denoise_step(x, torch.tensor([0.8]), cond, 1.0, 0)
+        cached = model.denoise_step(x, torch.tensor([0.4]), cond, 1.0, 1)
+        plain = dit(x, torch.tensor([0.4]), model._seqs["cond"])
+    assert torch.equal(cached, plain)
+    dit.transformer_blocks[0].attn.to_q._lora_down = torch.ones(1)
+    model.prepare_latent(x, cond, params)
+    assert model.kv_cache("cond") is None

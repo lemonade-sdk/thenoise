@@ -19,7 +19,7 @@ latent cell per 16x16 — hence the 32-pixel alignment of both).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import List, Optional, Tuple
 
 import torch
@@ -29,7 +29,7 @@ from thenoise.dit.qwen_image21.encoder import (
     QwenImage21TextEncoder,
     load_qwen_image21_text_encoder,
 )
-from thenoise.dit.qwen_image21.models import QwenImage21Sequence
+from thenoise.dit.qwen_image21.models import Attention, QwenImage21Sequence
 from thenoise.dit.qwen_image21.utils import is_qwen_image21_key
 from thenoise.dit.qwen_image21.utils import load_qwen_image21_dit
 from thenoise.models.base import (
@@ -94,6 +94,11 @@ class QwenImage21Model(DiffusionModel):
         self.dit = load_qwen_image21_dit(
             config.dit_path, device=self._load_target(config.dit_path), dtype=config.dtype
         )
+        self.KV_CACHE_WITHOUT_REFERENCE = self._supports_text_prefix_cache(self.dit)
+        if all(Attention._int8_convrot(p)
+               for block in self.dit.transformer_blocks
+               for p in (block.attn.to_q, block.attn.to_k, block.attn.to_v)):
+            self.dit.fuse_qkv_projections()
 
         # A fused-MLP checkpoint needs a LoRA's split SwiGLU names fused onto gate_up.
         self.lora_fusions = FUSE_GATE_UP if self.dit.params.fused_mlp else {}
@@ -118,6 +123,35 @@ class QwenImage21Model(DiffusionModel):
         self.memory.register("vae", self.vae)
 
         logger.info("Qwen-Image 2.1 model ready on %s (%s)", config.device, config.dtype)
+
+    @staticmethod
+    def _supports_text_prefix_cache(dit) -> bool:
+        blocks = getattr(dit, "transformer_blocks", ())
+        for block in blocks:
+            projections = [
+                block.attn.to_q, block.attn.to_k, block.attn.to_v,
+                block.attn.to_out[0], block.img_mlp.out,
+            ]
+            if block.img_mlp.fused:
+                projections.append(block.img_mlp.gate_up)
+            else:
+                projections.extend((block.img_mlp.proj, block.img_mlp.gate_layer))
+            if not all(Attention._int8_convrot(p) for p in projections):
+                return False
+        return bool(blocks)
+
+    def switch_loras(self, lora_specs, dit) -> None:
+        # The named Q/K/V weights are LoRA targets; rejoin them after a change.
+        if (not lora_specs and self._active_lora_result is None) or (
+            self._make_lora_spec_hash(lora_specs) == self._active_lora_spec
+        ):
+            return super().switch_loras(lora_specs, dit)
+        was_fused = any(block.attn.to_qkv is not None for block in dit.transformer_blocks)
+        if was_fused:
+            dit.unfuse_qkv_projections()
+        super().switch_loras(lora_specs, dit)
+        if was_fused and not self._lora_state_unfit:
+            dit.fuse_qkv_projections()
 
     # ------------------------------------------------------------ kernels
     def _encoder_images(self, args: EncodePromptArgs) -> Optional[list]:
@@ -171,6 +205,14 @@ class QwenImage21Model(DiffusionModel):
         table, so a denoise step is only the target-image tokens plus the block loop.
         Each branch gets its own, keyed ``cond`` / ``uncond`` like the KV caches.
         """
+        # Do not reuse prefixes when a projection's compute path changes (BF16,
+        # unsupported quantization layout, or runtime LoRA).
+        if params.kv_cache and ref is None and (
+            not self._supports_text_prefix_cache(self.dit)
+            or any(getattr(m, "_lora_down", None) is not None for m in self.dit.modules())
+        ):
+            logger.warning("Qwen-Image 2.1 T2I prefix cache disabled for this run")
+            params = replace(params, kv_cache=False)
         dev = torch.device(self.device)
         x = latents.to(device=dev, dtype=self.dtype)
 
@@ -193,7 +235,10 @@ class QwenImage21Model(DiffusionModel):
 
         self.start_kv_caches(
             params,
-            has_reference=refs is not None,
+            has_reference=(
+                refs is not None
+                or (params.kv_cache and self._seqs["cond"].prefix is not None)
+            ),
             has_uncond=params.guidance_scale > 1.0 and "uncond" in self._seqs,
         )
         return x

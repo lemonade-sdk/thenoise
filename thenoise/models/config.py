@@ -69,7 +69,7 @@ class GenerateRequest:
     lora_specs: Optional[List[str]] = None
     pixel_upscaler: Optional[str] = None
     image: Optional[Union[Image.Image, List[Image.Image]]] = None
-    # Reference-latent KV cache (edit only); None = auto.
+    # Step-invariant prefix KV cache (None = model default).
     kv_cache: Optional[bool] = None
     # Reference conditioning method for editing (edit only); None = auto.
     ref_method: Optional[str] = None
@@ -89,7 +89,7 @@ class SamplingParams:
     seed: int
     guidance_scale: float
     sampler: str
-    # Reference-latent KV cache (edit only); resolved to a concrete bool.
+    # Step-invariant prefix KV cache, resolved to a concrete bool.
     kv_cache: bool = False
 
 
