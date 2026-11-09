@@ -115,6 +115,7 @@ class DiffusionModel(ABC):
     # The empty class default keeps ``kv_cache`` answering ``None`` on adapters built
     # without ``__init__``.
     _kv_caches: Optional[Dict[str, KVCache]] = None
+    KV_CACHE_WITHOUT_REFERENCE: ClassVar[bool] = False
 
     # Preferences implied by the loaded checkpoint's markers; replaced per instance
     # in ``__init__``, with the empty class default covering adapters built without it.

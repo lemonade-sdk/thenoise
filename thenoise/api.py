@@ -68,7 +68,7 @@ class _Text2ImageBody(BaseModel):
     sampler: Optional[str] = None
     lora_specs: Optional[List[str]] = None  # ["filename.safetensors:0.8", ...]
     pixel_upscaler: Optional[str] = None  # name (no .safetensors) in upscaler_dir
-    kv_cache: Optional[bool] = None  # reference-latent KV cache (edit only; null = auto)
+    kv_cache: Optional[bool] = None  # step-invariant prefix KV cache (null = auto)
     ref_method: Optional[str] = None  # reference conditioning (edit only; null = auto)
     out: Literal["png", "json"] = "png"
 
