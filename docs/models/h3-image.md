@@ -39,6 +39,12 @@ recipes, each pinning the three checkpoints and the defaults:
 - [H3-Image-INT8.json](../../recipes/h3image/H3-Image-INT8.json) - int8-convrot DiT, 49 GB
 - [H3-Image.json](../../recipes/h3image/H3-Image.json) - bf16 DiT, 69 GB
 
+## Performance (Strix Halo)
+
+INT8-ConvRot, 768x1024:
+
+- Generate @ 4 steps: **~4.1 s**
+
 ## Download
 
 ```bash

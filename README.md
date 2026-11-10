@@ -97,6 +97,7 @@ a warmup run.
 | Flux 3 Klein · INT8-ConvRot · 15 steps | 13.4s | 75.8s |
 | MOSS-Image · BF16 + [8 step DMD LoRA](https://huggingface.co/lodestones/MOSS-Image-SFT-8-steps-dmd) · 8 steps | 12.6s | 51.2s |
 | Fibo 2.0 Turbo Edit · INT8-ConvRot · 4 steps | 9.2s | 35.6s |
+| H3-Image · INT8-ConvRot · 4 steps | 5.3s | 16.7s |
 
 *Image + simple instruction to edited image (editing):*
 
@@ -108,6 +109,7 @@ a warmup run.
 | Mage-Flow Turbo · BF16 · 4 steps | 4.9s | — *(no KV cache)* |
 | Flux 3 Klein · INT8-Convrot · 15 steps | 41.8s | — *(no KV cache)* |
 | Fibo 2.0 Turbo Edit · INT8-ConvRot · 4 steps | 15.5s | 20.6s |
+| H3-Image · INT8-ConvRot · 4 steps | 15s | 11.5s |
 
 <small>TheNoise 0.11.0, Strix Halo (gfx1151, 128 GB unified)</small>
 
