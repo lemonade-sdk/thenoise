@@ -85,6 +85,25 @@ def split_half_rope_1d(head_dim: int, theta: float = 10000.0):
     return build
 
 
+def split_half_rope_axes(scale: torch.Tensor, angle_scale: float = 1.0):
+    """Builder of the split-half convention over any number of axes sharing one frequency.
+
+    Returns ``pos -> (cos, sin)``, each ``[L, 1, 1, 2 * n_axes * len(scale)]``, for ``pos``
+    an ``[L, n_axes]`` coordinate tensor: every axis rotated by the same ``scale``, the
+    axes' angles concatenated in coordinate order.
+
+    ``angle_scale`` is how far one coordinate unit travels: 1.0 for coordinates the
+    frequencies already expect, ``2 * pi`` for a normalized grid spanning one turn.
+    """
+
+    def build(pos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        angles = (angle_scale * pos[:, :, None] * scale.to(pos)).flatten(1)
+        angles = torch.cat((angles, angles), dim=-1)
+        return angles.cos()[:, None, None, :], angles.sin()[:, None, None, :]
+
+    return build
+
+
 def split_half_rope_4d(head_dim: int, theta: float = 10000.0):
     """Builder for the split-half convention over a 4-axis ``(r, f, h, w)`` position.
 
@@ -106,9 +125,7 @@ def split_half_rope_4d(head_dim: int, theta: float = 10000.0):
     def build(pos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         # Frequencies in the coordinates' own precision.
         scale = 1.0 / theta ** (torch.arange(bands, dtype=pos.dtype, device=pos.device) / bands)
-        angles = (pos[:, :, None] * scale).flatten(-2)  # [L, head_dim/2]
-        angles = torch.cat((angles, angles), dim=-1)  # [L, head_dim]
-        return angles.cos()[:, None, None, :], angles.sin()[:, None, None, :]
+        return split_half_rope_axes(scale)(pos)
 
     return build
 
@@ -206,6 +223,7 @@ __all__ = [
     "apply_rope_split_half",
     "split_half_rope_3d",
     "split_half_rope_4d",
+    "split_half_rope_axes",
     "split_half_rope_1d",
     "RopeCache",
 ]

@@ -264,6 +264,60 @@ QWEN3_VL_8B_INSTRUCT_CONFIG = {
     "vision_start_token_id": 151652,
 }
 
+#: The released Qwen3-VL-32B architecture as the H3-Image text encoder ships it:
+#: truncated to 50 of 64 decoder layers, so there is no final norm and the conditioning
+#: is the unnormalized output of the layer that survived. The depth is read off the file
+#: at load; the number here is the release's.
+QWEN3_VL_32B_H3_CONFIG = {
+    "architectures": ["Qwen3VLForConditionalGeneration"],
+    "image_token_id": 151655,
+    "model_type": "qwen3_vl",
+    "text_config": {
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "bos_token_id": 151643,
+        "dtype": "bfloat16",
+        "eos_token_id": 151645,
+        "head_dim": 128,
+        "hidden_act": "silu",
+        "hidden_size": 5120,
+        "initializer_range": 0.02,
+        "intermediate_size": 25600,
+        "max_position_embeddings": 262144,
+        "model_type": "qwen3_vl_text",
+        "num_attention_heads": 64,
+        "num_hidden_layers": 50,
+        "num_key_value_heads": 8,
+        "rms_norm_eps": 1e-06,
+        "rope_scaling": {"mrope_interleaved": True, "mrope_section": [24, 20, 20], "rope_type": "default"},
+        "rope_theta": 5000000,
+        "tie_word_embeddings": False,
+        "use_cache": True,
+        "vocab_size": 151936,
+    },
+    "tie_word_embeddings": False,
+    "transformers_version": "4.57.0.dev0",
+    "video_token_id": 151656,
+    "vision_config": {
+        "deepstack_visual_indexes": [8, 16, 24],
+        "depth": 27,
+        "hidden_act": "gelu_pytorch_tanh",
+        "hidden_size": 1152,
+        "in_channels": 3,
+        "initializer_range": 0.02,
+        "intermediate_size": 4304,
+        "model_type": "qwen3_vl",
+        "num_heads": 16,
+        "num_position_embeddings": 2304,
+        "out_hidden_size": 5120,
+        "patch_size": 16,
+        "spatial_merge_size": 2,
+        "temporal_patch_size": 2,
+    },
+    "vision_end_token_id": 151653,
+    "vision_start_token_id": 151652,
+}
+
 # Qwen3-VL image preprocessing (shared by the 4B and 8B): mean/std 0.5, patch 16
 # merged 2x2 -> one vision token per 32x32 pixels.
 QWEN3_VL_PREPROCESSOR_CONFIG = {
@@ -347,6 +401,7 @@ __all__ = [
     "QWEN35_9B_CONFIG",
     "QWEN3_VL_4B_INSTRUCT_CONFIG",
     "QWEN3_VL_8B_INSTRUCT_CONFIG",
+    "QWEN3_VL_32B_H3_CONFIG",
     "QWEN3_VL_PREPROCESSOR_CONFIG",
     "QWEN2_5_VL_CONFIG",
     "QWEN2_5_VL_PREPROCESSOR_CONFIG",

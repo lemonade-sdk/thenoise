@@ -34,6 +34,7 @@ from thenoise.models import (  # noqa: E402
     Fibo2Model,
     Flux3Model,
     FluxKleinModel,
+    H3ImageModel,
     Krea2Model,
     MageFlowModel,
     MingImageModel,
@@ -564,6 +565,35 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "layers.0.feed_forward.w3.weight",
             "t_embedder.mlp.0.weight",
             "final_layer.linear.weight",
+        ],
+    ),
+    # The packed H3 DiT without an audio stream. The video sibling shares every key but
+    # ``audio_patch_proj``, and is claimed by nobody here rather than by this adapter.
+    "h3_image": (
+        H3ImageModel,
+        [
+            "video_patch_proj.weight",
+            "condition_proj.weight",
+            "blocks.0.attn.qkv_proj.weight",
+            "final_layer.video_out.weight",
+            "adaln_t_table",
+        ],
+    ),
+    "h3_image_wrapped": (
+        H3ImageModel,
+        [
+            "model.diffusion_model.video_patch_proj.weight",
+            "model.diffusion_model.condition_proj.weight",
+            "model.diffusion_model.blocks.0.attn.qkv_proj.weight",
+        ],
+    ),
+    "h3_video": (
+        None,
+        [
+            "video_patch_proj.weight",
+            "audio_patch_proj.weight",
+            "condition_proj.weight",
+            "final_layer.audio_out.weight",
         ],
     ),
     "unknown": (None, ["some.random.key", "blocks.0.attn.gate.weight"]),

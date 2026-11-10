@@ -164,6 +164,22 @@ def resize_to_long_edge(image: Image.Image, long_edge: int) -> Image.Image:
     return image.resize((new_w, new_h), Image.LANCZOS)
 
 
+def resize_to_short_edge(image: Image.Image, edge: int, align: int = 1) -> Image.Image:
+    """Make a PIL image's shortest side ``edge``, aspect preserved, in or out.
+
+    Unlike :func:`resize_to_long_edge` this enlarges: a model trained on references of a
+    certain minimum detail reads a small one as degraded conditioning. Sides are rounded
+    to ``align``.
+    """
+    w, h = image.size
+    scale = edge / min(w, h)
+    new_w = max(align, round(w * scale / align) * align)
+    new_h = max(align, round(h * scale / align) * align)
+    if (new_w, new_h) == (w, h):
+        return image
+    return image.resize((new_w, new_h), Image.LANCZOS)
+
+
 def align_down(value: int, multiple: int, minimum: int = 0) -> int:
     """Largest multiple of ``multiple`` not above ``value``, clamped to ``minimum``."""
     if multiple < 1:
@@ -172,7 +188,7 @@ def align_down(value: int, multiple: int, minimum: int = 0) -> int:
 
 
 # The fitting rules ReferenceSizing accepts.
-REF_FITS = ("area", "long_edge")
+REF_FITS = ("area", "long_edge", "short_edge")
 
 
 @dataclass(frozen=True)
@@ -181,14 +197,18 @@ class ReferenceSizing:
 
     Aspect is always preserved and nothing is ever cropped, so the references of a
     multi-reference edit keep the shape they arrived in. ``fit`` gives the single
-    ``cap`` its meaning: a pixel **area** to scale to, or a **longest side** to cap
-    without enlarging. The result is floored to ``align`` pixels, which keeps a
-    reference on whole latent cells and inside the cap.
+    ``cap`` its meaning: a pixel **area** to scale to, a **longest side** to cap
+    without enlarging, or the **shortest side** of a band it is scaled into — that one
+    enlarges up from ``floor``.
+
+    The result is floored to ``align`` pixels, which keeps a reference on whole latent
+    cells and inside the cap.
     """
 
     fit: str = "area"
     cap: int = 1024 * 1024
     align: int = 16
+    floor: int = 0
 
     def __post_init__(self) -> None:
         if self.fit not in REF_FITS:
@@ -203,6 +223,10 @@ class ReferenceSizing:
                 f"{self.fit} cap of {self.cap} cannot hold one {self.align}px cell "
                 f"(needs at least {minimum})"
             )
+        if self.floor > self.cap:
+            raise ValueError(
+                f"short-edge floor {self.floor} exceeds the cap {self.cap}"
+            )
 
     def target_size(self, width: int, height: int) -> Tuple[int, int]:
         """The size :meth:`apply` produces for a ``width`` x ``height`` reference."""
@@ -210,6 +234,9 @@ class ReferenceSizing:
             raise ValueError(f"invalid reference size {width}x{height}")
         if self.fit == "long_edge":
             scale = min(1.0, self.cap / max(width, height))
+        elif self.fit == "short_edge":
+            short = min(width, height)
+            scale = min(max(short, self.floor), self.cap) / short
         else:
             scale = (self.cap / (width * height)) ** 0.5
         return (
@@ -236,6 +263,7 @@ __all__ = [
     "pil_to_pixels",
     "pixels_to_pil",
     "resize_to_target",
+    "resize_to_short_edge",
     "center_crop",
     "cover_crop",
     "resize_to_area",

@@ -1,0 +1,29 @@
+{
+  "checkpoints": {
+    "main": "Comfy-Org/MiniMax-H3-Image:diffusion_models/minimax_h3_image_pruned_int8_convrot.safetensors",
+    "text_encoder": "Comfy-Org/MiniMax-H3-Image:text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+    "vae": "Comfy-Org/MiniMax-H3-Image:vae/minimax_h3_image_vae_fp16.safetensors"
+  },
+  "image_defaults": {
+    "cfg_scale": 1,
+    "height": 2048,
+    "steps": 4,
+    "width": 2048
+  },
+  "labels": [
+    "custom",
+    "image",
+    "edit"
+  ],
+  "recipe": "thenoise",
+  "recipe_options": {
+    "cfg_scale": 1,
+    "height": 2048,
+    "steps": 4,
+    "width": 2048
+  },
+  "registry_source": "huggingface",
+  "size": 49.29,
+  "source": "huggingface",
+  "model_name": "user.H3-Image-INT8"
+}

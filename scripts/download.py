@@ -25,6 +25,8 @@ Models:
                   https://huggingface.co/Comfy-Org/Mage-Flow
   fibo2           Bria Fibo 2.0 edit-turbo / dev (t2i + edit in one DiT)
                   https://huggingface.co/Comfy-Org/Fibo-2.0
+  h3-image        MiniMax H3-Image (t2i + edit in one DiT)
+                  https://huggingface.co/Comfy-Org/MiniMax-H3-Image
   esrgan          Real-ESRGAN x4 pixel upscaler (optional, for upscaling)
                   https://huggingface.co/Comfy-Org/Real-ESRGAN_repackaged
   controlmaps      Control-map checkpoints: a Depth-Anything-V2 depth model, or the
@@ -60,6 +62,7 @@ Usage:
     python scripts/download.py --model fibo2
     python scripts/download.py --model fibo2 --variant dev
     python scripts/download.py --model fibo2 --variant dev --int8-convrot
+    python scripts/download.py --model h3-image
     python scripts/download.py --model esrgan
     python scripts/download.py --model controlmaps
     python scripts/download.py --model controlmaps --variant pose
@@ -332,6 +335,24 @@ def _fibo2_jobs(args: argparse.Namespace) -> list[Artifact]:
     ]
 
 
+_H3_REPO = "Comfy-Org/MiniMax-H3-Image"
+
+
+def _h3_image_jobs(args: argparse.Namespace) -> list[Artifact]:
+    """H3-Image: the packed DiT + the truncated Qwen3-VL-32B TE + its own AE.
+
+    The 32B encoder is published quantized only, so it is fetched as-is whatever
+    ``--int8-convrot`` says.
+    """
+    suffix = "int8_convrot" if args.int8_convrot else "bf16"
+    return [
+        ("dit", _H3_REPO, f"diffusion_models/minimax_h3_image_pruned_{suffix}.safetensors"),
+        ("text_encoder", _H3_REPO,
+         "text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors"),
+        ("vae", _H3_REPO, "vae/minimax_h3_image_vae_fp16.safetensors"),
+    ]
+
+
 def _esrgan_jobs(args: argparse.Namespace) -> list[Artifact]:
     """Real-ESRGAN x4 pixel upscaler (no DiT/TE/VAE)."""
     return [
@@ -479,6 +500,11 @@ MODELS: dict[str, ModelSpec] = {
         variant_choices=("edit-turbo", "dev"),
         default_variant="edit-turbo",
     ),
+    "h3-image": ModelSpec(
+        "h3-image", "./models/h3-image",
+        "MiniMax H3-Image (t2i + edit in one DiT)",
+        _h3_image_jobs,
+    ),
     "esrgan": ModelSpec(
         "esrgan", "./models/esrgan",
         "Real-ESRGAN x4 pixel upscaler (optional; used for upscaling)",
@@ -522,6 +548,7 @@ def _epilog() -> str:
         "  python scripts/download.py --model mage-flow --int8-convrot --edit-only",
         "  python scripts/download.py --model fibo2",
         "  python scripts/download.py --model fibo2 --variant dev --int8-convrot",
+        "  python scripts/download.py --model h3-image",
         "  python scripts/download.py --model esrgan",
         "  python scripts/download.py --model controlmaps            # depth + pose",
         "  python scripts/download.py --model controlmaps --variant base",

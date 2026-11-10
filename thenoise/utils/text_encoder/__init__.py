@@ -13,7 +13,7 @@ system-prompt/suffix pair and :func:`compute_drop_idx`.
 from __future__ import annotations
 
 import os
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import torch
 from accelerate import init_empty_weights
@@ -234,17 +234,24 @@ def load_qwen3_vl_model(
     dtype: torch.dtype,
     device: Union[str, torch.device],
     config: Optional[dict] = None,
+    model_factory: Optional[Callable[["Qwen3VLConfig"], torch.nn.Module]] = None,
 ) -> Qwen3VLForConditionalGeneration:
-    """Build a Qwen3-VL text encoder (4B by default) and load a local safetensors into it.
+    """Build a Qwen3-VL text encoder and load a local safetensors into it.
 
     Accepts the official HF layout and ComfyUI's ``model.``/``visual.`` keys.
     ``config`` is one of the vendored ``QWEN3_VL_*_CONFIG`` dicts.
+
+    ``model_factory`` replaces the empty-model build (still under ``init_empty_weights``)
+    for a file whose architecture is not the plain HF one.
     """
     config = Qwen3VLConfig.from_dict(config or QWEN3_VL_4B_INSTRUCT_CONFIG)
     with init_empty_weights():
-        model = Qwen3VLForConditionalGeneration._from_config(config)
-        del model.lm_head
-        replace_linears(model)
+        if model_factory is None:
+            model = Qwen3VLForConditionalGeneration._from_config(config)
+            del model.lm_head
+            replace_linears(model)
+        else:
+            model = model_factory(config)
 
     load_text_encoder_weights(
         model,

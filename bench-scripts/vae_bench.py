@@ -356,6 +356,25 @@ def mage_flow_vae(ctx: Ctx, res: Res, op: str) -> Case:
     return vae_case(ctx, vae, "mage_flow", res, op, "128ch/16x, one-step denoiser")
 
 
+@fixture("h3_image", BOTH)
+def h3_image_vae(ctx: Ctx, res: Res, op: str) -> Case:
+    """The H3-Image codec: a conv encoder and a ViT decoder, both run in 256 px tiles.
+
+    ``register_tokens`` and the blocks' layer scales are ``torch.empty`` until a load
+    fills them, and uninitialized ones can hold NaN — which would time the NaN rather
+    than the codec.
+    """
+    from thenoise.vae import AutoencoderKLH3Image
+
+    vae = new_vae(ctx, "h3_image", AutoencoderKLH3Image)
+    with torch.no_grad():
+        vae.decoder.register_tokens.zero_()
+        for block in vae.decoder.transformer_blocks:
+            block.scale1.fill_(0.5)
+            block.scale2.fill_(0.5)
+    return vae_case(ctx, vae, "h3_image", res, op, "24ch/16x rgb, tiled 256px")
+
+
 # ------------------------------------------------------------------ measurement
 @dataclass
 class Timing:

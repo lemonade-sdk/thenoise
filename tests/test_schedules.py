@@ -24,6 +24,7 @@ from thenoise.models import (
     Fibo2Model,
     Flux3Model,
     FluxKleinModel,
+    H3ImageModel,
     Krea2Model,
     MageFlowModel,
     MingImageModel,
@@ -78,6 +79,16 @@ BARE = {
     "fibo2": {"vae": _vae(128, 16)},
     "moss_image": {"vae": _vae(128, 16)},
     "mage_flow": {"vae": _vae(128, 16), "dit": SimpleNamespace(patch_size=1)},
+    # The PDD ladder walks the distilled sigma grid, which the adapter reads off the
+    # checkpoint: the release's own non-uniform grid is the input that would catch a
+    # schedule interpolating sigmas instead of grid indices.
+    "h3_image": {
+        "vae": _vae(24, 16),
+        "params": SimpleNamespace(pdd_sigmas=(
+            1.0, 0.9675236940383911, 0.8875485062599182, 0.75,
+            0.5327739119529724, 0.23200887441635132, 0.0,
+        )),
+    },
     "qwen_image": {"vae": _vae(16, 8), "dit": SimpleNamespace(patch_size=2)},
     "qwen_image21": {"vae": _vae(64, 16, pixel_channels=4)},
 }
@@ -126,8 +137,9 @@ def test_schedule_resolution_dependence_matches_the_model(model_cls):
 
 
 # Pixel alignment each adapter rounds request sizes to. All the shipped models land
-# on 16 except Qwen-Image 2.1, which needs 32 (one Qwen3-VL vision token).
-ALIGN = {"qwen_image21": 32}
+# on 16 except Qwen-Image 2.1, which needs 32 (one Qwen3-VL vision token), and
+# H3-Image, whose reference band is measured in whole codec cells.
+ALIGN = {"qwen_image21": 32, "h3_image": 32}
 DEFAULT_ALIGN = 16
 
 
@@ -163,6 +175,7 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
         (MingImageModel, False, False),
         (FluxKleinModel, True, True),
         (Flux3Model, True, False),
+        (H3ImageModel, True, True),
         (MageFlowModel, True, False),
         (QwenImageModel, True, True),
         (QwenImage21Model, True, True),
