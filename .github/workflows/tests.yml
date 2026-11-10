@@ -43,7 +43,7 @@ jobs:
           set -euo pipefail
           uv venv --python 3.14 .venv
           uv pip install --python .venv/bin/python \
-            --index-url https://download.pytorch.org/whl/cpu torch
+            --index-url https://download.pytorch.org/whl/cpu torch torchvision
           uv pip install --python .venv/bin/python -e '.[dev]'
           .venv/bin/python - <<'PY'
           import sys
