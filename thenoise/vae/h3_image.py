@@ -35,7 +35,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from thenoise.utils.attention import eager_attention
-from thenoise.utils.rope import apply_rope_split_half
+from thenoise.utils.rope import apply_rope_split_half, split_half_rope_axes
 from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.safetensors import MemoryEfficientSafeOpen, load_safetensors
 from thenoise.utils.setup_logging import setup_logging
@@ -227,9 +227,7 @@ class RotaryEmbedding2D(nn.Module):
 
     def forward(self, ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """``[S, n_dim]`` -> the ``(cos, sin)`` pair ``[S, 1, 1, dim]``."""
-        angles = (self.angle_scale * ids[:, :, None] * self.inv_freq.to(ids.device)).flatten(1)
-        angles = torch.cat([angles, angles], dim=-1)
-        return angles.cos()[:, None, None, :], angles.sin()[:, None, None, :]
+        return split_half_rope_axes(self.inv_freq, self.angle_scale)(ids)
 
 
 class Attention(nn.Module):

@@ -19,13 +19,16 @@ properties of the release fix how those coordinates are laid out:
     on both spatial ones, which is why the rope has to be partial: a prompt longer
     than the target would otherwise dominate the spatial axes.
 
-The packed order is ``[text | references | target]``, and it is also the order the
-reference latents are handed to the model.
+The packed order is ``[text | target | references]``. Attention over the packed
+sequence is unmasked and every row carries its own coordinates, so the order is free
+-- and it is chosen to leave the reference rows as a suffix: they are the rows whose
+inputs do not change between steps, which is what a run's K/V cache can freeze (see
+:mod:`thenoise.dit.kvcache`).
 """
 from __future__ import annotations
 
 import math
-from typing import List, Mapping, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import torch
 
@@ -88,28 +91,27 @@ class Layout:
         segments: List[Tuple[int, int, str]] = [(0, text_len, "text")]
         # [n, 3] float64 per segment: (t, h, w)
         positions = [self._text_positions(text_len)]
-
-        # A reference occupies one unit of the time axis, so the target's origin
-        # starts behind all of them.
-        cursor = float(text_len)
         offset = text_len
-        for ref_h, ref_w in refs:
-            ref_frame, _ = frame_grid(ref_h, ref_w)
-            grid = torch.empty(ref_frame.shape[0], 3, dtype=torch.float64)
-            grid[:, 0] = cursor
-            grid[:, 1:] = ref_frame
-            segments.append((offset, offset + ref_frame.shape[0], "ref"))
-            positions.append(grid)
-            offset += ref_frame.shape[0]
-            cursor += 1.0
 
+        # A reference occupies one unit of the time axis, so the target's frame sits
+        # behind all of them in the coordinates -- even though it is packed ahead of
+        # them, which is what leaves the references a cacheable suffix.
         target_rows = frame.shape[0]
         grid = torch.empty(target_rows, 3, dtype=torch.float64)
-        grid[:, 0] = cursor
+        grid[:, 0] = text_len + len(refs)
         grid[:, 1:] = frame
         segments.append((offset, offset + target_rows, "target"))
         positions.append(grid)
         offset += target_rows
+
+        for i, (ref_h, ref_w) in enumerate(refs):
+            ref_frame, _ = frame_grid(ref_h, ref_w)
+            grid = torch.empty(ref_frame.shape[0], 3, dtype=torch.float64)
+            grid[:, 0] = float(text_len + i)
+            grid[:, 1:] = ref_frame
+            segments.append((offset, offset + ref_frame.shape[0], "ref"))
+            positions.append(grid)
+            offset += ref_frame.shape[0]
 
         self.text_len = text_len
         self.latent_h = latent_h
@@ -119,8 +121,8 @@ class Layout:
         self.segments = segments
         self.position_ids = torch.cat(positions)
         #: The target's own span, which is the only one the output head reads.
-        self.target_span = segments[-1][0], segments[-1][1]
-        #: Row count of the codec rows the embedding consumes: references then target.
+        self.target_span = segments[1][0], segments[1][1]
+        #: Row count of the codec rows the embedding consumes: target then references.
         self.codec_rows = offset - text_len
 
     @staticmethod
@@ -129,22 +131,22 @@ class Layout:
         grid[:, 0] = torch.arange(text_len, dtype=torch.float64)
         return grid
 
-    def modulation_rows(self, timestep_rows: Mapping[str, int],
-                        tags: Optional[torch.Tensor] = None
+    def modulation_rows(self, tags: Optional[torch.Tensor] = None
                         ) -> List[Tuple[int, int, int]]:
         """``(start, stop, modulation_row)`` covering the sequence, contiguous.
 
-        ``timestep_rows`` gives each segment kind the index of *its* timestep in the
-        run's sorted set of distinct timesteps: the target's own for it and for the
-        prompt, the pinned one for a reference — the two are not the same row except at
-        the very start of a run, and reading the wrong one conditions a reference as
-        picture-to-be-cleaned. The table is indexed by
-        ``timestep_rows[kind] * MODALITIES + tag``, so a segment's row is its base plus
-        the tag. The prompt is the one segment that mixes tags: the vision placeholders
-        inside it carry the visual tag, so it is split into one segment per run of equal
-        tags. ``tags`` is the text encoder's per-token tag vector, or ``None`` for a
-        prompt with no images in it.
+        A run's modulation embedding has two timestep rows: the step's own ``t``, which
+        the prompt and the target follow, and the
+        :data:`~thenoise.dit.h3_image.models.COND_TIMESTEP` the reference rows are
+        pinned at. Those are not the same row except at the very end of a run, and
+        reading the wrong one conditions a reference as picture-to-be-cleaned. The table
+        is indexed by ``timestep_row * MODALITIES + tag``, so a segment's row is its
+        base plus the tag. The prompt is the one segment that mixes tags: the vision
+        placeholders inside it carry the visual tag, so it is split into one segment per
+        run of equal tags. ``tags`` is the text encoder's per-token tag vector, or
+        ``None`` for a prompt with no images in it.
         """
+        timestep_rows = {"text": 0, "target": 0, "ref": 1}
         segments = []
         for start, stop, kind in self.segments:
             base = timestep_rows[kind] * MODALITIES

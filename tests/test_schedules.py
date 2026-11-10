@@ -175,7 +175,7 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
         (MingImageModel, False, False),
         (FluxKleinModel, True, True),
         (Flux3Model, True, False),
-        (H3ImageModel, True, False),
+        (H3ImageModel, True, True),
         (MageFlowModel, True, False),
         (QwenImageModel, True, True),
         (QwenImage21Model, True, True),

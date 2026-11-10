@@ -68,11 +68,16 @@ class H3ImageModel(DiffusionModel):
         "steps": 6,
         "guidance_scale": 1.0,
         "sampler": "euler",
+        "ref_method": "index_timestep_zero",
     }
 
     # Guidance is distilled in; a negative prompt still works as an extrapolation
     # direction, it is just off the model's training distribution.
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": False}
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": True}
+
+    # The step-invariant slice is the TRAILING reference rows: they are packed last so
+    # that a cached run recomputes the prompt and the target, which follow the timestep.
+    KV_CACHED_SLICE = "suffix"
 
     REFERENCE_SIZING = ReferenceSizing(
         fit="short_edge", floor=1024, cap=2048, align=CANVAS_MULTIPLE
@@ -172,14 +177,15 @@ class H3ImageModel(DiffusionModel):
         """Stash the packed sequence this run steps through; the latent is unchanged.
 
         The DiT takes the canonical latent and patches it internally, so the internal
-        form here is the latent itself — what has to be built once per run is the
-        layout (segment spans and rope coordinates) and the reference latents.
+        form here is the latent itself — what has to be built once per run is the layout
+        (segment spans and rope coordinates), the reference latents, and the run's K/V
+        caches.
         """
-        if ref_method != "index":
+        if ref_method != "index_timestep_zero":
             raise ValueError(
                 f"unsupported ref_latents_method {ref_method!r} for {self.name}: a "
-                "reference is always packed as its own rows, there is no other "
-                "conditioning to select"
+                "reference is always packed as its own rows, pinned at a timestep of "
+                "0.999, there is no other conditioning to select"
             )
         dev = torch.device(self.device)
         x = latents.to(dev, self.dtype)
@@ -194,7 +200,23 @@ class H3ImageModel(DiffusionModel):
             None if cond.null is None
             else Layout(cond.null.shape[1], lat_h, lat_w, shapes)
         )
+
+        self.dit.pe_embedder.clear()
+        self.dit.prepare_rope(self._layout, self.dtype)
+        if self._null_layout is not None:
+            self.dit.prepare_rope(self._null_layout, self.dtype, name="uncond")
+
+        self.start_kv_caches(
+            params,
+            has_reference=bool(refs),
+            has_uncond=params.guidance_scale > 1.0 and self._null_layout is not None,
+        )
         return x
+
+    def finalize_latent(self, latents: torch.Tensor, params: SamplingParams) -> torch.Tensor:
+        self.end_kv_caches()
+        self.dit.pe_embedder.clear()
+        return latents
 
     def begin_sampling(self, schedule: List[Step]) -> None:
         """The grid the PDD head bank averages over: this run's own sigmas."""
@@ -226,13 +248,14 @@ class H3ImageModel(DiffusionModel):
         v = self.dit(
             latents, sigma, cond.cond, self._layout, self._refs,
             tags=getattr(cond, "tags", None), seed=self._seed,
-            sample_sigmas=self._sample_sigmas,
+            sample_sigmas=self._sample_sigmas, kv=self.kv_cache("cond"),
         )
         if guidance_scale > 1.0 and cond.null is not None:
             neg = self.dit(
                 latents, sigma, cond.null, self._null_layout, self._refs,
                 tags=getattr(cond, "null_tags", None), seed=self._seed,
-                sample_sigmas=self._sample_sigmas,
+                sample_sigmas=self._sample_sigmas, rope="uncond",
+                kv=self.kv_cache("uncond"),
             )
             return neg + guidance_scale * (v - neg)
         return v

@@ -35,7 +35,7 @@ import json
 import logging
 import math
 from dataclasses import dataclass
-from typing import Optional, Sequence, Tuple
+from typing import NamedTuple, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -43,11 +43,14 @@ import torch.nn.functional as F
 from accelerate import init_empty_weights
 
 from thenoise.dit.h3_image.layout import MODALITIES, PATCH_SIZE, Layout, pad_to_patch
-from thenoise.utils.attention import attention
+from thenoise.dit.kvcache import KVBuffers, KVCache, attend, cache_mode
+from thenoise.dit.quantized import QuantizedLinear
+from thenoise.utils.dynamo import mark_token_axis
 from thenoise.utils.fp32_linear import Fp32Linear
 from thenoise.utils.loader import load_dit
+from thenoise.utils.qk_norm import QKNorm, qk_norm_key_map
 from thenoise.utils.rms_norm import RMSNorm
-from thenoise.utils.rope import apply_rope_split_half
+from thenoise.utils.rope import RopeCache, apply_rope_split_half, split_half_rope_axes
 from thenoise.utils.safetensors import MemoryEfficientSafeOpen, unwrap_key
 
 logger = logging.getLogger(__name__)
@@ -90,6 +93,28 @@ class H3ImageParams:
         return 6 * self.rope_inv_freq
 
 
+class Mod(NamedTuple):
+    """One modulation row, already projected: the shift/scale/gate of a span."""
+
+    shift: torch.Tensor
+    scale: torch.Tensor
+    gate: torch.Tensor
+
+
+class Span(NamedTuple):
+    """``[start, end)`` of the packed sequence and the modulation driving those rows.
+
+    Both halves of a block are carried because a span is a property of the sequence,
+    not of the projection: which rows share a modulation row is decided once per
+    forward, outside the compiled blocks, so that no row index reaches a graph.
+    """
+
+    start: int
+    end: int
+    attn: Mod
+    mlp: Mod
+
+
 class Attention(nn.Module):
     """Full attention over the packed sequence, with per-head Q/K norms and rope.
 
@@ -103,31 +128,35 @@ class Attention(nn.Module):
         self.heads = heads
         self.head_dim = head_dim
         inner = heads * head_dim
-        self.qkv_proj = nn.Linear(hidden, inner * 3, bias=False)
-        self.q_norm = RMSNorm(head_dim, eps=eps)
-        self.k_norm = RMSNorm(head_dim, eps=eps)
-        self.out_proj = nn.Linear(inner, hidden, bias=False)
+        self.qkv_proj = QuantizedLinear(hidden, inner * 3, bias=False)
+        self.qk_norm = QKNorm(head_dim, eps=eps)
+        self.out_proj = QuantizedLinear(inner, hidden, bias=False)
 
     def forward(self, x: torch.Tensor,
-                rope: Optional[Tuple[torch.Tensor, torch.Tensor]] = None) -> torch.Tensor:
-        """``x`` is ``[S, hidden]``; ``rope`` is the run's ``(cos, sin)``, ``[S, 1, 1, rot]``."""
-        rows = x.shape[0]
+                rope: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+                bufs: Optional[KVBuffers] = None) -> torch.Tensor:
+        """``x`` is ``[B, S, hidden]``; ``rope`` the run's ``(cos, sin)``, ``[S, 1, 1, rot]``.
+
+        ``bufs`` are this block's run-long K/V buffers (see :func:`.kvcache.attend`),
+        and the refiner calls with neither: its stream is unrotated and never cached.
+        """
+        batch, rows, _ = x.shape
         inner = self.heads * self.head_dim
         q, k, v = self.qkv_proj(x).split(inner, dim=-1)
 
         def heads_(t: torch.Tensor) -> torch.Tensor:
-            return t.view(rows, self.heads, self.head_dim).transpose(0, 1).unsqueeze(0)
+            return t.view(batch, rows, self.heads, self.head_dim).transpose(1, 2)
 
         q, k, v = heads_(q), heads_(k), heads_(v)
         # Per-head norms before the rotation: without them the QK magnitudes grow with
         # the trunk width and the softmax saturates, which is what the checkpoint's
         # q_norm/k_norm weights exist to hold down.
-        q, k = self.q_norm(q), self.k_norm(k)
+        q, k = self.qk_norm(q, k)
         if rope is not None:
             cos, sin = rope
             q = apply_rope_split_half(q, cos, sin)
             k = apply_rope_split_half(k, cos, sin)
-        return self.out_proj(attention([q, k, v]).squeeze(0))
+        return self.out_proj(attend(q, k, v, bufs))
 
 
 class MLP(nn.Module):
@@ -135,8 +164,8 @@ class MLP(nn.Module):
 
     def __init__(self, hidden: int, ffn: int):
         super().__init__()
-        self.fc1 = nn.Linear(hidden, ffn * 2, bias=False)
-        self.fc2 = nn.Linear(ffn, hidden, bias=False)
+        self.fc1 = QuantizedLinear(hidden, ffn * 2, bias=False)
+        self.fc2 = QuantizedLinear(ffn, hidden, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate, up = self.fc1(x).chunk(2, dim=-1)
@@ -164,25 +193,25 @@ class AdalnProj(nn.Module):
         return x.chunk(self.expand, dim=-1)
 
 
-def _mod_row(vecs: torch.Tensor, row, dtype: torch.dtype) -> torch.Tensor:
-    """One modulation row — or one per token, when ``row`` is an index tensor."""
-    return vecs[row].to(dtype)
+def _modulate(x: torch.Tensor, spans: Sequence[Span], norm: nn.Module, attn: bool
+              ) -> torch.Tensor:
+    """Pre-norm + AdaLN shift/scale, span by span: each span carries its own row."""
+    parts = []
+    for span in spans:
+        mod = span.attn if attn else span.mlp
+        parts.append((1.0 + mod.scale) * norm(x[:, span.start:span.end]) + mod.shift)
+    return parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
 
 
-def _mod_scale_shift(h: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor,
-                     segments: Sequence[Tuple[int, int, int]]) -> torch.Tensor:
-    for start, stop, row in segments:
-        h[start:stop].mul_(1.0 + _mod_row(scale, row, h.dtype)).add_(
-            _mod_row(shift, row, h.dtype))
-    return h
-
-
-def _mod_gate(x: torch.Tensor, gate: torch.Tensor, other: torch.Tensor,
-              segments: Sequence[Tuple[int, int, int]]) -> torch.Tensor:
-    """Accumulate a fresh attention/MLP output into the stream, gated, in place."""
-    for start, stop, row in segments:
-        x[start:stop].addcmul_(other[start:stop], _mod_row(gate, row, x.dtype))
-    return x
+def _gate(x: torch.Tensor, spans: Sequence[Span], update: torch.Tensor, attn: bool
+          ) -> torch.Tensor:
+    """Accumulate a fresh attention/MLP output into the stream, gated, span by span."""
+    parts = []
+    for span in spans:
+        mod = span.attn if attn else span.mlp
+        sl = slice(span.start, span.end)
+        parts.append(x[:, sl] + update[:, sl] * mod.gate)
+    return parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
 
 
 class DiTBlock(nn.Module):
@@ -195,12 +224,14 @@ class DiTBlock(nn.Module):
         self.mlp = MLP(params.hidden_size, params.ffn_hidden_size)
         self.adaln_proj = AdalnProj(params.adaln_dim, params.hidden_size, 6, MODALITIES)
 
-    def forward(self, x: torch.Tensor, t_emb: torch.Tensor, segments, rope) -> torch.Tensor:
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln_proj(t_emb)
-        h = _mod_scale_shift(self.norm1(x), shift_msa, scale_msa, segments)
-        x = _mod_gate(x, gate_msa, self.attn(h, rope), segments)
-        h = _mod_scale_shift(self.norm2(x), shift_mlp, scale_mlp, segments)
-        return _mod_gate(x, gate_mlp, self.mlp(h), segments)
+    @torch.compile(fullgraph=False)
+    def forward(self, x: torch.Tensor, spans: Sequence[Span],
+                rope: Tuple[torch.Tensor, torch.Tensor],
+                bufs: Optional[KVBuffers]) -> torch.Tensor:
+        h = _modulate(x, spans, self.norm1, attn=True)
+        x = _gate(x, spans, self.attn(h, rope, bufs), attn=True)
+        h = _modulate(x, spans, self.norm2, attn=False)
+        return _gate(x, spans, self.mlp(h), attn=False)
 
 
 class RefinerBlock(nn.Module):
@@ -257,13 +288,16 @@ class FinalLayer(nn.Module):
         self.video_out = Fp32Linear(params.hidden_size, params.video_dim * params.pdd_steps,
                                     bias=True)
 
-    def forward(self, x: torch.Tensor, t_emb: torch.Tensor, segment,
+    def forward(self, x: torch.Tensor, t_emb: torch.Tensor, target: Tuple[int, int],
                 sigma: float, sample_sigmas: Optional[torch.Tensor]) -> torch.Tensor:
-        """The target rows' velocity, ``segment`` being its ``(start, stop, row)``."""
+        """The target rows' velocity; ``target`` is their ``(start, stop)``.
+
+        The head is modulated by the step's timestep row alone: reference rows never
+        reach it, and the prompt's tags are a block-level concern.
+        """
         shift, scale = self.adaln_proj(t_emb)
-        start, stop, row = segment
-        h = (self.norm(x[start:stop]) * (1.0 + _mod_row(scale, row, scale.dtype))
-             + _mod_row(shift, row, shift.dtype)).to(torch.float32)
+        start, stop = target
+        h = (self.norm(x[:, start:stop]) * (1.0 + scale[0]) + shift[0]).to(torch.float32)
         if self.pdd_steps == 1:
             return self.video_out(h)
         weight, bias = self._bank(sigma, sample_sigmas)
@@ -303,6 +337,23 @@ class FinalLayer(nn.Module):
         )
 
 
+def _spans(rows: Sequence[Tuple[int, int, int]],
+           modulation: Tuple[torch.Tensor, ...]) -> list[Span]:
+    """One block's modulation projection -> the packed sequence's spans.
+
+    The row indexing happens here rather than in the block because a row number baked
+    into a compiled graph is a guard on it, and the rows of a run are not constants of
+    the architecture.
+    """
+    shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = modulation
+    return [
+        Span(start, stop,
+             Mod(shift_msa[row], scale_msa[row], gate_msa[row]),
+             Mod(shift_mlp[row], scale_mlp[row], gate_mlp[row]))
+        for start, stop, row in rows
+    ]
+
+
 class H3ImageDiT(nn.Module):
     """The image DiT: ``[text | references | target]`` in, the target's velocity out.
 
@@ -315,7 +366,7 @@ class H3ImageDiT(nn.Module):
         self.params = params
         self.video_patch_proj = Fp32Linear(params.video_dim, params.hidden_size,
                                            bias=True, out_dtype=None)
-        self.condition_proj = nn.Linear(params.text_dim, params.hidden_size, bias=True)
+        self.condition_proj = QuantizedLinear(params.text_dim, params.hidden_size, bias=True)
         self.register_buffer("adaln_t_table",
                              torch.empty(params.adaln_grid, params.adaln_dim, dtype=torch.float32))
         self.rope = nn.Module()
@@ -324,6 +375,8 @@ class H3ImageDiT(nn.Module):
         self.token_refiner = TokenRefiner(params)
         self.blocks = nn.ModuleList(DiTBlock(params) for _ in range(params.num_layers))
         self.final_layer = FinalLayer(params)
+        #: Rotary tables by conditioning branch; filled by :meth:`prepare_rope`.
+        self.pe_embedder = RopeCache(self._rope_table)
 
     @property
     def rope_dim(self) -> int:
@@ -331,37 +384,37 @@ class H3ImageDiT(nn.Module):
         return 6 * self.params.rope_inv_freq
 
     def _apply(self, fn, recurse=True):
-        """Move the model, keeping the modulation curve in FP32.
+        """Move the model, keeping the curve and the rope frequencies in FP32.
 
         The table is read by interpolating between neighbouring rows, and every
         modulation vector in the model is a projection of the result: rounding the
         curve to the compute dtype would move the conditioning of all 50 blocks, not
-        just one tensor. The FP32 linears pin themselves by the same mechanism.
+        just one tensor. An inverse frequency is multiplied by a coordinate that grows
+        with the canvas, so its rounding is amplified the same way. The FP32 linears
+        pin themselves by the same mechanism.
         """
         out = super()._apply(fn, recurse)
         if self.adaln_t_table.is_floating_point():
             self.adaln_t_table = self.adaln_t_table.float()
+        if self.rope.inv_freq.is_floating_point():
+            self.rope.inv_freq = self.rope.inv_freq.float()
         return out
 
     def refine_text(self, text_states: torch.Tensor) -> torch.Tensor:
         """``[1, L, text_dim]`` from the text encoder -> ``[1, L, hidden]``."""
-        return self.token_refiner(self.condition_proj(text_states[0])).unsqueeze(0)
+        return self.token_refiner(self.condition_proj(text_states))
 
-    def rope_angles(self, position_ids: torch.Tensor, dtype: torch.dtype
-                    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """``[S, 3]`` coordinates -> the run's ``(cos, sin)``, each ``[S, 1, 1, rope_dim]``.
+    def _rope_table(self, position_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """``[S, 3]`` coordinates -> ``(cos, sin)``, each ``[S, 1, 1, rope_dim]``.
 
-        All three axes share one frequency vector, and the angles are duplicated so
-        :func:`~thenoise.utils.rope.apply_rope_split_half` pairs dimension ``j`` with
-        ``j + rope_dim / 2``. The coordinates are float64, so the angles are computed
-        there and rounded once.
+        All three axes share one frequency vector. The coordinates are float64, so
+        they are brought to float32 here and the result is rounded once, by the cache.
         """
-        pos = position_ids.to(torch.float32)
-        inv = self.rope.inv_freq.to(pos.device)
-        per_axis = pos.unsqueeze(-1) * inv.view(1, 1, -1)
-        angles = torch.cat([per_axis[:, i] for i in range(per_axis.shape[1])], dim=-1)
-        angles = torch.cat((angles, angles), dim=-1)
-        return angles.cos()[:, None, None, :].to(dtype), angles.sin()[:, None, None, :].to(dtype)
+        return split_half_rope_axes(self.rope.inv_freq)(position_ids.to(torch.float32))
+
+    def prepare_rope(self, layout: Layout, dtype: torch.dtype, name: str = "cond") -> None:
+        """Build one branch's rotary table for a run; a forward then takes its ``name``."""
+        self.pe_embedder.store(name, layout.position_ids, dtype=dtype)
 
     def time_embedding(self, timesteps: Sequence[float], device: torch.device) -> torch.Tensor:
         """The curve table read at each timestep, interpolated between its rows.
@@ -392,21 +445,20 @@ class H3ImageDiT(nn.Module):
 
     def _codec_rows(self, target: torch.Tensor, refs: Sequence[torch.Tensor],
                     seed: int) -> torch.Tensor:
-        """Patchified rows in packing order: references (noise-augmented) then target.
+        """Patchified rows in packing order: the target, then the references.
 
         A reference is labelled as a nearly-noise row, so it is mixed with the noise
         that label promises — :data:`COND_TIMESTEP` of signal, the rest noise. Each
         one restarts the same RNG stream on purpose: a second reference must not
         inherit the random draws the first one consumed.
         """
-        rows = []
+        rows = [self.patchify(target.to(torch.float32))]
         for ref in refs:
             padded, _ = pad_to_patch(ref.to(torch.float32), self.params.patch_size)
             r = self.patchify(padded)
             gen = torch.Generator("cpu").manual_seed(seed)
             noise = torch.randn(r.shape, generator=gen, dtype=torch.float32)
             rows.append(COND_TIMESTEP * r + (1.0 - COND_TIMESTEP) * noise.to(r.device))
-        rows.append(self.patchify(target.to(torch.float32)))
         return torch.cat(rows, dim=0)
 
     def forward(
@@ -419,6 +471,8 @@ class H3ImageDiT(nn.Module):
         tags: Optional[torch.Tensor] = None,
         seed: int = 0,
         sample_sigmas: Optional[torch.Tensor] = None,
+        rope: str = "cond",
+        kv: Optional[KVCache] = None,
     ) -> torch.Tensor:
         """One forward pass; returns the target's velocity, ``[1, C, H, W]``.
 
@@ -426,8 +480,16 @@ class H3ImageDiT(nn.Module):
         whole patch and the padding cut back off the result), ``sigma`` the flow
         matching noise level, ``context`` the refined prompt ``[1, L, hidden]``,
         ``refs`` the reference latents in :attr:`Layout` order, ``tags`` the text
-        encoder's per-token modality tags, and ``sample_sigmas`` the schedule the run
-        is stepping through (needed whenever the head bank has more than one row).
+        encoder's per-token modality tags, ``sample_sigmas`` the schedule the run is
+        stepping through (needed whenever the head bank has more than one row),
+        ``rope`` the name this branch's rotary table was stored under, and ``kv`` this
+        branch's K/V cache.
+
+        A cached run walks the whole sequence once, references included, and afterwards
+        runs its leading rows — the prompt and the target — reading the references back
+        out of the buffers. That is the slice a cache may freeze: a reference is fed the
+        same latent, the same noise and :data:`COND_TIMESTEP` at every step, while the
+        prompt follows the step's timestep and is therefore recomputed.
         """
         device = latent.device
         dtype = context.dtype
@@ -439,37 +501,43 @@ class H3ImageDiT(nn.Module):
                 f"got {lat_h}x{lat_w}"
         )
 
-        # A reference's label is COND_TIMESTEP, not this step's time, and the table is
-        # indexed by the run's distinct timesteps in ascending order: at sigma 0.5 the
-        # target reads row 0 and the reference row 1 of the same embedding.
-        t = 1.0 - sigma
-        cond_t = max(t, COND_TIMESTEP)
-        timesteps = sorted({t, cond_t})
-        t_row = {value: i for i, value in enumerate(timesteps)}
-        segments = layout.modulation_rows(
-            {"text": t_row[t], "ref": t_row[cond_t], "target": t_row[t]}, tags
-        )
+        mode = cache_mode(kv, bool(refs))
+        rows = layout.modulation_rows(tags)
+        cos, sin = self.pe_embedder[rope]
+        if mode == "read":
+            n_rows = layout.target_span[1]
+            rows = [row for row in rows if row[0] < n_rows]
+            cos, sin = cos[:n_rows], sin[:n_rows]
+            patched = self.video_patch_proj(self.patchify(padded)).to(dtype)
+            h = torch.cat([context, patched.unsqueeze(0)], dim=1)
+        else:
+            patched = self.video_patch_proj(self._codec_rows(padded, refs, seed)).to(dtype)
+            h = torch.empty(1, layout.seq_len, self.params.hidden_size,
+                            dtype=dtype, device=device)
+            codec = 0
+            for start, stop, kind in layout.segments:
+                if kind == "text":
+                    h[:, start:stop] = context[0]
+                else:
+                    n = stop - start
+                    h[:, start:stop] = patched[codec:codec + n]
+                    codec += n
 
-        rows = self.video_patch_proj(self._codec_rows(padded, refs, seed)).to(dtype)
-        h = torch.empty(layout.seq_len, self.params.hidden_size, dtype=dtype, device=device)
-        codec = 0
-        text = context[0]
-        for start, stop, kind in layout.segments:
-            if kind == "text":
-                h[start:stop] = text
-            else:
-                n = stop - start
-                h[start:stop] = rows[codec:codec + n]
-                codec += n
+        # Row 0 of the modulation is this step's timestep and row 1 the reference's
+        # pinned one; the pair keeps its shape at the last step, where they coincide.
+        t = 1.0 - float(sigma)
+        t_emb = self.time_embedding((t, max(t, COND_TIMESTEP)), device)
+        kv_shape = (1, self.params.num_heads, layout.seq_len, self.params.head_dim)
+        mark_token_axis(h, dim=1)
+        mark_token_axis(cos, sin, dim=0)
+        for i, block in enumerate(self.blocks):
+            bufs = None if kv is None else kv.buffers(("attn", i), mode, kv_shape, dtype, device)
+            h = block(h, _spans(rows, block.adaln_proj(t_emb)), (cos, sin), bufs)
+        if kv is not None and mode == "fill":
+            kv.set_filled()
 
-        rope = self.rope_angles(layout.position_ids, dtype)
-        t_emb = self.time_embedding(timesteps, device)
-        for block in self.blocks:
-            h = block(h, t_emb, segments, rope)
-
-        out = self.final_layer(h, t_emb, (layout.target_span[0], layout.target_span[1],
-                                          t_row[t]), sigma, sample_sigmas)
-        out = self.unpatchify(out, lat_h, lat_w)
+        out = self.final_layer(h, t_emb, layout.target_span, sigma, sample_sigmas)
+        out = self.unpatchify(out[0], lat_h, lat_w)
         return -out[:, :, :orig_h, :orig_w].to(latent.dtype)
 
 
@@ -553,12 +621,16 @@ def load_h3_image_dit(
     The file is loaded with its own dtypes — BF16 trunk, FP32 patch projection and head
     bank, FP16 modulation heads — and only then moved to ``dtype``, because that move is
     where the FP32 islands pin themselves (:class:`~thenoise.utils.fp32_linear.Fp32Linear`
-    and :meth:`H3ImageDiT._apply`). Casting the state dict instead would round the
-    modulation factors the whole model is conditioned on before they ever arrived.
+    and :meth:`H3ImageDiT._apply`) and where the quantized weights stay quantized.
+    Casting the state dict instead would round the modulation factors the whole model is
+    conditioned on before they ever arrived.
+
+    The checkpoint stores the QK norms as ``attn.q_norm`` / ``attn.k_norm``; they are
+    remapped onto the shared :class:`~thenoise.utils.qk_norm.QKNorm` layout.
     """
     with init_empty_weights():
         model = H3ImageDiT(params)
-    load_dit(model, dit_path, device=device, dtype=None)
+    load_dit(model, dit_path, device=device, dtype=None, key_map=qk_norm_key_map)
     model.to(dtype=dtype)
     logger.info(
         "Loaded H3-Image DiT (%d layers, %dx%d heads, %d-step PDD head bank) from %s",

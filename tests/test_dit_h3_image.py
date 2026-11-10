@@ -15,6 +15,7 @@ from safetensors.torch import save_file
 
 from conftest import write_safetensors
 from thenoise.dit.h3_image import sampling
+from thenoise.dit.kvcache import KVCache
 from thenoise.dit.h3_image.encoder import (
     _truncate_qwen3_vl,
     layer_count,
@@ -66,6 +67,12 @@ def _tiny_dit(params: H3ImageParams | None = None) -> H3ImageDiT:
     return dit
 
 
+def _forward(dit, latent, sigma, context, layout, **kwargs) -> torch.Tensor:
+    """A forward with this branch's rotary table stored, as ``prepare_latent`` does."""
+    dit.prepare_rope(layout, context.dtype)
+    return dit(latent, sigma, context, layout, **kwargs)
+
+
 # ------------------------------------------------------------------ geometry
 
 
@@ -98,16 +105,16 @@ def test_pad_to_patch_repeats_the_edge_and_reports_the_original():
 def test_layout_segments_cover_the_sequence_in_order():
     layout = Layout(text_len=4, latent_h=4, latent_w=6, refs=[(2, 4), (4, 4)])
     kinds = [kind for _, _, kind in layout.segments]
-    assert kinds == ["text", "ref", "ref", "target"]
+    assert kinds == ["text", "target", "ref", "ref"]
 
     assert layout.segments[0][0] == 0
     for (_, end, _), (start, _, _) in zip(layout.segments, layout.segments[1:]):
         assert end == start
     assert layout.segments[-1][1] == layout.seq_len
-    assert layout.target_span == layout.segments[-1][:2]
+    assert layout.target_span == layout.segments[1][:2]
 
     # (2,4) is one row of patches x two; (4,4) is 2x2; the target (4,6) is 2x3.
-    assert [end - start for start, end, _ in layout.segments] == [4, 2, 4, 6]
+    assert [end - start for start, end, _ in layout.segments] == [4, 6, 2, 4]
     assert layout.codec_rows == 12
 
 
@@ -119,14 +126,14 @@ def test_layout_puts_references_one_time_unit_apart():
     tag alone cannot, since both are visual.
     """
     layout = Layout(text_len=3, latent_h=2, latent_w=2, refs=[(2, 2), (2, 2)])
-    (text_span, ref_a, ref_b, target) = [
-        layout.position_ids[start:stop] for start, stop, _ in layout.segments
-    ]
-    assert text_span[:, 0].tolist() == [0.0, 1.0, 2.0]
-    assert torch.equal(text_span[:, 1:], torch.zeros(3, 2))
-    assert ref_a[:, 0].unique().tolist() == [3.0]
-    assert ref_b[:, 0].unique().tolist() == [4.0]
-    assert target[:, 0].unique().tolist() == [5.0]
+    rows = {kind: layout.position_ids[start:stop]
+            for start, stop, kind in layout.segments}
+    ref_rows = [layout.position_ids[start:stop]
+                for start, stop, kind in layout.segments if kind == "ref"]
+    assert rows["text"][:, 0].tolist() == [0.0, 1.0, 2.0]
+    assert torch.equal(rows["text"][:, 1:], torch.zeros(3, 2))
+    assert [float(r[:, 0][0]) for r in ref_rows] == [3.0, 4.0]
+    assert rows["target"][:, 0].unique().tolist() == [5.0]
 
 
 def test_layout_without_references_is_text_then_target():
@@ -135,26 +142,25 @@ def test_layout_without_references_is_text_then_target():
     assert layout.refs == ()
 
 
-def test_modulation_rows_follow_the_timestep_and_the_tags():
+def test_modulation_rows_follow_the_step_and_the_tags():
     layout = Layout(text_len=4, latent_h=2, latent_w=2)
-    rows = layout.modulation_rows({"text": 1, "ref": 1, "target": 1})
-    assert rows == [(0, 4, 4), (4, 5, 3)]  # t-row 1: text tag 1 -> 4, visual tag 0 -> 3
+    assert layout.modulation_rows() == [(0, 4, 1), (4, 5, 0)]  # text tag 1, visual tag 0
 
     tags = torch.tensor([1, 0, 0, 1])
-    split = layout.modulation_rows({"text": 0, "ref": 0, "target": 0}, tags=tags)
-    assert split == [(0, 1, 1), (1, 3, 0), (3, 4, 1), (4, 5, 0)]
+    assert layout.modulation_rows(tags=tags) == [
+        (0, 1, 1), (1, 3, 0), (3, 4, 1), (4, 5, 0)]
 
 
 def test_a_reference_is_modulated_at_its_own_timestep():
     """A reference's pinned timestep is a different row than the target's.
 
-    The run's distinct timesteps are sorted, so at any sigma above 0.001 the target is
-    row 0 and the reference row 1: reading the target's row for both would condition a
-    reference as picture-to-be-cleaned, which is the one thing the packing exists to avoid.
+    Row 0 is the step's ``t``, which the prompt and the target share, and row 1 is
+    :data:`COND_TIMESTEP`: reading the target's row for both would condition a
+    reference as picture-to-be-cleaned, which is the one thing the packing exists to
+    avoid.
     """
     layout = Layout(text_len=3, latent_h=2, latent_w=2, refs=[(2, 2)])
-    rows = layout.modulation_rows({"text": 0, "ref": 1, "target": 0})
-    assert rows == [(0, 3, 1), (3, 4, 3), (4, 5, 0)]
+    assert layout.modulation_rows() == [(0, 3, 1), (3, 4, 0), (4, 5, 3)]
 
 
 # ---------------------------------------------------------------- head bank
@@ -197,8 +203,8 @@ def test_head_bank_demands_the_schedule_it_is_stepping_through():
 def test_forward_needs_no_schedule_for_a_single_head():
     params = _tiny_params(pdd_steps=1, pdd_sigmas=(1.0, 0.0))
     dit = _tiny_dit(params)
-    out = dit(torch.randn(1, 4, 4, 4), 1.0, torch.randn(1, 3, params.hidden_size),
-              Layout(3, 4, 4))
+    out = _forward(dit, torch.randn(1, 4, 4, 4), 1.0, torch.randn(1, 3, params.hidden_size),
+                   Layout(3, 4, 4))
     assert out.shape == (1, 4, 4, 4)
 
 
@@ -210,7 +216,8 @@ def test_forward_returns_the_targets_velocity():
     params = dit.params
     latent = torch.randn(1, params.latents_dim, 6, 6)
     context = torch.randn(1, 5, params.hidden_size)
-    out = dit(latent, 0.75, context, Layout(5, 6, 6), sample_sigmas=torch.tensor(TINY_SIGMAS))
+    out = _forward(dit, latent, 0.75, context, Layout(5, 6, 6),
+                   sample_sigmas=torch.tensor(TINY_SIGMAS))
 
     assert out.shape == latent.shape
     assert torch.isfinite(out).all()
@@ -223,8 +230,8 @@ def test_forward_cuts_the_padding_back_off_an_odd_latent():
     params = dit.params
     latent = torch.randn(1, params.latents_dim, 5, 7)
     layout = Layout(2, 6, 8)  # the padded shape
-    out = dit(latent, 1.0, torch.randn(1, 2, params.hidden_size), layout,
-              sample_sigmas=torch.tensor(TINY_SIGMAS))
+    out = _forward(dit, latent, 1.0, torch.randn(1, 2, params.hidden_size), layout,
+                   sample_sigmas=torch.tensor(TINY_SIGMAS))
     assert out.shape == (1, params.latents_dim, 5, 7)
 
 
@@ -235,6 +242,13 @@ def test_forward_rejects_a_layout_built_for_another_shape():
             sample_sigmas=torch.tensor(TINY_SIGMAS))
 
 
+def test_forward_demands_the_rope_table_of_its_branch():
+    dit = _tiny_dit()
+    with pytest.raises(KeyError, match="no entry for"):
+        dit(torch.randn(1, 4, 4, 4), 1.0, torch.randn(1, 3, 48), Layout(3, 4, 4),
+            sample_sigmas=torch.tensor(TINY_SIGMAS))
+
+
 def test_references_join_the_sequence_without_reaching_the_output():
     dit = _tiny_dit()
     params = dit.params
@@ -242,12 +256,61 @@ def test_references_join_the_sequence_without_reaching_the_output():
     context = torch.randn(1, 3, params.hidden_size)
     ref = torch.randn(1, params.latents_dim, 2, 2)
 
-    plain = dit(latent, 1.0, context, Layout(3, 4, 4),
-                sample_sigmas=torch.tensor(TINY_SIGMAS))
-    with_ref = dit(latent, 1.0, context, Layout(3, 4, 4, [(2, 2)]), refs=[ref],
-                   sample_sigmas=torch.tensor(TINY_SIGMAS))
+    plain = _forward(dit, latent, 1.0, context, Layout(3, 4, 4),
+                     sample_sigmas=torch.tensor(TINY_SIGMAS))
+    with_ref = _forward(dit, latent, 1.0, context, Layout(3, 4, 4, [(2, 2)]), refs=[ref],
+                        sample_sigmas=torch.tensor(TINY_SIGMAS))
     assert with_ref.shape == plain.shape
     assert not torch.allclose(with_ref, plain)
+
+
+def test_kv_cache_freezes_the_references_and_reproduces_the_full_sequence():
+    """Fill (references present) then read (references dropped, K/V cached) == full.
+
+    At one latent and one sigma the read path must reproduce the packed forward
+    exactly, which pins the trailing reference span, the buffer write offsets and the
+    rope slicing. Across steps the cache is an approximation by design; this is the
+    part that is exact.
+    """
+    dit = _tiny_dit()
+    params = dit.params
+    latent = torch.randn(1, params.latents_dim, 4, 4)
+    context = torch.randn(1, 3, params.hidden_size)
+    ref = torch.randn(1, params.latents_dim, 2, 2)
+    layout = Layout(3, 4, 4, [(2, 2)])
+    dit.prepare_rope(layout, torch.float32)
+    sigmas = torch.tensor(TINY_SIGMAS)
+
+    full = dit(latent, 0.5, context, layout, refs=[ref], sample_sigmas=sigmas)
+    kv = KVCache("run")
+    filled = dit(latent, 0.5, context, layout, refs=[ref], sample_sigmas=sigmas, kv=kv)
+    assert kv.filled
+    read = dit(latent, 0.5, context, layout, sample_sigmas=sigmas, kv=kv)
+
+    assert torch.allclose(filled, full, atol=1e-6)
+    assert torch.allclose(read, full, atol=1e-6)
+    # One pair of buffers for the single block, sized to the whole packed sequence.
+    bufs = next(iter(kv._buffers.values()))
+    assert bufs.capacity == layout.seq_len
+
+
+def test_kv_cache_holds_every_reference_of_the_run():
+    """Several references are one suffix: the cached span is their combined length."""
+    dit = _tiny_dit()
+    params = dit.params
+    latent = torch.randn(1, params.latents_dim, 4, 4)
+    context = torch.randn(1, 3, params.hidden_size)
+    refs = [torch.randn(1, params.latents_dim, 2, 2), torch.randn(1, params.latents_dim, 2, 4)]
+    layout = Layout(3, 4, 4, [(2, 2), (2, 4)])
+    dit.prepare_rope(layout, torch.float32)
+    sigmas = torch.tensor(TINY_SIGMAS)
+
+    full = dit(latent, 0.5, context, layout, refs=refs, sample_sigmas=sigmas)
+    kv = KVCache("run")
+    dit(latent, 0.5, context, layout, refs=refs, sample_sigmas=sigmas, kv=kv)
+    read = dit(latent, 0.5, context, layout, sample_sigmas=sigmas, kv=kv)
+    assert torch.allclose(read, full, atol=1e-6)
+    assert next(iter(kv._buffers.values())).capacity == layout.seq_len
 
 
 def test_reference_rows_are_mixed_with_the_noise_their_timestep_promises():
@@ -261,18 +324,18 @@ def test_reference_rows_are_mixed_with_the_noise_their_timestep_promises():
     ref = torch.ones(1, 4, 2, 2)
     target = torch.zeros(1, 4, 2, 2)
     rows = dit._codec_rows(target, [ref, ref], seed=7)
-    first, second = rows[:1], rows[1:2]
+    first, second = rows[1:2], rows[2:]
 
     # The sliver of noise is the one its label promises, from the stream that restarts
     # for each reference: 16 values for the one patch row a (2,2) latent makes.
     noise = torch.randn(1, 16, generator=torch.Generator("cpu").manual_seed(7))
     assert torch.allclose(first, COND_TIMESTEP * ref.reshape(1, -1) + (1 - COND_TIMESTEP) * noise)
 
-    # The target's own rows are fed as they are.
-    assert torch.equal(rows[2:], target.reshape(1, -1))
+    # The target's own rows are fed as they are, and they are packed first.
+    assert torch.equal(rows[0:1], target.reshape(1, -1))
 
     assert torch.equal(first, second)
-    assert not torch.equal(first, dit._codec_rows(target, [ref], seed=8)[:1])
+    assert not torch.equal(first, dit._codec_rows(target, [ref], seed=8)[1:2])
 
 
 def test_attention_normalizes_each_heads_query_and_key():
@@ -283,11 +346,11 @@ def test_attention_normalizes_each_heads_query_and_key():
     """
     dit = _tiny_dit()
     attn = dit.blocks[0].attn
-    x = torch.randn(6, dit.params.hidden_size)
+    x = torch.randn(1, 6, dit.params.hidden_size)
     base = attn(x)
 
-    for name in ("q_norm", "k_norm"):
-        norm = getattr(attn, name)
+    for name in ("query_norm", "key_norm"):
+        norm = getattr(attn.qk_norm, name)
         with torch.no_grad():
             norm.weight.mul_(1.5)
         perturbed = attn(x)
@@ -304,7 +367,8 @@ def test_refine_text_projects_the_prompt_to_the_trunk():
 
 def test_rope_rotates_part_of_the_head_and_passes_the_rest():
     dit = _tiny_dit()
-    cos, sin = dit.rope_angles(torch.rand(4, 3, dtype=torch.float64), torch.float32)
+    cos, sin = dit.pe_embedder.store("t", torch.rand(4, 3, dtype=torch.float64),
+                                     dtype=torch.float32)
     assert cos.shape == (4, 1, 1, dit.params.rope_dim)
     assert dit.params.rope_dim < dit.params.head_dim  # a partial rotation
     assert torch.allclose(cos.pow(2) + sin.pow(2), torch.ones_like(cos), atol=1e-5)
@@ -329,9 +393,11 @@ def test_time_embedding_interpolates_the_curve_and_clamps():
 
 
 def _write_dit(tmp_path, dit, params, sigmas=TINY_SIGMAS) -> str:
+    """A file in the release's own key spelling: it names the QK norms ``q_norm``/``k_norm``."""
     path = tmp_path / "h3-dit.safetensors"
     save_file(
-        {k: v.contiguous() for k, v in dit.state_dict().items()},
+        {k.replace("qk_norm.query_norm", "q_norm").replace("qk_norm.key_norm", "k_norm"):
+         v.contiguous() for k, v in dit.state_dict().items()},
         str(path),
         metadata={"config": json.dumps(
             {"transformer": {"pdd_steps": params.pdd_steps, "pdd_sigmas": list(sigmas)}}
@@ -386,7 +452,9 @@ def test_detect_refuses_a_head_bank_that_disagrees_with_its_grid(tmp_path):
 def test_detect_defaults_to_one_head_without_the_metadata(tmp_path):
     dit = _tiny_dit(_tiny_params(pdd_steps=1, pdd_sigmas=(1.0, 0.0)))
     path = tmp_path / "plain.safetensors"
-    write_safetensors(path, {k: v.contiguous() for k, v in dit.state_dict().items()})
+    write_safetensors(path, {k.replace("qk_norm.query_norm", "q_norm")
+                             .replace("qk_norm.key_norm", "k_norm"): v.contiguous()
+                             for k, v in dit.state_dict().items()})
     assert detect_params(str(path)).pdd_steps == 1
 
 
