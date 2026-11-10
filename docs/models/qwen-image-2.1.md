@@ -1,10 +1,5 @@
 # Qwen-Image 2.1
 
-Text-to-image prefix caching is opt-in (`--kv-cache`) for INT8-ConvRot checkpoints;
-BF16 and incompatible runtime-LoRA projections use uncached sampling. This also works
-on CUDA and ROCm without hard-coded GPU or library-version pins; numerical
-equivalence must still be checked when changing quantization backends.
-
 **One model for everything: t2i *and* edit.**
 
 Qwen-Image 2.1 is the newest generation: a single-stream DiT that does

@@ -854,21 +854,10 @@ def test_pnginfo_of_an_image_that_carries_none():
 
 
 def test_kv_cache_requires_an_edit_request():
+    """``kv_cache`` is a reference-latent optimization: it needs a reference image."""
     controller = _controller()
     with pytest.raises(ValueError, match="requires an edit request"):
         controller.generate(_request(kv_cache=True))
-
-
-def test_int8_t2i_can_request_prefix_cache():
-    model = StubModel()
-    model.KV_CACHE_WITHOUT_REFERENCE = True
-    model.CAPABILITIES = {**StubModel.CAPABILITIES, "kv_cache": True}
-    controller = _controller(model)
-    controller.generate(_request(width=64, height=64, steps=1, kv_cache=True))
-    assert model.params_seen[-1].kv_cache is True
-    key_on = controller._cache_key_sampling(("prompt",), 64, 64, 1, 7, "euler", kv_cache=True)
-    key_off = controller._cache_key_sampling(("prompt",), 64, 64, 1, 7, "euler", kv_cache=False)
-    assert key_on != key_off
 
 
 def test_kv_cache_requires_a_model_that_supports_it():

@@ -65,7 +65,6 @@ index_timestep_zero` (see [`/edit`](#post-edit)).
 | `upscale_type` | `string` | `refined` | `refined` (latent 2x + refiner) or `no-refiner` (pixel upscaler only) |
 | `pixel_upscaler` | `string` | `null` | Pixel upscaler name (no `.safetensors` suffix) from `--upscaler-dir` |
 | `sampler` | `string` | model default | Denoising solver: `euler` or `er_sde` |
-| `kv_cache` | `boolean` | `null` | Opt-in fixed-text-prefix reuse for Qwen-Image 2.1 INT8-ConvRot T2I; BF16 falls back to uncached sampling |
 | `qwen_vae_enhance` | `bool` | `false` | Nyquist notch post-filter (removes 2px grid artifacts) |
 | `saturation` | `float` | `0.0` | Colour saturation around neutral `0.0`: -1.0 greyscales, 1.0 doubles |
 | `vibrance` | `float` | `0.0` | Saturation that lifts washed-out pixels and leaves vivid ones alone |
