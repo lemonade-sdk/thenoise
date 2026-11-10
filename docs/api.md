@@ -65,6 +65,7 @@ index_timestep_zero` (see [`/edit`](#post-edit)).
 | `upscale_type` | `string` | `refined` | `refined` (latent 2x + refiner) or `no-refiner` (pixel upscaler only) |
 | `pixel_upscaler` | `string` | `null` | Pixel upscaler name (no `.safetensors` suffix) from `--upscaler-dir` |
 | `sampler` | `string` | model default | Denoising solver: `euler` or `er_sde` |
+| `kv_cache` | `boolean` | auto | Reuse step-invariant K/V across denoising steps. T2I defaults off (opt-in); compatible edits auto-enable based on `ref_method`. Explicit `true` requires model support |
 | `qwen_vae_enhance` | `bool` | `false` | Nyquist notch post-filter (removes 2px grid artifacts) |
 | `saturation` | `float` | `0.0` | Colour saturation around neutral `0.0`: -1.0 greyscales, 1.0 doubles |
 | `vibrance` | `float` | `0.0` | Saturation that lifts washed-out pixels and leaves vivid ones alone |
@@ -128,7 +129,6 @@ Accepts all `/text2image` fields plus:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `image` | `string` \| `string[]` | *(required)* | One or more base64-encoded reference images (OpenAI-style; first sets the output size when `width`/`height` omitted) |
-| `kv_cache` | `boolean` | auto | Reference-latent KV cache (freeze the reference tokens' K/V across denoise steps for faster editing). Auto = on when the resolved `ref_method` is `index_timestep_zero` and the model implements the cache, off otherwise. Forcing it to `true` also selects that method when `ref_method` is left on auto |
 | `ref_method` | `string` | auto | Reference conditioning: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index`. The cache default follows it |
 
 > **Reference method.** Checkpoints trained to condition their reference tokens

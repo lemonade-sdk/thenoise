@@ -91,3 +91,25 @@ def test_the_adapter_upscales_with_the_trained_transcoder(monkeypatch):
     assert upscaler.scale == QwenImage21Model.UPSCALE_SCALE
     assert loaded == [(torch.device("cpu"), torch.float32)]
     assert model.get_upscaler() is upscaler  # built once, then cached
+
+
+def test_text_only_run_can_create_kv_caches():
+    from types import SimpleNamespace
+
+    from thenoise.models.base import Conditioning
+    from thenoise.models.config import SamplingParams
+
+    dit = SimpleNamespace(
+        build_sequence=lambda *_args, **_kwargs: SimpleNamespace(
+            prefix=torch.ones(1, 2, 4)
+        )
+    )
+    model = _bare(dit=dit)
+    params = SamplingParams(
+        height=32, width=32, steps=2, seed=1,
+        guidance_scale=1.0, sampler="euler", kv_cache=True,
+    )
+    model.prepare_latent(
+        torch.zeros(1, 4, 2, 2), Conditioning(cond=torch.zeros(1, 2, 4)), params
+    )
+    assert model.kv_cache("cond") is not None

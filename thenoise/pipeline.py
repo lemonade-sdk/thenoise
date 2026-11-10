@@ -207,12 +207,12 @@ class PipelineController:
 
         Embeds the prompt key so any prompt/guidance/LoRA change cascades, and the
         custom ``sigmas`` grid so two grids of the same length never share cached
-        latents. The edit path also embeds ``ref_method`` and ``kv_cache``, both of
-        which change the denoise output.
+        latents. The KV-cache flag is part of both T2I and edit keys so toggling
+        it cannot reuse an incompatible sampling result.
         """
         base = (prompt_key, width, height, steps, seed, sampler, sigmas)
         if ref_method is None:
-            return ("sampling",) + base
+            return ("sampling",) + base + (kv_cache,)
         return ("sampling_edit",) + base + (ref_method, kv_cache)
 
     def _cache_key_decode(
@@ -297,10 +297,7 @@ class PipelineController:
         model = self.model
         is_edit = ref_key is not None
 
-        # The KV cache is a reference-latent optimization: it needs an edit request.
-        if r.kv_cache and not is_edit:
-            raise ValueError("kv_cache requires an edit request (a reference image)")
-        if r.kv_cache and is_edit and not model.capability("kv_cache"):
+        if r.kv_cache and not model.capability("kv_cache"):
             raise ValueError(f"model '{model.name}' does not support the reference-latent KV cache")
 
         prompt_key = self._cache_key_prompt(
@@ -487,11 +484,10 @@ class PipelineController:
             factor, upscale_type, pixel_upscaler
         )
 
-        # An explicit cache with the method on auto picks the method that makes it
-        # valid; an explicit ``index`` stays explicit and is rejected below.
-        if kv_cache and request.ref_method is None:
+        # Reference-method restrictions apply only to edits, not T2I.
+        if kv_cache and is_edit and request.ref_method is None:
             ref_method = "index_timestep_zero"
-        if kv_cache and ref_method != "index_timestep_zero":
+        if kv_cache and is_edit and ref_method != "index_timestep_zero":
             raise ValueError(
                 "kv_cache requires ref_method='index_timestep_zero': the cached "
                 "reference K/V are only step-invariant when the reference tokens are "

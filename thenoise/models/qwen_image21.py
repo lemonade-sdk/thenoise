@@ -193,7 +193,7 @@ class QwenImage21Model(DiffusionModel):
 
         self.start_kv_caches(
             params,
-            has_reference=refs is not None,
+            has_reference=self._seqs["cond"].prefix is not None,  # text also caches in T2I
             has_uncond=params.guidance_scale > 1.0 and "uncond" in self._seqs,
         )
         return x
