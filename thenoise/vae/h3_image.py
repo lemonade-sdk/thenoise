@@ -35,8 +35,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from thenoise.utils.attention import eager_attention
-from thenoise.utils.rope import apply_rope_split_half, split_half_rope_axes
 from thenoise.utils.rms_norm import RMSNorm
+from thenoise.utils.rope import apply_rope_split_half, split_half_rope_axes
 from thenoise.utils.safetensors import MemoryEfficientSafeOpen, load_safetensors
 from thenoise.utils.setup_logging import setup_logging
 
@@ -88,6 +88,12 @@ ROPE_DIM_RATIO = 0.5
 ROPE_THETA = 100.0
 NUM_REGISTER_TOKENS = 4
 NORM_EPS = 1e-5
+
+#: Pixels per tile, and the cross-fade between neighbouring ones. The decoder's rope
+#: spans whatever grid it is handed, so a wider grid than this is a scale it never saw:
+#: encoding or decoding a whole large frame leaves the latent grid stamped on the pixels.
+TILE_SIZE = 256
+TILE_BLEND = 64
 
 
 # --------------------------------------------------------------------------- encoder
@@ -211,12 +217,12 @@ def token_ids(dims: Tuple[int, int], device, dtype) -> torch.Tensor:
 
 
 class RotaryEmbedding2D(nn.Module):
-    """Split-half rope over the ``(h, w)`` latent axes, over ``dim`` of the head dim.
+    """Split-half rope over the ``(h, w)`` latent axes, over ``dim`` of the head.
 
     Coordinates arrive in ``[-1, 1]``, so a whole axis spans exactly one turn of the
     lowest frequency. The angles are duplicated to fill ``dim`` because
     :func:`~thenoise.utils.rope.apply_rope_split_half` pairs index ``i`` with
-    ``i + dim/2``.
+    ``i + dim/2``; the rest of the head is left alone.
     """
 
     def __init__(self, dim: int, rotary_base: float = ROPE_THETA, n_dim: int = 2):
@@ -338,7 +344,7 @@ class ViTImageDecoder(nn.Module):
 
         ids = token_ids((height, width), x.device, torch.float32)
         suffix = torch.zeros(1 + self.num_register_tokens, 2, device=ids.device, dtype=ids.dtype)
-        rope = tuple(f.to(x.dtype) for f in self.pos_embed(torch.cat([ids, suffix], dim=0)))
+        rope = self.pos_embed(torch.cat([ids, suffix], dim=0))
 
         for block in self.transformer_blocks:
             h = block(h, rope)
@@ -348,6 +354,56 @@ class ViTImageDecoder(nn.Module):
         return patches.permute(0, 3, 1, 4, 2, 5).reshape(
             batch, self.out_channels, height * self.patch_size, width * self.patch_size
         )
+
+
+# --------------------------------------------------------------------------- tiling
+
+
+def split_tiles(length: int, tile_size: int, blend: int, cell_px: int):
+    """Tile ``(starts, lengths, blends)`` covering ``length`` pixels.
+
+    Neighbours always overlap by at least ``blend`` and by as much more as it takes to
+    land on ``length`` exactly, spread a latent cell at a time over the seams. A frame
+    no larger than a tile is its own single tile.
+    """
+    if blend >= tile_size:
+        raise ValueError(f"a tile blend of {blend} leaves nothing to decode of a {tile_size} tile")
+    if tile_size >= length:
+        return [0], [length], []
+
+    count = math.ceil(length / tile_size)
+    overlaps = [blend] * (count - 1)
+    while tile_size * count - sum(overlaps) < length:
+        count += 1
+        overlaps = [blend] * (count - 1)
+    for i in range((tile_size * count - sum(overlaps) - length) // cell_px):
+        overlaps[i % (count - 1)] += cell_px
+
+    starts = [0]
+    for overlap in overlaps:
+        starts.append(starts[-1] + tile_size - overlap)
+    return starts, [tile_size] * count, overlaps
+
+
+def blend_tiles(a: torch.Tensor, b: torch.Tensor, extent: int, dim: int) -> torch.Tensor:
+    """Cross-fade the leading ``extent`` slices of ``b`` against the trailing ones of ``a``."""
+    extent = min(a.shape[dim], b.shape[dim], extent)
+    if extent <= 0:
+        return b
+    ramp = torch.arange(extent, device=b.device, dtype=b.dtype)
+    shape = [1] * b.ndim
+    shape[dim] = extent
+    ramp = ramp.view(shape)
+    tail = [slice(None)] * a.ndim
+    tail[dim] = slice(-extent, None)
+    head = [slice(None)] * b.ndim
+    head[dim] = slice(0, extent)
+    blended = a[tuple(tail)] * (1.0 - ramp / extent) + b[tuple(head)] * (ramp / extent)
+    if extent < b.shape[dim]:
+        rest = [slice(None)] * b.ndim
+        rest[dim] = slice(extent, None)
+        return torch.cat([blended, b[tuple(rest)]], dim=dim)
+    return blended
 
 
 # --------------------------------------------------------------------------- the codec
@@ -365,7 +421,8 @@ class AutoencoderKLH3Image(nn.Module):
     pixel_channels = 3
 
     def __init__(self, ch: int = CH, ch_mult=CH_MULT, dim: int = 1024, num_layers: int = 24,
-                 patch_size: Optional[int] = None):
+                 patch_size: Optional[int] = None, tile_size: int = TILE_SIZE,
+                 tile_blend: int = TILE_BLEND):
         """``ch``/``ch_mult`` are the encoder's stage widths, ``dim``/``num_layers`` the
         decoder's width and depth.
 
@@ -376,6 +433,8 @@ class AutoencoderKLH3Image(nn.Module):
         """
         super().__init__()
         self.patch_size = self.spatial_compression if patch_size is None else patch_size
+        self.tile_size = tile_size
+        self.tile_blend = tile_blend
 
         self.encoder = EncoderFCN3D(ch=ch, ch_mult=ch_mult)
         self.quant_conv = nn.Conv3d(2 * Z_CHANNELS, 2 * Z_CHANNELS, 1)
@@ -395,6 +454,87 @@ class AutoencoderKLH3Image(nn.Module):
     def device(self) -> torch.device:
         return next(self.decoder.parameters()).device
 
+    def _encode_moments(self, x: torch.Tensor) -> torch.Tensor:
+        """Pixel-normalized frames -> the ``2 * z`` posterior moments of the same grid."""
+        return self.quant_conv(self.encoder(x.unsqueeze(2)))
+
+    def _decode_pixels(self, z: torch.Tensor) -> torch.Tensor:
+        """Un-normalized latent -> raw decoder pixels, before the pixel un-normalize."""
+        return self.decoder(self.post_quant_conv(z))
+
+    def _tiled_moments(self, x: torch.Tensor) -> torch.Tensor:
+        """Encode each tile on its own, then cross-fade the seams in latent space."""
+        p = self.patch_size
+        y_at, y_len, y_blend = split_tiles(x.shape[-2], self.tile_size, self.tile_blend, p)
+        x_at, x_len, x_blend = split_tiles(x.shape[-1], self.tile_size, self.tile_blend, p)
+
+        rows = [[self._encode_moments(x[..., i:i + li, j:j + lj])
+                 for j, lj in zip(x_at, x_len)] for i, li in zip(y_at, y_len)]
+        y_blend = [b // p for b in y_blend]
+        x_blend = [b // p for b in x_blend]
+
+        out_rows = []
+        for i, row in enumerate(rows):
+            out = []
+            for j, tile in enumerate(row):
+                if i > 0:
+                    tile = blend_tiles(rows[i - 1][j], tile, y_blend[i - 1], dim=-2)
+                if j > 0:
+                    tile = blend_tiles(row[j - 1], tile, x_blend[j - 1], dim=-1)
+                if i < len(rows) - 1:
+                    tile = tile[..., :-y_blend[i], :]
+                if j < len(row) - 1:
+                    tile = tile[..., :, :-x_blend[j]]
+                out.append(tile)
+            out_rows.append(torch.cat(out, dim=-1))
+        return torch.cat(out_rows, dim=-2)
+
+    def _tiled_decode(self, z: torch.Tensor) -> torch.Tensor:
+        """Decode each latent tile on its own and cross-fade the seams in pixels.
+
+        Each tile is decoded as a frame of its own, which is what keeps every tile's
+        rope span inside the range the decoder was trained on. Seams are blended against
+        their already-blended neighbours, so a crossing stays continuous.
+        """
+        p = self.patch_size
+        height, width = z.shape[-2] * p, z.shape[-1] * p
+        y_at, y_len, y_blend = split_tiles(height, self.tile_size, self.tile_blend, p)
+        x_at, x_len, x_blend = split_tiles(width, self.tile_size, self.tile_blend, p)
+
+        canvas = torch.empty((z.shape[0], self.pixel_channels, height, width),
+                             dtype=z.dtype, device=z.device)
+        strip: Optional[torch.Tensor] = None
+        out_y = 0
+        for i, (y, yl) in enumerate(zip(y_at, y_len)):
+            row = z[..., y // p:y // p + yl // p, :]
+            new_strip = None
+            left_tail = None
+            out_x = 0
+            tile_height = 0
+            for j, x in enumerate(x_at):
+                tile = self._decode_pixels(row[..., x // p:x // p + x_len[j] // p])
+                if i > 0:
+                    tile = blend_tiles(strip[..., :, x:x + x_len[j]], tile, y_blend[i - 1], dim=-2)
+                if j > 0:
+                    tile = blend_tiles(left_tail, tile, x_blend[j - 1], dim=-1)
+                last_x = j == len(x_at) - 1
+                left_tail = None if last_x else tile[..., :, -x_blend[j]:].clone()
+                if not last_x:
+                    tile = tile[..., :, :-x_blend[j]]
+                last_y = i == len(y_at) - 1
+                if not last_y:
+                    if new_strip is None:
+                        new_strip = torch.empty((*tile.shape[:-2], y_blend[i], width),
+                                                dtype=tile.dtype, device=tile.device)
+                    new_strip[..., :, out_x:out_x + tile.shape[-1]] = tile[..., -y_blend[i]:, :]
+                    tile = tile[..., :-y_blend[i], :]
+                canvas[..., out_y:out_y + tile.shape[-2], out_x:out_x + tile.shape[-1]].copy_(tile)
+                tile_height = tile.shape[-2]
+                out_x += tile.shape[-1]
+            strip = new_strip
+            out_y += tile_height
+        return canvas
+
     def encode_pixels_to_latents(self, pixels: torch.Tensor) -> torch.Tensor:
         """``[B, 3, H, W]`` in [-1, 1] -> the normalized canonical latent.
 
@@ -404,7 +544,7 @@ class AutoencoderKLH3Image(nn.Module):
         x = pixels.to(self.device, self.dtype)
         x = ((x + 1.0) * 0.5 - self.pixel_mean.to(x)) / self.pixel_std.to(x)
 
-        moments = self.quant_conv(self.encoder(x.unsqueeze(2))).float()
+        moments = self._tiled_moments(x).float()
         mean, logvar = moments.chunk(2, dim=1)
         noise = torch.randn(
             mean.shape, generator=torch.Generator().manual_seed(ENCODE_SEED)
@@ -418,7 +558,7 @@ class AutoencoderKLH3Image(nn.Module):
         """Normalized canonical latent -> pixels clamped to [-1, 1]."""
         z = latents.to(self.device, self.dtype)
         z = z * self.latents_std.to(z) + self.latents_mean.to(z)
-        pixels = self.decoder(self.post_quant_conv(z))
+        pixels = self._tiled_decode(z)
         pixels = (pixels * self.pixel_std.to(pixels) + self.pixel_mean.to(pixels)) * 2.0 - 1.0
         return pixels.clamp(-1.0, 1.0)
 

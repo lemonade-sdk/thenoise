@@ -34,7 +34,9 @@ prompt with no system turn and no user turn around it, and each reference splice
 - Built-in defaults: **2048×2048, 6 steps, guidance 1.0, euler** — guidance is distilled
   in, so a negative prompt is an extrapolation off the training distribution
 - 20.1 B DiT: 21 GB int8-convrot, 40 GB bf16 — the largest model here by a distance
-- Its own codec: 24-channel latent at 16 px per cell, with a ViT decoder
+- Its own codec: 24-channel latent at 16 px per cell, with a ViT decoder. Both halves work
+  in 256 px tiles, the grid their rope knows; a whole large frame in one pass stamps that
+  tile grid into the pixels
 - Tokenizer and image preprocessor are vendored in this repository; nothing is fetched
 
 ## Specs

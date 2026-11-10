@@ -3,7 +3,8 @@
 The encoder is the H3 video encoder held to a single frame, so its interesting property
 is that the causal-temporal shortcut — convolving with the kernel's last tap instead of
 padding zeros in front — is the same convolution. Then the latent and pixel affine
-transformations, the fixed-seed posterior sample, and the loader's geometry sniffing.
+transformations, the fixed-seed posterior sample, the tiling the codec only ever runs
+inside, and the loader's geometry sniffing.
 """
 from __future__ import annotations
 
@@ -13,7 +14,10 @@ import torch.nn.functional as F
 
 from conftest import write_safetensors
 from thenoise.vae import AutoencoderKLH3Image, load_h3_image_vae
-from thenoise.vae.h3_image import ENCODE_SEED, LATENTS_MEAN, LATENTS_STD, CausalConv3d
+from thenoise.vae.h3_image import (
+    ENCODE_SEED, LATENTS_MEAN, LATENTS_STD, TILE_BLEND, TILE_SIZE, CausalConv3d,
+    blend_tiles, split_tiles,
+)
 
 def _tiny_vae() -> AutoencoderKLH3Image:
     """The shipped architecture with a 32-channel encoder and a narrow decoder.
@@ -104,6 +108,77 @@ def test_decode_reads_the_register_suffix_back_out(tiny_vae):
 def test_dtype_and_device_follow_the_weights(tiny_vae):
     assert tiny_vae.dtype == tiny_vae.decoder.x_embedder.weight.dtype
     assert tiny_vae.device == tiny_vae.decoder.x_embedder.weight.device
+
+
+def test_split_tiles_lands_on_the_frame_edge():
+    """Tiles cover the frame exactly, never a cell short and never a tile wide.
+
+    The slack left over by the minimum overlaps is spread a latent cell at a time, so a
+    frame of whole cells needs no ragged final tile — and a tile is never larger than
+    the grid the decoder's rope was trained to span.
+    """
+    for length in (272, 320, 512, 704, 1024, 1248):
+        starts, lengths, overlaps = split_tiles(length, TILE_SIZE, TILE_BLEND, 16)
+        assert starts[0] == 0
+        assert starts[-1] + lengths[-1] == length
+        assert len(starts) == len(lengths) == len(overlaps) + 1
+        assert all(o >= TILE_BLEND and o % 16 == 0 for o in overlaps)
+        assert all(s + l <= length for s, l in zip(starts, lengths))
+
+    assert split_tiles(240, TILE_SIZE, TILE_BLEND, 16) == ([0], [240], [])
+    with pytest.raises(ValueError, match="tile blend"):
+        split_tiles(512, TILE_SIZE, TILE_SIZE, 16)
+
+
+def test_blend_tiles_ramps_then_hands_the_rest_over():
+    a, b = torch.zeros(1, 1, 4), torch.ones(1, 1, 4)
+    out = blend_tiles(a, b, 2, dim=-1)
+    assert out.shape == b.shape
+    assert torch.allclose(out, torch.tensor([[[0.0, 0.5, 1.0, 1.0]]]))
+    assert torch.equal(blend_tiles(a, b, 0, dim=-1), b)
+
+
+def test_the_codec_only_ever_sees_a_tile(tiny_vae, monkeypatch):
+    """A frame larger than a tile is encoded and decoded tile by tile.
+
+    The rope spans whatever grid it is handed, so a whole large frame is a coordinate
+    range neither half was trained on — which shows up in the pixels as a grid at one
+    latent cell period. Nothing may reach either half wider than a tile.
+    """
+    monkeypatch.setattr(tiny_vae, "tile_size", 64)
+    monkeypatch.setattr(tiny_vae, "tile_blend", 32)
+    cells = 64 // tiny_vae.patch_size
+    seen = []
+
+    def spy(tile):
+        seen.append(tuple(tile.shape[-2:]))
+        return torch.zeros(1, 3, tile.shape[-2] * 16, tile.shape[-1] * 16)
+
+    monkeypatch.setattr(tiny_vae, "_decode_pixels", spy)
+    with torch.no_grad():
+        pixels = tiny_vae.decode_to_pixels(torch.zeros(1, 24, 12, 12))
+
+    assert pixels.shape == (1, 3, 192, 192)
+    assert len(seen) == 25, "192 pixels of 64-pixel tiles with overlap is 5 tiles per side"
+    assert set(seen) == {(cells, cells)}
+
+    seen.clear()
+    monkeypatch.setattr(tiny_vae, "_encode_moments",
+                        lambda x: seen.append(tuple(x.shape[-2:]))
+                        or torch.zeros(1, 48, 1, cells, cells))
+    with torch.no_grad():
+        tiny_vae.encode_pixels_to_latents(torch.zeros(1, 3, 192, 192))
+    assert len(seen) == 25
+    assert set(seen) == {(64, 64)}
+
+
+def test_a_frame_inside_a_tile_is_decoded_as_one_grid(tiny_vae):
+    """Below a tile there is nothing to cut, and tiling must not disturb the result."""
+    latent = torch.randn(1, 24, 3, 4)
+    pixels = torch.randn(1, 3, 48, 64)
+    with torch.no_grad():
+        assert torch.equal(tiny_vae._tiled_decode(latent), tiny_vae._decode_pixels(latent))
+        assert torch.equal(tiny_vae._tiled_moments(pixels), tiny_vae._encode_moments(pixels))
 
 
 def _write_checkpoint(tmp_path, vae, drop=()):
