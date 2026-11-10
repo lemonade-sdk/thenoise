@@ -2,8 +2,8 @@
 
 Ported from ComfyUI's ``comfy/ldm/qwen_image21/model.py`` (itself a port of the
 diffusers Qwen-Image 2.1 implementation, Apache-2.0) onto this engine's shared
-parts. Weight names follow the released checkpoints; the only renames are the QK
-norms onto the shared ``QKNorm`` layout (see ``thenoise.dit.qwen_image21.utils``).
+parts. Checkpoint Q/K/V weights are stacked on load; the QK norms are mapped
+onto the shared ``QKNorm`` layout (see ``thenoise.dit.qwen_image21.utils``).
 
 The sequence layout is ``[text … references … target]``:
 
@@ -166,15 +166,13 @@ class SwiGLUFeedForward(nn.Module):
 
 
 class Attention(nn.Module):
-    """Attention over one joint sequence: separate QKV, QK-norm, RoPE, out proj."""
+    """Joint attention with Q/K/V fused at checkpoint load time."""
 
     def __init__(self, dim: int, num_heads: int, head_dim: int, eps: float = 1e-6) -> None:
         super().__init__()
         self.num_heads = num_heads
         inner = num_heads * head_dim
-        self.to_q = QuantizedLinear(dim, inner, bias=False)
-        self.to_k = QuantizedLinear(dim, inner, bias=False)
-        self.to_v = QuantizedLinear(dim, inner, bias=False)
+        self.qkv = QuantizedLinear(dim, 3 * inner, bias=False)
         self.qk_norm = QKNorm(head_dim, eps=eps)
         # ``to_out`` is a ModuleList to match the checkpoint's ``to_out.0`` key.
         self.to_out = nn.ModuleList([QuantizedLinear(inner, dim, bias=False)])
@@ -185,9 +183,8 @@ class Attention(nn.Module):
         def split(t: Tensor) -> Tensor:
             return t.view(B, N, self.num_heads, -1).transpose(1, 2)
 
-        q = split(self.to_q(x))
-        k = split(self.to_k(x))
-        v = split(self.to_v(x))
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+        q, k, v = split(q), split(k), split(v)
         q, k = self.qk_norm(q, k)
         q, k = apply_rope(q, k, pe)
         return self.to_out[0](plan.run(q, k, v))

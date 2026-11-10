@@ -41,7 +41,7 @@ from thenoise.models.base import (
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, Qwen21TranscodeUpscaler
 from thenoise.utils.image_tensor import flatten_alpha, ReferenceSizing
-from thenoise.utils.lora import FUSE_GATE_UP
+from thenoise.utils.lora import FUSE_GATE_UP, FUSE_QKV
 from thenoise.utils.math import round_up
 from thenoise.vae import load_wan22_vae
 
@@ -95,8 +95,8 @@ class QwenImage21Model(DiffusionModel):
             config.dit_path, device=self._load_target(config.dit_path), dtype=config.dtype
         )
 
-        # A fused-MLP checkpoint needs a LoRA's split SwiGLU names fused onto gate_up.
-        self.lora_fusions = FUSE_GATE_UP if self.dit.params.fused_mlp else {}
+        # Map split LoRA Q/K/V and (if needed) SwiGLU factors to fused modules.
+        self.lora_fusions = {**FUSE_QKV, **(FUSE_GATE_UP if self.dit.params.fused_mlp else {})}
 
         # Per-run state, filled in by ``prepare_latent``.
         self._seqs: dict[str, QwenImage21Sequence] = {}

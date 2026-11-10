@@ -4,6 +4,11 @@ from __future__ import annotations
 import torch
 from PIL import Image
 
+from comfy_kitchen.tensor import QuantizedTensor, TensorWiseINT8Layout
+from conftest import comfy_quant, write_safetensors
+from thenoise.dit.quantized import QuantizedLinear
+from thenoise.dit.qwen_image21.utils import _fuse_qkv_state
+from thenoise.utils.loader import restore_quantized_layer
 from thenoise.models import QwenImage21Model
 from thenoise.models.base import DiffusionModel
 from thenoise.models.config import EncodePromptArgs
@@ -91,3 +96,34 @@ def test_the_adapter_upscales_with_the_trained_transcoder(monkeypatch):
     assert upscaler.scale == QwenImage21Model.UPSCALE_SCALE
     assert loaded == [(torch.device("cpu"), torch.float32)]
     assert model.get_upscaler() is upscaler  # built once, then cached
+
+
+def test_qkv_checkpoint_fold_and_quantized_undo(tmp_path):
+    prefix = "transformer_blocks.0.attn."
+    state = {}
+    for i, part in enumerate("qkv", 1):
+        name = f"{prefix}to_{part}"
+        state[name + ".weight"] = torch.full((256, 256), i, dtype=torch.int8)
+        state[name + ".weight_scale"] = torch.full((256, 1), i / 100)
+        state[name + ".comfy_quant"] = comfy_quant()
+
+    merged = _fuse_qkv_state(state)
+    key = prefix + "qkv"
+    assert merged[key + ".weight"].shape == (768, 256)
+    assert [int(x) for x in merged[key + ".weight"][:, 0][::256]] == [1, 2, 3]
+    assert merged[key + ".weight_scale"].shape == (768, 1)
+    assert not any(".to_q." in k or ".to_k." in k or ".to_v." in k for k in merged)
+
+    path = write_safetensors(tmp_path / "qkv.safetensors", state)
+    params = TensorWiseINT8Layout.Params(
+        scale=merged[key + ".weight_scale"], orig_dtype=torch.bfloat16,
+        orig_shape=(768, 256), is_weight=True, convrot=True, convrot_groupsize=256,
+    )
+    layer = QuantizedLinear(256, 768, bias=False)
+    layer.load_quantized(QuantizedTensor(merged[key + ".weight"], "TensorWiseINT8Layout", params))
+    expected = merged[key + ".weight"].clone()
+    layer.weight._qdata.zero_()
+    restore_quantized_layer(layer, path,
+                            tuple(f"{prefix}to_{p}.weight" for p in "qkv"))
+    assert torch.equal(layer.weight._qdata, expected)
+    assert torch.equal(layer.weight.params.scale, merged[key + ".weight_scale"])

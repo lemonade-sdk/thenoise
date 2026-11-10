@@ -159,9 +159,8 @@ def load_dit(
     ``state_map`` is a whole-state-dict fold, for the case where ONE parameter is
     several checkpoint tensors (e.g. stacking ``to_q/to_k/to_v`` into a fused
     ``qkv``). A fold must keep every ``.weight_scale``/``.comfy_quant`` sibling with
-    the weight it belongs to. Caveat: it renames module paths while the LoRA-undo
-    restore map is keyed on the checkpoint's own names, so folding a QUANTIZED
-    checkpoint breaks baked-LoRA undo on the folded layers.
+    the weight it belongs to. Folding a quantized checkpoint also requires the
+    adapter to map its fused module to the original keys for baked-LoRA undo.
     """
     device = torch.device(device)
 
@@ -406,23 +405,22 @@ def build_quantized_restore_map(
 def restore_quantized_layer(
     module: torch.nn.Module,
     path: str,
-    raw_key: str,
+    raw_key: str | tuple[str, ...],
 ) -> None:
-    """Restore a quantized layer's weight from a checkpoint by raw key.
-
-    Reads only the low-bit ``weight`` and its ``.weight_scale`` straight from the
-    file, and rebuilds a ``QuantizedTensor`` in the layer's existing layout profile.
-    """
+    """Restore a quantized layer from one or several stacked checkpoint weights."""
+    keys = (raw_key,) if isinstance(raw_key, str) else raw_key
     with MemoryEfficientSafeOpen(path) as f:
-        qdata = f.get_tensor(
-            raw_key,
-            device=module.weight.device,
-            dtype=module.weight.storage_dtype,
-        )
-        scale = f.get_tensor(
-            raw_key[: -len(".weight")] + _WEIGHT_SCALE_SUFFIX,
-            device=module.weight.params.scale.device,
-        )
+        weights = [f.get_tensor(key, device=module.weight.device,
+                                dtype=module.weight.storage_dtype) for key in keys]
+        scales = [f.get_tensor(key[: -len(".weight")] + _WEIGHT_SCALE_SUFFIX,
+                               device=module.weight.params.scale.device) for key in keys]
+    qdata = torch.cat(weights, dim=0) if len(weights) > 1 else weights[0]
+    if len(scales) > 1 and any(s.numel() == 1 for s in scales):
+        if not all(torch.equal(scales[0], s) for s in scales[1:]):
+            raise ValueError("cannot restore fused weight with incompatible scalar scales")
+        scale = scales[0]
+    else:
+        scale = torch.cat(scales, dim=0) if len(scales) > 1 else scales[0]
     qt = module.weight._copy_with(
         qdata=qdata,
         params=dataclasses.replace(module.weight.params, scale=scale),

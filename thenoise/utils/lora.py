@@ -319,7 +319,7 @@ def _lora_targets(model: torch.nn.Module):
 class _Undo(NamedTuple):
     mode: LoraMode
     factors: Optional[LoraFactors] = None   # BAKED: the delta is recomputed to undo it
-    raw_key: Optional[str] = None           # BAKED_QUANTIZED: raw checkpoint key
+    raw_key: Optional[str | tuple[str, ...]] = None  # BAKED_QUANTIZED: original key(s)
 
 
 class LoRAApplyResult(TypedDict):

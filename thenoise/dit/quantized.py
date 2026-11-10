@@ -152,7 +152,7 @@ class QuantizedLinear(nn.Module):
         self._lora_down = None
         self._lora_up = None
 
-    def undo_lora(self, dit_path: Optional[str], raw_key: Optional[str]) -> None:
+    def undo_lora(self, dit_path: Optional[str], raw_key: Optional[str | tuple[str, ...]]) -> None:
         """Undo a baked LoRA by reloading this layer's originals from the checkpoint."""
         if not dit_path or not raw_key:
             raise RuntimeError(
