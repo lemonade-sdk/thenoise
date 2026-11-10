@@ -183,8 +183,22 @@ def _is_options_problem(error: dict) -> bool:
     return not where or where[0] in OPTIONS_BY_KIND or where[0] in POSTPROCESS_NAMES
 
 
-def create_app(runtime) -> FastAPI:
-    app = FastAPI(title="thenoise", version=__version__)
+def create_app(runtime, *, video_jobs=None, video_model: str = "") -> FastAPI:
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def video_lifespan(_app: FastAPI):
+        try:
+            yield
+        finally:
+            video_jobs.close()
+
+    app = FastAPI(title="thenoise", version=__version__,
+                  lifespan=video_lifespan if video_jobs is not None else None)
+
+    if video_jobs is not None:
+        from thenoise.video.http import install_video_routes
+        install_video_routes(app, video_jobs, video_model)
 
     def image_response(image, out: str):
         """PNG bytes, or the same bytes base64-wrapped, with the image's own metadata."""

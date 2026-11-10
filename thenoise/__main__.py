@@ -1,6 +1,7 @@
 """Entrypoint: parse CLI, load a single model, then serve via uvicorn."""
 from __future__ import annotations
 
+from pathlib import Path
 from .cli import build_parser
 
 
@@ -17,6 +18,9 @@ def _serve(args) -> None:
     # Load the model only when all three checkpoints are supplied; otherwise
     # serve model-free (upscale only).
     model_paths = [args.dit, args.vae, args.text_encoder]
+    if args.video_model_dir and any(model_paths):
+        raise SystemExit("serve: --video-model-dir is video-only; do not combine it with image model paths")
+
     if any(model_paths):
         if not all(model_paths):
             raise SystemExit(
@@ -32,11 +36,22 @@ def _serve(args) -> None:
             ),
         )
 
+    video_jobs = None
+    video_model = ""
+    if args.video_model_dir:
+        from .video.service import create_video_service
+        video_jobs, video_model = create_video_service(
+            args.video_model_dir, device=settings.device, offload=args.video_offload,
+            cache_dir=str(Path(args.video_cache_dir).expanduser()),
+        )
+
     from .api import create_app
     import uvicorn
 
-    app = create_app(runtime)
-    if runtime.available():
+    app = create_app(runtime, video_jobs=video_jobs, video_model=video_model)
+    if video_jobs is not None:
+        print(f"thenoise serving video model '{video_model}' on {settings.device}")
+    elif runtime.available():
         print(f"thenoise serving model '{runtime.model_name}' on {settings.device}")
     else:
         print(f"thenoise serving WITHOUT a model on {settings.device} "

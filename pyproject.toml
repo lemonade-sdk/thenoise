@@ -27,6 +27,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+# Kept out of normal image installs. Torch remains managed by the operator.
+video = ["diffusers>=0.38.0", "av>=14", "ftfy>=6", "sentencepiece>=0.2"]
 # Download helpers in scripts/ (not needed at runtime).
 scripts = ["huggingface-hub>=0.34.3"]
 
@@ -60,6 +62,7 @@ packages = [
     "thenoise.utils",
     "thenoise.utils.text_encoder",
     "thenoise.vae",
+    "thenoise.video",
 ]
 
 [tool.setuptools.package-data]
