@@ -407,10 +407,13 @@ class H3ImageDiT(nn.Module):
     def _rope_table(self, position_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """``[S, 3]`` coordinates -> ``(cos, sin)``, each ``[S, 1, 1, rope_dim]``.
 
-        All three axes share one frequency vector. The coordinates are float64, so
-        they are brought to float32 here and the result is rounded once, by the cache.
+        All three axes share one frequency vector. The table is built where the model
+        lives — a :class:`~.layout.Layout` carries its coordinates on the CPU — and in
+        float32, since a coordinate is multiplied by an inverse frequency long before
+        anything is rounded down to the compute dtype.
         """
-        return split_half_rope_axes(self.rope.inv_freq)(position_ids.to(torch.float32))
+        pos = position_ids.to(self.rope.inv_freq.device, torch.float32)
+        return split_half_rope_axes(self.rope.inv_freq)(pos)
 
     def prepare_rope(self, layout: Layout, dtype: torch.dtype, name: str = "cond") -> None:
         """Build one branch's rotary table for a run; a forward then takes its ``name``."""
