@@ -99,6 +99,34 @@ def _value_map(key: str, tensor: torch.Tensor) -> tuple[str, torch.Tensor]:
     return key, tensor
 
 
+def _fuse_qkv_state(state: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """Stack split checkpoint Q/K/V weights and their quantization metadata."""
+    fused = dict(state)
+    for q in (k for k in state if k.endswith(".attn.to_q.weight")):
+        prefix = q[: -len("to_q.weight")]
+        for suffix in ("weight", "weight_scale", "comfy_quant"):
+            keys = [f"{prefix}to_{p}.{suffix}" for p in "qkv"]
+            present = [k for k in keys if k in fused]
+            if not present:
+                continue
+            if len(present) != 3:
+                raise ValueError(f"incomplete QKV {suffix}: {prefix}")
+            values = [fused.pop(k) for k in keys]
+            if suffix == "comfy_quant" or (suffix == "weight_scale" and
+                                            all(v.numel() == 1 for v in values)):
+                if not all(torch.equal(values[0], v) for v in values[1:]):
+                    raise ValueError(f"incompatible QKV {suffix}: {prefix}")
+                merged = values[0]
+            else:
+                if suffix == "weight_scale" and any(v.numel() == 1 for v in values):
+                    raise ValueError(f"mixed QKV scale granularity: {prefix}")
+                if any(v.dtype != values[0].dtype for v in values[1:]):
+                    raise ValueError(f"mixed QKV {suffix} dtypes: {prefix}")
+                merged = torch.cat(values, dim=0)
+            fused[f"{prefix}qkv.{suffix}"] = merged
+    return fused
+
+
 def load_qwen_image21_dit(
     dit_path: str,
     device: Union[str, torch.device],
@@ -116,7 +144,16 @@ def load_qwen_image21_dit(
         dtype=dtype,
         key_map=_key_map,
         value_map=_value_map,
+        state_map=_fuse_qkv_state,
     )
+    # A baked INT8 LoRA must undo by reloading the original split checkpoint keys.
+    restore = getattr(dit, "_quantized_restore_map", None)
+    if restore is not None:
+        for i in range(params.num_layers):
+            prefix = f"transformer_blocks.{i}.attn."
+            keys = [prefix + f"to_{p}" for p in "qkv"]
+            if all(k in restore for k in keys):
+                restore[prefix + "qkv"] = tuple(restore.pop(k) for k in keys)
     return dit
 
 

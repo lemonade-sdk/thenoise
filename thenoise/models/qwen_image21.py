@@ -29,7 +29,7 @@ from thenoise.dit.qwen_image21.encoder import (
     QwenImage21TextEncoder,
     load_qwen_image21_text_encoder,
 )
-from thenoise.dit.qwen_image21.models import Attention, QwenImage21Sequence
+from thenoise.dit.qwen_image21.models import QwenImage21Sequence
 from thenoise.dit.qwen_image21.utils import is_qwen_image21_key
 from thenoise.dit.qwen_image21.utils import load_qwen_image21_dit
 from thenoise.models.base import (
@@ -41,7 +41,7 @@ from thenoise.models.base import (
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, Qwen21TranscodeUpscaler
 from thenoise.utils.image_tensor import flatten_alpha, ReferenceSizing
-from thenoise.utils.lora import FUSE_GATE_UP
+from thenoise.utils.lora import FUSE_GATE_UP, FUSE_QKV
 from thenoise.utils.math import round_up
 from thenoise.vae import load_wan22_vae
 
@@ -94,13 +94,9 @@ class QwenImage21Model(DiffusionModel):
         self.dit = load_qwen_image21_dit(
             config.dit_path, device=self._load_target(config.dit_path), dtype=config.dtype
         )
-        if all(Attention._int8_convrot(p)
-               for block in self.dit.transformer_blocks
-               for p in (block.attn.to_q, block.attn.to_k, block.attn.to_v)):
-            self.dit.fuse_qkv_projections()
 
-        # A fused-MLP checkpoint needs a LoRA's split SwiGLU names fused onto gate_up.
-        self.lora_fusions = FUSE_GATE_UP if self.dit.params.fused_mlp else {}
+        # Map split LoRA Q/K/V and (if needed) SwiGLU factors to fused modules.
+        self.lora_fusions = {**FUSE_QKV, **(FUSE_GATE_UP if self.dit.params.fused_mlp else {})}
 
         # Per-run state, filled in by ``prepare_latent``.
         self._seqs: dict[str, QwenImage21Sequence] = {}
@@ -122,19 +118,6 @@ class QwenImage21Model(DiffusionModel):
         self.memory.register("vae", self.vae)
 
         logger.info("Qwen-Image 2.1 model ready on %s (%s)", config.device, config.dtype)
-
-    def switch_loras(self, lora_specs, dit) -> None:
-        # The named Q/K/V weights are LoRA targets; rejoin them after a change.
-        if (not lora_specs and self._active_lora_result is None) or (
-            self._make_lora_spec_hash(lora_specs) == self._active_lora_spec
-        ):
-            return super().switch_loras(lora_specs, dit)
-        was_fused = any(block.attn.to_qkv is not None for block in dit.transformer_blocks)
-        if was_fused:
-            dit.unfuse_qkv_projections()
-        super().switch_loras(lora_specs, dit)
-        if was_fused and not self._lora_state_unfit:
-            dit.fuse_qkv_projections()
 
     # ------------------------------------------------------------ kernels
     def _encoder_images(self, args: EncodePromptArgs) -> Optional[list]:

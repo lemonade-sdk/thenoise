@@ -360,8 +360,6 @@ def qwen_image21_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     read = scenario == "read"
 
     blk = new_block(ctx, name, QwenImage21TransformerBlock, dim, heads, head_dim, mlp_ratio=3)
-    if ctx.weights == "int8" and blk.attn.fuse_qkv_projections():
-        ctx.quant_note += " qkv=fused"
     seed_inputs(name, scenario, tokens)
 
     # Positions as build_sequence lays them out: text first, then one centred grid
@@ -416,9 +414,7 @@ def qwen_image21_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     # live tokens, and skips the text segment (its K/V is what was cached).
     if read:
         keys = [(tokens, full)]
-    # The original Q/K/V aliases still exist, but are not run separately.
-    duplicate = gemm_params(blk.attn.to_qkv) if blk.attn.to_qkv is not None else 0
-    flops = gemm_flops((gemm_params(blk) - duplicate, n)) + attn_flops(heads, head_dim, tuple(keys))
+    flops = gemm_flops((gemm_params(blk), n)) + attn_flops(heads, head_dim, tuple(keys))
     return Case(run, flops, n, detail=f"prefix={prefix} cache={full if refs else 0}")
 
 

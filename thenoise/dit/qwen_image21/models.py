@@ -2,8 +2,8 @@
 
 Ported from ComfyUI's ``comfy/ldm/qwen_image21/model.py`` (itself a port of the
 diffusers Qwen-Image 2.1 implementation, Apache-2.0) onto this engine's shared
-parts. Weight names follow the released checkpoints; the only renames are the QK
-norms onto the shared ``QKNorm`` layout (see ``thenoise.dit.qwen_image21.utils``).
+parts. Checkpoint Q/K/V weights are stacked on load; the QK norms are mapped
+onto the shared ``QKNorm`` layout (see ``thenoise.dit.qwen_image21.utils``).
 
 The sequence layout is ``[text … references … target]``:
 
@@ -25,7 +25,6 @@ from typing import Optional, Sequence
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
-from comfy_kitchen.tensor import QuantizedTensor, TensorWiseINT8Layout
 
 from thenoise.dit.kvcache import KVBuffers, KVCache, attend, cache_mode
 from thenoise.dit.quantized import QuantizedLinear
@@ -167,86 +166,16 @@ class SwiGLUFeedForward(nn.Module):
 
 
 class Attention(nn.Module):
-    """Joint attention, with optional INT8-ConvRot QKV projection fusion."""
+    """Joint attention with Q/K/V fused at checkpoint load time."""
 
     def __init__(self, dim: int, num_heads: int, head_dim: int, eps: float = 1e-6) -> None:
         super().__init__()
         self.num_heads = num_heads
         inner = num_heads * head_dim
-        self.to_q = QuantizedLinear(dim, inner, bias=False)
-        self.to_k = QuantizedLinear(dim, inner, bias=False)
-        self.to_v = QuantizedLinear(dim, inner, bias=False)
-        self.to_qkv = None
-        self._qkv_scale_shapes = None
+        self.qkv = QuantizedLinear(dim, 3 * inner, bias=False)
         self.qk_norm = QKNorm(head_dim, eps=eps)
         # ``to_out`` is a ModuleList to match the checkpoint's ``to_out.0`` key.
         self.to_out = nn.ModuleList([QuantizedLinear(inner, dim, bias=False)])
-
-    @staticmethod
-    def _int8_convrot(proj: QuantizedLinear) -> bool:
-        w = proj.weight
-        if not isinstance(w, QuantizedTensor) or w.layout_cls is not TensorWiseINT8Layout:
-            return False
-        p = w.params
-        return (
-            w.storage_dtype is torch.int8 and w.dtype is torch.bfloat16
-            and tuple(w.shape) == (proj.out_features, proj.in_features)
-            and tuple(w.storage_shape) == tuple(w.shape)
-            and tuple(p.orig_shape) == tuple(w.shape)
-            and p.orig_dtype is torch.bfloat16 and p.is_weight is True
-            and p.transposed is False and p.convrot is True
-            and p.convrot_groupsize == 256 and p.scale.dtype is torch.float32
-            and tuple(p.scale.shape) in ((proj.out_features,), (proj.out_features, 1))
-        )
-
-    def fuse_qkv_projections(self) -> bool:
-        if self.to_qkv is not None:
-            return True
-        projections = (self.to_q, self.to_k, self.to_v)
-        if not all(self._int8_convrot(p) for p in projections):
-            return False
-        weights = [p.weight for p in projections]
-        data = torch.cat([w._qdata for w in weights], dim=0)
-        scales = torch.cat([w.params.scale.reshape(-1) for w in weights])
-        joined = QuantizedTensor(data, weights[0]._layout_cls, replace(
-            weights[0].params, scale=scales, orig_shape=tuple(data.shape),
-        ))
-        qkv = QuantizedLinear(self.to_q.in_features, data.shape[0], bias=False)
-        qkv.load_quantized(joined)
-        self._qkv_scale_shapes = [tuple(w.params.scale.shape) for w in weights]
-        self.to_qkv = qkv
-        self._restore_qkv_views()
-        return True
-
-    def _restore_qkv_views(self) -> None:
-        """Keep original LoRA targets as zero-copy views of the fused weight."""
-        w = self.to_qkv.weight
-        inner = self.to_q.out_features
-        for i, proj in enumerate((self.to_q, self.to_k, self.to_v)):
-            start = i * inner
-            proj.weight = QuantizedTensor(
-                w._qdata.narrow(0, start, inner), w._layout_cls,
-                replace(w.params,
-                    scale=w.params.scale.reshape(-1).narrow(0, start, inner).reshape(
-                        self._qkv_scale_shapes[i]),
-                    orig_shape=(inner, proj.in_features),
-                ),
-            )
-
-    def unfuse_qkv_projections(self) -> None:
-        self.to_qkv = None
-        self._qkv_scale_shapes = None
-
-    def _apply(self, fn, recurse: bool = True):
-        if self.to_qkv is None or not recurse:
-            return super()._apply(fn, recurse)
-        projections = (self.to_q, self.to_k, self.to_v)
-        for proj in projections:
-            proj.weight = None  # transfer canonical storage only once
-        try:
-            return super()._apply(fn, recurse)
-        finally:
-            self._restore_qkv_views()
 
     def forward(self, x: Tensor, pe: Tensor, plan: AttentionPlan) -> Tensor:
         B, N, _ = x.shape
@@ -254,17 +183,7 @@ class Attention(nn.Module):
         def split(t: Tensor) -> Tensor:
             return t.view(B, N, self.num_heads, -1).transpose(1, 2)
 
-        if self.to_qkv is None:
-            q, k, v = self.to_q(x), self.to_k(x), self.to_v(x)
-        else:
-            q, k, v = self.to_qkv(x).chunk(3, dim=-1)
-            # Quantized LoRAs may keep a runtime low-rank branch.
-            if self.to_q._lora_down is not None:
-                q = q + self.to_q._lora_branch(x)
-            if self.to_k._lora_down is not None:
-                k = k + self.to_k._lora_branch(x)
-            if self.to_v._lora_down is not None:
-                v = v + self.to_v._lora_branch(x)
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
         q, k, v = split(q), split(k), split(v)
         q, k = self.qk_norm(q, k)
         q, k = apply_rope(q, k, pe)
@@ -456,23 +375,6 @@ class QwenImage21Transformer2DModel(nn.Module):
         )
 
     # -------------------------------------------------------------------- forward
-    def fuse_qkv_projections(self) -> bool:
-        attentions = [block.attn for block in self.transformer_blocks]
-        if not all(all(attn._int8_convrot(p) for p in
-                       (attn.to_q, attn.to_k, attn.to_v)) for attn in attentions):
-            return False
-        try:
-            for attn in attentions:
-                attn.fuse_qkv_projections()
-        except BaseException:
-            self.unfuse_qkv_projections()
-            raise
-        return True
-
-    def unfuse_qkv_projections(self) -> None:
-        for block in self.transformer_blocks:
-            block.attn.unfuse_qkv_projections()
-
     def forward(
         self,
         x: Tensor,

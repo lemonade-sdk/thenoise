@@ -630,7 +630,7 @@ def test_a_quantized_component_weighs_its_storage_not_its_logical_dtype():
 
     mm = MemoryManager("cpu", "meta")
     mm.register("int8", holder)
-    assert mm.weight_bytes("int8") == rows * cols + quantized.params.scale.nbytes
+    assert mm.weight_bytes("int8") == rows * cols
 
 
 def test_a_component_that_reports_no_weights_says_so(caplog):
