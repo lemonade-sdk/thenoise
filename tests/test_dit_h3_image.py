@@ -27,6 +27,7 @@ from thenoise.dit.h3_image.models import (
     COND_TIMESTEP,
     H3ImageDiT,
     H3ImageParams,
+    _spans,
     detect_params,
     load_h3_image_dit,
 )
@@ -439,6 +440,54 @@ def test_load_keeps_the_fp32_islands_at_fp32(tmp_path):
     assert loaded.blocks[0].adaln_proj.linear.weight.dtype == torch.float32
     assert loaded.blocks[0].norm1.weight.dtype == torch.bfloat16
     assert loaded.blocks[0].attn.qkv_proj.weight.dtype == torch.bfloat16
+
+
+def test_a_bf16_run_keeps_the_stream_at_bf16(tmp_path):
+    """The FP32 islands must not widen the trunk they feed.
+
+    The modulation is projected in FP32 from an FP32 curve; handed to the residual as
+    FP32 it promotes the stream, and every norm and GEMM of every later block then
+    runs at the wrong width — and warns about it.
+    """
+    dit = _tiny_dit()
+    path = _write_dit(tmp_path, dit, dit.params)
+    loaded = load_h3_image_dit(path, detect_params(path), device="cpu", dtype=torch.bfloat16)
+
+    block = loaded.blocks[0]
+    modulation = block.adaln_proj(loaded.time_embedding((0.5, COND_TIMESTEP), torch.device("cpu")))
+    assert modulation[0].dtype == torch.bfloat16
+
+    spans = _spans([(0, 6, 1), (6, 8, 3)], modulation)
+    cos = torch.ones(8, 1, 1, loaded.params.rope_dim, dtype=torch.bfloat16)
+    out = block(torch.randn(1, 8, loaded.params.hidden_size, dtype=torch.bfloat16),
+                spans, (cos, torch.zeros_like(cos)), None)
+    assert out.dtype == torch.bfloat16
+
+
+def test_a_bf16_edit_run_with_a_cache_stays_at_bf16(tmp_path):
+    """One loaded BF16 run of every path: islands in, trunk through, cache in between.
+
+    Both errors this pins are silent in a FP32 test: a widened stream only shows at
+    the first norm that disagrees with its weights, and a K/V buffer narrower than the
+    query only shows when ``attend`` reads the buffer back.
+    """
+    dit = _tiny_dit()
+    path = _write_dit(tmp_path, dit, dit.params)
+    loaded = load_h3_image_dit(path, detect_params(path), device="cpu", dtype=torch.bfloat16)
+    p = loaded.params
+    layout = Layout(3, 4, 4, [(2, 2)])
+    loaded.prepare_rope(layout, torch.bfloat16)
+    latent = torch.randn(1, p.latents_dim, 4, 4, dtype=torch.bfloat16)
+    context = torch.randn(1, 3, p.hidden_size, dtype=torch.bfloat16)
+    ref = torch.randn(1, p.latents_dim, 2, 2, dtype=torch.bfloat16)
+
+    kv = KVCache("run")
+    filled = loaded(latent, 0.5, context, layout, refs=[ref],
+                    sample_sigmas=torch.tensor(TINY_SIGMAS), kv=kv)
+    read = loaded(latent, 0.5, context, layout,
+                  sample_sigmas=torch.tensor(TINY_SIGMAS), kv=kv)
+    assert filled.dtype == read.dtype == torch.bfloat16
+    assert torch.isfinite(filled).all() and torch.isfinite(read).all()
 
 
 def test_detect_refuses_a_head_bank_that_disagrees_with_its_grid(tmp_path):

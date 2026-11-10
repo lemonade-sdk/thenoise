@@ -178,14 +178,20 @@ class AdalnProj(nn.Module):
     ``forward`` turns ``[M, t_dim]`` into ``expand`` tensors of ``[M * modalities,
     hidden]``, so the ``M`` timesteps of one forward — the target's and the pinned
     one the references carry — are projected together and indexed by row.
+
+    The projection runs in FP32 on a curve that is itself FP32, but its result joins a
+    residual stream at the trunk dtype, so ``out_dtype`` brings it back: an FP32 shift
+    would otherwise widen the stream for the remaining blocks.
     """
 
-    def __init__(self, t_dim: int, hidden: int, expand: int, modalities: int):
+    def __init__(self, t_dim: int, hidden: int, expand: int, modalities: int,
+                 out_dtype: Optional[torch.dtype] = None):
         super().__init__()
         self.expand = expand
         self.modalities = modalities
         self.hidden = hidden
-        self.linear = Fp32Linear(t_dim, expand * hidden * modalities, bias=True)
+        self.linear = Fp32Linear(t_dim, expand * hidden * modalities, bias=True,
+                                 out_dtype=out_dtype)
 
     def forward(self, t_emb: torch.Tensor) -> Tuple[torch.Tensor, ...]:
         x = self.linear(t_emb)
@@ -215,14 +221,15 @@ def _gate(x: torch.Tensor, spans: Sequence[Span], update: torch.Tensor, attn: bo
 
 
 class DiTBlock(nn.Module):
-    def __init__(self, params: H3ImageParams):
+    def __init__(self, params: H3ImageParams, compute_dtype: Optional[torch.dtype] = None):
         super().__init__()
         self.norm1 = RMSNorm(params.hidden_size, eps=params.norm_eps)
         self.norm2 = RMSNorm(params.hidden_size, eps=params.norm_eps)
         self.attn = Attention(params.hidden_size, params.num_heads, params.head_dim,
                               params.qk_norm_eps)
         self.mlp = MLP(params.hidden_size, params.ffn_hidden_size)
-        self.adaln_proj = AdalnProj(params.adaln_dim, params.hidden_size, 6, MODALITIES)
+        self.adaln_proj = AdalnProj(params.adaln_dim, params.hidden_size, 6, MODALITIES,
+                                    out_dtype=compute_dtype)
 
     @torch.compile(fullgraph=False)
     def forward(self, x: torch.Tensor, spans: Sequence[Span],
@@ -278,13 +285,14 @@ class FinalLayer(nn.Module):
     and the rest offsets from it.
     """
 
-    def __init__(self, params: H3ImageParams):
+    def __init__(self, params: H3ImageParams, compute_dtype: Optional[torch.dtype] = None):
         super().__init__()
         self.video_dim = params.video_dim
         self.pdd_steps = params.pdd_steps
         self.pdd_sigmas = tuple(params.pdd_sigmas)
         self.norm = RMSNorm(params.hidden_size, eps=params.final_norm_eps)
-        self.adaln_proj = AdalnProj(params.adaln_dim, params.hidden_size, 2, 1)
+        self.adaln_proj = AdalnProj(params.adaln_dim, params.hidden_size, 2, 1,
+                                    out_dtype=compute_dtype)
         self.video_out = Fp32Linear(params.hidden_size, params.video_dim * params.pdd_steps,
                                     bias=True)
 
@@ -361,7 +369,8 @@ class H3ImageDiT(nn.Module):
     sampling, so the forward never sees raw text-encoder states.
     """
 
-    def __init__(self, params: H3ImageParams):
+    def __init__(self, params: H3ImageParams,
+                 compute_dtype: Optional[torch.dtype] = None):
         super().__init__()
         self.params = params
         self.video_patch_proj = Fp32Linear(params.video_dim, params.hidden_size,
@@ -373,8 +382,9 @@ class H3ImageDiT(nn.Module):
         self.rope.register_buffer("inv_freq",
                                   torch.empty(params.rope_inv_freq, dtype=torch.float32))
         self.token_refiner = TokenRefiner(params)
-        self.blocks = nn.ModuleList(DiTBlock(params) for _ in range(params.num_layers))
-        self.final_layer = FinalLayer(params)
+        self.blocks = nn.ModuleList(
+            DiTBlock(params, compute_dtype) for _ in range(params.num_layers))
+        self.final_layer = FinalLayer(params, compute_dtype)
         #: Rotary tables by conditioning branch; filled by :meth:`prepare_rope`.
         self.pe_embedder = RopeCache(self._rope_table)
 
@@ -534,7 +544,11 @@ class H3ImageDiT(nn.Module):
         mark_token_axis(h, dim=1)
         mark_token_axis(cos, sin, dim=0)
         for i, block in enumerate(self.blocks):
-            bufs = None if kv is None else kv.buffers(("attn", i), mode, kv_shape, dtype, device)
+            # The buffers take the stream's dtype, not the caller's: ``attend`` copies
+            # k/v into them, and a buffer of another dtype would hand attention a key
+            # narrower than the query.
+            bufs = None if kv is None else kv.buffers(("attn", i), mode, kv_shape, h.dtype,
+                                                      device)
             h = block(h, _spans(rows, block.adaln_proj(t_emb)), (cos, sin), bufs)
         if kv is not None and mode == "fill":
             kv.set_filled()
@@ -632,7 +646,7 @@ def load_h3_image_dit(
     remapped onto the shared :class:`~thenoise.utils.qk_norm.QKNorm` layout.
     """
     with init_empty_weights():
-        model = H3ImageDiT(params)
+        model = H3ImageDiT(params, compute_dtype=dtype)
     load_dit(model, dit_path, device=device, dtype=None, key_map=qk_norm_key_map)
     model.to(dtype=dtype)
     logger.info(
