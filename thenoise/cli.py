@@ -86,9 +86,8 @@ def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png
     p.add_argument("--sampler", choices=["euler", "er_sde"], default=None,
                    help="denoising solver (default: auto)")
     p.add_argument("--kv-cache", dest="kv_cache", action="store_true",
-                   help="reference-latent KV cache (edit only): freeze the reference "
-                        "tokens' K/V across denoise steps for faster editing "
-                        "(implies --ref-method index_timestep_zero unless given)")
+                   help="KV cache: automatic for compatible edits, opt-in for T2I "
+                        "(Qwen-Image 2.1 caches its fixed text prefix)")
     p.add_argument("--no-kv-cache", dest="kv_cache", action="store_false",
                    help="disable the reference-latent KV cache (auto: on for "
                         "'index_timestep_zero' reference conditioning)")

@@ -853,11 +853,13 @@ def test_pnginfo_of_an_image_that_carries_none():
     assert pnginfo_of(Image.new("RGB", (2, 2))) is None
 
 
-def test_kv_cache_requires_an_edit_request():
-    """``kv_cache`` is a reference-latent optimization: it needs a reference image."""
-    controller = _controller()
-    with pytest.raises(ValueError, match="requires an edit request"):
-        controller.generate(_request(kv_cache=True))
+def test_t2i_kv_cache_is_opt_in_and_uses_a_distinct_sampling_key():
+    model = StubModel(capabilities={"kv_cache": True})
+    controller = _controller(model)
+    assert controller._resolve_pipeline(_request(), is_edit=False).kv_cache is False
+    controller.generate(_request(kv_cache=False))
+    controller.generate(_request(kv_cache=True))
+    assert model.calls["denoise_step"] == 4
 
 
 def test_kv_cache_requires_a_model_that_supports_it():
@@ -872,6 +874,8 @@ def test_kv_cache_requires_a_model_that_supports_it():
     from conftest import EditingStubModel
 
     controller = _controller(EditingStubModel())
+    with pytest.raises(ValueError, match="does not support the reference-latent KV cache"):
+        controller.generate(_request(kv_cache=True))
     with pytest.raises(ValueError, match="does not support the reference-latent KV cache"):
         controller.edit(
             _request(image=Image.new("RGB", (64, 64), "white"), steps=1, kv_cache=True)

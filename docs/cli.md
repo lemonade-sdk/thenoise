@@ -79,11 +79,11 @@ Then open <http://localhost:8000/> for the web UI. Full endpoint reference:
 | `--tint` | no | `0.0` | White balance across the green–magenta axis: -1.0 greens, 1.0 magentas (-1.0–1.0) |
 | `--sharpening` | no | `0.0` | RCAS sharpening strength (0.0–1.0) |
 | `--film-grain` | no | `0.0` | Film grain strength (0.0–10.0) |
-| `--kv-cache` / `--no-kv-cache` | no | auto | Reference-latent KV cache (edit only): freeze the reference tokens' K/V across denoise steps for faster editing. Auto = on for `index_timestep_zero` reference conditioning on models implementing the cache. `--kv-cache` also selects that method when `--ref-method` is left unset |
+| `--kv-cache` / `--no-kv-cache` | no | auto | T2I opt-in (off by default); Qwen-Image 2.1 caches its fixed text prefix. Compatible edits still enable caching automatically for `index_timestep_zero` |
 | `--ref-method` | no | auto | Reference conditioning for editing: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index`. The cache default follows it |
 
-> **Note:** `--kv-cache` is a reference-latent optimization and only applies to
-> `edit` (it needs a reference image). On `generate` it raises an error.
+> **Note:** T2I caching is supported by models with a cacheable text prefix;
+> other cache-capable models may accept the flag without a T2I speedup.
 
 ## Edit an image
 

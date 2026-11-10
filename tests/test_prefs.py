@@ -189,11 +189,11 @@ def test_an_explicit_false_wins_over_the_derived_default():
     assert r.kv_cache is False
 
 
-def test_an_explicit_kv_cache_without_a_reference_is_still_refused():
-    """Only the derived default yields to a plain generation; a request does not."""
-    controller = _controller(_ZeroCondModel())
-    with pytest.raises(ValueError, match="requires an edit request"):
-        controller.generate(_request(kv_cache=True, steps=1))
+def test_t2i_kv_cache_does_not_require_a_reference_method():
+    r = _controller(_ZeroCondModel())._resolve_pipeline(
+        _request(kv_cache=True, ref_method="index"), is_edit=False
+    )
+    assert (r.kv_cache, r.ref_method) == (True, "index")
 
 
 def test_edit_passes_the_resolved_method_to_the_model():
