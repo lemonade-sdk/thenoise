@@ -1,33 +1,7 @@
-"""The H3-Image DiT: a single-stream packed-token transformer with a PDD head bank.
+"""The H3-Image DiT: a packed single-stream transformer.
 
-Architecture facts a checkpoint pins and this module reads off it (see
-:func:`detect_params`): 50 blocks of ``hidden = 5376`` over 56 heads of 128, a
-SwiGLU MLP at 8/3 width, and no cross-attention anywhere — the prompt, the reference
-pictures and the target share the one sequence :mod:`.layout` builds, so a block is
-attention plus MLP with nothing conditioning on which token is which. The only place
-modality enters is the AdaLN modulation, and that is a *lookup*, not a projection of
-a computed time embedding:
-
-  * ``adaln_t_table`` is a 1025-row sampling of the time-embedding curve, and a step
-    reads it at ``t * 1024`` with linear interpolation between rows. The exported
-    checkpoint therefore carries no time embedder at all, and the per-block heads
-    consume an 8-wide coordinate vector rather than a full-width embedding.
-  * The table's rows are indexed by ``timestep_row * 3 + modality_tag``, so one
-    projection yields the modulation of every (timestep, modality) pair this forward
-    needs — which is how the reference rows of an edit, pinned at
-    :data:`COND_TIMESTEP`, get their own shift/scale/gate without a second pass.
-
-The output head is a **PDD head bank**: ``pdd_steps`` stacked heads, one per interval
-of the checkpoint's own sigma grid, where row 0 is a complete head and every later row
-is the offset from it for that interval. A step that spans several grid intervals —
-which is what happens the moment the sampler's schedule is not the distilled one —
-takes the dt-weighted mean of the heads it spans. This is why the sampler is fixed:
-the heads, the grid in :mod:`.sampling` and the 6-step default are one artifact.
-
-Two dtype islands survive from the release, both where rounding would be a quality
-regression rather than a rounding error: the input patch projection and the output
-head bank run in FP32 (:class:`~thenoise.utils.fp32_linear.Fp32Linear`), as does the
-modulation path that feeds them.
+The time embedding is a curve stored in the checkpoint and read between its rows, so it
+stays FP32; the output head is one head per interval of the checkpoint's sigma grid.
 """
 from __future__ import annotations
 
@@ -55,8 +29,7 @@ from thenoise.utils.safetensors import MemoryEfficientSafeOpen, unwrap_key
 
 logger = logging.getLogger(__name__)
 
-#: Reference rows are fed as if they were almost pure noise: the timestep they are
-#: labelled with, and the fraction of noise mixed into them to match that label.
+#: A reference row's timestep label; its noise is mixed to match that label.
 COND_TIMESTEP = 0.999
 
 
@@ -102,12 +75,7 @@ class Mod(NamedTuple):
 
 
 class Span(NamedTuple):
-    """``[start, end)`` of the packed sequence and the modulation driving those rows.
-
-    Both halves of a block are carried because a span is a property of the sequence,
-    not of the projection: which rows share a modulation row is decided once per
-    forward, outside the compiled blocks, so that no row index reaches a graph.
-    """
+    """``[start, end)`` of the packed sequence and the modulation driving those rows."""
 
     start: int
     end: int
@@ -116,12 +84,7 @@ class Span(NamedTuple):
 
 
 class Attention(nn.Module):
-    """Full attention over the packed sequence, with per-head Q/K norms and rope.
-
-    The projections are wider than the residual stream (``heads * head_dim`` is
-    7168 against a 5376 trunk), and there is no gate on the attention output: the
-    modulation's gate is the only one.
-    """
+    """Full attention over the packed sequence, with per-head Q/K norms and rope."""
 
     def __init__(self, hidden: int, heads: int, head_dim: int, eps: float):
         super().__init__()
@@ -135,10 +98,8 @@ class Attention(nn.Module):
     def forward(self, x: torch.Tensor,
                 rope: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
                 bufs: Optional[KVBuffers] = None) -> torch.Tensor:
-        """``x`` is ``[B, S, hidden]``; ``rope`` the run's ``(cos, sin)``, ``[S, 1, 1, rot]``.
-
-        ``bufs`` are this block's run-long K/V buffers (see :func:`.kvcache.attend`),
-        and the refiner calls with neither: its stream is unrotated and never cached.
+        """``x`` is ``[B, S, hidden]``; ``rope`` the run's ``(cos, sin)``, ``[S, 1, 1, rot]``;
+        ``bufs`` this block's run-long K/V (see :func:`.kvcache.attend`).
         """
         batch, rows, _ = x.shape
         inner = self.heads * self.head_dim
@@ -148,9 +109,8 @@ class Attention(nn.Module):
             return t.view(batch, rows, self.heads, self.head_dim).transpose(1, 2)
 
         q, k, v = heads_(q), heads_(k), heads_(v)
-        # Per-head norms before the rotation: without them the QK magnitudes grow with
-        # the trunk width and the softmax saturates, which is what the checkpoint's
-        # q_norm/k_norm weights exist to hold down.
+        # The checkpoint's q_norm/k_norm: without them the QK magnitudes grow with the
+        # trunk width and the softmax saturates.
         q, k = self.qk_norm(q, k)
         if rope is not None:
             cos, sin = rope
@@ -175,13 +135,8 @@ class MLP(nn.Module):
 class AdalnProj(nn.Module):
     """Modulation coordinates -> the per-(timestep, modality) shift/scale/gate rows.
 
-    ``forward`` turns ``[M, t_dim]`` into ``expand`` tensors of ``[M * modalities,
-    hidden]``, so the ``M`` timesteps of one forward — the target's and the pinned
-    one the references carry — are projected together and indexed by row.
-
-    The projection runs in FP32 on a curve that is itself FP32, but its result joins a
-    residual stream at the trunk dtype, so ``out_dtype`` brings it back: an FP32 shift
-    would otherwise widen the stream for the remaining blocks.
+    ``out_dtype`` brings the FP32 projection back to the trunk dtype: an FP32 shift
+    would widen the residual stream behind it.
     """
 
     def __init__(self, t_dim: int, hidden: int, expand: int, modalities: int,
@@ -258,11 +213,8 @@ class RefinerBlock(nn.Module):
 
 
 class TokenRefiner(nn.Module):
-    """The prompt's encoder: a few unmodulated blocks over the projected text states.
-
-    Runs once per sampling rather than once per step (the adapter caches its output in
-    :meth:`H3ImageDiT.refine_text`), because the prompt does not depend on the
-    timestep.
+    """The prompt's encoder: unmodulated blocks over the projected text states, which
+    do not depend on the timestep.
     """
 
     def __init__(self, params: H3ImageParams):
@@ -278,11 +230,8 @@ class TokenRefiner(nn.Module):
 
 
 class FinalLayer(nn.Module):
-    """Modulated output head over the target's rows, as a PDD head bank.
-
-    ``pdd_sigmas`` is the grid the bank was distilled on, one point per interval
-    boundary; ``pdd_steps`` rows of head are stored in the projection, row 0 complete
-    and the rest offsets from it.
+    """Modulated output head over the target's rows: ``video_out`` stores one head per
+    interval of ``pdd_sigmas``, row 0 complete and every later row an offset from it.
     """
 
     def __init__(self, params: H3ImageParams, compute_dtype: Optional[torch.dtype] = None):
@@ -298,11 +247,7 @@ class FinalLayer(nn.Module):
 
     def forward(self, x: torch.Tensor, t_emb: torch.Tensor, target: Tuple[int, int],
                 sigma: float, sample_sigmas: Optional[torch.Tensor]) -> torch.Tensor:
-        """The target rows' velocity; ``target`` is their ``(start, stop)``.
-
-        The head is modulated by the step's timestep row alone: reference rows never
-        reach it, and the prompt's tags are a block-level concern.
-        """
+        """The target rows' velocity; ``target`` is their ``(start, stop)``."""
         shift, scale = self.adaln_proj(t_emb)
         start, stop = target
         h = (self.norm(x[:, start:stop]) * (1.0 + scale[0]) + shift[0]).to(torch.float32)
@@ -312,12 +257,8 @@ class FinalLayer(nn.Module):
         return F.linear(h, weight, bias)
 
     def _bank(self, sigma: float, sample_sigmas: Optional[torch.Tensor]):
-        """The dt-weighted head for a step, folded onto the shape of one head.
-
-        The step's endpoints are located on both the sampler's schedule and the
-        distilled grid, and every interval between the two is averaged with weights
-        proportional to the sigma distance it covers. The start is clamped into the
-        bank first, so a step at the last interval still has one to its name.
+        """One head for a step: the intervals between its endpoints on the distilled
+        grid, averaged with weights proportional to the sigma distance each covers.
         """
         if sample_sigmas is None:
             raise ValueError(
@@ -349,9 +290,8 @@ def _spans(rows: Sequence[Tuple[int, int, int]],
            modulation: Tuple[torch.Tensor, ...]) -> list[Span]:
     """One block's modulation projection -> the packed sequence's spans.
 
-    The row indexing happens here rather than in the block because a row number baked
-    into a compiled graph is a guard on it, and the rows of a run are not constants of
-    the architecture.
+    Row indexing stays out of the block: a row number inside a compiled graph is a
+    guard on it.
     """
     shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = modulation
     return [
@@ -365,8 +305,7 @@ def _spans(rows: Sequence[Tuple[int, int, int]],
 class H3ImageDiT(nn.Module):
     """The image DiT: ``[text | references | target]`` in, the target's velocity out.
 
-    ``context`` is the *refined* prompt — :meth:`refine_text` is meant to run once per
-    sampling, so the forward never sees raw text-encoder states.
+    ``context`` is a refined prompt — :meth:`refine_text` runs once per sampling.
     """
 
     def __init__(self, params: H3ImageParams,
@@ -390,18 +329,12 @@ class H3ImageDiT(nn.Module):
 
     @property
     def rope_dim(self) -> int:
-        """Rotated dimensions of a head: three axes sharing the checkpoint's frequencies."""
         return 6 * self.params.rope_inv_freq
 
     def _apply(self, fn, recurse=True):
-        """Move the model, keeping the curve and the rope frequencies in FP32.
-
-        The table is read by interpolating between neighbouring rows, and every
-        modulation vector in the model is a projection of the result: rounding the
-        curve to the compute dtype would move the conditioning of all 50 blocks, not
-        just one tensor. An inverse frequency is multiplied by a coordinate that grows
-        with the canvas, so its rounding is amplified the same way. The FP32 linears
-        pin themselves by the same mechanism.
+        """Move the model, keeping the curve and the rope frequencies in FP32: every
+        modulation vector is a projection read between the curve's rows, and a rope
+        frequency is multiplied by a coordinate that grows with the canvas.
         """
         out = super()._apply(fn, recurse)
         if self.adaln_t_table.is_floating_point():
@@ -415,12 +348,9 @@ class H3ImageDiT(nn.Module):
         return self.token_refiner(self.condition_proj(text_states))
 
     def _rope_table(self, position_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """``[S, 3]`` coordinates -> ``(cos, sin)``, each ``[S, 1, 1, rope_dim]``.
-
-        All three axes share one frequency vector. The table is built where the model
-        lives — a :class:`~.layout.Layout` carries its coordinates on the CPU — and in
-        float32, since a coordinate is multiplied by an inverse frequency long before
-        anything is rounded down to the compute dtype.
+        """``[S, 3]`` coordinates -> ``(cos, sin)``, each ``[S, 1, 1, rope_dim]``, in
+        float32 on the model's device: a coordinate is multiplied by an inverse
+        frequency long before anything is rounded down to the compute dtype.
         """
         pos = position_ids.to(self.rope.inv_freq.device, torch.float32)
         return split_half_rope_axes(self.rope.inv_freq)(pos)
@@ -430,10 +360,8 @@ class H3ImageDiT(nn.Module):
         self.pe_embedder.store(name, layout.position_ids, dtype=dtype)
 
     def time_embedding(self, timesteps: Sequence[float], device: torch.device) -> torch.Tensor:
-        """The curve table read at each timestep, interpolated between its rows.
-
-        ``t`` outside ``[0, 1]`` clamps to the curve's ends; ``t = 1`` stays on the
-        last interval rather than reading past the table.
+        """The curve read at each timestep, interpolated between rows; ``t`` clamps to
+        the curve's ends.
         """
         t = torch.tensor(list(timesteps), dtype=torch.float32, device=device)
         table = self.adaln_t_table.to(device)
@@ -460,10 +388,8 @@ class H3ImageDiT(nn.Module):
                     seed: int) -> torch.Tensor:
         """Patchified rows in packing order: the target, then the references.
 
-        A reference is labelled as a nearly-noise row, so it is mixed with the noise
-        that label promises — :data:`COND_TIMESTEP` of signal, the rest noise. Each
-        one restarts the same RNG stream on purpose: a second reference must not
-        inherit the random draws the first one consumed.
+        Each reference restarts the RNG stream on purpose: a second one must not
+        inherit the draws the first consumed.
         """
         rows = [self.patchify(target.to(torch.float32))]
         for ref in refs:
@@ -489,20 +415,14 @@ class H3ImageDiT(nn.Module):
     ) -> torch.Tensor:
         """One forward pass; returns the target's velocity, ``[1, C, H, W]``.
 
-        ``latent`` is the canonical noisy latent (any H/W; it is repeat-padded to a
-        whole patch and the padding cut back off the result), ``sigma`` the flow
-        matching noise level, ``context`` the refined prompt ``[1, L, hidden]``,
-        ``refs`` the reference latents in :attr:`Layout` order, ``tags`` the text
-        encoder's per-token modality tags, ``sample_sigmas`` the schedule the run is
-        stepping through (needed whenever the head bank has more than one row),
-        ``rope`` the name this branch's rotary table was stored under, and ``kv`` this
-        branch's K/V cache.
+        ``latent`` is repeat-padded to a whole patch, the padding cut back off the
+        result; ``refs`` are the reference latents in :attr:`Layout` order and ``tags``
+        the text encoder's per-token modality tags; ``sample_sigmas`` is the schedule
+        being stepped through, which a head bank of more than one row requires.
 
-        A cached run walks the whole sequence once, references included, and afterwards
-        runs its leading rows — the prompt and the target — reading the references back
-        out of the buffers. That is the slice a cache may freeze: a reference is fed the
-        same latent, the same noise and :data:`COND_TIMESTEP` at every step, while the
-        prompt follows the step's timestep and is therefore recomputed.
+        A cached run walks the whole sequence once, then runs its leading rows reading
+        the references back from the buffers — the only rows whose K/V is step-invariant
+        (:data:`COND_TIMESTEP`).
         """
         device = latent.device
         dtype = context.dtype
@@ -536,17 +456,16 @@ class H3ImageDiT(nn.Module):
                     h[:, start:stop] = patched[codec:codec + n]
                     codec += n
 
-        # Row 0 of the modulation is this step's timestep and row 1 the reference's
-        # pinned one; the pair keeps its shape at the last step, where they coincide.
+        # Row 0 of the modulation is this step's timestep, row 1 the reference's pinned
+        # one; the pair keeps its shape at the last step, where they coincide.
         t = 1.0 - float(sigma)
         t_emb = self.time_embedding((t, max(t, COND_TIMESTEP)), device)
         kv_shape = (1, self.params.num_heads, layout.seq_len, self.params.head_dim)
         mark_token_axis(h, dim=1)
         mark_token_axis(cos, sin, dim=0)
         for i, block in enumerate(self.blocks):
-            # The buffers take the stream's dtype, not the caller's: ``attend`` copies
-            # k/v into them, and a buffer of another dtype would hand attention a key
-            # narrower than the query.
+            # Buffers take the stream's dtype: ``attend`` copies k/v into them, and a
+            # narrower buffer would hand attention a key narrower than the query.
             bufs = None if kv is None else kv.buffers(("attn", i), mode, kv_shape, h.dtype,
                                                       device)
             h = block(h, _spans(rows, block.adaln_proj(t_emb)), (cos, sin), bufs)
@@ -559,11 +478,10 @@ class H3ImageDiT(nn.Module):
 
 
 def detect_params(dit_path: str) -> H3ImageParams:
-    """Read the architecture, the PDD head count and its sigma grid out of a file.
+    """Read the architecture, the head-bank rows and its sigma grid out of a file.
 
-    The head count is a shape (``video_out`` holds one head per grid interval), but
-    the grid itself is only in the checkpoint's ``config`` metadata — and the two have
-    to agree, because a head bank indexed by a grid it does not span predicts a
+    The grid is only in the file's ``config`` metadata and the head count is a shape, and
+    the two must agree: a bank indexed by a grid it does not span predicts a
     plausible-but-wrong velocity rather than failing.
     """
     with MemoryEfficientSafeOpen(dit_path) as f:
@@ -635,15 +553,10 @@ def load_h3_image_dit(
 ) -> H3ImageDiT:
     """Build the DiT on meta from the checkpoint's own geometry, then load its weights.
 
-    The file is loaded with its own dtypes — BF16 trunk, FP32 patch projection and head
-    bank, FP16 modulation heads — and only then moved to ``dtype``, because that move is
-    where the FP32 islands pin themselves (:class:`~thenoise.utils.fp32_linear.Fp32Linear`
-    and :meth:`H3ImageDiT._apply`) and where the quantized weights stay quantized.
-    Casting the state dict instead would round the modulation factors the whole model is
-    conditioned on before they ever arrived.
-
-    The checkpoint stores the QK norms as ``attn.q_norm`` / ``attn.k_norm``; they are
-    remapped onto the shared :class:`~thenoise.utils.qk_norm.QKNorm` layout.
+    The file is read with its own dtypes (``dtype=None``) and only then moved to
+    ``dtype``: that move is where the FP32 islands pin themselves and quantized weights
+    stay quantized, where casting the state dict would round the modulation factors.
+    ``attn.q_norm`` / ``attn.k_norm`` are remapped by ``qk_norm_key_map``.
     """
     with init_empty_weights():
         model = H3ImageDiT(params, compute_dtype=dtype)

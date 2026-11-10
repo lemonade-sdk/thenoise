@@ -264,11 +264,10 @@ QWEN3_VL_8B_INSTRUCT_CONFIG = {
     "vision_start_token_id": 151652,
 }
 
-#: The 32B variant as the H3-Image text encoder ships it: the released Qwen3-VL-32B
-#: architecture with its decoder **truncated to 50 of 64 layers**, which is also why
-#: the checkpoint carries no final norm — the conditioning is the unnormalized output
-#: of the last layer that survived. The truncation is read off the file at load time;
-#: the number here is the release's.
+#: The released Qwen3-VL-32B architecture as the H3-Image text encoder ships it:
+#: truncated to 50 of 64 decoder layers, so there is no final norm and the conditioning
+#: is the unnormalized output of the layer that survived. The depth is read off the file
+#: at load; the number here is the release's.
 QWEN3_VL_32B_H3_CONFIG = {
     "architectures": ["Qwen3VLForConditionalGeneration"],
     "image_token_id": 151655,

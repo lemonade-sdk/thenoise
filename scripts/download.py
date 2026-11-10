@@ -341,8 +341,8 @@ _H3_REPO = "Comfy-Org/MiniMax-H3-Image"
 def _h3_image_jobs(args: argparse.Namespace) -> list[Artifact]:
     """H3-Image: the packed DiT + the truncated Qwen3-VL-32B TE + its own AE.
 
-    The 32B text encoder is published quantized only, and int8-convrot is the spelling
-    this engine dequantizes, so it is fetched as-is whatever ``--int8-convrot`` says.
+    The 32B encoder is published quantized only, so it is fetched as-is whatever
+    ``--int8-convrot`` says.
     """
     suffix = "int8_convrot" if args.int8_convrot else "bf16"
     return [

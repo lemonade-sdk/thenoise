@@ -1,28 +1,14 @@
 """H3-Image codec — a 3D causal CNN encoder over a single-frame 2D ViT decoder.
 
-Ported from ComfyUI's ``comfy/ldm/minimax/vae.py``. The module tree, and with it the
-checkpoint key names, is verbatim; only the ops change (``comfy.ops`` -> ``torch.nn``,
-ComfyUI's fused norm/rope/attention helpers -> their plain equivalents here). Spatial
-tiling and temporal chunking are not ported: a whole image goes through each half.
+Ported from ComfyUI's ``comfy/ldm/minimax/vae.py`` with its module tree — and with it
+the checkpoint key names — verbatim; only the ops differ. It is a video codec used as a
+still one: the encoder's convs see a lone frame through their last temporal tap, and the
+decoder drops the length-1 time axis the reference carries, which is why
+``post_quant_conv`` is 2D while ``quant_conv`` stays 3D.
 
-The codec is a video codec used as a still one, and both halves lose nothing by it:
-
-  * **encode** — the H3 video encoder on one frame. A causal 3D conv sees a lone frame
-    through its last temporal tap only, because the zeros padded in front of it
-    contribute nothing, so every conv here runs on ``weight[:, :, -1:]``: same answer,
-    a third of the arithmetic, no padded activations. The per-frame GroupNorm the video
-    path needs is what a plain GroupNorm already computes at ``T = 1``.
-  * **decode** — the image checkpoint's own ViT head: 24 layers, 16 heads, rope over
-    half the head dim and over the two spatial axes only. The reference spells it
-    ``ViT3DDecoder(patch_size_t=1, rope_dims=2)`` and carries a length-1 time axis
-    through it; that axis is dropped here, which is why ``post_quant_conv`` is 2D while
-    ``quant_conv`` stays 3D.
-
-Latent: 24 channels at 16 pixels per cell, normalized by the release's own per-channel
-mean and std — the checkpoint ships none, so the constants below are their one home.
-
-Encoding returns a posterior **sample** on a fixed seed, not the mean. That is the
-release's recipe: the decoder was trained on sampled latents and the mean decodes soft.
+The latent is 24 channels at 16 pixels per cell, normalized by the constants below — the
+checkpoint ships none, so they are their one home. Encoding returns a posterior *sample*
+on :data:`ENCODE_SEED`, never the mean: the decoder was trained on samples.
 """
 from __future__ import annotations
 
@@ -68,9 +54,8 @@ LATENTS_STD = [
     3.276226282119751, 3.1627357006073, 2.28168129920959475, 2.6127843856811525,
 ]
 
-#: Seed of the posterior sample encode conditions the decoder on. The H3 keyframe recipe
-#: restarts the same stream on purpose, so a reference's latent does not move with the
-#: generation's own seed.
+#: Seed of the posterior sample encode takes. Restarting the same stream keeps a
+#: reference's latent from moving with the generation's own seed.
 ENCODE_SEED = 42
 
 #: Encoder geometry (``ch_mult`` stages, with the spatial and temporal stride of each).
@@ -89,9 +74,8 @@ ROPE_THETA = 100.0
 NUM_REGISTER_TOKENS = 4
 NORM_EPS = 1e-5
 
-#: Pixels per tile, and the cross-fade between neighbouring ones. The decoder's rope
-#: spans whatever grid it is handed, so a wider grid than this is a scale it never saw:
-#: encoding or decoding a whole large frame leaves the latent grid stamped on the pixels.
+#: Pixels per tile and the cross-fade between neighbours. The decoder's rope spans
+#: whatever grid it is handed, so a wider grid is a scale it never saw.
 TILE_SIZE = 256
 TILE_BLEND = 64
 
@@ -102,10 +86,9 @@ TILE_BLEND = 64
 class CausalConv3d(nn.Conv3d):
     """Reflect-spatial, causal-temporal 3D convolution over a single frame.
 
-    ``padding`` is the (temporal, height, width) radius; the temporal one is causal, so
-    it pads in front only — and at ``T = 1`` everything padded is zero. The frame is
-    therefore convolved with the kernel's last temporal tap and no temporal padding,
-    which is what :meth:`forward` does instead of building the padded video.
+    ``padding`` is the (temporal, height, width) radius. At ``T = 1`` everything padded
+    in front is zero, so the frame is convolved with the kernel's last temporal tap
+    instead of building the padded video.
     """
 
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
@@ -219,10 +202,10 @@ def token_ids(dims: Tuple[int, int], device, dtype) -> torch.Tensor:
 class RotaryEmbedding2D(nn.Module):
     """Split-half rope over the ``(h, w)`` latent axes, over ``dim`` of the head.
 
-    Coordinates arrive in ``[-1, 1]``, so a whole axis spans exactly one turn of the
-    lowest frequency. The angles are duplicated to fill ``dim`` because
+    Coordinates arrive in ``[-1, 1]``, so a whole axis spans one turn of the lowest
+    frequency, and the angles are duplicated to fill ``dim`` because
     :func:`~thenoise.utils.rope.apply_rope_split_half` pairs index ``i`` with
-    ``i + dim/2``; the rest of the head is left alone.
+    ``i + dim/2``.
     """
 
     def __init__(self, dim: int, rotary_base: float = ROPE_THETA, n_dim: int = 2):
@@ -251,8 +234,7 @@ class Attention(nn.Module):
     def forward(self, x, rope, pre_norm, residual, residual_scale):
         batch, seq, _ = x.shape
         qkv = self.to_qkv(pre_norm(x)).view(batch, seq, -1, 3 * self.dim_head)
-        # [B, S, heads, 3*dh] -> head-major q, k, v: the head dim is the last axis the
-        # QK norm and the rope both read.
+        # Head-major, because that is the axis the QK norm and the rope read.
         query, key, value = (t.transpose(1, 2) for t in torch.chunk(qkv, 3, dim=-1))
 
         cos, sin = rope
@@ -301,8 +283,7 @@ class TransformerBlock(nn.Module):
 class ViTImageDecoder(nn.Module):
     """The image checkpoint's decoder: a 2D ViT that turns latent cells into pixels.
 
-    ``patch_size`` pixels per latent cell come out of ``proj_out`` as one flattened
-    patch, and the sequence ends in the learnable register tokens plus one spare row
+    The sequence ends in the learnable register tokens plus one spare row
     (``mask_token``) that inference never reads.
     """
 
@@ -362,9 +343,9 @@ class ViTImageDecoder(nn.Module):
 def split_tiles(length: int, tile_size: int, blend: int, cell_px: int):
     """Tile ``(starts, lengths, blends)`` covering ``length`` pixels.
 
-    Neighbours always overlap by at least ``blend`` and by as much more as it takes to
-    land on ``length`` exactly, spread a latent cell at a time over the seams. A frame
-    no larger than a tile is its own single tile.
+    Neighbours overlap by at least ``blend`` and by as much more as it takes to land on
+    ``length`` exactly, a latent cell at a time. A frame no larger than a tile is its
+    own single tile.
     """
     if blend >= tile_size:
         raise ValueError(f"a tile blend of {blend} leaves nothing to decode of a {tile_size} tile")
@@ -424,12 +405,9 @@ class AutoencoderKLH3Image(nn.Module):
                  patch_size: Optional[int] = None, tile_size: int = TILE_SIZE,
                  tile_blend: int = TILE_BLEND):
         """``ch``/``ch_mult`` are the encoder's stage widths, ``dim``/``num_layers`` the
-        decoder's width and depth.
-
-        The defaults are the release's, which the strict load in
-        :func:`load_h3_image_vae` checks; the arguments exist so the geometry can
-        be exercised at a fraction of the width. ``patch_size`` is fixed by
-        :data:`SPACE_DOWN`, whose product is the compression the latent format promises.
+        decoder's. The defaults are the release's, which :func:`load_h3_image_vae`
+        checks; the arguments exist so the geometry can be exercised at a fraction of
+        the width.
         """
         super().__init__()
         self.patch_size = self.spatial_compression if patch_size is None else patch_size
@@ -459,7 +437,7 @@ class AutoencoderKLH3Image(nn.Module):
         return self.quant_conv(self.encoder(x.unsqueeze(2)))
 
     def _decode_pixels(self, z: torch.Tensor) -> torch.Tensor:
-        """Un-normalized latent -> raw decoder pixels, before the pixel un-normalize."""
+        """Un-normalized latent -> raw decoder pixels."""
         return self.decoder(self.post_quant_conv(z))
 
     def _tiled_moments(self, x: torch.Tensor) -> torch.Tensor:
@@ -492,9 +470,8 @@ class AutoencoderKLH3Image(nn.Module):
     def _tiled_decode(self, z: torch.Tensor) -> torch.Tensor:
         """Decode each latent tile on its own and cross-fade the seams in pixels.
 
-        Each tile is decoded as a frame of its own, which is what keeps every tile's
-        rope span inside the range the decoder was trained on. Seams are blended against
-        their already-blended neighbours, so a crossing stays continuous.
+        Each tile is decoded as a frame of its own, which keeps every tile's rope span
+        inside the range the decoder was trained on.
         """
         p = self.patch_size
         height, width = z.shape[-2] * p, z.shape[-1] * p
@@ -538,8 +515,7 @@ class AutoencoderKLH3Image(nn.Module):
     def encode_pixels_to_latents(self, pixels: torch.Tensor) -> torch.Tensor:
         """``[B, 3, H, W]`` in [-1, 1] -> the normalized canonical latent.
 
-        A posterior sample on :data:`ENCODE_SEED`, never the mean: the decoder was
-        trained on samples, and the mean decodes soft.
+        A posterior sample on :data:`ENCODE_SEED`, never the mean.
         """
         x = pixels.to(self.device, self.dtype)
         x = ((x + 1.0) * 0.5 - self.pixel_mean.to(x)) / self.pixel_std.to(x)
@@ -566,12 +542,9 @@ class AutoencoderKLH3Image(nn.Module):
 def _geometry(vae_path: str) -> dict:
     """The widths and the decoder depth ``vae_path`` was written with, out of its header.
 
-    Reading the knobs off the file lets a release with a different ViT head load
-    unchanged, and turns a wrong checkpoint into a clear message instead of a shape error
-    halfway through the load. The encoder's stage *strides* are not in the header, so
-    they stay the release's (:data:`SPACE_DOWN`, :data:`TIME_DOWN`) — whose product is
-    the compression the latent format promises — and the strict load right after checks
-    everything else against them.
+    A wrong checkpoint then says so instead of failing on a shape halfway through the
+    load. The encoder's stage *strides* are not in the header, so they stay the release's
+    (:data:`SPACE_DOWN`, :data:`TIME_DOWN`) and the strict load checks the rest.
     """
     with MemoryEfficientSafeOpen(vae_path) as f:
         header = f.header

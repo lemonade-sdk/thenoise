@@ -1,10 +1,6 @@
-"""The H3-Image codec: 16x in both directions, on a reduced-width instance.
-
-The encoder is the H3 video encoder held to a single frame, so its interesting property
-is that the causal-temporal shortcut — convolving with the kernel's last tap instead of
-padding zeros in front — is the same convolution. Then the latent and pixel affine
-transformations, the fixed-seed posterior sample, the tiling the codec only ever runs
-inside, and the loader's geometry sniffing.
+"""The H3-Image codec at a reduced width: the single-frame causal shortcut, the latent and
+pixel affines, the fixed-seed posterior sample, tiling and the loader's geometry
+sniffing.
 """
 from __future__ import annotations
 
@@ -20,14 +16,12 @@ from thenoise.vae.h3_image import (
 )
 
 def _tiny_vae() -> AutoencoderKLH3Image:
-    """The shipped architecture with a 32-channel encoder and a narrow decoder.
-
-    32 is the narrowest the codec's 32-group GroupNorm accepts.
+    """The shipped architecture with a 32-channel encoder, the narrowest its 32-group
+    GroupNorm accepts.
 
     ``register_tokens`` and the decoder blocks' layer scales are ``torch.empty`` until a
-    checkpoint fills them — and they are multiplied into every token, so uninitialized
-    they turn each assertion about decoded pixels into a draw on whatever the allocator
-    left behind.
+    checkpoint fills them, and they multiply every token: unfilled, an assertion about
+    decoded pixels draws on the allocator.
     """
     torch.manual_seed(0)
     vae = AutoencoderKLH3Image(ch=32, dim=64, num_layers=1)
@@ -60,10 +54,8 @@ def test_latent_geometry_is_24_channels_at_16_pixels(tiny_vae):
 
 
 def test_encode_is_a_fixed_seed_posterior_sample(tiny_vae):
-    """Twice on the same pixels is the same latent, whatever the ambient RNG says.
-
-    The decoder is trained on sampled latents, so encode samples — and on a seed of its
-    own, which is what keeps a reference image's latent from moving with the
+    """Twice on the same pixels is the same latent, whatever the ambient RNG says. The seed
+    is encode's own, which keeps a reference image's latent from moving with the
     generation's seed.
     """
     pixels = torch.randn(1, 3, 32, 32)
@@ -75,11 +67,8 @@ def test_encode_is_a_fixed_seed_posterior_sample(tiny_vae):
 
 
 def test_single_frame_convolution_matches_the_padded_video():
-    """The ``T = 1`` shortcut drops the front padding and the taps it isolates.
-
-    The reference is the same convolution on a clip of two zero frames in front, run
-    with the full 3D kernel: only the kernel's last temporal tap can see the frame, and
-    the borders stay reflect-padded either way.
+    """The ``T = 1`` shortcut against the same convolution on a clip with two zero frames
+    padded in front and the full 3D kernel.
     """
     conv = CausalConv3d(3, 4, kernel_size=3, padding=1).eval()
     x = torch.randn(1, 3, 1, 6, 5)
@@ -111,11 +100,8 @@ def test_dtype_and_device_follow_the_weights(tiny_vae):
 
 
 def test_split_tiles_lands_on_the_frame_edge():
-    """Tiles cover the frame exactly, never a cell short and never a tile wide.
-
-    The slack left over by the minimum overlaps is spread a latent cell at a time, so a
-    frame of whole cells needs no ragged final tile — and a tile is never larger than
-    the grid the decoder's rope was trained to span.
+    """Tiles cover the frame exactly: the slack the minimum overlaps leave is spread a
+    latent cell at a time.
     """
     for length in (272, 320, 512, 704, 1024, 1248):
         starts, lengths, overlaps = split_tiles(length, TILE_SIZE, TILE_BLEND, 16)
@@ -139,11 +125,8 @@ def test_blend_tiles_ramps_then_hands_the_rest_over():
 
 
 def test_the_codec_only_ever_sees_a_tile(tiny_vae, monkeypatch):
-    """A frame larger than a tile is encoded and decoded tile by tile.
-
-    The rope spans whatever grid it is handed, so a whole large frame is a coordinate
-    range neither half was trained on — which shows up in the pixels as a grid at one
-    latent cell period. Nothing may reach either half wider than a tile.
+    """The rope spans whatever grid it is handed, so nothing may reach either half wider
+    than a tile.
     """
     monkeypatch.setattr(tiny_vae, "tile_size", 64)
     monkeypatch.setattr(tiny_vae, "tile_blend", 32)

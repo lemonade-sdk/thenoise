@@ -86,17 +86,14 @@ def split_half_rope_1d(head_dim: int, theta: float = 10000.0):
 
 
 def split_half_rope_axes(scale: torch.Tensor, angle_scale: float = 1.0):
-    """Builder for the split-half convention over any number of axes sharing one frequency vector.
+    """Builder of the split-half convention over any number of axes sharing one frequency.
 
-    Returns ``pos -> (cos, sin)``, each ``[L, 1, 1, 2 * n_axes * len(scale)]``, for
-    ``pos`` an ``[L, n_axes]`` coordinate tensor (no batch axis, as ``utils.positions``
-    builds them). Every axis is rotated by the same ``scale`` and the axes' angles are
-    concatenated in coordinate order, so the pair :func:`apply_rope_split_half` rotates
-    with which angle is fixed by the coordinate layout.
+    Returns ``pos -> (cos, sin)``, each ``[L, 1, 1, 2 * n_axes * len(scale)]``, for ``pos``
+    an ``[L, n_axes]`` coordinate tensor: every axis rotated by the same ``scale``, the
+    axes' angles concatenated in coordinate order.
 
-    ``angle_scale`` says how far one unit of coordinate travels: 1.0 when the
-    coordinates are already multiples the frequencies expect, ``2 * pi`` when they span
-    one turn (a normalized grid, as some codecs use).
+    ``angle_scale`` is how far one coordinate unit travels: 1.0 for coordinates the
+    frequencies already expect, ``2 * pi`` for a normalized grid spanning one turn.
     """
 
     def build(pos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

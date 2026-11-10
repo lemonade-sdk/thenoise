@@ -242,8 +242,7 @@ def load_qwen3_vl_model(
     ``config`` is one of the vendored ``QWEN3_VL_*_CONFIG`` dicts.
 
     ``model_factory`` replaces the empty-model build (still under ``init_empty_weights``)
-    for a file whose architecture is not the plain HF one — a released truncation drops
-    decoder layers and, with them, the final norm the class insists on running.
+    for a file whose architecture is not the plain HF one.
     """
     config = Qwen3VLConfig.from_dict(config or QWEN3_VL_4B_INSTRUCT_CONFIG)
     with init_empty_weights():

@@ -1,17 +1,13 @@
 """H3-Image adapter — 50-layer packed DiT + truncated Qwen3-VL-32B + a 24ch 16x codec.
 
-A distilled model with a fixed recipe: six steps along the sigma grid baked into the
-checkpoint, guidance folded into the weights, and an output head that only makes sense
-on that grid (see :mod:`thenoise.dit.h3_image.sampling`). Sizes are the model's own
-canvas: 2048x2048 pixels of area, any aspect, rounded to 32.
+A distilled model with a fixed recipe: steps along the sigma grid baked into the
+checkpoint, guidance folded into the weights, and a canvas of 2048x2048 pixels of area
+at any aspect, rounded to 32.
 
-Editing feeds a reference in twice, deliberately: the language model sees it as vision
-tokens inside the prompt (short edge 1024), and the DiT sees its latent as rows that
-are *not* denoised — pinned at a timestep of 0.999 and mixed with the noise that label
-implies, so it reads as an untouchable hint rather than as picture-to-be-cleaned. Both
-paths must agree on the reference's aspect ratio, so a single sizing rule
-(:attr:`REFERENCE_SIZING`) drives the latent, the default canvas and, at a fixed short
-edge, the conditioning copy.
+An editing reference is fed in twice on purpose: the language model sees it as vision
+tokens inside the prompt, the DiT as latent rows that are never denoised. Both paths must
+agree on its aspect ratio, so one sizing rule (:attr:`REFERENCE_SIZING`) drives the
+latent, the default canvas and — at a fixed short edge — the conditioning copy.
 """
 from __future__ import annotations
 
@@ -35,10 +31,9 @@ from thenoise.vae import load_h3_image_vae
 
 logger = logging.getLogger(__name__)
 
-#: Short edge of the picture the language model is shown. The DiT is shown a larger
-#: one (up to :attr:`REFERENCE_SIZING`'s cap): the vision tower compresses 32x32
-#: pixels into a token, so a bigger copy buys conditioning detail the text stream
-#: cannot use, at a token cost the packed sequence can.
+#: Short edge of the picture the language model is shown. The DiT is shown a larger one
+#: (up to :attr:`REFERENCE_SIZING`'s cap): the vision tower compresses 32x32 pixels into
+#: one token, so a bigger copy buys detail the text stream cannot use.
 VISION_SHORT_EDGE = 1024
 
 #: The model's own canvas multiple.
@@ -49,9 +44,7 @@ CANVAS_MULTIPLE = 32
 class H3ImageConditioning(Conditioning):
     """``Conditioning`` plus the per-branch modality tags the DiT modulates by.
 
-    ``tags`` marks each token of ``cond``: 0 where it is a vision placeholder (a
-    reference's expanded patches and the markers framing them), 1 everywhere else. They
-    are per-branch because the two prompts have the images at different offsets.
+    They are per-branch because the two prompts carry the images at different offsets.
     """
 
     tags: Optional[torch.Tensor] = None
@@ -65,7 +58,7 @@ class H3ImageModel(DiffusionModel):
         **DiffusionModel.DEFAULT_PREFS,
         "width": 2048,
         "height": 2048,
-        "steps": 6,
+        "steps": 4,
         "guidance_scale": 1.0,
         "sampler": "euler",
         "ref_method": "index_timestep_zero",
@@ -118,10 +111,9 @@ class H3ImageModel(DiffusionModel):
 
     # ------------------------------------------------------------ kernels
     def encode_prompt(self, args: EncodePromptArgs) -> H3ImageConditioning:
-        """Prompt (and references, as labelled vision blocks) -> raw conditioning.
+        """Prompt and references, as labelled vision blocks -> raw conditioning.
 
-        The negative branch sees the same pictures: they are the edit's subject, not
-        something to negate.
+        The negative branch sees the same pictures: they are the edit's subject.
         """
         images = [resize_to_short_edge(img, VISION_SHORT_EDGE, align=CANVAS_MULTIPLE)
                   for img in _as_list(args.image)]
@@ -136,12 +128,7 @@ class H3ImageModel(DiffusionModel):
         )
 
     def fuse_text(self, cond: Conditioning) -> H3ImageConditioning:
-        """Project and refine the prompt once per run, with the DiT resident.
-
-        The DiT's own ``condition_proj`` plus its token refiner: the prompt does not
-        depend on the timestep, so paying for two attention blocks per step would buy
-        nothing.
-        """
+        """Project and refine the prompt once per run: it does not depend on the step."""
         dev = torch.device(self.device)
         return H3ImageConditioning(
             cond=self.dit.refine_text(cond.cond.to(dev, self.dtype)),
@@ -173,10 +160,8 @@ class H3ImageModel(DiffusionModel):
     ) -> torch.Tensor:
         """Stash the packed sequence this run steps through; the latent is unchanged.
 
-        The DiT takes the canonical latent and patches it internally, so the internal
-        form here is the latent itself — what has to be built once per run is the layout
-        (segment spans and rope coordinates), the reference latents, and the run's K/V
-        caches.
+        The DiT patches the canonical latent itself, so what is built once per run is
+        the layout, the reference latents and the K/V caches.
         """
         dev = torch.device(self.device)
         x = latents.to(dev, self.dtype)
@@ -210,20 +195,20 @@ class H3ImageModel(DiffusionModel):
         return latents
 
     def begin_sampling(self, schedule: List[Step]) -> None:
-        """The grid the PDD head bank averages over: this run's own sigmas."""
+        """The sigmas of this run's schedule, which the head bank averages over."""
         sigmas = [float(step.t) for step in schedule]
         if schedule:
             sigmas.append(float(schedule[-1].t) - float(schedule[-1].delta))
         self._sample_sigmas = torch.tensor(sigmas, dtype=torch.float32)
 
     def schedule(self, params: SamplingParams) -> list[Step]:
-        """Uniform in the distilled grid's index — the grid itself at the default steps."""
+        """Uniform in the distilled grid's index — the grid itself at ``pdd_steps`` steps."""
         ladder = h3_sampling.sigma_ladder(self.params.pdd_sigmas, params.steps)
         return [Step(t=ladder[i], delta=ladder[i] - ladder[i + 1])
                 for i in range(params.steps)]
 
     def percent_to_sigma(self, percent: float) -> float:
-        """Percent -> sigma along the distilled grid, not along a straight line."""
+        """Percent -> sigma along the distilled grid."""
         return h3_sampling.percent_to_sigma(self.params.pdd_sigmas, percent)
 
     def denoise_step(
@@ -256,7 +241,7 @@ class H3ImageModel(DiffusionModel):
         return round_up(width, CANVAS_MULTIPLE), round_up(height, CANVAS_MULTIPLE)
 
     def default_edit_size(self, width: int, height: int) -> Tuple[int, int]:
-        """An unnamed edit is sampled at its first reference's own fitted size."""
+        """An unnamed edit is sampled at its first reference's fitted size."""
         return self.REFERENCE_SIZING.target_size(width, height)
 
     # ------------------------------------------------------------ editing

@@ -1125,6 +1125,83 @@ def fibo2_perceiver(ctx: Ctx, tokens: int, scenario: str) -> Case:
     return Case(run, flops, num_gist, detail=f"gist={num_gist} txt={ctx.txt}")
 
 
+def h3_params():
+    """The H3-Image geometry ``detect_params`` reads off the shipped checkpoint's header."""
+    from thenoise.dit.h3_image.models import H3ImageParams
+
+    return H3ImageParams(hidden_size=5376, num_layers=50, token_refiner_layers=2,
+                         num_heads=56, head_dim=128, ffn_hidden_size=14336,
+                         latents_dim=24, text_dim=5120, rope_inv_freq=16,
+                         adaln_grid=1025, adaln_dim=8, pdd_steps=6, pdd_sigmas=())
+
+
+@fixture("h3_image", "block", CACHE_SCENARIOS)
+def h3_image_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """H3-Image: single-stream block over a packed ``[text | target | references]``.
+
+    References are packed last so the cache can freeze them; the modulation is projected
+    outside the compiled block, so ``run`` does both, as the model's block loop does.
+    """
+    from thenoise.dit.h3_image.layout import Layout
+    from thenoise.dit.h3_image.models import DiTBlock, _spans
+    from thenoise.utils.rope import split_half_rope_axes
+
+    params = h3_params()
+    name = "h3_image/block"
+    cells = 2 * grid_side(tokens)          # one DiT row is a 2x2 latent patch
+    refs = n_refs(ctx, scenario)
+    read = scenario == "read"
+    layout = Layout(ctx.txt, cells, cells, ((cells, cells),) * refs)
+    n = layout.target_span[1] if read else layout.seq_len
+
+    blk = new_block(ctx, name, DiTBlock, params, ctx.dtype)
+    seed_inputs(name, scenario, tokens)
+    x = randn(ctx, 1, n, params.hidden_size)
+    t_emb = randn(ctx, 2, params.adaln_dim)     # the step's t, and the refs' pinned one
+
+    # The frequencies themselves come from the checkpoint; only their count is a shape.
+    inv_freq = 1.0 / 1000 ** (torch.arange(params.rope_inv_freq, device=ctx.tdev,
+                                           dtype=torch.float32) / params.rope_inv_freq)
+    pos = layout.position_ids.to(ctx.tdev, torch.float32)[:n]
+    cos, sin = (t.to(ctx.dtype) for t in split_half_rope_axes(inv_freq)(pos))
+    rows = [row for row in layout.modulation_rows() if row[0] < n]
+
+    bufs = None
+    kv_shape = (1, params.num_heads, layout.seq_len, params.head_dim)
+    if scenario != "plain":
+        cache = new_cache("suffix")
+        cache_buffers(cache, ("attn", 0), "fill", kv_shape, ctx)
+        if read:
+            cache.set_filled()
+        bufs = cache_buffers(cache, ("attn", 0), scenario, kv_shape, ctx, prime=read)
+
+    def run():
+        return blk(x, _spans(rows, blk.adaln_proj(t_emb)), (cos, sin), bufs)
+
+    flops = gemm_flops((gemm_params(blk), n))
+    flops += attn_flops(params.num_heads, params.head_dim, ((n, kv_shape[2]),))
+    return Case(run, flops, n, detail=f"{len(rows)} spans of {kv_shape[2]}")
+
+
+@fixture("h3_image", "refiner", fixed_seq=True)
+def h3_image_refiner(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """H3-Image's prompt stream: two unmodulated, unrotated blocks over the text."""
+    from thenoise.dit.h3_image.models import RefinerBlock
+
+    params = h3_params()
+    name = "h3_image/refiner"
+    blk = new_block(ctx, name, RefinerBlock, params)
+    seed_inputs(name, scenario, ctx.txt)
+    x = randn(ctx, 1, ctx.txt, params.hidden_size)
+
+    def run():
+        return blk(x)
+
+    flops = gemm_flops((gemm_params(blk), ctx.txt))
+    flops += attn_flops(params.num_heads, params.head_dim, ((ctx.txt, ctx.txt),))
+    return Case(run, flops, ctx.txt, detail=f"txt={ctx.txt}")
+
+
 # ------------------------------------------------------------------ measurement
 @dataclass
 class Timing:

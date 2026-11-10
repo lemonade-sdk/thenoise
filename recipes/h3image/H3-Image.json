@@ -7,7 +7,7 @@
   "image_defaults": {
     "cfg_scale": 1,
     "height": 2048,
-    "steps": 6,
+    "steps": 4,
     "width": 2048
   },
   "labels": [
@@ -19,7 +19,7 @@
   "recipe_options": {
     "cfg_scale": 1,
     "height": 2048,
-    "steps": 6,
+    "steps": 4,
     "width": 2048
   },
   "registry_source": "huggingface",

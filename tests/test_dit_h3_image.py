@@ -1,8 +1,6 @@
 """The H3-Image DiT: its packed layout, its head bank, and the geometry read off a file.
 
-Run on a reduced-width instance built here, because the whole contract is structure —
-which rows carry which timestep, which head answers which interval, which shape comes
-back out.
+Built at a reduced width here, because the contract is structure.
 """
 from __future__ import annotations
 
@@ -55,11 +53,8 @@ def _tiny_params(**over) -> H3ImageParams:
 
 
 def _tiny_dit(params: H3ImageParams | None = None) -> H3ImageDiT:
-    """A built instance with its two buffers filled in.
-
-    ``adaln_t_table`` and ``rope.inv_freq`` are ``torch.empty`` until a checkpoint
-    loads over them, so an unfilled instance computes with whatever the allocator
-    left behind — usually NaN, which would fail every test for the wrong reason.
+    """A built instance with its two empty buffers filled in: unfilled they hold whatever
+    the allocator left, usually NaN.
     """
     torch.manual_seed(0)
     dit = H3ImageDiT(params or _tiny_params()).eval().requires_grad_(False)
@@ -120,12 +115,7 @@ def test_layout_segments_cover_the_sequence_in_order():
 
 
 def test_layout_puts_references_one_time_unit_apart():
-    """The reference rows sit on the same grid as the target but a unit earlier.
-
-    That offset, not a different projection, is what tells the DiT which rows are the
-    picture to keep and which is the picture to make — the timestep tags the modality
-    tag alone cannot, since both are visual.
-    """
+    """Reference rows sit on the target's grid one time unit earlier."""
     layout = Layout(text_len=3, latent_h=2, latent_w=2, refs=[(2, 2), (2, 2)])
     rows = {kind: layout.position_ids[start:stop]
             for start, stop, kind in layout.segments}
@@ -153,12 +143,8 @@ def test_modulation_rows_follow_the_step_and_the_tags():
 
 
 def test_a_reference_is_modulated_at_its_own_timestep():
-    """A reference's pinned timestep is a different row than the target's.
-
-    Row 0 is the step's ``t``, which the prompt and the target share, and row 1 is
-    :data:`COND_TIMESTEP`: reading the target's row for both would condition a
-    reference as picture-to-be-cleaned, which is the one thing the packing exists to
-    avoid.
+    """Row 0 is the step's ``t`` (prompt and target) and row 1 ``COND_TIMESTEP``: reading
+    row 0 for both conditions a reference as picture-to-be-cleaned.
     """
     layout = Layout(text_len=3, latent_h=2, latent_w=2, refs=[(2, 2)])
     assert layout.modulation_rows() == [(0, 3, 1), (3, 4, 0), (4, 5, 3)]
@@ -183,10 +169,8 @@ def test_pdd_head_bank_uses_one_head_per_interval_of_its_own_schedule():
 
 
 def test_pdd_head_bank_averages_the_intervals_a_wider_step_spans():
-    """One step over the whole grid takes the dt-weighted mean of both heads.
-
-    The offset row is half-applied because it covers half the distance: the bank's row
-    0 is a complete head, and every later row is a delta from it.
+    """One step over the whole grid takes the dt-weighted mean of both heads: row 0 is a
+    complete head and every later row a delta, so the weights are distances.
     """
     dit = _tiny_dit()
     final = dit.final_layer
@@ -222,7 +206,6 @@ def test_forward_returns_the_targets_velocity():
 
     assert out.shape == latent.shape
     assert torch.isfinite(out).all()
-    # The head predicts the flow towards noise, the adapter integrates the other way.
     assert out.dtype == latent.dtype
 
 
@@ -266,12 +249,9 @@ def test_references_join_the_sequence_without_reaching_the_output():
 
 
 def test_kv_cache_freezes_the_references_and_reproduces_the_full_sequence():
-    """Fill (references present) then read (references dropped, K/V cached) == full.
-
-    At one latent and one sigma the read path must reproduce the packed forward
-    exactly, which pins the trailing reference span, the buffer write offsets and the
-    rope slicing. Across steps the cache is an approximation by design; this is the
-    part that is exact.
+    """Fill (references present) then read (references dropped, K/V cached) == the packed
+    forward. Exact at one latent and one sigma; across steps the cache is an
+    approximation by design.
     """
     dit = _tiny_dit()
     params = dit.params
@@ -290,7 +270,7 @@ def test_kv_cache_freezes_the_references_and_reproduces_the_full_sequence():
 
     assert torch.allclose(filled, full, atol=1e-6)
     assert torch.allclose(read, full, atol=1e-6)
-    # One pair of buffers for the single block, sized to the whole packed sequence.
+    # One pair of buffers, sized to the whole packed sequence.
     bufs = next(iter(kv._buffers.values()))
     assert bufs.capacity == layout.seq_len
 
@@ -315,11 +295,8 @@ def test_kv_cache_holds_every_reference_of_the_run():
 
 
 def test_reference_rows_are_mixed_with_the_noise_their_timestep_promises():
-    """Same seed, same rows: the augmentation is per-reference, not per-run.
-
-    A reference is labelled :data:`COND_TIMESTEP`, so it is 99.9% signal — and the
-    noise is drawn from a stream that restarts for every reference, which is why a
-    second reference does not inherit the first one's draws.
+    """The noise stream restarts per reference, so a second one does not inherit the first
+    one's draws.
     """
     dit = _tiny_dit()
     ref = torch.ones(1, 4, 2, 2)
@@ -327,8 +304,8 @@ def test_reference_rows_are_mixed_with_the_noise_their_timestep_promises():
     rows = dit._codec_rows(target, [ref, ref], seed=7)
     first, second = rows[1:2], rows[2:]
 
-    # The sliver of noise is the one its label promises, from the stream that restarts
-    # for each reference: 16 values for the one patch row a (2,2) latent makes.
+    # 16 values for the one patch row a (2,2) latent makes, from a stream that restarts
+    # per reference.
     noise = torch.randn(1, 16, generator=torch.Generator("cpu").manual_seed(7))
     assert torch.allclose(first, COND_TIMESTEP * ref.reshape(1, -1) + (1 - COND_TIMESTEP) * noise)
 
@@ -340,9 +317,7 @@ def test_reference_rows_are_mixed_with_the_noise_their_timestep_promises():
 
 
 def test_attention_normalizes_each_heads_query_and_key():
-    """The norms exist as weights in the file, so they have to be on the path.
-
-    A declared-but-unapplied norm loads cleanly and predicts plausible noise, so the
+    """A declared-but-unapplied norm loads cleanly and predicts plausible noise, so the
     assertion is that moving the weights moves the output.
     """
     dit = _tiny_dit()
@@ -425,11 +400,7 @@ def test_loader_restores_every_weight(tmp_path):
 
 
 def test_load_keeps_the_fp32_islands_at_fp32(tmp_path):
-    """A run in BF16 moves the trunk and leaves the modulation curve and head bank alone.
-
-    The checkpoint stores the modulation heads at lower precision than they run at, and
-    the curve is read by interpolation: both are pinned by module, not by the load call.
-    """
+    """A BF16 run moves the trunk and leaves the modulation curve and the head bank FP32."""
     dit = _tiny_dit()
     path = _write_dit(tmp_path, dit, dit.params)
     loaded = load_h3_image_dit(path, detect_params(path), device="cpu", dtype=torch.bfloat16)
@@ -443,11 +414,8 @@ def test_load_keeps_the_fp32_islands_at_fp32(tmp_path):
 
 
 def test_a_bf16_run_keeps_the_stream_at_bf16(tmp_path):
-    """The FP32 islands must not widen the trunk they feed.
-
-    The modulation is projected in FP32 from an FP32 curve; handed to the residual as
-    FP32 it promotes the stream, and every norm and GEMM of every later block then
-    runs at the wrong width — and warns about it.
+    """The FP32 islands must not widen the trunk they feed: a promoted stream runs every
+    later norm and GEMM at the wrong width.
     """
     dit = _tiny_dit()
     path = _write_dit(tmp_path, dit, dit.params)
@@ -465,11 +433,8 @@ def test_a_bf16_run_keeps_the_stream_at_bf16(tmp_path):
 
 
 def test_a_bf16_edit_run_with_a_cache_stays_at_bf16(tmp_path):
-    """One loaded BF16 run of every path: islands in, trunk through, cache in between.
-
-    Both errors this pins are silent in a FP32 test: a widened stream only shows at
-    the first norm that disagrees with its weights, and a K/V buffer narrower than the
-    query only shows when ``attend`` reads the buffer back.
+    """Both errors this pins are silent in an FP32 test: a widened stream, and a K/V buffer
+    narrower than the query.
     """
     dit = _tiny_dit()
     path = _write_dit(tmp_path, dit, dit.params)
@@ -556,24 +521,19 @@ def test_a_prompt_without_pictures_is_all_text():
     assert vision_token_tags(torch.tensor([1, 2, 3])).tolist() == [1, 1, 1]
 
 
-# --------------------------------------------------------------- the conditioner
+# --------------------------------------------------------------------- the conditioner
 #
-# ``encode`` is the one part of the release that is neither shape nor arithmetic: the
-# processor has to hand back the token types the truncated model asks for, and the
-# sequence the DiT modulates has to be the sequence that was embedded. A reduced-width
-# Qwen3-VL, built from the vendored config with the same call the loader makes, is the
-# cheapest thing that can say so.
+# ``encode`` is the part of the release that is neither shape nor arithmetic: the token
+# types the truncated model asks for, and the sequence the DiT modulates being the one
+# that was embedded.
 
 TINY_HIDDEN = 64
 TINY_LAYERS = 5
 
 
 def _tiny_qwen_config():
-    """The vendored 32B conditioner config at a width a CPU test can afford.
-
-    Reduced rather than written out: the truncation and the presentation read the
-    release's own fields (its image-token id, its vision merge size), so a hand-made
-    small config could drift from them unnoticed.
+    """The vendored 32B conditioner config at a width a CPU test can afford. Reduced rather
+    than written out, so it cannot drift from the release's own fields.
     """
     import copy
 
@@ -649,16 +609,14 @@ def test_the_conditioner_embeds_the_prompt_it_assembled(tiny_conditioner):
     assert int(mask.sum()) == mask.numel()  # one sequence, nothing padded
     assert torch.isfinite(embeds).all()
 
-    # The picture and its two markers are one visual run, with the prompt around it
-    # still text. (How many tokens a picture is worth is the processor's business, and
-    # is pinned in test_vision_token_tags_cover_the_markers_framing_the_pictures.)
+    # The picture and its two markers are one visual run; how many tokens a picture is
+    # worth is the processor's business.
     visual = (tags[0] == 0).tolist()
     assert [k for k, _ in groupby(visual)] == [False, True, False]
     assert sum(visual) > 0
     assert visual.count(False) > 2  # "Picture 1: " and the prompt on both sides
     assert int((tags == 1).sum()) > 0
 
-    # Asking again with the same prompt and picture gives the same conditioning.
     again, _, again_tags = encoder.encode("make it red", [picture])
     assert torch.equal(again, embeds) and torch.equal(again_tags, tags)
 

@@ -1,30 +1,10 @@
 """The H3-Image conditioner — Qwen3-VL-32B truncated to 50 layers, no final norm.
 
-Two things set this presentation apart from every other Qwen-VL conditioner here.
-
-**Nothing wraps the prompt.** The released model is conditioned on raw text with
-vision blocks spliced in — one ``Picture n: `` label per reference, in prompt order,
-then the prompt — with none of the system-turn/user-turn scaffolding the other
-conditioners build. That is not a stylistic choice to tidy away: the language model
-was trained on exactly this distribution, so adding a chat wrapper moves the whole
-conditioning off it. It also means there is no prefix to drop, so the entire token
-sequence, first marker to last, is the conditioning.
-
-**What is returned is unnormalized.** The file is a 32B decoder cut to its first 50
-layers, and the final RMSNorm went with the cut: the checkpoint has no
-``...norm.weight`` at all, and the DiT's ``condition_proj`` expects raw layer output.
-Hence the identity swap in :func:`_truncate_qwen3_vl` rather than a norm that
-happens to be initialised to ones — the difference is visible in the output, because
-an RMSNorm renormalises every token to a fixed magnitude and the prompt's magnitude
-carries information the DiT reads.
-
-The layer count is read off the file, so a release truncated somewhere else loads.
-
-Per-token **modality tags** come back with the embeddings: the vision placeholders
-inside the prompt carry the visual tag, everything else the text tag, and the DiT
-modulates the two differently (see
-:mod:`thenoise.dit.h3_image.models`). A tag is a property of the *prompt*, so it
-travels with the conditioning rather than being recomputed per step.
+Two constraints of the release shape it. The prompt carries no chat wrapper: the model
+was trained on raw text with labelled vision blocks spliced in, so a system or user turn
+moves the conditioning off its distribution — and with no prefix to drop, every token is
+conditioning. And the cut took the final RMSNorm with it: the DiT reads raw layer output,
+where an RMSNorm would fix a magnitude the DiT uses.
 """
 from __future__ import annotations
 
@@ -54,8 +34,7 @@ if TYPE_CHECKING:  # pragma: no cover - only for annotations
 logger = logging.getLogger(__name__)
 
 #: The label in front of each reference, 1-based, matching how the prompt refers to
-#: them. ``<Picture n>: `` with angle brackets belongs to the video models; the image
-#: release spells it without.
+#: them. ``<Picture n>: `` with angle brackets belongs to the video models.
 PICTURE_LABEL = "Picture {}: "
 
 #: Modality tag of a DiT-modulation group: 0 is visual, 1 is text.
@@ -68,12 +47,7 @@ PAD_TOKEN_ID = QWEN3_VL_32B_H3_CONFIG["text_config"]["bos_token_id"]
 
 
 def prompt_with_pictures(prompt: str, num_images: int) -> str:
-    """The conditioning text: one labelled vision block per reference, then the prompt.
-
-    An empty prompt with no references tokenizes to nothing at all, which no encoder
-    runs; it is left empty here and given the pad token by
-    :meth:`H3ImageTextEncoder.encode`, so the emptiness is decided once.
-    """
+    """The conditioning text: one labelled vision block per reference, then the prompt."""
     labels = "".join(PICTURE_LABEL.format(i + 1) + VISION_BLOCK
                      for i in range(num_images))
     return labels + prompt
@@ -83,10 +57,8 @@ def vision_token_tags(input_ids: torch.Tensor, image_pad_id: int = IMAGE_PAD_ID
                       ) -> Tensor:
     """Per-token modality tags: 0 across each vision block, 1 everywhere else.
 
-    A block is the run of expanded image patches *and* the two markers framing it, so
-    each run of ``image_pad`` is widened by one token on either side — the framing
-    tokens describe the picture, not the sentence, and the DiT's visual modulation is
-    what the reference model applies to them.
+    Each run of ``image_pad`` is widened by one token on either side: the markers
+    framing a picture describe the picture, and the DiT modulates them visually.
     """
     ids = input_ids.view(-1).tolist()
     tags = [TAG_TEXT] * len(ids)
@@ -106,9 +78,8 @@ def vision_token_tags(input_ids: torch.Tensor, image_pad_id: int = IMAGE_PAD_ID
 def _truncate_qwen3_vl(config, layers: int) -> nn.Module:
     """A Qwen3-VL with ``layers`` decoder layers and no final norm.
 
-    The truncation is a property of the released file, not of the vendored config, so
-    the depth is set here; the norm is replaced rather than deleted because the
-    language model's forward calls it.
+    The depth is a property of the released file, not of the vendored config, and the
+    norm is replaced rather than deleted because the language model's forward calls it.
     """
     config.text_config.num_hidden_layers = layers
     model = Qwen3VLForConditionalGeneration._from_config(config)
@@ -116,6 +87,7 @@ def _truncate_qwen3_vl(config, layers: int) -> nn.Module:
     model.model.language_model.norm = nn.Identity()
     replace_linears(model)
     return model
+
 
 def layer_count(path: str) -> int:
     """How many decoder layers a text-encoder file holds, from its header."""
@@ -150,11 +122,10 @@ class H3ImageTextEncoder(nn.Module):
     def encode(
         self, prompt: str, images: Optional[Sequence["Image.Image"]] = None
     ) -> Tuple[Tensor, Tensor, Tensor]:
-        """Encode one prompt -> ``(embeds [1, L, 5120], mask [1, L], tags [1, L])``.
+        """``(embeds [1, L, 5120], mask [1, L], tags [1, L])`` for one prompt.
 
-        The images are the *already fitted* PIL images, in the order the prompt labels
-        them. ``mask`` marks real tokens: the batch is one sequence, so it is all ones
-        and the DiT's sequence length is simply ``L``.
+        ``images`` are the already fitted PIL images, in the order the prompt labels
+        them. One sequence is encoded at a time, so ``mask`` is all ones.
         """
         images = [] if images is None else list(images)
         text = prompt_with_pictures(prompt, len(images))
@@ -162,8 +133,7 @@ class H3ImageTextEncoder(nn.Module):
 
         input_ids = torch.as_tensor(inputs["input_ids"]).to(self.device, torch.long)
         if input_ids.shape[-1] == 0:
-            # An empty prompt with no references tokenizes to nothing, which no
-            # language model runs; the pad token is the release's own fallback.
+            # An empty prompt with no references tokenizes to nothing at all.
             input_ids = torch.full((1, 1), PAD_TOKEN_ID, dtype=torch.long, device=self.device)
 
         model_inputs = {
@@ -183,8 +153,7 @@ class H3ImageTextEncoder(nn.Module):
                 inputs["mm_token_type_ids"]
             ).to(self.device, torch.long)
 
-        # The truncated model ends in an identity, so this *is* the unnormalized output
-        # of the last surviving layer.
+        # The truncated model ends in an identity: nothing normalizes this output.
         embeds = self.qwen.model(**model_inputs).last_hidden_state
         tags = vision_token_tags(input_ids[0]).view(input_ids.shape).to(self.device)
         mask = torch.ones_like(input_ids)
@@ -201,11 +170,7 @@ def load_h3_image_text_encoder(
     device,
     tokenizer_dir: Optional[str] = None,
 ) -> H3ImageTextEncoder:
-    """Load the truncated Qwen3-VL-32B conditioner plus its tokenizer and processor.
-
-    The tokenizer is the shared Qwen BPE; the release adds no tokens the image
-    presentation needs, so no special-token surgery happens at load.
-    """
+    """Load the truncated Qwen3-VL-32B conditioner plus its tokenizer and processor."""
     layers = layer_count(path)
     qwen = load_qwen3_vl_model(
         path,

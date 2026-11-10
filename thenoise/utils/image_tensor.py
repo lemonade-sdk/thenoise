@@ -167,10 +167,9 @@ def resize_to_long_edge(image: Image.Image, long_edge: int) -> Image.Image:
 def resize_to_short_edge(image: Image.Image, edge: int, align: int = 1) -> Image.Image:
     """Make a PIL image's shortest side ``edge``, aspect preserved, in or out.
 
-    The counterpart of :func:`resize_to_long_edge` for a model trained on references
-    of one particular scale: a small reference is enlarged, not left alone. Sides are
-    rounded to ``align``, which keeps the result on the grid the model's own reference
-    sizing uses.
+    Unlike :func:`resize_to_long_edge` this enlarges: a model trained on references of a
+    certain minimum detail reads a small one as degraded conditioning. Sides are rounded
+    to ``align``.
     """
     w, h = image.size
     scale = edge / min(w, h)
@@ -199,9 +198,8 @@ class ReferenceSizing:
     Aspect is always preserved and nothing is ever cropped, so the references of a
     multi-reference edit keep the shape they arrived in. ``fit`` gives the single
     ``cap`` its meaning: a pixel **area** to scale to, a **longest side** to cap
-    without enlarging, or the **shortest side** of a band it is scaled into — that
-    one also enlarges, up from ``floor``, because a model trained on references of a
-    certain minimum detail reads a small one as a degraded conditioning.
+    without enlarging, or the **shortest side** of a band it is scaled into — that one
+    enlarges up from ``floor``.
 
     The result is floored to ``align`` pixels, which keeps a reference on whole latent
     cells and inside the cap.

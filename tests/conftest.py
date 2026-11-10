@@ -567,10 +567,8 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "final_layer.linear.weight",
         ],
     ),
-    # The packed H3 DiT without an audio stream. Its video sibling shares every key
-    # except ``audio_patch_proj``, and this engine runs no audio, so the matrix also
-    # pins down that the video checkpoint is claimed by nobody rather than sampled
-    # as an image model with a silently dropped stream.
+    # The packed H3 DiT without an audio stream. The video sibling shares every key but
+    # ``audio_patch_proj``, and is claimed by nobody here rather than by this adapter.
     "h3_image": (
         H3ImageModel,
         [
