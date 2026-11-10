@@ -181,12 +181,6 @@ class H3ImageModel(DiffusionModel):
         (segment spans and rope coordinates), the reference latents, and the run's K/V
         caches.
         """
-        if ref_method != "index_timestep_zero":
-            raise ValueError(
-                f"unsupported ref_latents_method {ref_method!r} for {self.name}: a "
-                "reference is always packed as its own rows, pinned at a timestep of "
-                "0.999, there is no other conditioning to select"
-            )
         dev = torch.device(self.device)
         x = latents.to(dev, self.dtype)
         refs = [pad_to_patch(r.to(dev, self.dtype), PATCH_SIZE)[0] for r in _as_list(ref)]
