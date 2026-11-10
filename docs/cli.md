@@ -79,7 +79,7 @@ Then open <http://localhost:8000/> for the web UI. Full endpoint reference:
 | `--tint` | no | `0.0` | White balance across the green–magenta axis: -1.0 greens, 1.0 magentas (-1.0–1.0) |
 | `--sharpening` | no | `0.0` | RCAS sharpening strength (0.0–1.0) |
 | `--film-grain` | no | `0.0` | Film grain strength (0.0–10.0) |
-| `--kv-cache` / `--no-kv-cache` | no | auto | T2I opt-in (off by default); Qwen-Image 2.1 caches its fixed text prefix. Compatible edits still enable caching automatically for `index_timestep_zero` |
+| `--kv-cache` / `--no-kv-cache` | no | auto | Reuse step-invariant K/V across denoising steps. T2I defaults off (opt-in); compatible edits auto-enable for `index_timestep_zero` |
 | `--ref-method` | no | auto | Reference conditioning for editing: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index`. The cache default follows it |
 
 > **Note:** T2I caching is supported by models with a cacheable text prefix;

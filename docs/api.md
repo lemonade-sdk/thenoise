@@ -65,7 +65,7 @@ index_timestep_zero` (see [`/edit`](#post-edit)).
 | `upscale_type` | `string` | `refined` | `refined` (latent 2x + refiner) or `no-refiner` (pixel upscaler only) |
 | `pixel_upscaler` | `string` | `null` | Pixel upscaler name (no `.safetensors` suffix) from `--upscaler-dir` |
 | `sampler` | `string` | model default | Denoising solver: `euler` or `er_sde` |
-| `kv_cache` | `boolean` | auto | Optional KV reuse: T2I defaults off (Qwen-Image 2.1 can cache its text prefix); compatible edits auto-enable based on `ref_method`. Explicit `true` requires model support |
+| `kv_cache` | `boolean` | auto | Reuse step-invariant K/V across denoising steps. T2I defaults off (opt-in); compatible edits auto-enable based on `ref_method`. Explicit `true` requires model support |
 | `qwen_vae_enhance` | `bool` | `false` | Nyquist notch post-filter (removes 2px grid artifacts) |
 | `saturation` | `float` | `0.0` | Colour saturation around neutral `0.0`: -1.0 greyscales, 1.0 doubles |
 | `vibrance` | `float` | `0.0` | Saturation that lifts washed-out pixels and leaves vivid ones alone |
