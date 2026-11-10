@@ -71,17 +71,14 @@ class H3ImageModel(DiffusionModel):
         "ref_method": "index_timestep_zero",
     }
 
-    # Guidance is distilled in; a negative prompt still works as an extrapolation
-    # direction, it is just off the model's training distribution.
     CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": True}
-
-    # The step-invariant slice is the TRAILING reference rows: they are packed last so
-    # that a cached run recomputes the prompt and the target, which follow the timestep.
     KV_CACHED_SLICE = "suffix"
 
     REFERENCE_SIZING = ReferenceSizing(
         fit="short_edge", floor=1024, cap=2048, align=CANVAS_MULTIPLE
     )
+
+    REF_METHODS = ("index_timestep_zero",)
 
     @staticmethod
     def detect(f) -> bool:
