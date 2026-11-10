@@ -58,6 +58,7 @@ TheNoise ships:
 | **Mage-Flow / Turbo**, the fastest model, with editing | ✓ | ✓ | [mage-flow](docs/models/mage-flow.md) |
 | **Flux.3**, 15 steps with editing | ✓ | ✓ | [flux3](docs/models/flux3.md) |
 | **Fibo 2.0**, Bria's 4-step generate-and-edit model | ✓ | ✓ | [fibo2](docs/models/fibo2.md) |
+| **H3-Image**, MiniMax's 20 B generate-and-edit model | ✓ | ✓ | [h3-image](docs/models/h3-image.md) |
 
 New models are added over time. PRs adding model support are welcome.
 
