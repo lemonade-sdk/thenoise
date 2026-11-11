@@ -36,7 +36,7 @@ def test_video_http_t2v_and_i2v_and_content(tmp_path):
     install_video_routes(app, jobs, "Wan2.2-TI2V-5B")
     try:
         with TestClient(app) as c:
-            req = {"model": "Wan2.2-TI2V-5B", "prompt": "fox", "video_frames": 9,
+            req = {"model": "Wan2.2-TI2V-5B", "prompt": "fox", "frames": 9,
                    "width": 480, "height": 320, "fps": 8, "duration": 10}
             r = c.post("/v1/videos", json=req)
             assert r.status_code == 202
@@ -78,7 +78,7 @@ def test_video_http_cancel_running_and_rejection(tmp_path):
     try:
         with TestClient(app) as c:
             assert c.post("/v1/videos", json={"model": "wrong", "prompt": "fox"}).status_code == 400
-            assert c.post("/v1/videos", json={"prompt": "fox", "sampling_method": "dpmpp"}).status_code == 422
+            assert c.post("/v1/videos", json={"prompt": "fox", "sampler": "dpmpp"}).status_code == 422
             assert c.post("/v1/videos", json={"prompt": "fox", "image": "invalid!?"}).status_code == 400
             assert c.post("/v1/videos", json={"prompt": "fox", "image": base64.b64encode(b"not an image").decode()}).status_code == 400
             r = c.post("/v1/videos", json={"prompt": "fox"})

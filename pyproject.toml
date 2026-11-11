@@ -23,12 +23,12 @@ dependencies = [
     "comfy-kitchen>=0.2.40",
     "numpy",
     "tqdm",
+    "av>=14",
+    "sentencepiece>=0.2",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest"]
-# Kept out of normal image installs. Torch remains managed by the operator.
-video = ["diffusers>=0.38.0", "av>=14", "ftfy>=6", "sentencepiece>=0.2"]
 # Download helpers in scripts/ (not needed at runtime).
 scripts = ["huggingface-hub>=0.34.3"]
 
@@ -48,6 +48,7 @@ packages = [
     "thenoise.dit.moss_image",
     "thenoise.dit.qwen_image",
     "thenoise.dit.qwen_image21",
+    "thenoise.dit.wan_video",
     "thenoise.dit.anima",
     "thenoise.dit.zimage",
     "thenoise.dit.flux2",

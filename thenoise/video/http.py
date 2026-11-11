@@ -1,4 +1,4 @@
-"""Lemonade PR #3506-compatible video job routes for TheNoise standalone HTTP."""
+"""Asynchronous video job routes."""
 from __future__ import annotations
 
 import base64
@@ -22,14 +22,14 @@ class VideoRequest(BaseModel):
     negative_prompt: str = ""
     width: int = 1280
     height: int = 704
-    video_frames: Optional[int] = Field(default=None, ge=1)
+    frames: Optional[int] = Field(default=None, ge=1)
     duration: Optional[float] = Field(default=None, gt=0)
     fps: int = Field(default=24, ge=1, le=60)
     steps: int = Field(default=30, ge=1, le=100)
-    cfg_scale: float = 5.0
+    guidance_scale: float = 5.0
     seed: Optional[int] = None
     output_format: Literal["mp4", "webm"] = "webm"
-    sampling_method: Literal["unipc", "euler"] = "unipc"
+    sampler: Literal["unipc", "euler"] = "unipc"
     flow_shift: float = 5.0
     image: Optional[str] = None  # base64-encoded PNG/JPEG initial frame for I2V
 

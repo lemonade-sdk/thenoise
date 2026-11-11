@@ -4,7 +4,6 @@
 """Causal FP32 Wan 2.2 TI2V-5B video VAE."""
 from __future__ import annotations
 
-import json
 from collections import namedtuple
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +13,8 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 from safetensors import safe_open
+
+from thenoise.utils.wan_weights import validated_key_map, wan_vae_key
 
 CACHE_T = 2
 DecoderOutput = namedtuple("DecoderOutput", "sample")
@@ -334,45 +335,38 @@ def _unpatchify(x: Tensor, p: int) -> Tensor:
 
 
 # Production: validate before allocating the large temporal VAE.
-_TI2V_VAE_CONFIG = {
-    "_class_name": "AutoencoderKLWan",
-    "base_dim": 160,
-    "decoder_base_dim": 256,
-    "z_dim": 48,
-    "in_channels": 12,
-    "out_channels": 12,
-    "dim_mult": [1, 2, 4, 4],
-    "num_res_blocks": 2,
-    "temperal_downsample": [False, True, True],
-    "is_residual": True,
-    "patch_size": 2,
-    "scale_factor_temporal": 4,
-    "scale_factor_spatial": 16,
-    "attn_scales": [],
-    "dropout": 0.0,
-}
+# ComfyUI comfy/latent_formats.py:Wan22; unlike Diffusers there is no model config.json.
+_LATENTS_MEAN = (
+    -0.2289, -0.0052, -0.1323, -0.2339, -0.2799, 0.0174, 0.1838, 0.1557,
+    -0.1382, 0.0542, 0.2813, 0.0891, 0.1570, -0.0098, 0.0375, -0.1825,
+    -0.2246, -0.1207, -0.0698, 0.5109, 0.2665, -0.2108, -0.2158, 0.2502,
+    -0.2055, -0.0322, 0.1109, 0.1567, -0.0729, 0.0899, -0.2799, -0.1230,
+    -0.0313, -0.1649, 0.0117, 0.0723, -0.2839, -0.2083, -0.0520, 0.3748,
+    0.0152, 0.1957, 0.1433, -0.2944, 0.3573, -0.0548, -0.1681, -0.0667,
+)
+_LATENTS_STD = (
+    0.4765, 1.0364, 0.4514, 1.1677, 0.5313, 0.4990, 0.4818, 0.5013,
+    0.8158, 1.0344, 0.5894, 1.0901, 0.6885, 0.6165, 0.8454, 0.4978,
+    0.5759, 0.3523, 0.7135, 0.6804, 0.5833, 1.4146, 0.8986, 0.5659,
+    0.7069, 0.5338, 0.4889, 0.4917, 0.4069, 0.4999, 0.6866, 0.4093,
+    0.5709, 0.6065, 0.6415, 0.4944, 0.5726, 1.2042, 0.5458, 1.6887,
+    0.3971, 1.0600, 0.3943, 0.5537, 0.5444, 0.4089, 0.7468, 0.7744,
+)
 
 
-def _read_config(model_dir: Path, *, test_size: bool) -> SimpleNamespace:
-    path = model_dir / "vae" / "config.json"
-    try:
-        config = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise ValueError(f"missing or invalid local Wan video VAE config: {path}") from exc
-    for key, value in _TI2V_VAE_CONFIG.items():
-        if (not test_size or key in ("_class_name", "in_channels", "out_channels", "z_dim", "patch_size",
-                                     "temperal_downsample", "scale_factor_temporal", "scale_factor_spatial", "is_residual")) and config.get(key) != value:
-            raise ValueError(f"unsupported Wan 2.2 video VAE config: {key}")
-    if (len(config.get("latents_mean", [])) != 48 or len(config.get("latents_std", [])) != 48
-            or not all(isinstance(v, (int, float)) and float(v) > 0 for v in config["latents_std"])):
-        raise ValueError("invalid Wan 48-channel latent statistics")
-    if test_size:
-        if (not isinstance(config.get("base_dim"), int) or not 2 <= config["base_dim"] <= 256
-                or not isinstance(config.get("decoder_base_dim"), int) or not 2 <= config["decoder_base_dim"] <= 256):
-            raise ValueError("invalid miniature VAE width")
-        if not isinstance(config.get("num_res_blocks"), int) or not 1 <= config["num_res_blocks"] <= 2:
-            raise ValueError("invalid miniature VAE depth")
-    return SimpleNamespace(**config)
+def _comfy_vae_config(overrides: dict | None = None) -> SimpleNamespace:
+    cfg = dict(
+        base_dim=160, decoder_base_dim=256, z_dim=48,
+        dim_mult=[1, 2, 4, 4], num_res_blocks=2,
+        temperal_downsample=[False, True, True],
+        dropout=0.0, is_residual=True, in_channels=12,
+        out_channels=12, patch_size=2, scale_factor_temporal=4,
+        scale_factor_spatial=16, attn_scales=[],
+        latents_mean=list(_LATENTS_MEAN), latents_std=list(_LATENTS_STD),
+    )
+    if overrides:
+        cfg.update(overrides)
+    return SimpleNamespace(**cfg)
 
 
 class WanNativeVideoVAE(nn.Module):
@@ -463,43 +457,42 @@ class WanNativeVideoVAE(nn.Module):
         return self.decode(self.encode(x).latent_dist.mode()).sample
 
 
+def _comfy_vae_checkpoint(root: Path) -> Path:
+    for directory in (root, root / "split_files"):
+        path = directory / "vae" / "wan2.2_vae.safetensors"
+        if path.is_file():
+            return path
+    raise FileNotFoundError("Wan 2.2 VAE missing: vae/wan2.2_vae.safetensors")
+
+
 def load_wan_native_video_vae(
     model_dir: str | Path, *, check_cancel: Callable[[], None] | None = None,
-    _test_size: bool = False,
+    _test_config: dict | None = None,
 ) -> WanNativeVideoVAE:
-    """Load FP32 video-VAE weights directly from local safetensors."""
+    """Read the ComfyUI WanVAE layout, computing causally in FP32."""
     root = Path(model_dir).expanduser().resolve()
-    cfg = _read_config(root, test_size=_test_size)
-    checkpoint = root / "vae" / "diffusion_pytorch_model.safetensors"
-    if not checkpoint.is_file():
-        raise FileNotFoundError(f"Wan native video VAE checkpoint missing: {checkpoint}")
+    cfg = _comfy_vae_config(_test_config)
+    checkpoint = _comfy_vae_checkpoint(root)
     with torch.device("meta"):
         model = WanNativeVideoVAE(cfg)
     expected = {name: tuple(t.shape) for name, t in model.state_dict().items()}
     if check_cancel:
         check_cancel()
-    with safe_open(str(checkpoint), framework="pt", device="cpu") as file:
-        received = set(file.keys())
-        missing = sorted(expected.keys() - received)
-        extra = sorted(received - expected.keys())
-        if missing or extra:
-            raise ValueError(f"Wan native VAE keys mismatch: missing={missing[:8]}, extra={extra[:8]}")
-        for i, (name, shape) in enumerate(expected.items()):
-            if check_cancel and i % 16 == 0:
-                check_cancel()
-            slice_ = file.get_slice(name)
-            if tuple(slice_.get_shape()) != shape:
-                raise ValueError(f"Wan native VAE tensor shape mismatch: {name}")
-            # Upcasting BF16 to FP32 cannot recover the original VAE weights.
-            if slice_.get_dtype() != "F32":
-                raise ValueError(f"Wan video VAE checkpoint is not FP32: {name}")
-        # Validate *all* shapes before assigning any large weights.
-        for i, name in enumerate(expected):
+    with safe_open(str(checkpoint), framework="pt", device="cpu") as f:
+        mapping = validated_key_map(
+            set(f.keys()), lambda k: wan_vae_key(k, num_res_blocks=cfg.num_res_blocks), set(expected)
+        )
+        for raw, target in mapping.items():
+            if tuple(f.get_slice(raw).get_shape()) != expected[target]:
+                raise ValueError(f"Wan VAE tensor shape mismatch: {raw} -> {target}")
+            if f.get_slice(raw).get_dtype() not in ("F32", "F16", "BF16"):
+                raise ValueError(f"Wan VAE unsupported dtype: {raw}")
+        for i, (raw, target) in enumerate(sorted(mapping.items())):
             if check_cancel and i % 8 == 0:
                 check_cancel()
-            tensor = file.get_tensor(name)
-            model.load_state_dict({name: tensor}, strict=False, assign=True)
-    if any(param.is_meta for param in model.parameters()):
-        raise RuntimeError("Wan native VAE contains unloaded meta parameters")
+            # Comfy-Org's public VAE is FP16; FP32 *execution* is still required.
+            model.load_state_dict({target: f.get_tensor(raw).to(torch.float32)}, strict=False, assign=True)
+    if any(p.is_meta for p in model.parameters()):
+        raise RuntimeError("Wan video VAE contains unloaded meta parameters")
     model.clear_cache()
     return model.eval()

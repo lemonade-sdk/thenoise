@@ -1,42 +1,36 @@
 # Video generation
 
-Wan 2.2 TI2V-5B supports text-to-video and first-frame image-to-video via
-asynchronous jobs. TheNoise runs the native 3D transformer and causal video VAE;
-Diffusers supplies the pipeline orchestration and schedulers; the native
-transformer and video VAE load and execute without Diffusers model weights.
-The model loads from a local Wan 2.2 TI2V-5B checkpoint directory on first use.
+TheNoise supports native Wan 2.2 TI2V-5B text-to-video and image-to-video generation.
+Use the [Comfy-Org/Wan-2.2](https://huggingface.co/Comfy-Org/Wan-2.2)
+checkpoints under one directory:
 
-## Setup
-
-```sh
-uv pip install -e '.[video]'
-python -m thenoise serve --video-model-dir /path/to/Wan2.2-TI2V-5B-Diffusers \
-    --video-offload --port 8000
+```
+models/wan22/split_files/
+  diffusion_models/wan2.2_ti2v_5B_fp16.safetensors
+  text_encoders/umt5_xxl_fp16.safetensors
+  vae/wan2.2_vae.safetensors
 ```
 
-`--video-offload` stages model components through CPU. Video and image model
-checkpoints cannot be supplied in the same `serve` invocation.
+Install TheNoise (`uv pip install -e .`) and use `.[scripts]` if the
+`hf` download tool is not already installed. Download the three model files:
 
-## HTTP API
+```sh
+hf download Comfy-Org/Wan-2.2 split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors --local-dir ./models/wan22
+hf download Comfy-Org/Wan-2.2 split_files/text_encoders/umt5_xxl_fp16.safetensors --local-dir ./models/wan22
+hf download Comfy-Org/Wan-2.2 split_files/vae/wan2.2_vae.safetensors --local-dir ./models/wan22
+python -m thenoise serve --video-model-dir ./models/wan22 --video-offload
+```
 
 ```sh
 curl -X POST http://localhost:8000/v1/videos \
   -H 'Content-Type: application/json' \
-  -d '{"prompt":"A fox walking through snow", "video_frames":33, "fps":24, "width":720, "height":480, "steps":8, "output_format":"mp4"}'
+  -d '{"prompt":"A fox walking through snow", "frames":33, "fps":24, "width":720, "height":480, "steps":8, "output_format":"mp4"}'
 ```
 
-The response contains a job `id` and status `queued`. Poll
-`GET /v1/videos/{id}` for progress and the final status. Retrieve the video with
-`GET /v1/videos/{id}/content`, or cancel using
-`POST /v1/videos/{id}/cancel`.
-
-For image-to-video add `"image":"<base64-encoded PNG or JPEG>"`. Optional
-parameters include `negative_prompt`, `cfg_scale`, `seed`, `duration`,
-`sampling_method` (`unipc` or `euler`) and `flow_shift`. MP4/H.264 and WebM/VP9
-are supported. Frames are rounded to Wan's `4n+1` temporal grid.
-
-Jobs run one at a time, with up to four waiting in the queue. Clips are stored
-under `~/.cache/thenoise/videos` (configurable with `--video-cache-dir`). Jobs
-are not persisted across restarts. Cancellation is cooperative and cannot stop
-a running GPU kernel immediately. Decoded frames are currently buffered before
-container encoding; spatial VAE tiling is not implemented.
+Poll `GET /v1/videos/{id}` and download `GET /v1/videos/{id}/content`.
+Cancel with `POST /v1/videos/{id}/cancel`.
+For I2V include `"image":"<base64-encoded JPEG or PNG>"`.
+Output is MP4/H.264 or WebM/VP9, and frames follow Wan's `4n+1` grid.
+`--video-offload` stages the text encoder, transformer, and VAE using the shared memory manager.
+Video and image models currently require separate `serve` invocations.
+The FP8 text encoder is not yet supported; use the FP16 checkpoint.

@@ -19,7 +19,7 @@ def encode_video(frames: Iterable, spec: ResolvedVideo, token: Cancellation, out
         import av
         import numpy as np
     except ImportError as e:
-        raise RuntimeError("video encoding needs the optional 'video' extras (PyAV)") from e
+        raise RuntimeError("video encoding requires PyAV") from e
 
     codec = "libx264" if spec.output_format == "mp4" else "libvpx-vp9"
     tmp = out.with_name(out.name + ".part")

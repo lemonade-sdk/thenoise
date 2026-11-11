@@ -19,7 +19,7 @@ class WanNativeOutput:
 
 
 def _timestep_embedding(t: Tensor, dim: int) -> Tensor:
-    """Wan's cos/sin embedding (Diffusers Timesteps, flip_sin_to_cos=True)."""
+    """Wan's cosine/sine timestep embedding."""
     half = dim // 2
     scale = torch.exp(
         -math.log(10_000) * torch.arange(half, device=t.device, dtype=torch.float32) / half
@@ -32,8 +32,7 @@ def _timestep_embedding(t: Tensor, dim: int) -> Tensor:
 class WanNativeRoPE(nn.Module):
     """Repackage checkpoint frequency tables into TheNoise's adjacent-pair RoPE.
 
-    This preserves Diffusers' FP64-generated frequency phases already stored in
-    FP32 buffers; recreating the frequencies in FP32 causes avoidable drift.
+    Precompute FP64 phases and retain FP32 buffers to avoid phase drift.
     """
 
     def __init__(self, weights: nn.Module):
@@ -67,7 +66,6 @@ class WanNativeRoPE(nn.Module):
             sin_w[None, None, :w].expand(t, h, w, -1),
         ), dim=-1).reshape(t * h * w, -1)
         # TheNoise apply_rope consumes adjacent 2x2 matrices, [B, N, D/2, 2, 2].
-        # Diffusers' table duplicates each phase across the two components.
         cs = cos[:, ::2]
         sn = sin[:, 1::2]
         return torch.stack((cs, -sn, sn, cs), dim=-1).reshape(1, t * h * w, -1, 2, 2)
@@ -182,7 +180,7 @@ class WanNativeDiT(nn.Module):
 
     @property
     def dtype(self) -> torch.dtype:
-        return self.patch_embedding.weight.dtype
+        return self.proj_out.weight.dtype
 
     @property
     def device(self) -> torch.device:
@@ -211,7 +209,7 @@ class WanNativeDiT(nn.Module):
             raise ValueError("invalid 48-channel Wan latent geometry")
 
         rope = self.rope(hidden_states)
-        x = self.patch_embedding(hidden_states).flatten(2).transpose(1, 2).contiguous()
+        x = self.patch_embedding(hidden_states.float()).to(hidden_states.dtype).flatten(2).transpose(1, 2).contiguous()
         temb, modulation, ctx = self.condition_embedder(timestep, encoder_hidden_states)
         if timestep.ndim == 2 and timestep.shape != (b, x.shape[1]):
             raise ValueError("I2V token timesteps must match patchified latent tokens")

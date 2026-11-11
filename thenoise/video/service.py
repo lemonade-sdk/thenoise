@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .jobs import VideoJobs
-from .wan import WanVideo
+from thenoise.models.wan_video import WanVideo
 
 
 def create_video_service(model_dir: str, *, device: str, offload: bool,

@@ -9,11 +9,13 @@ from typing import Dict, Type
 
 from .base import Sampler, Step
 from .euler import EulerSampler
+from .uni_pc import UniPCSampler
 from .er_sde import ErSdeSampler
 
 SAMPLERS: Dict[str, Type[Sampler]] = {
     "euler": EulerSampler,
     "er_sde": ErSdeSampler,
+    "unipc": UniPCSampler,
 }
 
 

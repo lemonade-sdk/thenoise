@@ -50,7 +50,7 @@ def fake_av(monkeypatch):
 
 
 def spec():
-    return VideoSpec(prompt="fox", width=480, height=320, video_frames=9,
+    return VideoSpec(prompt="fox", width=480, height=320, frames=9,
                      fps=8, output_format="mp4").resolve()
 
 

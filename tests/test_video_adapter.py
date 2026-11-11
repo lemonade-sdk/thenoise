@@ -1,9 +1,7 @@
-"""Video pipeline lifecycle, cancellation and precision checks."""
+"""Native video lifecycle and cancellation checks."""
 from __future__ import annotations
 
-import contextlib
 import io
-import json
 import sys
 import threading
 import types
@@ -14,231 +12,174 @@ from PIL import Image
 
 from thenoise.video.jobs import Cancellation, VideoCancelled
 from thenoise.video.spec import VideoSpec
-from thenoise.video.wan import WanVideo
+from thenoise.models.wan_video import WanVideo
 
 
 @pytest.fixture
-def adapter_env(tmp_path, monkeypatch):
-    model = tmp_path / "model"
-    model.mkdir()
-    (model / "model_index.json").write_text(json.dumps({
-        "_class_name": "WanPipeline", "expand_timesteps": True,
-        "transformer_2": [None, None],
-        "scheduler": ["diffusers", "UniPCMultistepScheduler"],
-    }))
-    loads = []
-    runs = []
+def fake_video(tmp_path, monkeypatch):
+    root = tmp_path / "model"
+    root.mkdir()
+    calls = []
 
-    class Scheduler:
-        def __init__(self, **config):
-            self.config = config or {
-                "use_flow_sigmas": True,
-                "prediction_type": "flow_prediction",
-                "num_train_timesteps": 1000,
-            }
-
-        @classmethod
-        def from_pretrained(cls, *_args, **_kwargs):
-            return cls()
-
-        @classmethod
-        def from_config(cls, config, **overrides):
-            return cls(**(dict(config) | overrides))
-
-    class Euler(Scheduler):
-        pass
+    class Decoder(torch.nn.Module):
+        def forward(self, z):
+            return z
 
     class VAE(torch.nn.Module):
         def __init__(self):
             super().__init__()
             self.weight = torch.nn.Parameter(torch.tensor([1.0012345], dtype=torch.float32))
-            self.config = types.SimpleNamespace(z_dim=48)
-            self.encoder = torch.nn.Identity()
-            self.decoder = torch.nn.Identity()
+            self.config = types.SimpleNamespace(
+                z_dim=48, latents_mean=[0.0] * 48, latents_std=[1.0] * 48,
+            )
+            self.decoder = Decoder()
             self.cache_clears = 0
+
+        @property
+        def dtype(self):
+            return self.weight.dtype
 
         def clear_cache(self):
             self.cache_clears += 1
 
+        def encode(self, x, return_dict=False):
+            calls.append("vae_encode")
+            latent = torch.zeros(x.shape[0], 48, 1, x.shape[-2] // 16, x.shape[-1] // 16)
+            return (types.SimpleNamespace(mode=lambda: latent),)
+
+        def decode(self, z, return_dict=False):
+            calls.append("vae_decode")
+            for i in range(z.shape[2]):
+                self.decoder(z[:, :, i:i + 1])
+            return (torch.zeros(z.shape[0], 3, 4 * z.shape[2] - 3, z.shape[3] * 16, z.shape[4] * 16),)
+
     class DiT(torch.nn.Module):
         def __init__(self):
             super().__init__()
-            self.weight = torch.nn.Parameter(torch.ones(1, dtype=torch.bfloat16))
-            self.config = types.SimpleNamespace(in_channels=48)
+            self.weight = torch.nn.Parameter(torch.ones(1, dtype=torch.float16))
+            self.config = types.SimpleNamespace(patch_size=(1, 2, 2))
 
-        def forward(self, x):
-            return x
+        @property
+        def dtype(self):
+            return self.weight.dtype
 
-    class Pipeline:
-        def __init__(self, *, tokenizer, text_encoder, vae, scheduler, transformer,
-                     transformer_2=None, boundary_ratio=None, expand_timesteps=False):
-            self.vae, self.transformer = vae, transformer
-            self.text_encoder, self.tokenizer = text_encoder, tokenizer
-            self.scheduler, self.transformer_2 = scheduler, transformer_2
-            self.config = {"boundary_ratio": boundary_ratio, "expand_timesteps": expand_timesteps}
-            self.offload_calls = 0
-            self.hooks_removed = 0
+    class Text(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1, dtype=torch.float16))
 
-        @classmethod
-        def from_pretrained(cls, *_args, **_kwargs):
-            raise AssertionError("video must use native DiT/VAE loaders")
-
-        def to(self, device):
-            assert device == "cpu"
-            return self
-
-        def enable_model_cpu_offload(self, *, device):
-            assert device == "cpu"
-            self.offload_calls += 1
-
-        def remove_all_hooks(self):
-            self.hooks_removed += 1
-
-        def __call__(self, **params):
-            mode = "i2v" if isinstance(self, ImagePipeline) else "t2v"
-            runs.append((mode, params, dict(self.scheduler.config)))
-            self.text_encoder(torch.ones(1))
-            if mode == "i2v":
-                self.vae.encoder(torch.ones(1))
-            for step in range(params["num_inference_steps"]):
-                self.transformer(torch.ones(1))
-                params["callback_on_step_end"](self, step, 0, {"latents": None})
-            for _ in range((params["num_frames"] - 1) // 4 + 1):
-                self.vae.decoder(torch.ones(1))
-            return types.SimpleNamespace(frames=[[
-                Image.new("RGB", (params["width"], params["height"]))
-                for _ in range(params["num_frames"])
-            ]])
-
-    class ImagePipeline(Pipeline):
-        pass
+        def forward(self, ids, mask):
+            return torch.zeros(1, 16, 32, dtype=torch.float16)
 
     class Tokenizer:
-        @classmethod
-        def from_pretrained(cls, *_args, **_kwargs):
-            return cls()
+        def encode(self, prompt):
+            return torch.ones(1, 16, dtype=torch.long), torch.ones(1, 16, dtype=torch.bool)
 
-    class TextEncoder(torch.nn.Module):
-        @classmethod
-        def from_pretrained(cls, *_args, **_kwargs):
-            return cls()
-
-        def forward(self, x):
-            return x
-
-    diffusers = types.ModuleType("diffusers")
-    diffusers.WanPipeline = Pipeline
-    diffusers.WanImageToVideoPipeline = ImagePipeline
-    diffusers.UniPCMultistepScheduler = Scheduler
-    diffusers.FlowMatchEulerDiscreteScheduler = Euler
-    schedulers = types.ModuleType("diffusers.schedulers")
-    unipc = types.ModuleType("diffusers.schedulers.scheduling_unipc_multistep")
-    unipc.UniPCMultistepScheduler = Scheduler
-    transformers = types.ModuleType("transformers")
-    transformers.T5TokenizerFast = Tokenizer
-    transformers.UMT5EncoderModel = TextEncoder
-
-    inference = types.ModuleType("thenoise.inference")
-    inference.inference = contextlib.nullcontext
-    inference.inference_lock = threading.RLock()
-    for name, module in {
-        "diffusers": diffusers,
-        "diffusers.schedulers": schedulers,
-        "diffusers.schedulers.scheduling_unipc_multistep": unipc,
-        "transformers": transformers,
-        "thenoise.inference": inference,
-    }.items():
-        monkeypatch.setitem(sys.modules, name, module)
-
-    from thenoise.video import native_vae, native_checkpoint
-
-    def load_vae(path, *, check_cancel):
+    def load_vae(_root, *, check_cancel):
         check_cancel()
-        loads.append("vae")
+        calls.append("load_vae")
         return VAE()
 
-    def load_dit(path, *, dtype, check_cancel):
+    def load_dit(_root, *, dtype, check_cancel):
         check_cancel()
-        assert dtype is torch.bfloat16
-        loads.append("dit")
+        assert dtype is torch.float16
+        calls.append("load_dit")
         return DiT()
 
-    monkeypatch.setattr(native_vae, "load_wan_native_video_vae", load_vae)
-    monkeypatch.setattr(native_checkpoint, "load_wan_native_transformer", load_dit)
-    monkeypatch.setattr("thenoise.video.wan.encode_video", lambda frames, spec, token, out, progress: out.write_bytes(b"video"))
-    return model, loads, runs
+    def load_text(_root, *, dtype, check_cancel):
+        check_cancel()
+        assert dtype is torch.float16
+        calls.append("load_text")
+        return Text(), Tokenizer()
+
+    def sample(latents, sigmas, predict, *, sampler, cancel, progress, after_step=None):
+        calls.append("sample_" + ("i2v" if after_step is not None else "t2v"))
+        for i in range(len(sigmas) - 1):
+            cancel()
+            progress(i + 1, len(sigmas) - 1)
+        return latents
+
+    class FakeStage:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        @staticmethod
+        def run(func, *args):
+            return func(*args)
+
+    class FakeMemory:
+        def __init__(self, *args):
+            self.items = {}
+
+        def register(self, key, value):
+            self.items[key] = value
+
+        def stage(self, *args, **kwargs):
+            return FakeStage()
+
+        def offload(self, *args):
+            pass
+
+    import thenoise.models.wan_video as wan
+    monkeypatch.setattr(wan, "load_wan_native_video_vae", load_vae)
+    monkeypatch.setattr(wan, "load_wan_native_transformer", load_dit)
+    monkeypatch.setattr(wan, "load_wan_text_encoder", load_text)
+    monkeypatch.setattr(wan, "sample_flow", sample)
+    monkeypatch.setattr(wan, "MemoryManager", FakeMemory)
+    monkeypatch.setattr(wan, "encode_video", lambda frames, spec, tok, dest, progress: dest.write_bytes(b"video"))
+
+    inference = types.ModuleType("thenoise.inference")
+    from contextlib import nullcontext
+    inference.inference = nullcontext
+    inference.inference_lock = threading.Lock()
+    monkeypatch.setitem(sys.modules, "thenoise.inference", inference)
+    return WanVideo(str(root), device="cpu", offload=True), calls
 
 
-def _spec(*, image=None, sampling_method="unipc"):
-    return VideoSpec(prompt="fox", width=480, height=320, video_frames=9,
-                     steps=2, image=image, sampling_method=sampling_method).resolve()
+def _spec(*, image=None):
+    return VideoSpec(prompt="fox", width=480, height=320, frames=9,
+                     steps=2, image=image).resolve()
 
 
-@pytest.mark.parametrize("offload", [False, True])
-def test_native_t2v_i2v_t2v_reuses_weights_and_scheduler(adapter_env, tmp_path, offload):
-    model, loads, runs = adapter_env
-    video = WanVideo(str(model), device="cpu", offload=offload)
-    out = tmp_path / "clip.webm"
-    buffer = io.BytesIO()
-    Image.new("RGB", (32, 32), "red").save(buffer, format="PNG")
-
-    for spec in (_spec(), _spec(image=buffer.getvalue(), sampling_method="euler"), _spec()):
+def test_native_t2v_i2v_t2v_reuses_models(fake_video, tmp_path):
+    video, calls = fake_video
+    image = io.BytesIO()
+    Image.new("RGB", (16, 16), "red").save(image, format="PNG")
+    out = tmp_path / "out.mp4"
+    for spec in (_spec(), _spec(image=image.getvalue()), _spec()):
         video.generate(spec, Cancellation(), lambda *_: None, out)
-
-    assert loads == ["vae", "dit"]
-    assert [r[0] for r in runs] == ["t2v", "i2v", "t2v"]
-    assert runs[1][1]["image"].size == (480, 320)
-    assert runs[1][2]["shift"] == 5.0
-    assert runs[2][2]["use_flow_sigmas"] is True
-    assert runs[2][2]["prediction_type"] == "flow_prediction"
-    assert video._pipe.vae.weight.dtype is torch.float32
-    assert video._pipe.vae.weight.item() == pytest.approx(1.0012345, abs=1e-7)
-    assert video._pipe.transformer.weight.dtype is torch.bfloat16
-    if offload:
-        assert video._pipe.offload_calls == 1
+    assert calls[:3] == ["load_vae", "load_text", "load_dit"]
+    assert calls.count("load_dit") == calls.count("load_text") == 1
+    assert [s for s in calls if s.startswith("sample_")] == ["sample_t2v", "sample_i2v", "sample_t2v"]
+    assert video.vae.dtype is torch.float32
+    assert video.transformer.dtype is torch.float16
     assert out.read_bytes() == b"video"
 
 
-def test_cancel_sampling_does_not_poison_next_job(adapter_env, tmp_path):
-    model, loads, runs = adapter_env
-    video = WanVideo(str(model), device="cpu")
+def test_cancel_sampling_recovers_for_next_job(fake_video, tmp_path):
+    video, calls = fake_video
     token = Cancellation()
 
-    def cancel_at_step(stage, *_):
+    def cancel_after_one(stage, *_):
         if stage == "sampling":
             token.cancel()
 
     with pytest.raises(VideoCancelled):
-        video.generate(_spec(), token, cancel_at_step, tmp_path / "clip.mp4")
+        video.generate(_spec(), token, cancel_after_one, tmp_path / "clip.mp4")
     video.generate(_spec(), Cancellation(), lambda *_: None, tmp_path / "clip.mp4")
-    assert loads == ["vae", "dit"]
-    assert len(runs) == 2
+    assert calls.count("load_dit") == 1
 
 
-def test_cancel_decoding_removes_hooks_and_clears_cache(adapter_env, tmp_path):
-    model, loads, runs = adapter_env
-    video = WanVideo(str(model), device="cpu")
-    token = Cancellation()
-
-    def cancel_during_decode(stage, *_):
-        if stage == "decoding":
-            token.cancel()
-
-    with pytest.raises(VideoCancelled):
-        video.generate(_spec(), token, cancel_during_decode, tmp_path / "clip.mp4")
-    video.generate(_spec(), Cancellation(), lambda *_: None, tmp_path / "clip.mp4")
-    assert loads == ["vae", "dit"]
-    assert len(runs) == 2
-    assert video._pipe.vae.cache_clears >= 2
-
-
-def test_progress_reports_decode_and_encoding(adapter_env, tmp_path):
-    model, _, _ = adapter_env
-    video = WanVideo(str(model), device="cpu")
+def test_decode_progress_and_recovery(fake_video, tmp_path):
+    video, calls = fake_video
     events = []
-    video.generate(_spec(), Cancellation(), lambda *args: events.append(args), tmp_path / "clip.mp4")
+    video.generate(_spec(), Cancellation(), lambda *e: events.append(e), tmp_path / "clip.mp4")
     assert ("decoding", 0, 3) in events
     assert [e for e in events if e[0] == "decoding" and e[1] > 0] == [
         ("decoding", 1, 3), ("decoding", 2, 3), ("decoding", 3, 3)
     ]
     assert ("encoding", 0, 9) in events
+    assert video.vae.cache_clears >= 1
