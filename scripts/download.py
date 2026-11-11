@@ -52,6 +52,7 @@ Usage:
     python scripts/download.py --model ming-image --int8-convrot
     python scripts/download.py --model moss-image
     python scripts/download.py --model moss-image --variant base --small-decoder
+    python scripts/download.py --model moss-image --variant 8steps --int8-convrot
     python scripts/download.py --model qwen-image --edit-only
     python scripts/download.py --model qwen-image-2.1
     python scripts/download.py --model qwen-image-2.1 --variant base
@@ -202,19 +203,52 @@ def _ming_image_jobs(args: argparse.Namespace) -> list[Artifact]:
     ]
 
 
+#: MOSS-Image repos, and variant -> (repo, bf16 DiT, int8-convrot DiT). The
+#: ``*8steps`` entries are these same checkpoints with the 8-step DMD2 LoRA baked by
+#: ``scripts/merge_lora.py``; our registry keeps its files at the repo root, so those
+#: jobs carry the local subdirectory in the label (``main`` lands a slashed label there).
+_MOSS_REPO = "Comfy-Org/MOSS-Image"
+_MOSS_BAKED_REPO = "thenoise-ai/diffusion-models"
+_MOSS_VARIANTS: dict[str, tuple[str, str, str]] = {
+    "sft": (
+        _MOSS_REPO,
+        "diffusion_models/moss_image_sft_bf16.safetensors",
+        "diffusion_models/moss_image_sft_int8_convrot.safetensors",
+    ),
+    "base": (
+        _MOSS_REPO,
+        "diffusion_models/moss_image_base_bf16.safetensors",
+        "diffusion_models/moss_image_base_int8_convrot.safetensors",
+    ),
+    "8steps": (
+        _MOSS_BAKED_REPO,
+        "moss_image_sft_bf16_8steps.safetensors",
+        "moss_image_sft_8steps__int8_convrot.safetensors",
+    ),
+    "base-8steps": (
+        _MOSS_BAKED_REPO,
+        "moss_image_base_bf16_8steps.safetensors",
+        "moss_image_base_8steps__int8_convrot.safetensors",
+    ),
+}
+
+
 def _moss_image_jobs(args: argparse.Namespace) -> list[Artifact]:
-    """MOSS-Image: SFT (default) or base DiT + Qwen3.5-9B TE + Flux.2 AE.
+    """MOSS-Image: SFT (default) or base DiT, either with the 8-step LoRA baked
+    (``8steps`` / ``base-8steps``) + Qwen3.5-9B TE + Flux.2 AE.
 
     The text encoder ships only int8-convrot, so ``--int8-convrot`` selects the DiT
     alone.
     """
-    repo = "Comfy-Org/MOSS-Image"
-    stem = "moss_image_base" if args.variant == "base" else "moss_image_sft"
-    suffix = "int8_convrot_attn" if args.int8_convrot else "bf16"
+    repo, bf16, int8 = _MOSS_VARIANTS[args.variant]
+    dit = int8 if args.int8_convrot else bf16
+    # Comfy-Org files the DiT under diffusion_models/, which hf_hub_download recreates;
+    # a repo storing it flat needs that directory named in the label instead.
+    dit_label = "dit" if "/" in dit else f"diffusion_models/{dit}"
     jobs = [
-        ("dit", repo, f"diffusion_models/{stem}_{suffix}.safetensors"),
-        ("text_encoder", repo, "text_encoders/qwen3.5_9b_int8_convrot.safetensors"),
-        ("vae", repo, "vae/flux2-vae.safetensors"),
+        (dit_label, repo, dit),
+        ("text_encoder", _MOSS_REPO, "text_encoders/qwen3.5_9b_int8_convrot.safetensors"),
+        ("vae", _MOSS_REPO, "vae/flux2-vae.safetensors"),
     ]
     if args.small_decoder:
         jobs.append(("vae (small decoder)", *_SMALL_DECODER_VAE))
@@ -465,10 +499,10 @@ MODELS: dict[str, ModelSpec] = {
     ),
     "moss-image": ModelSpec(
         "moss-image", "./models/moss-image",
-        "MOSS-Image text-to-image (SFT, or base)",
+        "MOSS-Image text-to-image (SFT, or base; either with the 8-step LoRA baked)",
         _moss_image_jobs,
         variant_supported=True,
-        variant_choices=("sft", "base"),
+        variant_choices=("sft", "base", "8steps", "base-8steps"),
         default_variant="sft",
     ),
     "qwen-image": ModelSpec(
@@ -541,6 +575,7 @@ def _epilog() -> str:
         "  python scripts/download.py --model ming-image --int8-convrot",
         "  python scripts/download.py --model moss-image",
         "  python scripts/download.py --model moss-image --variant base --small-decoder",
+    "  python scripts/download.py --model moss-image --variant 8steps --int8-convrot",
         "  python scripts/download.py --model qwen-image --edit-only",
         "  python scripts/download.py --model qwen-image-2.1 --variant base --int8-convrot",
         "  python scripts/download.py --model mage-flow",
@@ -583,6 +618,7 @@ def main() -> None:
             "klein: 4b | 4b-base | 9b | 9b-base (default: 4b) | "
             "qwen-image-2.1: turbo | base (default: turbo) | "
             "mage-flow: turbo | rl | base (default: turbo) | "
+            "moss-image: sft | base | 8steps | base-8steps (default: sft) | "
             "fibo2: edit-turbo | dev (default: edit-turbo) | "
             "controlmaps: all | small | base | large | pose | pose-r50vd "
             "(default: all, the depth model and both pose checkpoints)"

@@ -12,6 +12,8 @@ packed 128-channel one at 16 pixels per cell.
 - Not a distilled checkpoint: `--sampler euler --steps 50` is the release recipe, and
   the stochastic `er_sde` gets about the same picture in half the steps
 - int8-convrot DiT (5.0 GB); the bf16 original is ~9.5 GB
+- 8-step distilled DiTs of both checkpoints, bf16 and int8-convrot — one file, no LoRA
+  to load
 - The tokenizer ships inside this repository, chat template included — nothing to fetch
 
 > Commands below assume a dev checkout (`./thenoise.sh`, `.venv/bin/python`).
@@ -34,8 +36,8 @@ packed 128-channel one at 16 pixels per cell.
 
 | Checkpoint | File |
 |---|---|
-| `--variant sft` *(default)* | `moss_image_sft_{bf16,int8_convrot_attn}.safetensors` |
-| `--variant base` | `moss_image_base_{bf16,int8_convrot_attn}.safetensors` |
+| `--variant sft` *(default)* | `moss_image_sft_{bf16,int8_convrot}.safetensors` |
+| `--variant base` | `moss_image_base_{bf16,int8_convrot}.safetensors` |
 
 The `sft` checkpoint is the one to use: `base` is its un-fine-tuned parent, useful
 for LoRA training rather than for drawing.
@@ -45,8 +47,16 @@ for LoRA training rather than for drawing.
 Ready-made [Lemonade](https://lemonade-server.ai/docs/dev/backends-reference/#backends)
 recipes for this model - each pins the checkpoints and the generation defaults:
 
+- [MOSS-Image-SFT-8steps.json](../../recipes/moss-image/MOSS-Image-SFT-8steps.json) - SFT BF16 with the 8-step LoRA baked, 8 steps, guidance 1
+- [MOSS-Image-SFT-8steps-INT8.json](../../recipes/moss-image/MOSS-Image-SFT-8steps-INT8.json) - same, INT8-ConvRot
+- [MOSS-Image-Base-8steps.json](../../recipes/moss-image/MOSS-Image-Base-8steps.json) - base BF16 with the 8-step LoRA baked
+- [MOSS-Image-Base-8steps-INT8.json](../../recipes/moss-image/MOSS-Image-Base-8steps-INT8.json) - same, INT8-ConvRot
 - [MOSS-Image-SFT.json](../../recipes/moss-image/MOSS-Image-SFT.json) - SFT BF16, 25 steps
 - [MOSS-Image-SFT-INT8.json](../../recipes/moss-image/MOSS-Image-SFT-INT8.json) - SFT INT8-ConvRot, 25 steps
+
+The 8-step recipes bake lodestones'
+[MOSS-Image 8-step DMD2](https://huggingface.co/lodestones/Kromoss) LoRA into the DiT.
+Draw with them at 8 steps, guidance 1 and `--sampler euler`.
 
 ## Performance (Strix Halo)
 
@@ -70,6 +80,9 @@ INT8-ConvRot, [8 step DMD LoRA](https://huggingface.co/lodestones/MOSS-Image-SFT
 # int8-convrot DiT (the text encoder is int8-convrot either way)
 .venv/bin/python scripts/download.py --model moss-image --int8-convrot
 
+# the 8-step distilled DiT of either checkpoint (--variant 8steps | base-8steps)
+.venv/bin/python scripts/download.py --model moss-image --variant 8steps
+
 # ... and BFL's small-decoder AE, which decodes ~1.4x faster into the same latents
 .venv/bin/python scripts/download.py --model moss-image --small-decoder
 ```
@@ -83,14 +96,14 @@ Generate:
 
 ```bash
 ./thenoise.sh serve \
-  --dit ./models/moss-image/diffusion_models/moss_image_sft_int8_convrot_attn.safetensors \
+  --dit ./models/moss-image/diffusion_models/moss_image_sft_int8_convrot.safetensors \
   --text-encoder ./models/moss-image/text_encoders/qwen3.5_9b_int8_convrot.safetensors \
   --vae ./models/moss-image/vae/flux2-vae.safetensors
 ```
 
 ```bash
 ./thenoise.sh generate "a half-eaten croissant on a ceramic plate, window light" \
-  --dit ./models/moss-image/diffusion_models/moss_image_sft_int8_convrot_attn.safetensors \
+  --dit ./models/moss-image/diffusion_models/moss_image_sft_int8_convrot.safetensors \
   --text-encoder ./models/moss-image/text_encoders/qwen3.5_9b_int8_convrot.safetensors \
   --vae ./models/moss-image/vae/flux2-vae.safetensors
 ```
