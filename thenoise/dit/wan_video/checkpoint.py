@@ -67,22 +67,6 @@ class _WanWeightsRoPE(nn.Module):
         self.patch_size = patch_size
         self.h_dim = self.w_dim = 2 * (head_dim // 6)
         self.t_dim = head_dim - self.h_dim - self.w_dim
-        self.register_buffer("freqs_cos", torch.empty(0), persistent=False)
-        self.register_buffer("freqs_sin", torch.empty(0), persistent=False)
-
-
-def _rope_tables(rope: _WanWeightsRoPE, max_seq_len: int) -> None:
-    cos_parts, sin_parts = [], []
-    for dim in (rope.t_dim, rope.h_dim, rope.w_dim):
-        frequency = 1.0 / (10000.0 ** (
-            torch.arange(0, dim, 2, dtype=torch.float64, device="cpu") / dim
-        ))
-        phase = torch.outer(torch.arange(max_seq_len, dtype=torch.float64), frequency)
-        cos_parts.append(phase.cos().repeat_interleave(2, dim=-1).float())
-        sin_parts.append(phase.sin().repeat_interleave(2, dim=-1).float())
-    rope.freqs_cos = torch.cat(cos_parts, dim=-1)
-    rope.freqs_sin = torch.cat(sin_parts, dim=-1)
-
 
 class _WanWeightsCondition(nn.Module):
     def __init__(self, width: int, text_dim: int, freq_dim: int):
@@ -146,7 +130,6 @@ def load_wan_native_transformer(
     config = SimpleNamespace(**(_TI2V_CONFIG | (_test_config or {})))
     with torch.device("meta"):
         weights = _WanWeightModel(config)
-    _rope_tables(weights.rope, config.rope_max_seq_len)
     expected = {k: tuple(v.shape) for k, v in weights.state_dict().items()}
     checkpoint = _find_checkpoint(root)
     if check_cancel:

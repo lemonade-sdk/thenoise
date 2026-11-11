@@ -76,6 +76,44 @@ def _write(root, *, missing=None, wrong_shape=None):
     return state
 
 
+
+def test_wan_rope_uses_shared_builder_and_caches_by_geometry():
+    from thenoise.utils.rope import RopeCache
+
+    with torch.device("meta"):
+        weights = _WanWeightModel(SimpleNamespace(**(_TI2V_CONFIG | TINY)))
+    from thenoise.dit.wan_video.model import WanNativeRoPE
+    rope = WanNativeRoPE(weights.rope)
+    assert isinstance(rope._frequencies, RopeCache)
+
+    input_video = torch.zeros(1, 48, 3, 4, 6)
+    first = rope(input_video)
+    assert rope(input_video) is first
+    assert first.shape == (1, 18, 6, 2, 2)
+
+    dim = TINY["attention_head_dim"]
+    dims = [dim - 4 * (dim // 6), 2 * (dim // 6), 2 * (dim // 6)]
+    cos_axes, sin_axes = [], []
+    for part in dims:
+        inv_freq = 1 / 10000 ** (torch.arange(0, part, 2, dtype=torch.float64) / part)
+        angles = torch.outer(torch.arange(64, dtype=torch.float64), inv_freq)
+        cos_axes.append(angles.cos().float())
+        sin_axes.append(angles.sin().float())
+    cos = torch.cat([cos_axes[0][:3, None, None].expand(3, 2, 3, -1),
+                     cos_axes[1][None, :2, None].expand(3, 2, 3, -1),
+                     cos_axes[2][None, None, :3].expand(3, 2, 3, -1)], dim=-1)
+    sin = torch.cat([sin_axes[0][:3, None, None].expand(3, 2, 3, -1),
+                     sin_axes[1][None, :2, None].expand(3, 2, 3, -1),
+                     sin_axes[2][None, None, :3].expand(3, 2, 3, -1)], dim=-1)
+    expected = torch.stack((cos, -sin, sin, cos), dim=-1).reshape(1, 18, 6, 2, 2)
+    torch.testing.assert_close(first, expected, rtol=1e-5, atol=1e-5)
+
+    rope.to("cpu")
+    second = rope(input_video)
+    assert second is not first
+    torch.testing.assert_close(second, first, rtol=0, atol=0)
+    assert rope(torch.zeros(1, 48, 1, 4, 4)).shape == (1, 4, 6, 2, 2)
+
 def test_comfy_checkpoint_dtype_and_forward(tmp_path):
     raw = _write(tmp_path)
     model = load_wan_native_transformer(tmp_path, dtype=torch.float32, _test_config=TINY)

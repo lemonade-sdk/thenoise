@@ -6,7 +6,7 @@ import sentencepiece as spm
 import torch
 from safetensors.torch import save_file
 
-from thenoise.text_encoders.wan_video import WanUMT5, load_wan_text_encoder
+from thenoise.text_encoders.wan_video import WanUMT5, _T5Attention, load_wan_text_encoder
 
 
 CFG = dict(width=16, ff_dim=32, heads=4, layers=2, vocab_size=64)
@@ -31,6 +31,24 @@ def small_checkpoint(root: Path, *, missing=False):
     save_file(tensors, str(dest / "umt5_xxl_fp16.safetensors"))
     return model
 
+
+
+def test_t5_shared_attention_preserves_unscaled_scores_and_mask():
+    model = _T5Attention(width=16, heads=4).eval()
+    with torch.no_grad():
+        for p in model.parameters():
+            p.uniform_(-0.1, 0.1)
+        x = torch.randn(1, 6, 16)
+        mask = torch.tensor([[True, True, True, False, False, False]])
+        q, k, v = (layer(x).reshape(1, 6, 4, 4).transpose(1, 2)
+                   for layer in (model.q, model.k, model.v))
+        bias = model.relative_attention_bias(model._buckets(6, x.device))
+        bias = bias.permute(2, 0, 1)[None].to(x.dtype)
+        bias = bias.masked_fill(~mask[:, None, None, :], torch.finfo(x.dtype).min)
+        expected = torch.nn.functional.scaled_dot_product_attention(
+            q, k, v, attn_mask=bias, scale=1.0
+        ).transpose(1, 2).reshape(1, 6, 16)
+        torch.testing.assert_close(model(x, mask), model.o(expected), rtol=1e-5, atol=1e-5)
 
 def test_t5_forward_shape_mask_and_no_transformers():
     model = WanUMT5(**CFG).eval()

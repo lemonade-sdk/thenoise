@@ -15,6 +15,7 @@ from torch.nn import functional as F
 from safetensors import safe_open
 
 from thenoise.utils.wan_weights import validated_key_map, wan_vae_key
+from thenoise.vae.wan22 import Wan22AttentionBlock
 
 CACHE_T = 2
 DecoderOutput = namedtuple("DecoderOutput", "sample")
@@ -198,22 +199,12 @@ class _ResidualBlock(nn.Module):
         return x + shortcut
 
 
-class _AttentionBlock(nn.Module):
-    def __init__(self, dim: int):
-        super().__init__()
-        self.norm = _RMSNorm(dim)
-        self.to_qkv = nn.Conv2d(dim, dim * 3, 1)
-        self.proj = nn.Conv2d(dim, dim, 1)
-
+class _AttentionBlock(Wan22AttentionBlock):
     def forward(self, x: Tensor) -> Tensor:
         b, c, t, h, w = x.shape
-        y = x.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
-        y = self.norm(y)
-        qkv = self.to_qkv(y).reshape(b * t, 1, c * 3, h * w).permute(0, 1, 3, 2).contiguous()
-        q, k, v = qkv.chunk(3, dim=-1)
-        y = F.scaled_dot_product_attention(q, k, v)
-        y = self.proj(y.squeeze(1).permute(0, 2, 1).reshape(b * t, c, h, w))
-        return y.view(b, t, c, h, w).permute(0, 2, 1, 3, 4) + x
+        frames = x.permute(0, 2, 1, 3, 4).reshape(b * t, c, h, w)
+        frames = super().forward(frames)
+        return frames.reshape(b, t, c, h, w).permute(0, 2, 1, 3, 4)
 
 
 class _MidBlock(nn.Module):

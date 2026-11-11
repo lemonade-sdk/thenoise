@@ -12,6 +12,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from thenoise.dit.quantized import QuantizedLinear
+from thenoise.utils.attention import AttentionParams, attention
 from thenoise.utils.wan_weights import validated_key_map
 
 
@@ -58,8 +59,10 @@ class _T5Attention(nn.Module):
         bias = bias.permute(2, 0, 1)[None].to(x.dtype)
         # T5's attention scores are unscaled, unlike ordinary SDPA.
         bias = bias.masked_fill(~mask[:, None, None, :], torch.finfo(x.dtype).min)
-        attended = F.scaled_dot_product_attention(q, k, v, attn_mask=bias, scale=1.0)
-        return self.o(attended.transpose(1, 2).reshape(batch, length, width))
+        attended = attention(
+            [q, k * math.sqrt(dim), v], attn_params=AttentionParams(attention_mask=bias)
+        )
+        return self.o(attended)
 
 
 class _T5AttentionLayer(nn.Module):

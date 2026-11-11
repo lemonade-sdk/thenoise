@@ -10,7 +10,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from thenoise.utils.attention import attention
-from thenoise.utils.rope import apply_rope
+from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 
 
 @dataclass
@@ -30,19 +30,18 @@ def _timestep_embedding(t: Tensor, dim: int) -> Tensor:
 
 
 class WanNativeRoPE(nn.Module):
-    """Repackage checkpoint frequency tables into TheNoise's adjacent-pair RoPE.
-
-    Precompute FP64 phases and retain FP32 buffers to avoid phase drift.
-    """
-
     def __init__(self, weights: nn.Module):
         super().__init__()
         self.patch_size = tuple(weights.patch_size)
-        self.t_dim = int(weights.t_dim)
-        self.h_dim = int(weights.h_dim)
-        self.w_dim = int(weights.w_dim)
-        self.register_buffer("freqs_cos", weights.freqs_cos, persistent=False)
-        self.register_buffer("freqs_sin", weights.freqs_sin, persistent=False)
+        self._frequencies = RopeCache(matrix_rope(
+            [int(weights.t_dim), int(weights.h_dim), int(weights.w_dim)], 10000.0
+        ))
+        self._shape_device = None
+
+    def _apply(self, fn):
+        self._frequencies.clear()
+        self._shape_device = None
+        return super()._apply(fn)
 
     def forward(self, latents: Tensor) -> Tensor:
         _, _, t, h, w = latents.shape
@@ -50,25 +49,14 @@ class WanNativeRoPE(nn.Module):
         if t % pt or h % ph or w % pw:
             raise ValueError("Wan native DiT needs latent geometry divisible by patch size")
         t, h, w = t // pt, h // ph, w // pw
-        sizes = (self.t_dim, self.h_dim, self.w_dim)
-        cos_t, cos_h, cos_w = self.freqs_cos.split(sizes, dim=-1)
-        sin_t, sin_h, sin_w = self.freqs_sin.split(sizes, dim=-1)
-        if t > cos_t.shape[0] or h > cos_h.shape[0] or w > cos_w.shape[0]:
-            raise ValueError("Wan 3D RoPE geometry exceeds checkpoint table")
-        cos = torch.cat((
-            cos_t[:t, None, None].expand(t, h, w, -1),
-            cos_h[None, :h, None].expand(t, h, w, -1),
-            cos_w[None, None, :w].expand(t, h, w, -1),
-        ), dim=-1).reshape(t * h * w, -1)
-        sin = torch.cat((
-            sin_t[:t, None, None].expand(t, h, w, -1),
-            sin_h[None, :h, None].expand(t, h, w, -1),
-            sin_w[None, None, :w].expand(t, h, w, -1),
-        ), dim=-1).reshape(t * h * w, -1)
-        # TheNoise apply_rope consumes adjacent 2x2 matrices, [B, N, D/2, 2, 2].
-        cs = cos[:, ::2]
-        sn = sin[:, 1::2]
-        return torch.stack((cs, -sn, sn, cs), dim=-1).reshape(1, t * h * w, -1, 2, 2)
+        key = (t, h, w, latents.device)
+        if key != self._shape_device:
+            axes = [torch.arange(n, device=latents.device, dtype=torch.float32)
+                    for n in (t, h, w)]
+            grid = torch.stack(torch.meshgrid(*axes, indexing="ij"), dim=-1)
+            self._frequencies.store("grid", grid.reshape(1, -1, 3))
+            self._shape_device = key
+        return self._frequencies["grid"]
 
 
 class WanNativeAttention(nn.Module):
