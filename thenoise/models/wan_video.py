@@ -85,8 +85,10 @@ class WanVideo:
             return
         vae = load_wan_native_video_vae(self.vae_path, check_cancel=token.check)
         token.check()
+        # UMT5's gated FFN can overflow FP16 before its final normalization.
+        # BF16 preserves the FP16 checkpoint's memory footprint but widens the exponent.
         text_encoder, tokenizer = load_wan_text_encoder(
-            self.text_encoder_path, dtype=torch.float16, check_cancel=token.check,
+            self.text_encoder_path, dtype=torch.bfloat16, check_cancel=token.check,
         )
         token.check()
         transformer = load_wan_native_transformer(

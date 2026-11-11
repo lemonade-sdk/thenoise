@@ -6,7 +6,7 @@ import sentencepiece as spm
 import torch
 from safetensors.torch import save_file
 
-from thenoise.text_encoders.wan_video import WanUMT5, _T5Attention, load_wan_text_encoder
+from thenoise.text_encoders.wan_video import WanUMT5, _T5Attention, _T5GatedFFN, load_wan_text_encoder
 
 
 CFG = dict(width=16, ff_dim=32, heads=4, layers=2, vocab_size=64)
@@ -76,6 +76,23 @@ def test_text_encoder_comfy_checkpoint_and_sentencepiece(tmp_path):
     with torch.no_grad():
         out = model(ids, mask)
     assert out.shape == (1, 16, 16)
+
+
+def test_bf16_umt5_gated_ffn_avoids_fp16_overflow():
+    """Gated products can exceed FP16's range before the down projection.
+
+    UMT5 is loaded in BF16; the DiT still uses FP16 after the final T5 norm.
+    """
+    ffn = _T5GatedFFN(width=2, ff_dim=2).to(torch.bfloat16).eval()
+    with torch.no_grad():
+        ffn.wi_0.weight.fill_(200)
+        ffn.wi_1.weight.fill_(200)
+        ffn.wo.weight.fill_(1e-5)
+        x = torch.ones((1, 1, 2), dtype=torch.bfloat16)
+        out = ffn(x)
+    assert out.dtype is torch.bfloat16
+    assert bool(torch.isfinite(out).all())
+    assert float(out.abs().max()) > 0
 
 
 def test_text_missing_weights_rejected(tmp_path):

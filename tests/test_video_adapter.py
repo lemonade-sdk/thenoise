@@ -66,10 +66,10 @@ def fake_video(tmp_path, monkeypatch):
     class Text(torch.nn.Module):
         def __init__(self):
             super().__init__()
-            self.weight = torch.nn.Parameter(torch.ones(1, dtype=torch.float16))
+            self.weight = torch.nn.Parameter(torch.ones(1, dtype=torch.bfloat16))
 
         def forward(self, ids, mask):
-            return torch.zeros(1, 16, 32, dtype=torch.float16)
+            return torch.zeros(1, 16, 32, dtype=self.weight.dtype)
 
     class Tokenizer:
         def encode(self, prompt):
@@ -88,7 +88,7 @@ def fake_video(tmp_path, monkeypatch):
 
     def load_text(_root, *, dtype, check_cancel):
         check_cancel()
-        assert dtype is torch.float16
+        assert dtype is torch.bfloat16
         calls.append("load_text")
         return Text(), Tokenizer()
 
@@ -158,6 +158,7 @@ def test_native_t2v_i2v_t2v_reuses_models(fake_video, tmp_path):
     assert [s for s in calls if s.startswith("sample_")] == ["sample_t2v", "sample_i2v", "sample_t2v"]
     assert video.vae.dtype is torch.float32
     assert video.transformer.dtype is torch.float16
+    assert video.text_encoder.weight.dtype is torch.bfloat16
     assert out.read_bytes() == b"video"
 
 

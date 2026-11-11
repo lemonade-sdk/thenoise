@@ -9,8 +9,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from conftest import CATALOG_IDS
-from thenoise.models import MODEL_CATALOG
+from conftest import IMAGE_CATALOG, IMAGE_CATALOG_IDS
 from thenoise.models.base import DiffusionModel
 from thenoise.samplers import create_sampler
 from thenoise.upscale import (
@@ -19,7 +18,7 @@ from thenoise.upscale import (
 )
 
 
-@pytest.mark.parametrize("model", MODEL_CATALOG, ids=CATALOG_IDS)
+@pytest.mark.parametrize("model", IMAGE_CATALOG, ids=IMAGE_CATALOG_IDS)
 def test_model_defaults_are_a_usable_superset_of_the_base(model):
     """A merge that drops a base preference KeyErrors at request time, and a typo'd
     sampler name only blows up when somebody generates: tie both to the machinery.
