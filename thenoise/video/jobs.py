@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from .spec import ResolvedVideo
+from .spec import ResolvedVideo, VideoSpec
 
 log = logging.getLogger("uvicorn.error")
 
@@ -90,8 +90,10 @@ Renderer = Callable[[ResolvedVideo, Cancellation, Callable[[str, int, int], None
 
 class VideoJobs:
     def __init__(self, renderer: Renderer, root: Path, *, model: str,
-                 queue_limit: int = 4, history_limit: int = 32):
+                 queue_limit: int = 4, history_limit: int = 32,
+                 resolve: Callable[[VideoSpec], ResolvedVideo] | None = None):
         self._render = renderer
+        self._resolve = resolve or VideoSpec.resolve
         self._root = Path(root)
         self._model = model
         self._queue_limit = queue_limit
@@ -102,7 +104,9 @@ class VideoJobs:
         self._worker: Optional[threading.Thread] = None
         self._closed = False
 
-    def submit(self, spec: ResolvedVideo) -> dict:
+    def submit(self, spec: VideoSpec | ResolvedVideo) -> dict:
+        if isinstance(spec, VideoSpec):
+            spec = self._resolve(spec)
         with self._lock:
             if self._closed:
                 raise RuntimeError("video service is shutting down")

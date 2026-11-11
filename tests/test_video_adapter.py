@@ -92,11 +92,11 @@ def fake_video(tmp_path, monkeypatch):
         calls.append("load_text")
         return Text(), Tokenizer()
 
-    def sample(latents, sigmas, predict, *, sampler, cancel, progress, after_step=None):
-        calls.append("sample_" + ("i2v" if after_step is not None else "t2v"))
-        for i in range(len(sigmas) - 1):
-            cancel()
-            progress(i + 1, len(sigmas) - 1)
+    def sample(_self, latents, spec, positive, negative, condition, token, progress):
+        calls.append("sample_" + ("i2v" if condition is not None else "t2v"))
+        for i in range(spec.steps):
+            token.check()
+            progress("sampling", i + 1, spec.steps)
         return latents
 
     class FakeStage:
@@ -127,7 +127,7 @@ def fake_video(tmp_path, monkeypatch):
     monkeypatch.setattr(wan, "load_wan_native_video_vae", load_vae)
     monkeypatch.setattr(wan, "load_wan_native_transformer", load_dit)
     monkeypatch.setattr(wan, "load_wan_text_encoder", load_text)
-    monkeypatch.setattr(wan, "sample_flow", sample)
+    monkeypatch.setattr(wan.WanVideo, "_sample", sample)
     monkeypatch.setattr(wan, "MemoryManager", FakeMemory)
     monkeypatch.setattr(wan, "encode_video", lambda frames, spec, tok, dest, progress: dest.write_bytes(b"video"))
 
@@ -136,7 +136,9 @@ def fake_video(tmp_path, monkeypatch):
     inference.inference = nullcontext
     inference.inference_lock = threading.Lock()
     monkeypatch.setitem(sys.modules, "thenoise.inference", inference)
-    return WanVideo(str(root), device="cpu", offload=True), calls
+    config = types.SimpleNamespace(dit_path=str(root), vae_path=str(root),
+                                   text_encoder_path=str(root), device="cpu", offload_device="cpu")
+    return WanVideo(config=config), calls
 
 
 def _spec(*, image=None):

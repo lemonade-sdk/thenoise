@@ -107,6 +107,8 @@ def _fp32_key(key: str) -> bool:
 
 
 def _find_checkpoint(root: Path) -> Path:
+    if root.is_file():
+        return root
     for base in (root, root / "split_files"):
         for name in ("wan2.2_ti2v_5B_fp16.safetensors", "wan2.2_ti2v_5B_bf16.safetensors"):
             p = base / "diffusion_models" / name

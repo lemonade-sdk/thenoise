@@ -30,14 +30,16 @@ def test_wan_frame_grid_and_duration():
     # Exact counts win, even when duration was also supplied.
     assert (a.frame_count, a.fps) == (9, 8)
     assert a.public()["duration"] == 9 / 8
-    assert VideoSpec(prompt="x", frames=10).resolve().frame_count == 13
-    assert VideoSpec(prompt="x", frames=17).resolve().frame_count == 17
+    # Request parsing is model-neutral. The Wan model applies its temporal grid.
+    from thenoise.models.wan_video import WanVideo
+    assert WanVideo.resolve_video(VideoSpec(prompt="x", frames=10)).frame_count == 13
+    assert WanVideo.resolve_video(VideoSpec(prompt="x", frames=17)).frame_count == 17
     # Precisely halfway: Lemonade's std::round picks the larger 4n+1 count.
-    assert VideoSpec(prompt="x", duration=11/8, fps=8).resolve().frame_count == 13
+    assert WanVideo.resolve_video(VideoSpec(prompt="x", duration=11/8, fps=8)).frame_count == 13
 
 
 def test_video_validation_fails_before_job_creation():
-    for bad in (dict(width=4096), dict(fps=0), dict(guidance_scale=float("nan")),
+    for bad in (dict(width=-1), dict(fps=0), dict(guidance_scale=float("nan")),
                 dict(output_format="avi")):
         with pytest.raises(ValueError):
             VideoSpec(prompt="valid", **bad).resolve()
@@ -167,4 +169,6 @@ def test_completed_i2v_releases_input_media_but_retains_mode(tmp_path):
 
 
 def test_frame_count_does_not_have_a_static_limit():
-    assert VideoSpec(prompt="fox", frames=1000).resolve().frame_count == 1001
+    from thenoise.models.wan_video import WanVideo
+    assert VideoSpec(prompt="fox", frames=1000).resolve().frame_count == 1000
+    assert WanVideo.resolve_video(VideoSpec(prompt="fox", frames=1000)).frame_count == 1001

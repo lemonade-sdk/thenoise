@@ -86,7 +86,8 @@ class UniPCSampler(Sampler):
     """The same solver exposed to the regular image-model sampler registry."""
 
     def sample(self, x, schedule: list[Step], cond, guidance_scale: float,
-               seed: int, desc: str = "sampling") -> torch.Tensor:
+               seed: int, desc: str = "sampling",
+               step_callback: Callable[[torch.Tensor, int, int], torch.Tensor] | None = None) -> torch.Tensor:
         if not schedule:
             return x
         self.model.begin_sampling(schedule)
@@ -101,4 +102,6 @@ class UniPCSampler(Sampler):
                     cond, guidance_scale, i,
                 ).float()
             x = solver.step(x.float(), sigma, max(0.0, next_sigma), velocity).to(dtype)
+            if step_callback is not None:
+                x = step_callback(x, i + 1, len(schedule))
         return x

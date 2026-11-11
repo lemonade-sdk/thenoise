@@ -89,7 +89,8 @@ class Runtime:
             self._model = cls(config=config)
         self._model_name = name
         self._paths = paths
-        self._pipeline = PipelineController(self._model, self._pixel_upscalers)
+        self._pipeline = (None if getattr(self._model, "VIDEO", False)
+                          else PipelineController(self._model, self._pixel_upscalers))
 
     def reload(self) -> None:
         """Rebuild the loaded model from its checkpoints, which clears an unfit state."""
@@ -143,6 +144,11 @@ class Runtime:
     def pipeline(self):
         """The pipeline controller (None until a model is loaded)."""
         return self._pipeline
+
+    @property
+    def video_model(self):
+        """The loaded video model, or None for image/model-free serving."""
+        return self._model if getattr(self._model, "VIDEO", False) else None
 
     @property
     def pixel_upscalers(self):

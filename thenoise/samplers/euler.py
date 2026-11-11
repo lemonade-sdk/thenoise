@@ -1,7 +1,7 @@
 """Euler sampler: first-order integration of the flow ODE."""
 from __future__ import annotations
 
-from typing import List
+from typing import Callable, List
 
 import torch
 from tqdm import tqdm
@@ -19,6 +19,7 @@ class EulerSampler(Sampler):
         guidance_scale: float,
         seed: int,
         desc: str = "sampling",
+        step_callback: Callable[[torch.Tensor, int, int], torch.Tensor] | None = None,
     ) -> torch.Tensor:
         dtype = x.dtype
         self.model.begin_sampling(schedule)
@@ -26,6 +27,7 @@ class EulerSampler(Sampler):
             v = self.model.denoise_step(x, step.t, cond, guidance_scale, i)
             x = x.float() - step.delta * v.float()
             x = x.to(dtype)
-            # Keep the per-step timing accurate.
+            if step_callback is not None:
+                x = step_callback(x, i + 1, len(schedule))
             synchronize_device(x.device)
         return x

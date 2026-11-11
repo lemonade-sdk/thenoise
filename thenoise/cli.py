@@ -112,10 +112,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_model_paths(serve, required=False)
     _add_upscaler_args(serve)
     _add_controlmap_args(serve)
-    serve.add_argument("--video-model-dir", default="", metavar="DIR",
-                       help="local Wan 2.2 TI2V-5B checkpoint directory (video-only)")
-    serve.add_argument("--video-offload", action="store_true",
-                       help="stage video model weights through CPU to fit a smaller GPU")
     serve.add_argument("--video-cache-dir", default="~/.cache/thenoise/videos", metavar="DIR",
                        help="directory for completed video clips")
     serve.add_argument("--host", default="127.0.0.1",

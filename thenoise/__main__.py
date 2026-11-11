@@ -18,9 +18,6 @@ def _serve(args) -> None:
     # Load the model only when all three checkpoints are supplied; otherwise
     # serve model-free (upscale only).
     model_paths = [args.dit, args.vae, args.text_encoder]
-    if args.video_model_dir and any(model_paths):
-        raise SystemExit("serve: --video-model-dir is video-only; do not combine it with image model paths")
-
     if any(model_paths):
         if not all(model_paths):
             raise SystemExit(
@@ -38,10 +35,10 @@ def _serve(args) -> None:
 
     video_jobs = None
     video_model = ""
-    if args.video_model_dir:
+    if getattr(runtime, "video_model", None) is not None:
         from .video.service import create_video_service
         video_jobs, video_model = create_video_service(
-            args.video_model_dir, device=settings.device, offload=args.video_offload,
+            runtime.video_model,
             cache_dir=str(Path(args.video_cache_dir).expanduser()),
         )
 

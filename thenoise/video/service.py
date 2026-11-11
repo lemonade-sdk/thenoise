@@ -1,14 +1,12 @@
-"""Wire native Wan inference to asynchronous video jobs."""
+"""Expose a loaded video model through asynchronous video jobs."""
 from __future__ import annotations
 
 from pathlib import Path
 
 from .jobs import VideoJobs
-from thenoise.models.wan_video import WanVideo
 
 
-def create_video_service(model_dir: str, *, device: str, offload: bool,
-                         cache_dir: str) -> tuple[VideoJobs, str]:
-    model = WanVideo(model_dir, device=device, offload=offload)
-    jobs = VideoJobs(model.generate, Path(cache_dir), model=model.name)
+def create_video_service(model, *, cache_dir: str) -> tuple[VideoJobs, str]:
+    jobs = VideoJobs(model.generate, Path(cache_dir), model=model.name,
+                     resolve=model.resolve_video)
     return jobs, model.name

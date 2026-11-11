@@ -154,6 +154,8 @@ class WanSentencePiece:
 
 
 def _text_path(root: Path) -> Path:
+    if root.is_file():
+        return root
     for base in (root, root / "split_files"):
         for name in ("umt5_xxl_fp16.safetensors", "umt5_xxl_fp8_e4m3fn_scaled.safetensors"):
             candidate = base / "text_encoders" / name

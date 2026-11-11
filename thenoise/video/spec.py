@@ -7,17 +7,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 
-def _frame_grid(wanted: float, *, upward: bool) -> int:
-    if not math.isfinite(wanted) or wanted <= 0:
-        raise ValueError("video duration / frame count must be positive and finite")
-    # Wan 2.2 packs (F-1)/4 temporal cells. Explicit frames never shrink;
-    # an approximate duration chooses the nearest valid frame count.
-    cells = (wanted - 1) / 4
-    # Match the API's ties-away-from-zero frame rounding.
-    n = math.ceil(cells) if upward else math.floor(cells + 0.5)
-    return 4 * max(1, n) + 1
-
-
 @dataclass(frozen=True)
 class ResolvedVideo:
     prompt: str
@@ -32,7 +21,6 @@ class ResolvedVideo:
     output_format: str
     image: Optional[bytes] = None
     sampler: str = "unipc"
-    flow_shift: float = 5.0
 
     @property
     def mode(self) -> str:
@@ -45,7 +33,7 @@ class ResolvedVideo:
             "duration": self.frame_count / self.fps, "steps": self.steps,
             "guidance_scale": self.guidance_scale, "seed": self.seed,
             "output_format": self.output_format,
-            "sampler": self.sampler, "flow_shift": self.flow_shift,
+            "sampler": self.sampler,
         }
 
 
@@ -64,41 +52,35 @@ class VideoSpec:
     output_format: str = "webm"
     image: Optional[bytes] = None
     sampler: str = "unipc"
-    flow_shift: float = 5.0
 
     def resolve(self) -> ResolvedVideo:
         if not self.prompt.strip():
             raise ValueError("prompt must not be empty")
-        if not 1 <= self.fps <= 60:
-            raise ValueError("fps must be between 1 and 60")
-        if not 1 <= self.steps <= 100:
-            raise ValueError("steps must be between 1 and 100")
-        if not math.isfinite(self.guidance_scale) or self.guidance_scale < 0 or self.guidance_scale > 30:
-            raise ValueError("guidance_scale must be finite and between 0 and 30")
-        if self.sampler not in ("unipc", "euler"):
-            raise ValueError("sampler must be unipc or euler")
-        if not math.isfinite(self.flow_shift) or not 0 < self.flow_shift <= 20:
-            raise ValueError("flow_shift must be finite and in (0, 20]")
-        if not 128 <= self.width <= 2048 or not 128 <= self.height <= 2048:
-            raise ValueError("width and height must be between 128 and 2048")
-        width, height = self.width // 32 * 32, self.height // 32 * 32
-        if self.frames is not None:
-            frames = _frame_grid(self.frames, upward=True)
-        elif self.duration is not None:
-            frames = _frame_grid(self.duration * self.fps, upward=False)
-        else:
-            frames = 33
+        if self.fps <= 0 or self.steps <= 0:
+            raise ValueError("fps and steps must be positive")
+        if not math.isfinite(self.guidance_scale) or self.guidance_scale < 0:
+            raise ValueError("guidance_scale must be finite and nonnegative")
+        if not self.sampler:
+            raise ValueError("sampler must not be empty")
+        if self.width <= 0 or self.height <= 0:
+            raise ValueError("width and height must be positive")
+        if self.frames is not None and self.frames <= 0:
+            raise ValueError("frames must be positive")
+        if self.duration is not None and (not math.isfinite(self.duration) or self.duration <= 0):
+            raise ValueError("duration must be finite and positive")
+        width, height = self.width, self.height
+        frames = (self.frames if self.frames is not None else
+                  max(1, math.floor(self.duration * self.fps + 0.5))
+                  if self.duration is not None else 33)
         if self.output_format not in ("mp4", "webm"):
             raise ValueError("output_format must be mp4 or webm")
-        if self.image is not None and len(self.image) > 15 * 1024 * 1024:
-            raise ValueError("image exceeds 15 MiB")
-        if self.seed is not None and not -1 <= self.seed < 2**32:
-            raise ValueError("seed must be -1 or between 0 and 2**32-1")
+        if self.seed is not None and not -(2**63) <= self.seed < 2**64:
+            raise ValueError("seed is outside torch.Generator's supported range")
         seed = secrets.randbits(32) if self.seed is None or self.seed == -1 else self.seed
         return ResolvedVideo(
             prompt=self.prompt, negative_prompt=self.negative_prompt,
             width=width, height=height, frame_count=frames, fps=self.fps,
             steps=self.steps, guidance_scale=self.guidance_scale, seed=seed,
             output_format=self.output_format, image=self.image,
-            sampler=self.sampler, flow_shift=self.flow_shift,
+            sampler=self.sampler,
         )

@@ -78,7 +78,10 @@ def test_video_http_cancel_running_and_rejection(tmp_path):
     try:
         with TestClient(app) as c:
             assert c.post("/v1/videos", json={"model": "wrong", "prompt": "fox"}).status_code == 400
-            assert c.post("/v1/videos", json={"prompt": "fox", "sampler": "dpmpp"}).status_code == 422
+            assert c.post("/v1/videos", json={"prompt": "fox", "sampler": "dpmpp"}).status_code == 202
+            assert c.post("/v1/videos", json={"prompt": "fox", "width": 7680, "height": 4320,
+                                               "fps": 120, "steps": 250}).status_code == 202
+            assert c.post("/v1/videos", json={"prompt": "fox", "flow_shift": 7}).status_code == 422
             assert c.post("/v1/videos", json={"prompt": "fox", "image": "invalid!?"}).status_code == 400
             assert c.post("/v1/videos", json={"prompt": "fox", "image": base64.b64encode(b"not an image").decode()}).status_code == 400
             r = c.post("/v1/videos", json={"prompt": "fox"})

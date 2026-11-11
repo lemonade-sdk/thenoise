@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, Callable, List
 
 import torch
 
@@ -34,6 +34,7 @@ class Sampler(ABC):
         guidance_scale: float,
         seed: int,
         desc: str = "sampling",
+        step_callback: Callable[[torch.Tensor, int, int], torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """Run one denoising pass over ``schedule``, returning the denoised latent.
 

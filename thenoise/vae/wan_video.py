@@ -449,6 +449,8 @@ class WanNativeVideoVAE(nn.Module):
 
 
 def _comfy_vae_checkpoint(root: Path) -> Path:
+    if root.is_file():
+        return root
     for directory in (root, root / "split_files"):
         path = directory / "vae" / "wan2.2_vae.safetensors"
         if path.is_file():

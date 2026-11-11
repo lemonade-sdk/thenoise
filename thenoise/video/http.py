@@ -8,7 +8,7 @@ from typing import Literal, Optional
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from .jobs import VideoJobs
 from .spec import VideoSpec
@@ -22,23 +22,19 @@ class VideoRequest(BaseModel):
     negative_prompt: str = ""
     width: int = 1280
     height: int = 704
-    frames: Optional[int] = Field(default=None, ge=1)
-    duration: Optional[float] = Field(default=None, gt=0)
-    fps: int = Field(default=24, ge=1, le=60)
-    steps: int = Field(default=30, ge=1, le=100)
+    frames: Optional[int] = None
+    duration: Optional[float] = None
+    fps: int = 24
+    steps: int = 30
     guidance_scale: float = 5.0
     seed: Optional[int] = None
     output_format: Literal["mp4", "webm"] = "webm"
-    sampler: Literal["unipc", "euler"] = "unipc"
-    flow_shift: float = 5.0
+    sampler: str = "unipc"
     image: Optional[str] = None  # base64-encoded PNG/JPEG initial frame for I2V
 
     def to_spec(self) -> VideoSpec:
         data = self.model_dump(exclude={"model", "image"})
         if self.image is not None:
-            # Bound encoded allocation *before* base64 decode.
-            if len(self.image) > 20 * 1024 * 1024:
-                raise ValueError("image exceeds 15 MiB")
             try:
                 data["image"] = base64.b64decode(self.image, validate=True)
             except (binascii.Error, ValueError) as e:
@@ -50,8 +46,8 @@ class VideoRequest(BaseModel):
             from PIL import Image
             try:
                 with Image.open(io.BytesIO(data["image"])) as img:
-                    if img.format not in ("PNG", "JPEG") or img.width * img.height > 25_000_000:
-                        raise ValueError("image must be PNG/JPEG and at most 25 megapixels")
+                    if img.format not in ("PNG", "JPEG"):
+                        raise ValueError("image must be PNG or JPEG")
                     img.verify()
             except (OSError, Image.DecompressionBombError) as e:
                 raise ValueError("image must be a valid PNG/JPEG") from e
@@ -64,7 +60,7 @@ def install_video_routes(app: FastAPI, jobs: VideoJobs, model_name: str) -> None
         if req.model and req.model != model_name:
             return JSONResponse({"error": f"model {req.model!r} is not loaded"}, status_code=400)
         try:
-            spec = req.to_spec().resolve()
+            spec = req.to_spec()
             snapshot = jobs.submit(spec)
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)

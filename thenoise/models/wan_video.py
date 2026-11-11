@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import gc
 import io
+import dataclasses
 import logging
 import time
 from contextlib import ExitStack
@@ -12,42 +13,84 @@ import torch
 
 from thenoise.dit.wan_video.checkpoint import load_wan_native_transformer
 from thenoise.memory import MemoryManager
-from thenoise.samplers.flow import flow_sigmas, sample_flow
+from thenoise.samplers import Step, create_sampler
+from thenoise.dit.wan_video.sampling import get_sigmas, wan_frame_grid
 from thenoise.text_encoders.wan_video import load_wan_text_encoder
 from thenoise.utils.image_tensor import cover_crop, load_image, pil_to_pixels, pixels_to_pil
 from thenoise.vae.wan_video import load_wan_native_video_vae
 from thenoise.video.container import encode_video
 from thenoise.video.jobs import Cancellation
-from thenoise.video.spec import ResolvedVideo
+from thenoise.video.spec import ResolvedVideo, VideoSpec
 
 log = logging.getLogger("uvicorn.error")
 
 
+class _WanVelocity:
+    """Adapt Wan's velocity callback to the shared image/video sampler contract."""
+
+    def __init__(self, predict):
+        self._predict = predict
+
+    def begin_sampling(self, _schedule):
+        pass
+
+    def denoise_step(self, x, t, _cond, _guidance_scale, _index):
+        return self._predict(x, float(t))
+
+
 class WanVideo:
     name = "Wan2.2-TI2V-5B"
+    VIDEO = True
+    CAPABILITIES = {"video": True, "t2v": True, "i2v": True}
 
-    def __init__(self, model_dir: str, *, device: str = "cuda", offload: bool = False):
-        self.model_dir = Path(model_dir).expanduser().resolve()
-        self.device = torch.device(device)
-        self.offload = offload
-        self.memory = MemoryManager(self.device, "cpu" if offload else self.device)
+    @staticmethod
+    def detect(f) -> bool:
+        from thenoise.utils.safetensors import unwrap_key
+        keys = {unwrap_key(k) for k in f.keys()}
+        return ({"patch_embedding.weight", "blocks.0.self_attn.q.weight",
+                 "text_embedding.0.weight"}.issubset(keys) and
+                f.get_slice(next(k for k in f.keys() if unwrap_key(k) == "patch_embedding.weight")).get_shape()[1] == 48)
+
+    def __init__(self, *, config):
+        self.dit_path = config.dit_path
+        self.vae_path = config.vae_path
+        self.text_encoder_path = config.text_encoder_path
+        self.device = torch.device(config.device)
+        self.memory = MemoryManager(self.device, config.offload_device)
         self.transformer = None
         self.text_encoder = None
         self.tokenizer = None
         self.vae = None
 
+    @staticmethod
+    def resolve_video(spec: VideoSpec) -> ResolvedVideo:
+        """Wan's geometric restrictions; the HTTP request itself is model-neutral."""
+        resolved = spec.resolve()
+        if resolved.sampler not in ("euler", "unipc"):
+            raise ValueError("Wan TI2V-5B supports only euler or unipc samplers")
+        width = (resolved.width // 32) * 32
+        height = (resolved.height // 32) * 32
+        if width == 0 or height == 0:
+            raise ValueError("Wan video requires width and height of at least 32")
+        wanted = (spec.frames if spec.frames is not None else
+                  spec.duration * spec.fps if spec.duration is not None else 33)
+        return dataclasses.replace(
+            resolved, width=width, height=height,
+            frame_count=wan_frame_grid(wanted, upward=spec.frames is not None),
+        )
+
     def _load(self, token: Cancellation) -> None:
         token.check()
         if self.transformer is not None:
             return
-        vae = load_wan_native_video_vae(self.model_dir, check_cancel=token.check)
+        vae = load_wan_native_video_vae(self.vae_path, check_cancel=token.check)
         token.check()
         text_encoder, tokenizer = load_wan_text_encoder(
-            self.model_dir, dtype=torch.float16, check_cancel=token.check,
+            self.text_encoder_path, dtype=torch.float16, check_cancel=token.check,
         )
         token.check()
         transformer = load_wan_native_transformer(
-            self.model_dir, dtype=torch.float16, check_cancel=token.check,
+            self.dit_path, dtype=torch.float16, check_cancel=token.check,
         )
         token.check()
         if vae.dtype != torch.float32:
@@ -83,8 +126,6 @@ class WanVideo:
 
     def _image_condition(self, spec: ResolvedVideo, token: Cancellation) -> torch.Tensor:
         image = load_image(io.BytesIO(spec.image))
-        if image.width * image.height > 25_000_000:
-            raise ValueError("I2V input image exceeds 25 megapixels")
         frame = cover_crop(image, spec.width, spec.height)
         pixels = pil_to_pixels(frame, channels=3)
         video = pixels[None, :, None].to(self.device)
@@ -129,16 +170,20 @@ class WanVideo:
             )[0].float()
             return uncond_vel + spec.guidance_scale * (cond_vel - uncond_vel)
 
-        def restore(x: torch.Tensor) -> torch.Tensor:
+        def step_done(x: torch.Tensor, i: int, total: int) -> torch.Tensor:
             if condition is not None:
-                x[:, :, :1] = condition
+                x[:, :, :1] = condition.to(x.dtype)
+            progress("sampling", i, total)
+            token.check()
             return x
 
-        return sample_flow(
-            latents, flow_sigmas(spec.steps, spec.flow_shift), predict,
-            sampler=spec.sampler, cancel=token.check,
-            after_step=restore if condition is not None else None,
-            progress=lambda step, total: progress("sampling", step, total),
+        sigmas = get_sigmas(spec.steps)
+        ts = torch.tensor(sigmas, device=latents.device, dtype=torch.float32)
+        schedule = [Step(t=ts[i], delta=ts[i] - ts[i + 1])
+                    for i in range(len(ts) - 1)]
+        return create_sampler(spec.sampler, _WanVelocity(predict)).sample(
+            latents, schedule, None, spec.guidance_scale, spec.seed,
+            step_callback=step_done,
         )
 
     def _decode(self, latents: torch.Tensor, token: Cancellation, progress):
@@ -175,16 +220,12 @@ class WanVideo:
                 positive = stage.run(self._prompt_embeddings, spec.prompt, token)
                 negative = (stage.run(self._prompt_embeddings, spec.negative_prompt, token)
                             if spec.guidance_scale > 1 else None)
-            if self.offload:
-                self.memory.offload("text_encoder")
             token.check()
 
             condition = None
             if spec.image is not None:
                 with self.memory.stage("vae", pixels=pixels) as stage:
                     condition = stage.run(self._image_condition, spec, token)
-                if self.offload:
-                    self.memory.offload("vae")
 
             shape = (1, 48, (spec.frame_count - 1) // 4 + 1,
                      spec.height // 16, spec.width // 16)
@@ -194,16 +235,12 @@ class WanVideo:
             with self.memory.stage("dit", pixels=pixels) as stage:
                 latents = stage.run(self._sample, latents, spec, positive, negative,
                                     condition, token, progress)
-            if self.offload:
-                self.memory.offload("dit")
             token.check()
             log.info("Wan sampling finished in %.1fs", time.monotonic() - start)
             del positive, negative, condition
 
             with self.memory.stage("vae", pixels=pixels) as stage:
                 frames = stage.run(self._decode, latents, token, progress)
-            if self.offload:
-                self.memory.offload("vae")
             del latents
 
         token.check()
