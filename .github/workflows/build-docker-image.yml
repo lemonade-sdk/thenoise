@@ -6,8 +6,8 @@ name: Build TheNoise Docker image (ROCm)
 # the primary target.
 #
 # Triggers:
-#   * git tag matching v*        -> build + smoke test + push. A release is the
-#     only thing that moves the rolling :gfx<target> / :latest tags.
+#   * git tag matching v*        -> build + smoke test + push. Only stable
+#     vX.Y.Z tags move the rolling :gfx<target> / :latest tags.
 #   * workflow_dispatch          -> build + smoke test. With the push_image
 #     toggle on it publishes as :edge-gfx<target>, never as :gfx<target>, so a
 #     test build cannot repoint what the docs tell people to pull.
@@ -79,6 +79,7 @@ jobs:
       matrix: ${{ steps.set.outputs.matrix }}
       push: ${{ steps.set.outputs.push }}
       tag_prefix: ${{ steps.set.outputs.tag_prefix }}
+      stable_release: ${{ steps.set.outputs.stable_release }}
     steps:
       - name: Set inputs
         id: set
@@ -97,12 +98,19 @@ jobs:
           elif [ "$PUSH_IN" = true ]; then push=true
           else push=false; fi
           echo "push=$push" >> "$GITHUB_OUTPUT"
-          # The rolling tag is a pointer, so only a release may move it: a
-          # manual build publishes beside it as edge-gfx<target>. The target
-          # already spells the gfx, so a release adds no prefix at all.
-          if [ "${{ github.event_name }}" = push ]; then prefix=
-          else prefix=edge-; fi
+          # Only canonical stable tags move :gfx<target> and :latest.
+          # Pre-release tag pushes and manual builds publish as :edge-gfx<target>
+          # without moving the stable tags.
+          if [ "$GITHUB_EVENT_NAME" = push ] &&
+             [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            prefix=
+            stable=true
+          else
+            prefix=edge-
+            stable=false
+          fi
           echo "tag_prefix=$prefix" >> "$GITHUB_OUTPUT"
+          echo "stable_release=$stable" >> "$GITHUB_OUTPUT"
 
   build-image:
     needs: prepare
@@ -147,14 +155,16 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ steps.image.outputs.name }}
+          flavor: |
+            latest=false
           tags: |
-            # v0.12.1 -> 0.12.1-gfx1151
+            # v0.12.1 -> 0.12.1-gfx1151; v0.14.0-rc.1 -> 0.14.0-rc.1-gfx1151
             type=semver,pattern={{version}},suffix=-${{ matrix.gfx_target }}
             # the rolling per-target tag the docs point at; edge-gfx<target>
-            # for anything that is not a release (see prepare)
+            # for pre-releases and manual builds (see prepare)
             type=raw,value=${{ needs.prepare.outputs.tag_prefix }}${{ matrix.gfx_target }}
-            # and :latest for the primary target, releases only
-            type=raw,value=latest,enable=${{ matrix.gfx_target == 'gfx1151' && github.event_name == 'push' }}
+            # and :latest for the primary target, stable releases only
+            type=raw,value=latest,enable=${{ matrix.gfx_target == 'gfx1151' && needs.prepare.outputs.stable_release == 'true' }}
 
       - name: Build image
         uses: docker/build-push-action@v6
