@@ -5,4 +5,4 @@ A small explicit API surface over a few models. Implementations live in
 """
 from __future__ import annotations
 
-__version__ = "0.13.0"
+__version__ = "0.14.0"

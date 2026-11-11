@@ -33,6 +33,7 @@ from thenoise.postprocess.options import (
 from thenoise.utils.image_tensor import load_image
 from thenoise.utils.options import options_schema, wire_fields
 from thenoise.utils.png import pnginfo_of
+from thenoise import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +184,7 @@ def _is_options_problem(error: dict) -> bool:
 
 
 def create_app(runtime) -> FastAPI:
-    app = FastAPI(title="thenoise", version="0.1.0")
+    app = FastAPI(title="thenoise", version=__version__)
 
     def image_response(image, out: str):
         """PNG bytes, or the same bytes base64-wrapped, with the image's own metadata."""
