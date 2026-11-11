@@ -108,16 +108,6 @@ Generate:
   --vae ./models/moss-image/vae/flux2-vae.safetensors
 ```
 
-The distilled checkpoint, one forward per step and nothing to attach:
-
-```bash
-./thenoise.sh generate "a half-eaten croissant on a ceramic plate, window light" \
-  --dit ./models/moss-image/diffusion_models/moss_image_sft_8steps__int8_convrot.safetensors \
-  --text-encoder ./models/moss-image/text_encoders/qwen3.5_9b_int8_convrot.safetensors \
-  --vae ./models/moss-image/vae/flux2-vae.safetensors \
-  --sampler euler --steps 8 --guidance-scale 1
-```
-
 ## Notes on the recipe
 
 **Guidance is on by default.** CFG 3.0 — two forwards per step, one on the prompt and
@@ -131,9 +121,5 @@ resolution.
 
 **Sizes are rounded up to 16 px**, one DiT token per latent cell: 1024×1024 is
 64×64 tokens.
-
-**Both defaults above belong to the 25-step checkpoint.** The 8-step files want Euler
-at guidance 1, where the negative forward never runs — and with it the block-22 skip
-that sharpens the 25-step recipe.
 
 
