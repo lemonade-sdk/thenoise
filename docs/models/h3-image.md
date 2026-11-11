@@ -45,6 +45,22 @@ INT8-ConvRot, 768x1024:
 
 - Generate @ 4 steps: **~4.1 s**
 
+## Examples
+
+*Generated:*
+
+<img width="45%" alt="Photo" src="https://github.com/user-attachments/assets/49e903ac-704e-452c-b38b-6f359b32dce1" />
+<img width="45%" alt="Sketch" src="https://github.com/user-attachments/assets/2964384a-4a41-4233-b636-0dd5dd3a5a10" />
+
+*Edited:*
+
+| Before | After | Prompt |
+|---|---|---|
+| <img width="100%" alt="Sketch" src="https://github.com/user-attachments/assets/2964384a-4a41-4233-b636-0dd5dd3a5a10" /> | <img width="100%" alt="thenoise_edit_32470856" src="https://github.com/user-attachments/assets/14911881-9266-4d0c-9a0f-ee7de91f8cfe" /> | Color image |
+| <img width="100%" alt="Sketch" src="https://github.com/user-attachments/assets/2964384a-4a41-4233-b636-0dd5dd3a5a10" /> | <img width="100%" alt="thenoise_edit_514649780" src="https://github.com/user-attachments/assets/e6e1a5a8-f694-45c1-9cbc-a11e65eff670" /> | Make image realistic |
+|<img width="100%" alt="Sketch" src="https://github.com/user-attachments/assets/2964384a-4a41-4233-b636-0dd5dd3a5a10" /> | <img width="100%" alt="thenoise_edit_1358020328" src="https://github.com/user-attachments/assets/d03df717-ff72-4c69-98f5-6fdcb6d626b2" /> | Write in diagonal on top "Rome, 2026" in hand-writing font. Make image colorful.|
+| <img height="500px" alt="Photo" src="https://github.com/user-attachments/assets/49e903ac-704e-452c-b38b-6f359b32dce1" /><img height="500px" alt="thenoise_1235292549" src="https://github.com/user-attachments/assets/3d8ef355-b84c-4b0a-bcb7-9e1f33cdd58f" /> | <img width="2592" height="3456" alt="thenoise_edit_3501531793" src="https://github.com/user-attachments/assets/460ecaf3-a776-4d30-9985-d7b41c5d84c5" /> | Change the clothing of model from &lt;image1&gt; to that of model from &lt;image2&gt;. Remove the hat and make her hairstyle a wavy fashion bob. Make the background bordeaux.|
+
 ## Download
 
 ```bash
