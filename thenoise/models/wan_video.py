@@ -42,6 +42,17 @@ class WanVideo:
     name = "Wan2.2-TI2V-5B"
     VIDEO = True
     CAPABILITIES = {"video": True, "t2v": True, "i2v": True}
+    DEFAULT_PREFS = {
+        "negative_prompt": "",
+        "width": 1280,
+        "height": 704,
+        "frames": 33,
+        "fps": 24,
+        "steps": 12,
+        "guidance_scale": 5.0,
+        "output_format": "webm",
+        "sampler": "unipc",
+    }
 
     @staticmethod
     def detect(f) -> bool:
@@ -62,10 +73,10 @@ class WanVideo:
         self.tokenizer = None
         self.vae = None
 
-    @staticmethod
-    def resolve_video(spec: VideoSpec) -> ResolvedVideo:
-        """Wan's geometric restrictions; the HTTP request itself is model-neutral."""
-        resolved = spec.resolve()
+    @classmethod
+    def resolve_video(cls, spec: VideoSpec) -> ResolvedVideo:
+        """Apply this model's defaults and geometric restrictions."""
+        resolved = spec.resolve(cls.DEFAULT_PREFS)
         if resolved.sampler not in ("euler", "unipc"):
             raise ValueError("Wan TI2V-5B supports only euler or unipc samplers")
         width = (resolved.width // 32) * 32
@@ -73,7 +84,7 @@ class WanVideo:
         if width == 0 or height == 0:
             raise ValueError("Wan video requires width and height of at least 32")
         wanted = (spec.frames if spec.frames is not None else
-                  spec.duration * spec.fps if spec.duration is not None else 33)
+                  spec.duration * resolved.fps if spec.duration is not None else resolved.frame_count)
         return dataclasses.replace(
             resolved, width=width, height=height,
             frame_count=wan_frame_grid(wanted, upward=spec.frames is not None),

@@ -143,7 +143,7 @@ def fake_video(tmp_path, monkeypatch):
 
 def _spec(*, image=None):
     return VideoSpec(prompt="fox", width=480, height=320, frames=9,
-                     steps=2, image=image).resolve()
+                     steps=2, image=image).resolve(WanVideo.DEFAULT_PREFS)
 
 
 def test_native_t2v_i2v_t2v_reuses_models(fake_video, tmp_path):

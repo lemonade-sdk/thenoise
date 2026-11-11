@@ -93,7 +93,7 @@ class VideoJobs:
                  queue_limit: int = 4, history_limit: int = 32,
                  resolve: Callable[[VideoSpec], ResolvedVideo] | None = None):
         self._render = renderer
-        self._resolve = resolve or VideoSpec.resolve
+        self._resolve = resolve
         self._root = Path(root)
         self._model = model
         self._queue_limit = queue_limit
@@ -106,6 +106,8 @@ class VideoJobs:
 
     def submit(self, spec: VideoSpec | ResolvedVideo) -> dict:
         if isinstance(spec, VideoSpec):
+            if self._resolve is None:
+                raise ValueError("a video model resolver is required for unresolved requests")
             spec = self._resolve(spec)
         with self._lock:
             if self._closed:

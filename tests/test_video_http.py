@@ -12,6 +12,7 @@ from PIL import Image
 
 from thenoise.video.http import install_video_routes
 from thenoise.video.jobs import VideoJobs
+from thenoise.models.wan_video import WanVideo
 
 
 def until(predicate, timeout=2):
@@ -31,7 +32,8 @@ def test_video_http_t2v_and_i2v_and_content(tmp_path):
         progress("sampling", 1, spec.steps)
         path.write_bytes(b"\x1aE\xdf\xa3" + b"video")
 
-    jobs = VideoJobs(fake_render, tmp_path, model="Wan2.2-TI2V-5B")
+    jobs = VideoJobs(fake_render, tmp_path, model="Wan2.2-TI2V-5B",
+                     resolve=WanVideo.resolve_video)
     app = FastAPI()
     install_video_routes(app, jobs, "Wan2.2-TI2V-5B")
     try:
@@ -72,13 +74,14 @@ def test_video_http_cancel_running_and_rejection(tmp_path):
         token.check()
         path.write_bytes(b"clip")
 
-    jobs = VideoJobs(fake_render, tmp_path, model="Wan2.2-TI2V-5B")
+    jobs = VideoJobs(fake_render, tmp_path, model="Wan2.2-TI2V-5B",
+                     resolve=WanVideo.resolve_video)
     app = FastAPI()
     install_video_routes(app, jobs, "Wan2.2-TI2V-5B")
     try:
         with TestClient(app) as c:
             assert c.post("/v1/videos", json={"model": "wrong", "prompt": "fox"}).status_code == 400
-            assert c.post("/v1/videos", json={"prompt": "fox", "sampler": "dpmpp"}).status_code == 202
+            assert c.post("/v1/videos", json={"prompt": "fox", "sampler": "dpmpp"}).status_code == 400
             assert c.post("/v1/videos", json={"prompt": "fox", "width": 7680, "height": 4320,
                                                "fps": 120, "steps": 250}).status_code == 202
             assert c.post("/v1/videos", json={"prompt": "fox", "flow_shift": 7}).status_code == 422

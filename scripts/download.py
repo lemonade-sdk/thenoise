@@ -12,6 +12,8 @@ Models:
                   https://huggingface.co/circlestone-labs/Anima
   krea2           Krea 2 Turbo (bf16 / raw)
                   https://huggingface.co/Comfy-Org/Krea-2
+  wan22           Wan 2.2 TI2V-5B (text-to-video and image-to-video)
+                  https://huggingface.co/Comfy-Org/Wan-2.2
   zimage          Z-Image Turbo (distilled, 8-step) or Z-Image (base)
                   https://huggingface.co/Comfy-Org/z_image_turbo
                   https://huggingface.co/Comfy-Org/z_image
@@ -64,6 +66,7 @@ Usage:
     python scripts/download.py --model fibo2 --variant dev
     python scripts/download.py --model fibo2 --variant dev --int8-convrot
     python scripts/download.py --model h3-image
+    python scripts/download.py --model wan22
     python scripts/download.py --model esrgan
     python scripts/download.py --model controlmaps
     python scripts/download.py --model controlmaps --variant pose
@@ -395,6 +398,16 @@ def _esrgan_jobs(args: argparse.Namespace) -> list[Artifact]:
     ]
 
 
+def _wan22_jobs(args: argparse.Namespace) -> list[Artifact]:
+    """Wan 2.2 TI2V-5B: FP16 DiT, UMT5 encoder, and causal video VAE."""
+    repo = "Comfy-Org/Wan-2.2"
+    return [
+        ("dit", repo, "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors"),
+        ("text_encoder", repo, "split_files/text_encoders/umt5_xxl_fp16.safetensors"),
+        ("vae", repo, "split_files/vae/wan2.2_vae.safetensors"),
+    ]
+
+
 #: Depth-Anything-V2: (variant) -> huggingface repo, with the files a control-map dir
 #: needs (config + weights + processor config).
 _DEPTH_REPOS = {
@@ -539,6 +552,12 @@ MODELS: dict[str, ModelSpec] = {
         "MiniMax H3-Image (t2i + edit in one DiT)",
         _h3_image_jobs,
     ),
+    "wan22": ModelSpec(
+        "wan22", "./models/wan22",
+        "Wan 2.2 TI2V-5B (T2V / I2V)",
+        _wan22_jobs,
+        has_int8=False,
+    ),
     "esrgan": ModelSpec(
         "esrgan", "./models/esrgan",
         "Real-ESRGAN x4 pixel upscaler (optional; used for upscaling)",
@@ -584,6 +603,7 @@ def _epilog() -> str:
         "  python scripts/download.py --model fibo2",
         "  python scripts/download.py --model fibo2 --variant dev --int8-convrot",
         "  python scripts/download.py --model h3-image",
+        "  python scripts/download.py --model wan22",
         "  python scripts/download.py --model esrgan",
         "  python scripts/download.py --model controlmaps            # depth + pose",
         "  python scripts/download.py --model controlmaps --variant base",

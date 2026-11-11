@@ -4,7 +4,7 @@ from __future__ import annotations
 import math
 import secrets
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 
 @dataclass(frozen=True)
@@ -19,8 +19,8 @@ class ResolvedVideo:
     guidance_scale: float
     seed: int
     output_format: str
-    image: Optional[bytes] = None
-    sampler: str = "unipc"
+    image: Optional[bytes]
+    sampler: str
 
     @property
     def mode(self) -> str:
@@ -40,47 +40,57 @@ class ResolvedVideo:
 @dataclass(frozen=True)
 class VideoSpec:
     prompt: str
-    negative_prompt: str = ""
-    width: int = 1280
-    height: int = 704
+    negative_prompt: Optional[str] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
     frames: Optional[int] = None
     duration: Optional[float] = None
-    fps: int = 24
-    steps: int = 30
-    guidance_scale: float = 5.0
+    fps: Optional[int] = None
+    steps: Optional[int] = None
+    guidance_scale: Optional[float] = None
     seed: Optional[int] = None
-    output_format: str = "webm"
+    output_format: Optional[str] = None
     image: Optional[bytes] = None
-    sampler: str = "unipc"
+    sampler: Optional[str] = None
 
-    def resolve(self) -> ResolvedVideo:
+    def resolve(self, defaults: Mapping[str, Any]) -> ResolvedVideo:
+        """Resolve omitted options from the selected model's preferences."""
+        def pref(key: str):
+            value = getattr(self, key)
+            return defaults[key] if value is None else value
+
+        negative_prompt = pref("negative_prompt")
+        width, height = pref("width"), pref("height")
+        fps, steps = pref("fps"), pref("steps")
+        guidance_scale = pref("guidance_scale")
+        output_format, sampler = pref("output_format"), pref("sampler")
+
         if not self.prompt.strip():
             raise ValueError("prompt must not be empty")
-        if self.fps <= 0 or self.steps <= 0:
+        if fps <= 0 or steps <= 0:
             raise ValueError("fps and steps must be positive")
-        if not math.isfinite(self.guidance_scale) or self.guidance_scale < 0:
+        if not math.isfinite(guidance_scale) or guidance_scale < 0:
             raise ValueError("guidance_scale must be finite and nonnegative")
-        if not self.sampler:
+        if not sampler:
             raise ValueError("sampler must not be empty")
-        if self.width <= 0 or self.height <= 0:
+        if width <= 0 or height <= 0:
             raise ValueError("width and height must be positive")
         if self.frames is not None and self.frames <= 0:
             raise ValueError("frames must be positive")
         if self.duration is not None and (not math.isfinite(self.duration) or self.duration <= 0):
             raise ValueError("duration must be finite and positive")
-        width, height = self.width, self.height
         frames = (self.frames if self.frames is not None else
-                  max(1, math.floor(self.duration * self.fps + 0.5))
-                  if self.duration is not None else 33)
-        if self.output_format not in ("mp4", "webm"):
+                  max(1, math.floor(self.duration * fps + 0.5))
+                  if self.duration is not None else defaults["frames"])
+        if output_format not in ("mp4", "webm"):
             raise ValueError("output_format must be mp4 or webm")
         if self.seed is not None and not -(2**63) <= self.seed < 2**64:
             raise ValueError("seed is outside torch.Generator's supported range")
         seed = secrets.randbits(32) if self.seed is None or self.seed == -1 else self.seed
         return ResolvedVideo(
-            prompt=self.prompt, negative_prompt=self.negative_prompt,
-            width=width, height=height, frame_count=frames, fps=self.fps,
-            steps=self.steps, guidance_scale=self.guidance_scale, seed=seed,
-            output_format=self.output_format, image=self.image,
-            sampler=self.sampler,
+            prompt=self.prompt, negative_prompt=negative_prompt,
+            width=width, height=height, frame_count=frames, fps=fps,
+            steps=steps, guidance_scale=guidance_scale, seed=seed,
+            output_format=output_format, image=self.image,
+            sampler=sampler,
         )

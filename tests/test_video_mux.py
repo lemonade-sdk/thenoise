@@ -11,6 +11,7 @@ import pytest
 from thenoise.video.container import encode_video
 from thenoise.video.jobs import Cancellation, VideoCancelled
 from thenoise.video.spec import VideoSpec
+from thenoise.models.wan_video import WanVideo
 
 
 def fake_av(monkeypatch):
@@ -51,7 +52,7 @@ def fake_av(monkeypatch):
 
 def spec():
     return VideoSpec(prompt="fox", width=480, height=320, frames=9,
-                     fps=8, output_format="mp4").resolve()
+                     fps=8, output_format="mp4").resolve(WanVideo.DEFAULT_PREFS)
 
 
 def test_encoded_clip_is_published_only_after_mux_is_closed(tmp_path, monkeypatch):

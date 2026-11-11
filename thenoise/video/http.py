@@ -19,17 +19,17 @@ class VideoRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     model: Optional[str] = None
     prompt: str
-    negative_prompt: str = ""
-    width: int = 1280
-    height: int = 704
+    negative_prompt: Optional[str] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
     frames: Optional[int] = None
     duration: Optional[float] = None
-    fps: int = 24
-    steps: int = 30
-    guidance_scale: float = 5.0
+    fps: Optional[int] = None
+    steps: Optional[int] = None
+    guidance_scale: Optional[float] = None
     seed: Optional[int] = None
-    output_format: Literal["mp4", "webm"] = "webm"
-    sampler: str = "unipc"
+    output_format: Optional[Literal["mp4", "webm"]] = None
+    sampler: Optional[str] = None
     image: Optional[str] = None  # base64-encoded PNG/JPEG initial frame for I2V
 
     def to_spec(self) -> VideoSpec:
