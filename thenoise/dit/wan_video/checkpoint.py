@@ -11,7 +11,9 @@ from torch import nn
 from safetensors import safe_open
 
 from thenoise.dit.quantized import QuantizedLinear
-from thenoise.utils.wan_weights import validated_key_map, wan_dit_key
+from thenoise.utils.checkpoint_weights import load_mapped_weights
+from thenoise.utils.model_dir import find_weight_file
+from thenoise.utils.wan_weights import wan_dit_key
 from .model import WanNativeDiT
 
 
@@ -106,19 +108,6 @@ def _fp32_key(key: str) -> bool:
     )
 
 
-def _find_checkpoint(root: Path) -> Path:
-    if root.is_file():
-        return root
-    for base in (root, root / "split_files"):
-        for name in ("wan2.2_ti2v_5B_fp16.safetensors", "wan2.2_ti2v_5B_bf16.safetensors"):
-            p = base / "diffusion_models" / name
-            if p.is_file():
-                return p
-    raise FileNotFoundError(
-        "Wan 2.2 TI2V-5B checkpoint missing: expected diffusion_models/"
-        "wan2.2_ti2v_5B_fp16.safetensors (Comfy-Org/Wan-2.2)"
-    )
-
 
 def load_wan_native_transformer(
     model_dir: str | Path, *, dtype: torch.dtype = torch.bfloat16,
@@ -128,27 +117,19 @@ def load_wan_native_transformer(
     """Read the ComfyUI WanModel layout without constructing a Diffusers module."""
     if dtype not in (torch.bfloat16, torch.float16, torch.float32):
         raise ValueError("Wan TI2V-5B uses FP16/BF16/FP32 execution")
-    root = Path(model_dir).expanduser().resolve()
     config = SimpleNamespace(**(_TI2V_CONFIG | (_test_config or {})))
     with torch.device("meta"):
         weights = _WanWeightModel(config)
-    expected = {k: tuple(v.shape) for k, v in weights.state_dict().items()}
-    checkpoint = _find_checkpoint(root)
+    checkpoint = find_weight_file(
+        model_dir, "diffusion_models",
+        ("wan2.2_ti2v_5B_fp16.safetensors", "wan2.2_ti2v_5B_bf16.safetensors"),
+    )
     if check_cancel:
         check_cancel()
     with safe_open(str(checkpoint), framework="pt", device="cpu") as file:
-        mapping = validated_key_map(set(file.keys()), wan_dit_key, set(expected))
-        for raw, key in sorted(mapping.items()):
-            if tuple(file.get_slice(raw).get_shape()) != expected[key]:
-                raise ValueError(f"Wan checkpoint shape mismatch: {raw} -> {key}")
-        for i, (raw, key) in enumerate(sorted(mapping.items())):
-            if check_cancel and i % 8 == 0:
-                check_cancel()
-            tensor = file.get_tensor(raw)
-            if not tensor.is_floating_point() or tensor.element_size() not in (2, 4):
-                raise ValueError(f"unsupported Wan checkpoint tensor dtype: {raw} ({tensor.dtype})")
-            tensor = tensor.to(dtype=torch.float32 if _fp32_key(key) else dtype)
-            weights.load_state_dict({key: tensor}, strict=False, assign=True)
-    if any(p.is_meta for p in weights.parameters()):
-        raise RuntimeError("Wan transformer has unloaded meta tensors")
+        load_mapped_weights(
+            file, weights, wan_dit_key,
+            dtype_for=lambda key: torch.float32 if _fp32_key(key) else dtype,
+            excluded=frozenset(), check_cancel=check_cancel, label="Wan transformer",
+        )
     return WanNativeDiT.from_weights(weights.eval())

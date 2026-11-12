@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 
+from thenoise.utils.checkpoint_weights import validated_key_map
+
 
 def wan_dit_key(raw: str) -> str:
     """Map ComfyUI WanModel weights to TheNoise's TI2V-5B DiT structure."""
@@ -95,18 +97,3 @@ def wan_vae_key(raw: str, *, num_res_blocks: int = 2) -> str:
     name = name.replace(".residual.6.", ".conv2.")
     name = name.replace(".shortcut.", ".conv_shortcut.")
     return name
-
-
-def validated_key_map(keys: set[str], mapper, expected: set[str]) -> dict[str, str]:
-    """Require a bijection; never silently discard or overwrite checkpoint data."""
-    mapped = {raw: mapper(raw) for raw in keys}
-    values = set(mapped.values())
-    if len(values) != len(mapped) or values != expected:
-        missing = sorted(expected - values)
-        extra = sorted(values - expected)
-        duplicates = len(mapped) - len(values)
-        raise ValueError(
-            f"Wan ComfyUI checkpoint keys mismatch: missing={missing[:6]}, "
-            f"extra={extra[:6]}, duplicates={duplicates}"
-        )
-    return mapped

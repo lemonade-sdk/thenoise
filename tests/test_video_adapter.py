@@ -128,7 +128,8 @@ def fake_video(tmp_path, monkeypatch):
     monkeypatch.setattr(wan, "load_wan_native_transformer", load_dit)
     monkeypatch.setattr(wan, "load_wan_text_encoder", load_text)
     monkeypatch.setattr(wan.WanVideo, "_sample", sample)
-    monkeypatch.setattr(wan, "MemoryManager", FakeMemory)
+    import thenoise.models.video_base as video_base
+    monkeypatch.setattr(video_base, "MemoryManager", FakeMemory)
     monkeypatch.setattr(wan, "encode_video", lambda frames, spec, tok, dest, progress: dest.write_bytes(b"video"))
 
     inference = types.ModuleType("thenoise.inference")
@@ -160,6 +161,22 @@ def test_native_t2v_i2v_t2v_reuses_models(fake_video, tmp_path):
     assert video.transformer.dtype is torch.float16
     assert video.text_encoder.weight.dtype is torch.bfloat16
     assert out.read_bytes() == b"video"
+
+
+def test_unload_releases_weights_and_allows_reloading(fake_video, tmp_path, monkeypatch):
+    video, calls = fake_video
+    video.generate(_spec(), Cancellation(), lambda *_: None, tmp_path / "clip.mp4")
+    import thenoise.models.video_base as video_base
+    released = []
+    monkeypatch.setattr(video_base, "release_device_memory", released.append)
+
+    video.unload()
+    assert video.vae is video.text_encoder is video.transformer is video.tokenizer is None
+    assert video.memory.items == {}
+    assert released == [video.device]
+
+    video.generate(_spec(), Cancellation(), lambda *_: None, tmp_path / "clip.mp4")
+    assert calls.count("load_dit") == calls.count("load_vae") == 2
 
 
 def test_cancel_sampling_recovers_for_next_job(fake_video, tmp_path):

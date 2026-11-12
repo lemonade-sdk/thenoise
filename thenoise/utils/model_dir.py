@@ -1,6 +1,8 @@
 """Name parsing, path resolution and listing for model files in a base directory."""
 from __future__ import annotations
 
+from pathlib import Path
+
 
 def ensure_safetensors(name: str) -> str:
     """Return ``name`` with a trailing ``.safetensors`` appended if missing."""
@@ -49,3 +51,22 @@ def list_safetensors(base_dir: str) -> list[str]:
             rel = os.path.relpath(os.path.join(root, name), base_dir)
             names.append(strip_safetensors(rel))
     return sorted(names)
+
+
+def find_weight_file(
+    root: str | Path, directory: str, filenames: tuple[str, ...]
+) -> Path:
+    """Resolve an explicit file or a Comfy-style root or split_files directory."""
+    root = Path(root).expanduser().resolve()
+    if root.is_file():
+        return root
+    if not filenames:
+        raise ValueError("at least one checkpoint filename is required")
+    for base in (root, root / "split_files"):
+        for filename in filenames:
+            path = base / directory / filename
+            if path.is_file():
+                return path
+    raise FileNotFoundError(
+        f"checkpoint missing under {root}: expected {directory}/{filenames[0]}"
+    )

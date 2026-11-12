@@ -58,15 +58,3 @@ def test_step_callback_cancellation():
             torch.zeros(1, 3, 4, 4), schedule, None, 1.0, 0,
             step_callback=stop,
         )
-
-
-def test_comfy_checkpoints_allow_normal_model_file_paths(tmp_path):
-    from thenoise.dit.wan_video.checkpoint import _find_checkpoint
-    from thenoise.text_encoders.wan_video import _text_path
-    from thenoise.vae.wan_video import _comfy_vae_checkpoint
-
-    path = tmp_path / "checkpoint.safetensors"
-    path.touch()
-    assert _find_checkpoint(path) == path
-    assert _text_path(path) == path
-    assert _comfy_vae_checkpoint(path) == path

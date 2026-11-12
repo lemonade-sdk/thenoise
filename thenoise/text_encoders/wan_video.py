@@ -13,7 +13,8 @@ from torch.nn import functional as F
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention
-from thenoise.utils.wan_weights import validated_key_map
+from thenoise.utils.checkpoint_weights import load_mapped_weights
+from thenoise.utils.model_dir import find_weight_file
 
 
 class _T5Norm(nn.Module):
@@ -153,16 +154,6 @@ class WanSentencePiece:
         return torch.tensor([ids], dtype=torch.long), torch.tensor([[1] * count + [0] * (max_length - count)], dtype=torch.bool)
 
 
-def _text_path(root: Path) -> Path:
-    if root.is_file():
-        return root
-    for base in (root, root / "split_files"):
-        for name in ("umt5_xxl_fp16.safetensors", "umt5_xxl_fp8_e4m3fn_scaled.safetensors"):
-            candidate = base / "text_encoders" / name
-            if candidate.is_file():
-                return candidate
-    raise FileNotFoundError("Wan text encoder missing: text_encoders/umt5_xxl_fp16.safetensors")
-
 
 def _text_key(name: str) -> str:
     return name.removeprefix("text_encoders.").removeprefix("umt5xxl.transformer.").removeprefix("transformer.")
@@ -172,31 +163,25 @@ def load_wan_text_encoder(model_dir: str | Path, *, dtype: torch.dtype = torch.f
                           check_cancel: Callable[[], None] | None = None,
                           _test_config: dict | None = None) -> tuple[WanUMT5, WanSentencePiece]:
     """Load Comfy-Org's UMT5 weights and tokenizer without Transformers."""
-    checkpoint = _text_path(Path(model_dir).expanduser().resolve())
+    checkpoint = find_weight_file(
+        model_dir, "text_encoders",
+        ("umt5_xxl_fp16.safetensors", "umt5_xxl_fp8_e4m3fn_scaled.safetensors"),
+    )
     if "fp8" in checkpoint.name:
         raise ValueError("FP8 UMT5 is not yet supported; use umt5_xxl_fp16.safetensors")
     with torch.device("meta"):
         model = WanUMT5(**(_test_config or {}))
-    expected = {k: tuple(v.shape) for k, v in model.state_dict().items()}
     if check_cancel:
         check_cancel()
     with safe_open(str(checkpoint), framework="pt", device="cpu") as sf:
-        keys = set(sf.keys())
-        if "spiece_model" not in keys:
+        if "spiece_model" not in sf.keys():
             raise ValueError("Comfy UMT5 checkpoint is missing embedded spiece_model")
-        mapping = validated_key_map(keys - {"spiece_model"}, _text_key, set(expected))
-        for raw, target in mapping.items():
-            if tuple(sf.get_slice(raw).get_shape()) != expected[target]:
-                raise ValueError(f"UMT5 checkpoint shape mismatch: {raw} -> {target}")
-            if sf.get_slice(raw).get_dtype() not in ("F16", "BF16", "F32"):
-                raise ValueError(f"unsupported UMT5 tensor dtype: {raw}")
         if sf.get_slice("spiece_model").get_dtype() != "U8":
             raise ValueError("invalid Comfy UMT5 sentencepiece tokenizer data")
+        load_mapped_weights(
+            sf, model, _text_key, dtype_for=lambda _: dtype,
+            excluded=frozenset({"spiece_model"}), check_cancel=check_cancel,
+            label="UMT5",
+        )
         tokenizer = WanSentencePiece(sf.get_tensor("spiece_model").numpy().tobytes())
-        for i, (raw, target) in enumerate(sorted(mapping.items())):
-            if check_cancel and i % 8 == 0:
-                check_cancel()
-            model.load_state_dict({target: sf.get_tensor(raw).to(dtype=dtype)}, strict=False, assign=True)
-    if any(p.is_meta for p in model.parameters()):
-        raise RuntimeError("UMT5 contains unloaded meta parameters")
     return model.eval(), tokenizer

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .base import DiffusionModel
+from .video_base import VideoModel
 from .anima import AnimaModel
 from .fibo2 import Fibo2Model
 from .flux_klein import FluxKleinModel
@@ -45,4 +46,4 @@ def resolve(dit_path: str) -> type:
     raise ValueError(f"could not determine model type from {dit_path} (known: {names})")
 
 
-__all__ = ["MODEL_CATALOG", "DiffusionModel", "resolve"]
+__all__ = ["MODEL_CATALOG", "DiffusionModel", "VideoModel", "resolve"]

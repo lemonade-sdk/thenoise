@@ -1,7 +1,6 @@
 """Wan 2.2 TI2V-5B generation from Comfy-Org checkpoints."""
 from __future__ import annotations
 
-import gc
 import io
 import dataclasses
 import logging
@@ -12,7 +11,7 @@ from pathlib import Path
 import torch
 
 from thenoise.dit.wan_video.checkpoint import load_wan_native_transformer
-from thenoise.memory import MemoryManager
+from thenoise.models.video_base import VideoModel
 from thenoise.samplers import Step, create_sampler
 from thenoise.dit.wan_video.sampling import get_sigmas, wan_frame_grid
 from thenoise.text_encoders.wan_video import load_wan_text_encoder
@@ -38,10 +37,9 @@ class _WanVelocity:
         return self._predict(x, float(t))
 
 
-class WanVideo:
+class WanVideo(VideoModel):
     name = "Wan2.2-TI2V-5B"
-    VIDEO = True
-    CAPABILITIES = {"video": True, "t2v": True, "i2v": True}
+    CAPABILITIES = {**VideoModel.CAPABILITIES, "t2v": True, "i2v": True}
     DEFAULT_PREFS = {
         "negative_prompt": "",
         "width": 1280,
@@ -63,11 +61,7 @@ class WanVideo:
                 f.get_slice(next(k for k in f.keys() if unwrap_key(k) == "patch_embedding.weight")).get_shape()[1] == 48)
 
     def __init__(self, *, config):
-        self.dit_path = config.dit_path
-        self.vae_path = config.vae_path
-        self.text_encoder_path = config.text_encoder_path
-        self.device = torch.device(config.device)
-        self.memory = MemoryManager(self.device, config.offload_device)
+        super().__init__(config=config)
         self.transformer = None
         self.text_encoder = None
         self.tokenizer = None
@@ -76,7 +70,7 @@ class WanVideo:
     @classmethod
     def resolve_video(cls, spec: VideoSpec) -> ResolvedVideo:
         """Apply this model's defaults and geometric restrictions."""
-        resolved = spec.resolve(cls.DEFAULT_PREFS)
+        resolved = super().resolve_video(spec)
         if resolved.sampler not in ("euler", "unipc"):
             raise ValueError("Wan TI2V-5B supports only euler or unipc samplers")
         width = (resolved.width // 32) * 32
@@ -261,10 +255,5 @@ class WanVideo:
         encode_video(frames, spec, token, output, progress)
         log.info("Wan video saved: %s", output)
 
-    def unload(self) -> None:
-        for name in ("vae", "text_encoder", "dit"):
-            self.memory.register(name, None)
+    def _clear_weights(self) -> None:
         self.vae = self.text_encoder = self.tokenizer = self.transformer = None
-        gc.collect()
-        if self.device.type == "cuda" and torch.cuda.is_available():
-            torch.cuda.empty_cache()
