@@ -1,6 +1,7 @@
 """Entrypoint: parse CLI, load a single model, then serve via uvicorn."""
 from __future__ import annotations
 
+from pathlib import Path
 from .cli import build_parser
 
 
@@ -32,11 +33,22 @@ def _serve(args) -> None:
             ),
         )
 
+    video_jobs = None
+    video_model = ""
+    if getattr(runtime, "video_model", None) is not None:
+        from .video.service import create_video_service
+        video_jobs, video_model = create_video_service(
+            runtime.video_model,
+            cache_dir=str(Path(args.video_cache_dir).expanduser()),
+        )
+
     from .api import create_app
     import uvicorn
 
-    app = create_app(runtime)
-    if runtime.available():
+    app = create_app(runtime, video_jobs=video_jobs, video_model=video_model)
+    if video_jobs is not None:
+        print(f"thenoise serving video model '{video_model}' on {settings.device}")
+    elif runtime.available():
         print(f"thenoise serving model '{runtime.model_name}' on {settings.device}")
     else:
         print(f"thenoise serving WITHOUT a model on {settings.device} "

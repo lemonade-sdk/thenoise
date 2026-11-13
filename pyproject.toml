@@ -23,6 +23,8 @@ dependencies = [
     "comfy-kitchen>=0.2.40",
     "numpy",
     "tqdm",
+    "av>=14",
+    "sentencepiece>=0.2",
 ]
 
 [project.optional-dependencies]
@@ -46,6 +48,7 @@ packages = [
     "thenoise.dit.moss_image",
     "thenoise.dit.qwen_image",
     "thenoise.dit.qwen_image21",
+    "thenoise.dit.wan_video",
     "thenoise.dit.anima",
     "thenoise.dit.zimage",
     "thenoise.dit.flux2",
@@ -60,6 +63,7 @@ packages = [
     "thenoise.utils",
     "thenoise.utils.text_encoder",
     "thenoise.vae",
+    "thenoise.video",
 ]
 
 [tool.setuptools.package-data]

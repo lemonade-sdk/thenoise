@@ -17,9 +17,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from conftest import CATALOG_IDS
+from conftest import IMAGE_CATALOG, IMAGE_CATALOG_IDS
 from thenoise.models import (
-    MODEL_CATALOG,
     AnimaModel,
     Fibo2Model,
     Flux3Model,
@@ -99,7 +98,7 @@ BARE = {
 RESOLUTION_AWARE = {"flux_klein", "qwen_image", "qwen_image21", "ming_image"}
 
 
-@pytest.mark.parametrize("model_cls", MODEL_CATALOG, ids=CATALOG_IDS)
+@pytest.mark.parametrize("model_cls", IMAGE_CATALOG, ids=IMAGE_CATALOG_IDS)
 @pytest.mark.parametrize("steps", [1, 4, 8])
 def test_schedule_contract(model_cls, steps):
     model = _bare(model_cls, **BARE[model_cls.name])
@@ -121,7 +120,7 @@ def test_schedule_contract(model_cls, steps):
     assert deltas[-1] == pytest.approx(ts[-1])
 
 
-@pytest.mark.parametrize("model_cls", MODEL_CATALOG, ids=CATALOG_IDS)
+@pytest.mark.parametrize("model_cls", IMAGE_CATALOG, ids=IMAGE_CATALOG_IDS)
 def test_schedule_resolution_dependence_matches_the_model(model_cls):
     small = _bare(model_cls, **BARE[model_cls.name]).schedule(_params(steps=8, width=512, height=512))
     large = _bare(model_cls, **BARE[model_cls.name]).schedule(_params(steps=8, width=1024, height=1024))
@@ -143,7 +142,7 @@ ALIGN = {"qwen_image21": 32, "h3_image": 32}
 DEFAULT_ALIGN = 16
 
 
-@pytest.mark.parametrize("model_cls", MODEL_CATALOG, ids=CATALOG_IDS)
+@pytest.mark.parametrize("model_cls", IMAGE_CATALOG, ids=IMAGE_CATALOG_IDS)
 def test_resolve_size_aligns_to_the_patched_latent_grid(model_cls):
     """Odd sizes are rounded up to the model's pixel alignment."""
     align = ALIGN.get(model_cls.name, DEFAULT_ALIGN)
@@ -153,7 +152,7 @@ def test_resolve_size_aligns_to_the_patched_latent_grid(model_cls):
     assert model.resolve_size(1024, 512) == (1024, 512)
 
 
-@pytest.mark.parametrize("model_cls", MODEL_CATALOG, ids=CATALOG_IDS)
+@pytest.mark.parametrize("model_cls", IMAGE_CATALOG, ids=IMAGE_CATALOG_IDS)
 def test_percent_to_sigma_stays_strictly_below_one(model_cls):
     """ER-SDE divides by ``1 - sigma``: sigma_0 must be nudged below 1, never on it.
 
@@ -182,7 +181,7 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
         (MossImageModel, False, False),
         (Fibo2Model, True, True),
     ],
-    ids=CATALOG_IDS,
+    ids=IMAGE_CATALOG_IDS,
 )
 def test_model_capabilities(model_cls, edit, kv_cache):
     """``CAPABILITIES`` must describe the adapter: the pipeline rejects a request the

@@ -1,13 +1,8 @@
-"""Model catalog: the set of registered DiffusionModel classes.
-
-To add a new model, write a ``DiffusionModel`` subclass (with ``name`` and a
-``detect(f)`` routine) and append it to ``MODEL_CATALOG``.
-"""
+"""Checkpoint-detected model catalog for image and video models."""
 from __future__ import annotations
 
-from typing import List, Type
-
 from .base import DiffusionModel
+from .video_base import VideoModel
 from .anima import AnimaModel
 from .fibo2 import Fibo2Model
 from .flux_klein import FluxKleinModel
@@ -20,8 +15,9 @@ from .moss_image import MossImageModel
 from .zimage import ZImageModel
 from .qwen_image import QwenImageModel
 from .qwen_image21 import QwenImage21Model
+from .wan_video import WanVideo
 
-MODEL_CATALOG: List[Type[DiffusionModel]] = [
+MODEL_CATALOG: list[type] = [
     Krea2Model,
     AnimaModel,
     ZImageModel,
@@ -34,10 +30,11 @@ MODEL_CATALOG: List[Type[DiffusionModel]] = [
     QwenImage21Model,
     MossImageModel,
     Fibo2Model,
+    WanVideo,
 ]
 
 
-def resolve(dit_path: str) -> Type[DiffusionModel]:
+def resolve(dit_path: str) -> type:
     """Determine the model class from a DiT checkpoint."""
     from safetensors import safe_open
 
@@ -49,4 +46,4 @@ def resolve(dit_path: str) -> Type[DiffusionModel]:
     raise ValueError(f"could not determine model type from {dit_path} (known: {names})")
 
 
-__all__ = ["MODEL_CATALOG", "DiffusionModel", "resolve"]
+__all__ = ["MODEL_CATALOG", "DiffusionModel", "VideoModel", "resolve"]

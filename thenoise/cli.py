@@ -83,7 +83,7 @@ def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png
                    help="'refined' (default): latent 2x + refiner, plus pixel "
                         "upscaler above factor 2; 'no-refiner': pixel upscaler "
                         "only (no latent 2x)")
-    p.add_argument("--sampler", choices=["euler", "er_sde"], default=None,
+    p.add_argument("--sampler", choices=["euler", "er_sde", "unipc"], default=None,
                    help="denoising solver (default: auto)")
     p.add_argument("--kv-cache", dest="kv_cache", action="store_true",
                    help="reuse step-invariant K/V during denoising (T2I opt-in; "
@@ -112,6 +112,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_model_paths(serve, required=False)
     _add_upscaler_args(serve)
     _add_controlmap_args(serve)
+    serve.add_argument("--video-cache-dir", default="~/.cache/thenoise/videos", metavar="DIR",
+                       help="directory for completed video clips")
     serve.add_argument("--host", default="127.0.0.1",
                        help="bind host (default: 127.0.0.1)")
     serve.add_argument("--port", type=int, default=8000,

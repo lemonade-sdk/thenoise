@@ -712,7 +712,7 @@ def test_apply_with_no_loras_returns_an_empty_result():
 @pytest.fixture
 def switch_model(tmp_path, monkeypatch):
     """A stub adapter over a spy-instrumented apply/undo pair."""
-    import thenoise.models.base as model_base
+    import thenoise.models.lora_support as model_base
 
     events = []
     real_apply, real_undo = model_base.apply_lora_to_model, model_base.undo_lora_on_model
@@ -754,7 +754,7 @@ def test_a_switch_that_runs_out_of_memory_refuses_the_model_until_a_reload(
     switch_model, monkeypatch
 ):
     """A half-merged DiT is neither base nor LoRA; nothing may build on it again."""
-    import thenoise.models.base as model_base
+    import thenoise.models.lora_support as model_base
 
     model, _events = switch_model
     dit = _TinyNet()
@@ -777,7 +777,7 @@ def test_a_switch_that_runs_out_of_memory_refuses_the_model_until_a_reload(
 
 def test_an_undo_that_runs_out_of_memory_refuses_the_model_too(switch_model, monkeypatch):
     """An interrupted way out corrupts as much as the way in."""
-    import thenoise.models.base as model_base
+    import thenoise.models.lora_support as model_base
 
     model, _events = switch_model
     dit = _TinyNet()
