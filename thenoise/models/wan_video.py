@@ -5,11 +5,11 @@ import io
 import dataclasses
 import logging
 import re
-import time
 from contextlib import ExitStack
 from pathlib import Path
 
 import torch
+from tqdm import tqdm
 
 from thenoise.dit.wan_video.checkpoint import load_wan_native_transformer
 from thenoise.utils.wan_weights import wan_dit_key
@@ -102,6 +102,9 @@ class WanVideo(VideoModel):
         self.text_encoder = None
         self.tokenizer = None
         self.vae = None
+
+    def load_weights(self) -> None:
+        self._load(Cancellation())
 
     @classmethod
     def resolve_video(cls, spec: VideoSpec) -> ResolvedVideo:
@@ -236,13 +239,14 @@ class WanVideo(VideoModel):
         def before(_module, _args):
             token.check()
 
-        def after(_module, _args, _result):
-            nonlocal decoded
-            decoded += 1
-            progress("decoding", decoded, chunks)
-
         progress("decoding", 0, chunks)
-        with ExitStack() as hooks:
+        with ExitStack() as hooks, tqdm(total=chunks, desc="decoding") as bar:
+            def after(_module, _args, _result):
+                nonlocal decoded
+                decoded += 1
+                bar.update(1)
+                progress("decoding", decoded, chunks)
+
             hooks.callback(self.vae.decoder.register_forward_pre_hook(before).remove)
             hooks.callback(self.vae.decoder.register_forward_hook(after).remove)
             try:
@@ -279,11 +283,9 @@ class WanVideo(VideoModel):
                      spec.height // spatial_factor, spec.width // spatial_factor)
             rng = torch.Generator(device="cpu").manual_seed(spec.seed)
             latents = torch.randn(shape, generator=rng, dtype=torch.float32).to(self.device)
-            start = time.monotonic()
             latents = self._run_denoiser(latents, spec, positive, negative,
                                          condition, token, progress, pixels)
             token.check()
-            log.info("Wan sampling finished in %.1fs", time.monotonic() - start)
             del positive, negative, condition
 
             with self.memory.stage("vae", pixels=pixels) as stage:

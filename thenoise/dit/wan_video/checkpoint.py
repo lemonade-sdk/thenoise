@@ -8,11 +8,9 @@ from typing import Callable
 
 import torch
 from torch import nn
-from safetensors import safe_open
 
 from thenoise.dit.quantized import QuantizedLinear
-from thenoise.utils.checkpoint_weights import load_mapped_weights, validated_key_map
-from thenoise.utils.loader import _build_fp8_qt
+from thenoise.utils.loader import load_mapped_safetensors
 from thenoise.utils.model_dir import find_weight_file
 from thenoise.utils.wan_weights import wan_dit_key
 from .model import WanNativeDiT
@@ -115,84 +113,6 @@ def _fp32_key(key: str) -> bool:
 
 
 
-def _load_14b_weights(source, weights, dtype, check_cancel):
-    """Strict, tensor-at-a-time loader for FP16 and Comfy FP8-scaled experts."""
-    scale_suffixes = (".weight_scale", ".scale_weight")
-    keys = set(source.keys())
-    scales = {}
-    for raw in keys:
-        suffix = next((s for s in scale_suffixes if raw.endswith(s)), None)
-        if suffix:
-            stem = raw[:-len(suffix)]
-            if stem in scales:
-                raise ValueError(f"duplicate FP8 scale for {stem}")
-            scales[stem] = raw
-    input_scales = {k[:-len(".scale_input")]: k for k in keys if k.endswith(".scale_input")}
-    markers = {k for k in keys if k.removeprefix("model.diffusion_model.")
-               .removeprefix("diffusion_model.") == "scaled_fp8"}
-    if len(markers) > 1:
-        raise ValueError("Wan 14B duplicate scaled_fp8 markers")
-    full_precision_mm = False
-    if markers:
-        marker = source.get_tensor(next(iter(markers)))
-        # ComfyUI's legacy marker uses two elements for full-precision matmul.
-        # Every other element count (including an empty marker) selects normal FP8.
-        full_precision_mm = marker.numel() == 2
-    ignored = (set(scales.values()) | set(input_scales.values()) | markers |
-               {k for k in keys if k.endswith(".comfy_quant")})
-    expected = {k: tuple(v.shape) for k, v in weights.state_dict().items()}
-    mapped = validated_key_map(keys - ignored, wan_dit_key, set(expected))
-    # Check all tensors before materializing weights (no partial silent load).
-    for raw, key in mapped.items():
-        entry = source.get_slice(raw)
-        if tuple(entry.get_shape()) != expected[key]:
-            raise ValueError(f"Wan 14B shape mismatch: {raw} -> {key}")
-        kind = entry.get_dtype()
-        if kind in ("F8_E4M3", "F8_E5M2"):
-            if not raw.endswith(".weight") or raw[:-7] not in scales:
-                raise ValueError(f"Wan 14B FP8 weight without scale: {raw}")
-            if not isinstance(weights.get_submodule(key[:-7]), QuantizedLinear):
-                raise ValueError(f"Wan 14B FP8 non-linear unsupported: {raw}")
-        elif kind not in ("F16", "BF16", "F32"):
-            raise ValueError(f"Wan 14B unsupported tensor dtype: {raw}: {kind}")
-    for stem in scales:
-        if stem + ".weight" not in mapped:
-            raise ValueError(f"Wan 14B orphan FP8 scale: {stem}")
-
-    # Validate activation scales before loading; attach them through the
-    # QuantizedLinear API alongside each FP8 weight.
-    calibrated_scales = {}
-    for stem, raw in input_scales.items():
-        weight_raw = stem + ".weight"
-        if weight_raw not in mapped or stem not in scales:
-            raise ValueError(f"Wan 14B orphan FP8 input scale: {raw}")
-        if source.get_slice(weight_raw).get_dtype() not in ("F8_E4M3", "F8_E5M2"):
-            raise ValueError(f"Wan 14B input scale on non-FP8 weight: {raw}")
-        scale = source.get_tensor(raw).float()
-        if scale.numel() != 1 or not torch.isfinite(scale).all() or not (scale > 0).all():
-            raise ValueError(f"Wan 14B invalid FP8 input scale: {raw}")
-        if not full_precision_mm:
-            calibrated_scales[weight_raw] = scale.reshape(())
-
-    for i, (raw, key) in enumerate(sorted(mapped.items())):
-        if check_cancel is not None and i % 8 == 0:
-            check_cancel()
-        tensor = source.get_tensor(raw)
-        if tensor.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-            scale = source.get_tensor(scales[raw[:-7]])
-            weights.get_submodule(key[:-7]).load_quantized(
-                _build_fp8_qt(tensor, scale, {}),
-                input_scale=calibrated_scales.get(raw),
-            )
-        else:
-            weights.load_state_dict(
-                {key: tensor.to(dtype=torch.float32 if _fp32_key(key) else dtype)},
-                strict=False, assign=True,
-            )
-    if any(p.is_meta for p in weights.parameters()):
-        raise RuntimeError("Wan 14B checkpoint contains unloaded meta parameters")
-
-
 def load_wan_native_transformer(
     model_dir: str | Path, *, dtype: torch.dtype = torch.bfloat16,
     check_cancel: Callable[[], None] | None = None,
@@ -221,13 +141,10 @@ def load_wan_native_transformer(
         )
     if check_cancel:
         check_cancel()
-    with safe_open(str(checkpoint), framework="pt", device="cpu") as file:
-        if expert:
-            _load_14b_weights(file, weights, dtype, check_cancel)
-        else:
-            load_mapped_weights(
-                file, weights, wan_dit_key,
-                dtype_for=lambda key: torch.float32 if _fp32_key(key) else dtype,
-                excluded=frozenset(), check_cancel=check_cancel, label="Wan transformer",
-            )
+    load_mapped_safetensors(
+        weights, checkpoint, wan_dit_key,
+        dtype_for=lambda key: torch.float32 if _fp32_key(key) else dtype,
+        check_cancel=check_cancel, label="Wan transformer",
+        quantized=bool(expert),
+    )
     return WanNativeDiT.from_weights(weights.eval())

@@ -12,9 +12,8 @@ from typing import Callable
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
-from safetensors import safe_open
 
-from thenoise.utils.checkpoint_weights import load_mapped_weights
+from thenoise.utils.loader import load_mapped_safetensors
 from thenoise.utils.model_dir import find_weight_file
 from thenoise.utils.wan_weights import wan_vae_key, wan_vae21_key
 from thenoise.vae.wan22 import Wan22AttentionBlock, WAN22_LATENTS_MEAN, WAN22_LATENTS_STD
@@ -474,10 +473,9 @@ def load_wan_native_video_vae(
         model = WanNativeVideoVAE(cfg)
     if check_cancel:
         check_cancel()
-    with safe_open(str(checkpoint), framework="pt", device="cpu") as f:
-        load_mapped_weights(
-            f, model, mapper, dtype_for=lambda _: compute_dtype,
-            excluded=frozenset(), check_cancel=check_cancel, label="Wan VAE",
-        )
+    load_mapped_safetensors(
+        model, checkpoint, mapper, dtype_for=lambda _: compute_dtype,
+        check_cancel=check_cancel, label="Wan VAE",
+    )
     model.clear_cache()
     return model.eval()

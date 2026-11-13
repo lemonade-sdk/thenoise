@@ -45,20 +45,9 @@ def test_14b_loads_explicitly_named_experts(tmp_path, monkeypatch):
         def eval(self):
             return self
 
-    class Reader:
-        def __init__(self, path):
-            self.path = path
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
     monkeypatch.setattr(loader, "_WanWeightModel", lambda config: FakeWeights())
-    monkeypatch.setattr(loader, "safe_open", lambda path, **kwargs: Reader(path))
-    monkeypatch.setattr(loader, "_load_14b_weights",
-                        lambda source, *args: opened.append(source.path))
+    monkeypatch.setattr(loader, "load_mapped_safetensors",
+                        lambda weights, path, *_args, **_kwargs: opened.append(str(path)))
     monkeypatch.setattr(loader.WanNativeDiT, "from_weights", lambda weights: weights)
 
     high = tmp_path / "renamed_a.safetensors"
@@ -190,20 +179,12 @@ def test_wan21_fp16_vae_loader_preserves_5b_dtype(monkeypatch):
 
     seen = []
 
-    class Reader:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
     monkeypatch.setattr(native_vae, "find_weight_file", lambda *args: "unused.safetensors")
-    monkeypatch.setattr(native_vae, "safe_open", lambda *args, **kwargs: Reader())
 
-    def capture_dtype(_source, _model, _mapper, *, dtype_for, **_kwargs):
+    def capture_dtype(_model, _path, _mapper, *, dtype_for, **_kwargs):
         seen.append(dtype_for("encoder.conv_in.weight"))
 
-    monkeypatch.setattr(native_vae, "load_mapped_weights", capture_dtype)
+    monkeypatch.setattr(native_vae, "load_mapped_safetensors", capture_dtype)
     tiny = {"base_dim": 4, "decoder_base_dim": 4, "num_res_blocks": 1}
     native_vae.load_wan_native_video_vae("unused", wan21=True, _test_config=tiny)
     native_vae.load_wan_native_video_vae("unused", _test_config=tiny)

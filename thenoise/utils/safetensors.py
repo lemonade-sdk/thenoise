@@ -13,6 +13,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 class MemoryEfficientSafeOpen:
     """Reader for safetensors files that memory-maps large tensors."""
 

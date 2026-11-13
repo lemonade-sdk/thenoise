@@ -71,6 +71,7 @@ class Runtime:
     def load(self, paths: ModelPaths) -> None:
         from .models import resolve
         from .models.config import ModelConfig
+        from .models.video_base import VideoModel
         from .pipeline import PipelineController
 
         cls = resolve(paths.dit_path)
@@ -101,7 +102,10 @@ class Runtime:
         self._unload()  # swap: only one model resident at a time
         logger.info("Loading model '%s'", name)
         with inference():
-            self._model = cls(config=config)
+            model = cls(config=config)
+            if isinstance(model, VideoModel):
+                model.load_weights()
+        self._model = model
         self._model_name = name
         self._paths = paths
         self._pipeline = (None if getattr(self._model, "VIDEO", False)

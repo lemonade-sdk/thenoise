@@ -11,6 +11,7 @@ from safetensors.torch import save_file
 from thenoise.models.video_base import VideoModel
 from thenoise.models.wan_video import WanVideo
 from thenoise.utils.checkpoint_weights import load_mapped_weights
+from thenoise.utils.loader import load_mapped_safetensors
 from thenoise.utils.model_dir import find_weight_file
 from thenoise.vae.wan22 import WAN22_LATENTS_MEAN, WAN22_LATENTS_STD
 from thenoise.vae.wan_video import _comfy_vae_config
@@ -40,6 +41,9 @@ def test_video_base_is_usable_without_wan(tmp_path, monkeypatch):
         def detect(_checkpoint):
             return False
 
+        def load_weights(self):
+            raise AssertionError("not a server startup test")
+
         def generate(self, spec, token, progress, output):
             raise AssertionError("not an inference test")
 
@@ -67,6 +71,61 @@ def test_video_base_is_usable_without_wan(tmp_path, monkeypatch):
     assert model.memory is not old_manager
     assert model.memory.weight_bytes("audio_vae") == 0
     assert released == [model.device]
+
+
+def test_streaming_checkpoint_uses_shared_key_mapping(tmp_path):
+    path = tmp_path / "float.safetensors"
+    save_file({"raw.weight": torch.ones(3, 2, dtype=torch.float16),
+               "raw.bias": torch.zeros(3, dtype=torch.float16)}, str(path))
+    with torch.device("meta"):
+        model = torch.nn.Linear(2, 3)
+    load_mapped_safetensors(
+        model, path, lambda key: key.removeprefix("raw."),
+        dtype_for=lambda _: torch.float32, label="test",
+    )
+    assert model.weight.dtype == torch.float32
+    assert model.weight.shape == (3, 2)
+    assert not any(p.is_meta for p in model.parameters())
+
+
+def test_streaming_checkpoint_validates_before_assigning(tmp_path):
+    path = tmp_path / "bad.safetensors"
+    save_file({"weight": torch.ones(3, 2, dtype=torch.float16),
+               "bias": torch.zeros(4, dtype=torch.float16)}, str(path))
+    with torch.device("meta"):
+        model = torch.nn.Linear(2, 3)
+    with pytest.raises(ValueError, match="shape mismatch"):
+        load_mapped_safetensors(model, path, lambda key: key,
+                                dtype_for=lambda _: torch.float16, label="test")
+    assert all(p.is_meta for p in model.parameters())
+
+
+def test_streaming_loader_keeps_cpu_weights_memory_mapped(tmp_path, monkeypatch):
+    from safetensors import safe_open as open_safetensors
+    import thenoise.utils.loader as loader
+
+    path = tmp_path / "mapped.safetensors"
+    save_file({"weight": torch.full((4, 512), 1.5, dtype=torch.float16),
+               "bias": torch.zeros(4, dtype=torch.float16)}, str(path))
+
+    opens = []
+
+    def capture_mmap(*args, **kwargs):
+        opens.append((args, kwargs))
+        return open_safetensors(*args, **kwargs)
+
+    monkeypatch.setattr(loader, "safe_open", capture_mmap)
+    with torch.device("meta"):
+        model = torch.nn.Linear(512, 4)
+    loader.load_mapped_safetensors(
+        model, path, lambda key: key,
+        dtype_for=lambda _: torch.float16, label="test",
+    )
+    assert len(opens) == 1
+    assert opens[0][1] == {"framework": "pt", "device": "cpu"}
+    # File ownership/lifetime is handled by safetensors; the parameter remains
+    # valid after the file context has been closed, without a copy on read.
+    torch.testing.assert_close(model.weight, torch.full_like(model.weight, 1.5))
 
 
 def test_find_weight_file_supports_comfy_layout_and_explicit_file(tmp_path):

@@ -210,7 +210,7 @@ class VideoJobs:
                 job.status = "running"
                 job.started_at = _now()
                 job.stage = "loading"
-            log.info("Video %s started: loading model", job.id)
+            log.info("Video %s started", job.id)
 
             def progress(stage: str, step: int = 0, total: int = 0) -> None:
                 job.token.check()
