@@ -1,17 +1,10 @@
-"""Shared text-encoder / tokenizer loading for the DiT adapters.
-
-The vendored tokenizer data lives under ``configs/``: ``qwen25_tokenizer``, the
-single Qwen BPE tokenizer shared by the Qwen2/Qwen3 variants (the vocab, merges,
-normalizer, pre/post-processor and decoder are byte-identical across them; only a
-few ``tokenizer_config.json`` fields differ and are applied as overrides),
-``qwen35_tokenizer`` for Qwen3.5 (its own vocabulary, so it cannot share the file),
-and ``t5`` for the LLM-adapter target tokens.
-
-The module also carries the chat-template pieces the conditioners share: the
-system-prompt/suffix pair and :func:`compute_drop_idx`.
+"""What the DiT adapters share to turn a prompt into conditioning: the text encoders,
+their vendored tokenizers under ``configs/``, the chat templates, and the kernel
+corrections no dependency makes for us.
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import Callable, Optional, Union
 
@@ -47,6 +40,7 @@ from thenoise.utils.qwen_configs import (
 )
 
 _CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
+logger = logging.getLogger(__name__)
 QWEN25_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "qwen25_tokenizer")
 QWEN35_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "qwen35_tokenizer")
 T5_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "t5")
@@ -199,6 +193,58 @@ def load_qwen3_text_encoder(
     qwen3.config.use_cache = False
     tokenizer = load_qwen3_tokenizer(overrides=QWEN3_06B_TOKENIZER_OVERRIDES)
     return qwen3.model, tokenizer
+
+
+#: FLA's conv kernel ignores, silently, an activation name it does not know.
+CONV_ACTIVATIONS = (None, "silu", "swish")
+
+_PATCH_MARK = "_thenoise_fla_conv"
+
+
+def _fla_conv(shipped: Callable, fwd: Callable) -> Callable:
+    """The convolution run by ``fwd``. It works in ``[B, L, C]`` where the layer hands
+    over and expects ``[B, C, L]``, views both ways through the projection's own buffer.
+    """
+
+    def conv(hidden_states, weight, bias=None, activation=None, **kwargs):
+        if activation not in CONV_ACTIVATIONS:
+            return shipped(hidden_states, weight, bias, activation, **kwargs)
+        y = fwd(hidden_states.transpose(1, 2), weight, bias, None, activation=activation)
+        return (y[0] if isinstance(y, tuple) else y).transpose(1, 2)
+
+    return conv
+
+
+def apply_qwen35_kernels() -> bool:
+    """Put a Qwen3.5 conditioner's DeltaNet convolution on flash-linear-attention.
+
+    transformers asks for the ``causal_conv1d`` CUDA package here, and without it hands
+    MIOpen a depthwise conv measured three orders of magnitude off this part's GEMM rate.
+    FLA has that kernel under a name transformers never looks for; its gated-delta-rule
+    counterpart needs no patch, only an importable ``fla``. Idempotent.
+    """
+    # Here rather than at the top: the kernels want triton, which a CPU torch lacks.
+    try:
+        from fla.modules.causal_conv1d import causal_conv1d_fwd
+        from transformers.models.qwen3_5 import modeling_qwen3_5 as qwen35
+    except ImportError:
+        logger.debug("flash-linear-attention's conv1d is unavailable; keeping the "
+                     "shipped convolution")
+        return False
+
+    shipped = getattr(qwen35, "causal_conv1d_fn", None)
+    if shipped is None:
+        logger.warning("transformers no longer has causal_conv1d_fn to replace; the "
+                       "Qwen3.5 conditioner runs on its own conv1d")
+        return False
+    if getattr(shipped, _PATCH_MARK, False):
+        return True
+
+    conv = _fla_conv(shipped, causal_conv1d_fwd)
+    setattr(conv, _PATCH_MARK, True)
+    qwen35.causal_conv1d_fn = conv
+    logger.info("Qwen3.5 conditioner: causal conv1d on flash-linear-attention")
+    return True
 
 
 def load_qwen35_model(
@@ -398,6 +444,8 @@ def _convert_qwen2_5_vl_keys(key: str) -> str:
 
 
 __all__ = [
+    "apply_qwen35_kernels",
+    "CONV_ACTIVATIONS",
     "find_tokenizer_dir",
     "load_tokenizer",
     "load_qwen3_model",

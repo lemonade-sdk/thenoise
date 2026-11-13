@@ -23,6 +23,7 @@ from torch import Tensor, nn
 from thenoise.utils.text_encoder import (
     IM_END,
     IM_START,
+    apply_qwen35_kernels,
     find_tokenizer_dir,
     load_qwen35_model,
     load_qwen35_tokenizer,
@@ -91,6 +92,7 @@ def load_moss_image_text_encoder(
     The tokenizer defaults to a ``tokenizer/`` directory next to the checkpoint, else
     the vendored one.
     """
+    apply_qwen35_kernels()
     qwen = load_qwen35_model(path, dtype=dtype, device=device)
     tokenizer = load_qwen35_tokenizer(tokenizer_dir or find_tokenizer_dir(path))
     encoder = MossImageTextEncoder(qwen, tokenizer)

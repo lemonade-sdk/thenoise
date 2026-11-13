@@ -16,6 +16,7 @@ dependencies = [
     "pydantic>=2.6",
     # model code
     "transformers>=5.4.0",
+    "fla-core>=0.6.0",
     "safetensors>=0.4.5",
     "einops>=0.7.0",
     "accelerate>=1.6.0",
