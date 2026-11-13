@@ -52,6 +52,15 @@ on:
         required: false
         default: true
         type: boolean
+      prerelease:
+        description: 'Publish a pre-release instead of a stable release'
+        required: false
+        default: false
+        type: boolean
+      prerelease_tag:
+        description: 'Pre-release tag (e.g. v0.14.0-rc.1; required for a manual pre-release)'
+        required: false
+        type: string
       platforms:
         description: 'Platforms to build'
         required: false
@@ -99,7 +108,24 @@ jobs:
           PLATFORMS_IN: ${{ github.event.inputs.platforms }}
           SKIP_QUAL: ${{ github.event.inputs.skip_qualification }}
           SELF_HOSTED: ${{ github.event.inputs.self_hosted }}
+          PRERELEASE_IN: ${{ inputs.prerelease }}
+          PRERELEASE_TAG_IN: ${{ inputs.prerelease_tag }}
         run: |
+          # Reject invalid tags BEFORE starting the expensive portable builds.
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$ ]]; then
+              echo "::error::Expected tag vX.Y.Z or vX.Y.Z-rc.N (also alpha/beta)."
+              exit 1
+            fi
+          elif [ "$PRERELEASE_IN" = true ]; then
+            if [[ ! "$PRERELEASE_TAG_IN" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(alpha|beta|rc)\.[0-9]+$ ]]; then
+              echo "::error::A manual pre-release requires prerelease_tag=vX.Y.Z-rc.N (or alpha/beta)."
+              exit 1
+            fi
+          elif [ -n "$PRERELEASE_TAG_IN" ]; then
+            echo "::error::Set prerelease=true when specifying prerelease_tag."
+            exit 1
+          fi
           echo "gfx_targets=$GFX_TARGETS" >> "$GITHUB_OUTPUT"
           matrix=$(echo "$GFX_TARGETS" \
             | tr ',' '\n' \
@@ -453,11 +479,12 @@ jobs:
           TV_W: ${{ needs.build-windows.outputs.torch_version }}
           CUDA_NV: ${{ needs.build-cuda.outputs.thenoise_version }}
           CUDA_RESULT: ${{ needs.build-cuda.result }}
+          PRERELEASE_IN: ${{ inputs.prerelease }}
+          PRERELEASE_TAG_IN: ${{ inputs.prerelease_tag }}
         run: |
-          # Release tag follows the canonical scheme regardless of trigger:
-          # thenoise-<version>-rocm<rocm> (e.g. thenoise-0.9.0-rocm10.1.0).
-          # For a tag push, the pushed v* tag is just the trigger — the actual
-          # release tag is derived from the build outputs. Linux and Windows
+          # Stable releases retain the canonical thenoise-<version>-rocm<rocm>
+          # tag. Pre-releases use the exact vX.Y.Z-rc.N tag so that Lemonade
+          # can pin and download assets with the same name. Linux and Windows
           # build the same torch/thenoise versions, so either platform's
           # outputs define the (shared) tag; prefer Linux, fall back to Windows
           # when only Windows was built (platforms=windows -> empty outputs).
@@ -470,6 +497,28 @@ jobs:
           fi
           ROCM=$(printf '%s' "$TV" | grep -oP 'rocm[\d.]+' || echo rocm)
           TAG="thenoise-${VERSION}-${ROCM}"
+          PRERELEASE=false
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              PRERELEASE=true
+              TAG="$GITHUB_REF_NAME"
+            fi
+          elif [ "$PRERELEASE_IN" = true ]; then
+            PRERELEASE=true
+            TAG="$PRERELEASE_TAG_IN"
+          fi
+          if [ "$PRERELEASE" = true ]; then
+            # A release tagged v0.14.0-rc.1 must actually contain a 0.14.0 build
+            # (e.g. package version 0.14.0rc1); reject accidental mismatches.
+            tag_core="${TAG#v}"
+            tag_core="${tag_core%%-*}"
+            package_core="$(printf '%s' "$VERSION" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true)"
+            if [ "$tag_core" != "$package_core" ]; then
+              echo "::error::Pre-release $TAG does not match bundled TheNoise $VERSION"
+              exit 1
+            fi
+          fi
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "thenoise_version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "torch_version=$TV" >> "$GITHUB_OUTPUT"
@@ -607,6 +656,7 @@ jobs:
           CUDA_RESULT: ${{ needs.build-cuda.result }}
           CUDA_VERSION: ${{ needs.build-cuda.outputs.cuda_version }}
           DRAFT: ${{ steps.draftflag.outputs.draft }}
+          PRERELEASE: ${{ steps.tag.outputs.prerelease }}
         run: |
           TAG="${{ steps.tag.outputs.tag }}"
           REPO="${{ github.repository }}"
@@ -629,6 +679,9 @@ jobs:
             fi
             echo "**Platforms**: $platforms"
             echo "**Build Date**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            if [ "$PRERELEASE" = true ]; then
+              echo '**Release channel**: pre-release (not latest)'
+            fi
             if [ "$DRAFT" = true ]; then
               echo "**GPU qualification**: pending — this release is a draft until the gfx1151 end-to-end generation test passes."
             else
@@ -653,10 +706,20 @@ jobs:
             fi
           } > notes.md
           cat notes.md
-          args=(--repo "$REPO" --title "v$VERSION" --notes-file notes.md)
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists; refusing to overwrite its assets."
+            exit 1
+          fi
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$PRERELEASE" = true ] &&
+             gh api "repos/$REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "::error::Git tag $TAG already exists; use the tag-triggered workflow to publish it."
+            exit 1
+          fi
+          title="v$VERSION"
+          [ "$PRERELEASE" = true ] && title="$TAG (pre-release)"
+          args=(--repo "$REPO" --target "$GITHUB_SHA" --title "$title" --notes-file notes.md)
           [ "$DRAFT" = true ] && args+=(--draft)
-          # shellcheck disable=SC2086
-          gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag 2>/dev/null || true
+          [ "$PRERELEASE" = true ] && args+=(--prerelease --latest=false)
           # shellcheck disable=SC2086
           gh release create "$TAG" "${args[@]}" $UPLOAD_FILES
 
