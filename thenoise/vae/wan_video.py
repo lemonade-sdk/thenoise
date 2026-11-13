@@ -1,7 +1,7 @@
 # Copyright 2025 The Wan Team and The HuggingFace Team Authors.
 # Independent TheNoise implementation of the Wan 2.2 video VAE architecture.
 # SPDX-License-Identifier: Apache-2.0
-"""Causal FP32 Wan 2.2 TI2V-5B video VAE."""
+"""Native causal Wan video VAE with model-specific compute precision."""
 from __future__ import annotations
 
 from collections import namedtuple
@@ -366,7 +366,7 @@ class WanNativeVideoVAE(nn.Module):
     The 48ch 2.2 and 16ch 2.1 variants share causal building blocks. The cached decoder
     consumes latent frames individually, emitting one RGB frame for the first
     latent, then four for each subsequent latent. Cache state never crosses
-    separate encode/decode calls. All weights remain FP32.
+    separate encode/decode calls. Precision is set at checkpoint load time.
     """
     def __init__(self, config: SimpleNamespace):
         super().__init__()
@@ -412,12 +412,12 @@ class WanNativeVideoVAE(nn.Module):
     def encode(self, x: Tensor, return_dict: bool = True):
         if x.ndim != 5 or x.shape[1] != 3 or (x.shape[2] - 1) % 4:
             raise ValueError("Wan VAE expects [B,3,4*n+1,H,W] video")
-        if self.dtype != torch.float32:
-            raise RuntimeError("Wan causal video VAE must remain in FP32")
+        if self.dtype not in (torch.float16, torch.float32):
+            raise RuntimeError("Wan causal video VAE requires FP16 or FP32 weights")
         self._onload_if_offloaded()
         self.clear_cache()
         try:
-            x = _patchify(x, self.config.patch_size)
+            x = _patchify(x.to(dtype=self.dtype), self.config.patch_size)
             moments = []
             for i, start in enumerate(range(0, x.shape[2], 4)):
                 # First frame alone; remaining frames in groups of four.
@@ -432,12 +432,12 @@ class WanNativeVideoVAE(nn.Module):
     def decode(self, z: Tensor, return_dict: bool = True):
         if z.ndim != 5 or z.shape[1] != self.config.z_dim or z.shape[2] < 1:
             raise ValueError(f"Wan VAE expects [B,{self.config.z_dim},T,H,W] latent video")
-        if self.dtype != torch.float32:
-            raise RuntimeError("Wan causal video VAE must remain in FP32")
+        if self.dtype not in (torch.float16, torch.float32):
+            raise RuntimeError("Wan causal video VAE requires FP16 or FP32 weights")
         self._onload_if_offloaded()
         self.clear_cache()
         try:
-            x = self.post_quant_conv(z)
+            x = self.post_quant_conv(z.to(dtype=self.dtype))
             frames = [self.decoder(x[:, :, i:i + 1], self._feat_map, [0], first_chunk=(i == 0))
                       for i in range(x.shape[2])]
             out = _unpatchify(torch.cat(frames, dim=2), self.config.patch_size).clamp(-1.0, 1.0)
@@ -454,7 +454,8 @@ def load_wan_native_video_vae(
     model_dir: str | Path, *, check_cancel: Callable[[], None] | None = None,
     _test_config: dict | None = None, wan21: bool = False,
 ) -> WanNativeVideoVAE:
-    """Read native ComfyUI Wan 2.2 / Wan 2.1 causal VAE weights in FP32."""
+    """Load Wan 2.1 in FP16 and preserve Wan 2.2 TI2V-5B FP32 precision."""
+    compute_dtype = torch.float16 if wan21 else torch.float32
     if wan21:
         overrides = dict(base_dim=96, decoder_base_dim=96, z_dim=16,
                          in_channels=3, out_channels=3, patch_size=1,
@@ -475,7 +476,7 @@ def load_wan_native_video_vae(
         check_cancel()
     with safe_open(str(checkpoint), framework="pt", device="cpu") as f:
         load_mapped_weights(
-            f, model, mapper, dtype_for=lambda _: torch.float32,
+            f, model, mapper, dtype_for=lambda _: compute_dtype,
             excluded=frozenset(), check_cancel=check_cancel, label="Wan VAE",
         )
     model.clear_cache()

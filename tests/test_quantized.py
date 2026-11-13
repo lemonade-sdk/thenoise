@@ -72,6 +72,15 @@ def test_quantized_linear_load_quantized_and_forward(qt, stored_dtype):
     assert out.dtype == torch.bfloat16
 
 
+def test_quantized_linear_owns_optional_fp8_activation_scale():
+    layer = QuantizedLinear(IN_F, OUT_F, bias=False)
+    assert layer.input_scale is None
+    layer.load_quantized(wrapped_fp8_tensor(), input_scale=torch.tensor([0.75]))
+    assert layer.input_scale.item() == pytest.approx(0.75)
+    assert "input_scale" not in layer.state_dict()
+    assert layer.input_scale.device == layer.weight.device
+
+
 @pytest.mark.parametrize("layout", ["int8", "fp8"])
 def test_quantized_linear_bake_lora_requantizes_in_place(layout):
     """The delta is baked into the stored low-bit weight, profile preserved."""

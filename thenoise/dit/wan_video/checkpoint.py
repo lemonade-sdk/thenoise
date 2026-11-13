@@ -159,8 +159,9 @@ def _load_14b_weights(source, weights, dtype, check_cancel):
         if stem + ".weight" not in mapped:
             raise ValueError(f"Wan 14B orphan FP8 scale: {stem}")
 
-    # Legacy Comfy FP8 checkpoints also store calibrated input scales.
-    # Their keys are metadata, but the values affect activation quantization.
+    # Validate activation scales before loading; attach them through the
+    # QuantizedLinear API alongside each FP8 weight.
+    calibrated_scales = {}
     for stem, raw in input_scales.items():
         weight_raw = stem + ".weight"
         if weight_raw not in mapped or stem not in scales:
@@ -171,8 +172,7 @@ def _load_14b_weights(source, weights, dtype, check_cancel):
         if scale.numel() != 1 or not torch.isfinite(scale).all() or not (scale > 0).all():
             raise ValueError(f"Wan 14B invalid FP8 input scale: {raw}")
         if not full_precision_mm:
-            module = weights.get_submodule(mapped[weight_raw][:-7])
-            module.register_buffer("input_scale", scale.reshape(()), persistent=False)
+            calibrated_scales[weight_raw] = scale.reshape(())
 
     for i, (raw, key) in enumerate(sorted(mapped.items())):
         if check_cancel is not None and i % 8 == 0:
@@ -180,7 +180,10 @@ def _load_14b_weights(source, weights, dtype, check_cancel):
         tensor = source.get_tensor(raw)
         if tensor.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
             scale = source.get_tensor(scales[raw[:-7]])
-            weights.get_submodule(key[:-7]).load_quantized(_build_fp8_qt(tensor, scale, {}))
+            weights.get_submodule(key[:-7]).load_quantized(
+                _build_fp8_qt(tensor, scale, {}),
+                input_scale=calibrated_scales.get(raw),
+            )
         else:
             weights.load_state_dict(
                 {key: tensor.to(dtype=torch.float32 if _fp32_key(key) else dtype)},

@@ -143,8 +143,8 @@ This model uses **two** separately loaded DiTs (high-/low-noise), the **Wan 2.1
 16-channel VAE** (`wan_2.1_vae.safetensors`), and the same FP16 UMT5 encoder as
 5B. Pass **both expert files explicitly**: `--dit` selects high noise and
 `--dit-low` selects low noise. File names and directories are not inspected to
-infer the expert role. FP16 and ComfyUI FP8-scaled experts are supported (FP8
-requires Comfy Kitchen).
+infer the expert role. FP16 and ComfyUI FP8-scaled experts are supported.
+The native Wan 2.1 VAE uses FP16 compute.
 Both experts are swapped by the normal device memory manager at the sigma
 boundary; do not run both as resident GPU models on a 32 GiB card.
 

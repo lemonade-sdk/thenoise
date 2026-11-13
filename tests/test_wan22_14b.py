@@ -185,6 +185,49 @@ def test_wan21_latent_normalization_is_not_identity():
     torch.testing.assert_close(video._denormalize(normalized), z)
 
 
+def test_wan21_fp16_vae_loader_preserves_5b_dtype(monkeypatch):
+    from thenoise.vae import wan_video as native_vae
+
+    seen = []
+
+    class Reader:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(native_vae, "find_weight_file", lambda *args: "unused.safetensors")
+    monkeypatch.setattr(native_vae, "safe_open", lambda *args, **kwargs: Reader())
+
+    def capture_dtype(_source, _model, _mapper, *, dtype_for, **_kwargs):
+        seen.append(dtype_for("encoder.conv_in.weight"))
+
+    monkeypatch.setattr(native_vae, "load_mapped_weights", capture_dtype)
+    tiny = {"base_dim": 4, "decoder_base_dim": 4, "num_res_blocks": 1}
+    native_vae.load_wan_native_video_vae("unused", wan21=True, _test_config=tiny)
+    native_vae.load_wan_native_video_vae("unused", _test_config=tiny)
+    assert seen == [torch.float16, torch.float32]
+
+
+def test_wan21_fp16_vae_decodes_float32_latents_and_clears_cache():
+    cfg = _comfy_vae_config(dict(
+        base_dim=4, decoder_base_dim=4, num_res_blocks=1,
+        z_dim=16, in_channels=3, out_channels=3, patch_size=1,
+        scale_factor_spatial=8, is_residual=False,
+        temperal_downsample=[False, True, True],
+    ))
+    with torch.inference_mode():
+        vae = WanNativeVideoVAE(cfg).half().eval()
+        latents = torch.randn(1, 16, 2, 2, 2, dtype=torch.float32)
+        first = vae.decode(latents).sample
+        second = vae.decode(latents).sample
+        assert first.dtype == torch.float16
+        assert first.shape == second.shape == (1, 3, 5, 16, 16)
+        torch.testing.assert_close(first, second, rtol=0, atol=0)
+        assert all(item is None for item in vae._feat_map)
+
+
 def test_14b_rejects_image_input():
     with pytest.raises(ValueError, match="I2V"):
         Wan14BVideo.resolve_video(VideoSpec(prompt="x", image=b"image"))
