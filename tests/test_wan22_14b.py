@@ -1,4 +1,5 @@
 """Small no-download tests for the Wan 2.2 A14B expert path."""
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -33,6 +34,76 @@ def test_14b_catalog_detection_does_not_regress_5b():
     f = Checkpoint()
     assert Wan14BVideo.detect(f)
     assert not WanVideo.detect(f)
+
+
+def test_14b_loads_explicitly_named_experts(tmp_path, monkeypatch):
+    from thenoise.dit.wan_video import checkpoint as loader
+
+    opened = []
+
+    class FakeWeights:
+        def eval(self):
+            return self
+
+    class Reader:
+        def __init__(self, path):
+            self.path = path
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(loader, "_WanWeightModel", lambda config: FakeWeights())
+    monkeypatch.setattr(loader, "safe_open", lambda path, **kwargs: Reader(path))
+    monkeypatch.setattr(loader, "_load_14b_weights",
+                        lambda source, *args: opened.append(source.path))
+    monkeypatch.setattr(loader.WanNativeDiT, "from_weights", lambda weights: weights)
+
+    high = tmp_path / "renamed_a.safetensors"
+    low = tmp_path / "renamed_b.safetensors"
+    high.write_bytes(b"high")
+    low.write_bytes(b"low")
+    loader.load_wan_native_transformer(high, expert="high")
+    loader.load_wan_native_transformer(low, expert="low")
+    assert opened == [str(high), str(low)]
+    with pytest.raises(FileNotFoundError, match="low-noise"):
+        loader.load_wan_native_transformer(tmp_path, expert="low")
+
+
+def test_14b_requires_two_distinct_expert_paths(tmp_path, monkeypatch):
+    import thenoise.models as catalog
+    from thenoise.runtime import ModelPaths, Runtime, Settings
+
+    class StubVideo:
+        name = "Wan2.2-T2V-A14B"
+        TWO_EXPERT_DIT = True
+        VIDEO = True
+
+        def __init__(self, *, config):
+            self.config = config
+
+    monkeypatch.setattr(catalog, "resolve", lambda path: StubVideo)
+    rt = Runtime(Settings(device="cpu", offload_device="cpu"))
+    high = str(tmp_path / "first.safetensors")
+    low = str(tmp_path / "second.safetensors")
+    with pytest.raises(ValueError, match="requires --dit-low"):
+        rt.load(ModelPaths(high, "vae", "te"))
+    with pytest.raises(ValueError, match="different checkpoints"):
+        rt.load(ModelPaths(high, "vae", "te", dit_low_path=high))
+    with pytest.raises(FileNotFoundError, match="low-noise"):
+        rt.load(ModelPaths(high, "vae", "te", dit_low_path=low))
+    Path(low).write_bytes(b"low")
+    rt.load(ModelPaths(high, "vae", "te", dit_low_path=low))
+    assert rt.model.config.dit_low_path == low
+
+    class SingleDit(StubVideo):
+        TWO_EXPERT_DIT = False
+
+    monkeypatch.setattr(catalog, "resolve", lambda path: SingleDit)
+    with pytest.raises(ValueError, match="only supported"):
+        rt.load(ModelPaths(high, "vae", "te", dit_low_path=low))
 
 
 def test_14b_topology_meta_and_vae21_key_mapping():

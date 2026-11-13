@@ -141,14 +141,17 @@ See the [HTTP API](../api.md#video-generation) for parameters and responses.
 
 This model uses **two** separately loaded DiTs (high-/low-noise), the **Wan 2.1
 16-channel VAE** (`wan_2.1_vae.safetensors`), and the same FP16 UMT5 encoder as
-5B. TheNoise finds the low-noise expert beside the high-noise `--dit` path.
-FP16 and ComfyUI FP8-scaled experts are supported (FP8 requires Comfy Kitchen).
+5B. Pass **both expert files explicitly**: `--dit` selects high noise and
+`--dit-low` selects low noise. File names and directories are not inspected to
+infer the expert role. FP16 and ComfyUI FP8-scaled experts are supported (FP8
+requires Comfy Kitchen).
 Both experts are swapped by the normal device memory manager at the sigma
 boundary; do not run both as resident GPU models on a 32 GiB card.
 
 ```bash
 ./thenoise.sh serve \
   --dit ./models/wan22/split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors \
+  --dit-low ./models/wan22/split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors \
   --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors \
   --vae ./models/wan22/split_files/vae/wan_2.1_vae.safetensors \
   --port 8000

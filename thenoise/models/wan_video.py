@@ -309,6 +309,7 @@ class WanVideo(VideoModel):
 class Wan14BVideo(WanVideo):
     """Two-expert Wan 2.2 T2V-A14B. I2V has a different 36-channel DiT."""
     name = "Wan2.2-T2V-A14B"
+    TWO_EXPERT_DIT = True
     CAPABILITIES = {**VideoModel.CAPABILITIES, "t2v": True, "i2v": False}
     DEFAULT_PREFS = {**WanVideo.DEFAULT_PREFS, "width": 832, "height": 480,
                      "frames": 33, "fps": 16, "steps": 40,
@@ -328,6 +329,7 @@ class Wan14BVideo(WanVideo):
 
     def __init__(self, *, config):
         super().__init__(config=config)
+        self.dit_low_path = getattr(config, "dit_low_path", None)
         self.low_transformer = None
 
     @classmethod
@@ -340,6 +342,8 @@ class Wan14BVideo(WanVideo):
         token.check()
         if self.transformer is not None:
             return
+        if not self.dit_low_path:
+            raise ValueError("Wan 2.2 T2V-A14B requires --dit-low")
         vae = load_wan_native_video_vae(self.vae_path, check_cancel=token.check, wan21=True)
         token.check()
         text_encoder, tokenizer = load_wan_text_encoder(
@@ -351,7 +355,7 @@ class Wan14BVideo(WanVideo):
         )
         token.check()
         low = load_wan_native_transformer(
-            self.dit_path, dtype=torch.bfloat16, check_cancel=token.check, expert="low",
+            self.dit_low_path, dtype=torch.bfloat16, check_cancel=token.check, expert="low",
         )
         token.check()
         self.memory.register("vae", vae)

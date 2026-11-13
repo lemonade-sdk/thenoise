@@ -196,7 +196,7 @@ def load_wan_native_transformer(
     _test_config: dict | None = None,
     expert: str | None = None,
 ) -> WanNativeDiT:
-    """Read native ComfyUI Wan weights; 14B expects a matching pair of experts."""
+    """Read native ComfyUI Wan weights; 14B expects an explicit expert file."""
     if dtype not in (torch.bfloat16, torch.float16, torch.float32):
         raise ValueError("Wan uses FP16/BF16/FP32 execution")
     if expert not in (None, "high", "low"):
@@ -206,18 +206,11 @@ def load_wan_native_transformer(
     with torch.device("meta"):
         weights = _WanWeightModel(config)
     if expert:
-        root = Path(model_dir)
-        if root.is_file():
-            if "high_noise_14B" not in root.name:
-                raise ValueError("--dit must name the Wan 14B high-noise checkpoint")
-            checkpoint = root if expert == "high" else root.with_name(
-                root.name.replace("high_noise_14B", "low_noise_14B"))
-            if not checkpoint.is_file():
-                raise FileNotFoundError(f"missing Wan 14B {expert}-noise checkpoint: {checkpoint}")
-        else:
-            names = tuple(f"wan2.2_t2v_{expert}_noise_14B_{kind}.safetensors"
-                          for kind in ("fp8_scaled", "fp16"))
-            checkpoint = find_weight_file(root, "diffusion_models", names)
+        checkpoint = Path(model_dir)
+        if not checkpoint.is_file():
+            raise FileNotFoundError(
+                f"Wan 14B {expert}-noise DiT checkpoint must be a file: {checkpoint}"
+            )
     else:
         checkpoint = find_weight_file(
             model_dir, "diffusion_models",

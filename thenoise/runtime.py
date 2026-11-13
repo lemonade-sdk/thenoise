@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Optional
 
 from thenoise.errors import ModelReloadNeeded
@@ -37,6 +38,7 @@ class ModelPaths:
     vae_path: str
     text_encoder_path: str
     lora_dir: str = ""
+    dit_low_path: str = ""
 
 
 class NotLoadedError(RuntimeError):
@@ -74,6 +76,18 @@ class Runtime:
         cls = resolve(paths.dit_path)
         name = cls.name
 
+        if getattr(cls, "TWO_EXPERT_DIT", False):
+            if not paths.dit_low_path:
+                raise ValueError("Wan 2.2 T2V-A14B requires --dit-low")
+            high = Path(paths.dit_path).resolve()
+            low = Path(paths.dit_low_path).resolve()
+            if high == low:
+                raise ValueError("--dit and --dit-low must be different checkpoints")
+            if not low.is_file():
+                raise FileNotFoundError(f"low-noise DiT checkpoint not found: {low}")
+        elif paths.dit_low_path:
+            raise ValueError("--dit-low is only supported by Wan 2.2 T2V-A14B")
+
         config = ModelConfig(
             dit_path=paths.dit_path,
             vae_path=paths.vae_path,
@@ -81,6 +95,7 @@ class Runtime:
             device=self._settings.device,
             offload_device=self._settings.offload_device,
             lora_dir=paths.lora_dir or None,
+            dit_low_path=paths.dit_low_path or None,
         )
 
         self._unload()  # swap: only one model resident at a time
