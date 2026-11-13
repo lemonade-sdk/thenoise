@@ -4,6 +4,7 @@ from __future__ import annotations
 import io
 import dataclasses
 import logging
+import re
 import time
 from contextlib import ExitStack
 from pathlib import Path
@@ -11,6 +12,7 @@ from pathlib import Path
 import torch
 
 from thenoise.dit.wan_video.checkpoint import load_wan_native_transformer
+from thenoise.utils.wan_weights import wan_dit_key
 from thenoise.models.video_base import VideoModel
 from thenoise.samplers import Step, create_sampler
 from thenoise.dit.wan_video.sampling import get_sigmas, wan_frame_grid
@@ -59,6 +61,40 @@ class WanVideo(VideoModel):
         return ({"patch_embedding.weight", "blocks.0.self_attn.q.weight",
                  "text_embedding.0.weight"}.issubset(keys) and
                 f.get_slice(next(k for k in f.keys() if unwrap_key(k) == "patch_embedding.weight")).get_shape()[1] == 48)
+
+    def _lora_key_map(self, key: str) -> str:
+        """Map native ComfyUI Wan LoRA projection names to our DiT module paths."""
+        for suffix in (".lora_A.weight", ".lora_B.weight", ".alpha"):
+            if not key.endswith(suffix):
+                continue
+            stem = key[:-len(suffix)]
+            if stem.startswith("lora_unet_"):
+                raw = stem.removeprefix("lora_unet_")
+                match = re.fullmatch(r"blocks_(\d+)_(self_attn|cross_attn)_(q|k|v|o)", raw)
+                ffn = re.fullmatch(r"blocks_(\d+)_ffn_(0|2)", raw)
+                if match:
+                    stem = f"blocks.{match[1]}.{match[2]}.{match[3]}"
+                elif ffn:
+                    stem = f"blocks.{ffn[1]}.ffn.{ffn[2]}"
+                else:
+                    return key  # unknown training schema: never guess a projection
+            stem = (stem.removeprefix("transformer.")
+                    .removeprefix("model.diffusion_model.")
+                    .removeprefix("diffusion_model."))
+            stem = wan_dit_key(stem + ".weight").removesuffix(".weight")
+            stem = re.sub(r"^(blocks\.\d+)\.ffn\.net\.0\.proj$", r"\1.ffn_in", stem)
+            stem = re.sub(r"^(blocks\.\d+)\.ffn\.net\.2$", r"\1.ffn_out", stem)
+            for raw, target in (
+                ("time_embedder.linear_1", "time_linear_1"),
+                ("time_embedder.linear_2", "time_linear_2"),
+                ("time_proj", "time_proj"),
+                ("text_embedder.linear_1", "text_linear_1"),
+                ("text_embedder.linear_2", "text_linear_2"),
+            ):
+                stem = stem.replace("condition_embedder." + raw,
+                                    "condition_embedder." + target)
+            return stem + suffix
+        return key
 
     def __init__(self, *, config):
         super().__init__(config=config)
@@ -221,6 +257,10 @@ class WanVideo(VideoModel):
 
         pixels = spec.width * spec.height
         with inference_lock, inference():
+            if spec.lora_specs and not self.lora_dir:
+                raise ValueError("video LoRAs require --lora-dir")
+            if self._lora_state_unfit:
+                self.unload()  # a partially merged LoRA must never be sampled again
             progress("loading", 0, 0)
             self._load(token)
             with self.memory.stage("text_encoder", pixels=pixels) as stage:
@@ -240,6 +280,7 @@ class WanVideo(VideoModel):
             latents = torch.randn(shape, generator=rng, dtype=torch.float32).to(self.device)
             start = time.monotonic()
             with self.memory.stage("dit", pixels=pixels) as stage:
+                self.switch_loras(spec.lora_specs, self.transformer)
                 latents = stage.run(self._sample, latents, spec, positive, negative,
                                     condition, token, progress)
             token.check()

@@ -14,13 +14,14 @@ from typing import Any, Callable, ClassVar
 import torch
 
 from thenoise.memory import MemoryManager
+from thenoise.models.lora_support import LoRASupport
 from thenoise.models.config import ModelConfig
 from thenoise.utils.device import release_device_memory
 from thenoise.video.jobs import Cancellation
 from thenoise.video.spec import ResolvedVideo, VideoSpec
 
 
-class VideoModel(ABC):
+class VideoModel(LoRASupport, ABC):
     VIDEO: ClassVar[bool] = True
     CAPABILITIES: ClassVar[dict[str, bool]] = {"video": True}
     DEFAULT_PREFS: ClassVar[dict[str, Any]]
@@ -30,6 +31,8 @@ class VideoModel(ABC):
         self.dit_path = config.dit_path
         self.vae_path = config.vae_path
         self.text_encoder_path = config.text_encoder_path
+        self.lora_dir = getattr(config, "lora_dir", None)
+        self._init_lora_state()
         self.device = torch.device(config.device)
         self.offload_device = torch.device(config.offload_device)
         self.memory = MemoryManager(self.device, self.offload_device)
@@ -58,6 +61,7 @@ class VideoModel(ABC):
     def unload(self) -> None:
         """Drop both model and residency references before freeing the device."""
         self._clear_weights()
+        self._init_lora_state()
         # The old manager still references registered modules and residency
         # state. Rebuild it so a subsequent load is not marked resident.
         self.memory = MemoryManager(self.device, self.offload_device)

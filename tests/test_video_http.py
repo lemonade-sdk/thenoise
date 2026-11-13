@@ -40,27 +40,38 @@ def test_video_http_t2v_and_i2v_and_content(tmp_path):
         with TestClient(app) as c:
             req = {"model": "Wan2.2-TI2V-5B", "prompt": "fox", "frames": 9,
                    "width": 480, "height": 320, "fps": 8, "duration": 10}
-            r = c.post("/v1/videos", json=req)
+            r = c.post("/videos", json=req)
             assert r.status_code == 202
             ident = r.json()["id"]
-            until(lambda: c.get(f"/v1/videos/{ident}").json()["status"] == "completed")
-            status = c.get(f"/v1/videos/{ident}").json()
+            until(lambda: c.get(f"/videos/{ident}").json()["status"] == "completed")
+            status = c.get(f"/videos/{ident}").json()
             assert status["frame_count"] == 9 and status["duration"] == 9/8
-            assert c.get(f"/v1/videos/{ident}/content").content.startswith(b"\x1aE\xdf\xa3")
+            assert c.get(f"/videos/{ident}/content").content.startswith(b"\x1aE\xdf\xa3")
 
             im = Image.new("RGB", (40, 30), color="red")
             buf = io.BytesIO()
             im.save(buf, format="PNG")
             req["image"] = base64.b64encode(buf.getvalue()).decode("ascii")
             req["output_format"] = "mp4"
-            r = c.post("/v1/videos", json=req)
+            r = c.post("/videos", json=req)
             assert r.status_code == 202
             second = r.json()["id"]
-            until(lambda: c.get(f"/v1/videos/{second}").json()["status"] == "completed")
+            until(lambda: c.get(f"/videos/{second}").json()["status"] == "completed")
             assert seen[0].mode == "t2v" and seen[1].mode == "i2v"
             assert seen[1].image == buf.getvalue()
-            assert c.get(f"/v1/videos/{second}").json()["mime_type"] == "video/mp4"
-            assert c.get("/v1/videos/unknown").status_code == 404
+            assert c.get(f"/videos/{second}").json()["mime_type"] == "video/mp4"
+            assert c.get("/videos/unknown").status_code == 404
+
+            sync = c.post("/video", json={"prompt": "fox", "frames": 9,
+                                          "width": 480, "height": 320,
+                                          "output_format": "mp4",
+                                          "lora_specs": ["style:0.7"]})
+            assert sync.status_code == 200
+            assert sync.headers["content-type"].startswith("video/mp4")
+            assert sync.content.startswith(bytes([0x1a, 69, 0xdf, 0xa3]))
+            assert seen[-1].lora_specs == ["style:0.7"]
+            assert not list(tmp_path.glob("sync_*"))
+            assert c.post("/video", json={"model": "wrong", "prompt": "fox"}).status_code == 400
     finally:
         jobs.close()
 
@@ -80,21 +91,21 @@ def test_video_http_cancel_running_and_rejection(tmp_path):
     install_video_routes(app, jobs, "Wan2.2-TI2V-5B")
     try:
         with TestClient(app) as c:
-            assert c.post("/v1/videos", json={"model": "wrong", "prompt": "fox"}).status_code == 400
-            assert c.post("/v1/videos", json={"prompt": "fox", "sampler": "dpmpp"}).status_code == 400
-            assert c.post("/v1/videos", json={"prompt": "fox", "width": 7680, "height": 4320,
+            assert c.post("/videos", json={"model": "wrong", "prompt": "fox"}).status_code == 400
+            assert c.post("/videos", json={"prompt": "fox", "sampler": "dpmpp"}).status_code == 400
+            assert c.post("/videos", json={"prompt": "fox", "width": 7680, "height": 4320,
                                                "fps": 120, "steps": 250}).status_code == 202
-            assert c.post("/v1/videos", json={"prompt": "fox", "flow_shift": 7}).status_code == 422
-            assert c.post("/v1/videos", json={"prompt": "fox", "image": "invalid!?"}).status_code == 400
-            assert c.post("/v1/videos", json={"prompt": "fox", "image": base64.b64encode(b"not an image").decode()}).status_code == 400
-            r = c.post("/v1/videos", json={"prompt": "fox"})
+            assert c.post("/videos", json={"prompt": "fox", "flow_shift": 7}).status_code == 422
+            assert c.post("/videos", json={"prompt": "fox", "image": "invalid!?"}).status_code == 400
+            assert c.post("/videos", json={"prompt": "fox", "image": base64.b64encode(b"not an image").decode()}).status_code == 400
+            r = c.post("/videos", json={"prompt": "fox"})
             ident = r.json()["id"]
             assert entered.wait(2)
-            assert c.get(f"/v1/videos/{ident}/content").status_code == 409
-            assert c.post(f"/v1/videos/{ident}/cancel").json()["status"] == "canceling"
+            assert c.get(f"/videos/{ident}/content").status_code == 409
+            assert c.post(f"/videos/{ident}/cancel").json()["status"] == "canceling"
             proceed.set()
-            until(lambda: c.get(f"/v1/videos/{ident}").json()["status"] == "canceled")
-            assert c.get(f"/v1/videos/{ident}/content").status_code == 409
-            assert c.post(f"/v1/videos/{ident}/cancel").status_code == 409
+            until(lambda: c.get(f"/videos/{ident}").json()["status"] == "canceled")
+            assert c.get(f"/videos/{ident}/content").status_code == 409
+            assert c.post(f"/videos/{ident}/cancel").status_code == 409
     finally:
         jobs.close()

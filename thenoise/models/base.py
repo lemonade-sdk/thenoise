@@ -22,11 +22,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple
 
 import torch
-from safetensors.torch import load_file
 
 from thenoise.dit.kvcache import KVCache
-from thenoise.errors import ModelReloadNeeded
 from thenoise.memory import MemoryManager
+from thenoise.models.lora_support import LoRASupport
 from thenoise.utils.device_patches import apply_device_patches
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.image_tensor import ReferenceSizing
@@ -35,14 +34,7 @@ from thenoise.upscale import LatentUpscaler
 
 if TYPE_CHECKING:  # pragma: no cover - only for annotations
     from PIL import Image
-from thenoise.utils.model_dir import (
-    ensure_safetensors,
-    resolve_in_dir,
-    list_safetensors,
-)
 from thenoise.utils.checkpoint import checkpoint_bytes, detect_checkpoint_prefs
-from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
-from thenoise.utils.lora import LoRAApplyResult
 from thenoise.utils.safetensors import unwrap_key
 
 logger = logging.getLogger(__name__)
@@ -73,7 +65,7 @@ def normalize_keys(keys):
         yield unwrap_key(k)
 
 
-class DiffusionModel(ABC):
+class DiffusionModel(LoRASupport, ABC):
     """Base class for model adapters. Subclasses must set ``name``."""
 
     name: str = ""
@@ -120,23 +112,10 @@ class DiffusionModel(ABC):
     # in ``__init__``, with the empty class default covering adapters built without it.
     checkpoint_prefs: Dict[str, Any] = {}
 
-    # Sub-projection stackings this model's modules use, as a ``{fused: parts}`` spec
-    # (``FUSE_QKV``/``FUSE_GATE_UP`` in ``thenoise.utils.lora``): a LoRA trained on
-    # the separate part names is fused onto the fused module before matching.
-    lora_fusions: Dict[str, Tuple[str, ...]] = {}
-
     # Which end of the attention sequence this model's KV cache freezes: "suffix"
     # for a ``text, target, references`` layout, "prefix" for ``text + references,
     # target``.
     KV_CACHED_SLICE: ClassVar[str] = "suffix"
-
-    def _lora_key_map(self, key: str) -> str:
-        """Map a LoRA key to this model's schema.
-
-        Training tools name LoRA targets differently from this repo's model schema;
-        families with a non-canonical schema override this. Default: identity.
-        """
-        return key
 
     @staticmethod
     @abstractmethod
@@ -164,9 +143,7 @@ class DiffusionModel(ABC):
         apply_device_patches(self.device)
 
         # Cached LoRA factors, for clean switching between requests.
-        self._active_lora_result: Optional[LoRAApplyResult] = None
-        self._active_lora_spec: Optional[str] = None
-        self._lora_state_unfit = False
+        self._init_lora_state()
 
         # Lazy latent upscaler (only built if upscale is requested).
         self._upscaler: Optional[LatentUpscaler] = None
@@ -359,104 +336,6 @@ class DiffusionModel(ABC):
     def end_kv_caches(self) -> None:
         """Drop the run's caches. Call in ``finalize_latent``, before the VAE decode."""
         self._kv_caches = None
-
-    # --------------------------------------------------------------- LoRA
-    def _parse_lora_spec(self, spec: str) -> Tuple[str, float]:
-        """Parse a 'filename:weight' spec into (filename, weight), appending .safetensors."""
-        if ":" in spec:
-            filename, weight_str = spec.rsplit(":", 1)
-            weight = float(weight_str)
-        else:
-            filename = spec
-            weight = 1.0
-
-        filename = ensure_safetensors(filename)
-
-        return filename, weight
-
-    def _resolve_lora_path(self, filename: str) -> str:
-        """Resolve a LoRA filename against lora_dir, rejecting path traversal."""
-        return resolve_in_dir(self.lora_dir, filename)
-
-    def _get_lora_sd(self, filename: str) -> Dict[str, torch.Tensor]:
-        """Load a LoRA state dict from disk."""
-        filepath = self._resolve_lora_path(filename)
-
-        logger.info("Loading LoRA: %s", filepath)
-        return load_file(filepath, device=self.device)
-
-    def _make_lora_spec_hash(self, lora_specs: Optional[List[str]]) -> str:
-        """Stable key for a set of LoRA specs."""
-        if not lora_specs:
-            return "__none__"
-        return "|".join(sorted(lora_specs))
-
-    def switch_loras(
-        self,
-        lora_specs: Optional[List[str]],
-        dit: torch.nn.Module,
-    ) -> None:
-        """Switch active LoRAs on the DiT (in-place, under the lock).
-
-        No-op when the requested config matches the current one.
-
-        Running out of memory part-way leaves some layers merged with nothing recorded to
-        undo them, and undoing the prefix is no repair: a baked delta subtracted from a
-        rounded weight does not return the weight. The instance refuses from then on until
-        it is rebuilt, with ``ModelReloadNeeded``.
-        """
-        if self._lora_state_unfit:
-            raise ModelReloadNeeded(
-                f"{self.name}: a LoRA switch ran out of memory on this instance, so it"
-                " will not touch the DiT again. Reload the model."
-            )
-
-        new_spec = self._make_lora_spec_hash(lora_specs)
-        if new_spec == self._active_lora_spec:
-            return
-
-        try:
-            if self._active_lora_result is not None:
-                logger.debug("Undoing previous LoRA config")
-                undo_lora_on_model(dit, self._active_lora_result)
-                self._active_lora_result = None
-
-            if lora_specs and self.lora_dir is not None:
-                lora_sds = []
-                multipliers = []
-                for spec in lora_specs:
-                    filename, weight = self._parse_lora_spec(spec)
-                    lora_sds.append(self._get_lora_sd(filename))
-                    multipliers.append(weight)
-
-                self._active_lora_result = apply_lora_to_model(
-                    dit, lora_sds, multipliers,
-                    dit_path=self.dit_path,
-                    key_map=self._lora_key_map,
-                    fusions=self.lora_fusions,
-                )
-                active_names = ", ".join(
-                    self._parse_lora_spec(s)[0] for s in lora_specs
-                )
-                logger.info("Applied LoRA(s): %s", active_names)
-            else:
-                logger.debug("Using base model (no LoRA)")
-        except torch.cuda.OutOfMemoryError:
-            self._active_lora_result = None
-            self._active_lora_spec = None
-            self._lora_state_unfit = True
-            logger.error("LoRA switch ran out of memory on %s", self.name)
-            raise ModelReloadNeeded(
-                f"{self.name}: applying the LoRAs ran out of memory part-way, so the DiT"
-                " holds weights that are neither the base model nor any LoRA set. Reload"
-                " the model."
-            ) from None
-
-        self._active_lora_spec = new_spec
-
-    def list_loras(self) -> List[str]:
-        """Available LoRA names relative to lora_dir, with .safetensors stripped."""
-        return list_safetensors(self.lora_dir)
 
     # ------------------------------------------------------- latent upscaler
     def get_upscaler(self) -> LatentUpscaler:

@@ -62,6 +62,16 @@ TheNoise ships:
 
 New models are added over time. PRs adding model support are welcome.
 
+### Video models
+
+| Model | Text-to-video | Image-to-video | Details |
+|---|---|---|---|
+| **Wan 2.2 TI2V-5B** | ✓ | ✓ | [wan22](docs/models/wan22.md) |
+
+Video requests are supported synchronously (`POST /video`) and through the
+job API (`POST /videos`); see the [HTTP API](docs/api.md#video-generation).
+To animate a still image, follow the [image-to-video example](docs/models/wan22.md#image-to-video-i2v).
+
 ## How does it compare to ComfyUI?
 
 ComfyUI is a general-purpose, node-based framework and remains the better
@@ -98,6 +108,15 @@ a warmup run.
 | MOSS-Image · BF16 + [8 step DMD LoRA](https://huggingface.co/lodestones/MOSS-Image-SFT-8-steps-dmd) · 8 steps | 12.6s | 51.2s |
 | Fibo 2.0 Turbo Edit · INT8-ConvRot · 4 steps | 9.2s | 35.6s |
 | H3-Image · INT8-ConvRot · 4 steps | 5.3s | 16.7s |
+
+*Video generation (text-to-video):*
+
+| Model and settings | Sampling time | Notes |
+|---|---:|---|
+| Wan 2.2 TI2V-5B, 704×480, 33 frames, UniPC, 8 steps | **28.8 s** | Strix Halo gfx1151, ROCm 10.1; end-to-end T2V completed, total time not recorded |
+
+The video VAE transient peaked at 24.6 GiB above the stage baseline during that run.
+See [Wan 2.2](docs/models/wan22.md) for the full test setup.
 
 *Image + simple instruction to edited image (editing):*
 

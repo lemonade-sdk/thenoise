@@ -104,11 +104,30 @@ class VideoJobs:
         self._worker: Optional[threading.Thread] = None
         self._closed = False
 
-    def submit(self, spec: VideoSpec | ResolvedVideo) -> dict:
+    def _resolve_spec(self, spec: VideoSpec | ResolvedVideo) -> ResolvedVideo:
         if isinstance(spec, VideoSpec):
             if self._resolve is None:
                 raise ValueError("a video model resolver is required for unresolved requests")
-            spec = self._resolve(spec)
+            return self._resolve(spec)
+        return spec
+
+    def render_sync(self, spec: VideoSpec | ResolvedVideo) -> Path:
+        """Render directly; the HTTP response removes the private output on completion."""
+        spec = self._resolve_spec(spec)
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("video service is shutting down")
+        self._root.mkdir(parents=True, exist_ok=True)
+        target = self._root / ("sync_" + uuid.uuid4().hex + "." + spec.output_format)
+        try:
+            self._render(spec, Cancellation(), lambda *_: None, target)
+            return target
+        except BaseException:
+            target.unlink(missing_ok=True)
+            raise
+
+    def submit(self, spec: VideoSpec | ResolvedVideo) -> dict:
+        spec = self._resolve_spec(spec)
         with self._lock:
             if self._closed:
                 raise RuntimeError("video service is shutting down")

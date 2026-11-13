@@ -27,6 +27,73 @@ Start the server with [`serve`](cli.md#serve-a-model-over-http) and TheNoise exp
 | `POST` | `/controlmap` | Extract a control map from an input image (works even with no model loaded) |
 | `POST` | `/text2image` | Generate an image |
 | `POST` | `/edit` | Edit an image from an instruction (image + prompt → edited image); requires an editing-capable model |
+| `POST` | `/video` | Generate a video synchronously, returning MP4 or WebM bytes |
+| `POST` | `/videos` | Queue an asynchronous video generation (202) |
+| `GET` | `/videos/{id}` | Get job status and progress |
+| `GET` | `/videos/{id}/content` | Download a completed video |
+| `POST` | `/videos/{id}/cancel` | Cancel a queued/running video |
+
+## Video generation
+
+When a video model is loaded, TheNoise serves the model through either the
+synchronous `POST /video` endpoint (video bytes directly), or the asynchronous
+job endpoints (`POST /videos` + polling). Both accept the same JSON body and use
+the loaded model's defaults when optional fields are omitted.
+
+| Field | Type | Description |
+|---|---|---|
+| `prompt` | string | Required text prompt |
+| `model` | string | Optional loaded model name, checked if provided |
+| `image` | string | Optional base64-encoded PNG/JPEG first frame (I2V; omit for T2V) |
+| `negative_prompt` | string | Optional negative text prompt |
+| `width`, `height` | integer | Video dimensions (Wan rounds down to multiples of 32) |
+| `frames` | integer | Desired frame count (Wan uses a `4n+1` grid) |
+| `duration`, `fps` | number, integer | Duration in seconds and frames/second; explicit `frames` takes priority |
+| `steps`, `guidance_scale`, `seed` | number | Sampling parameters |
+| `sampler` | string | Model-supported sampler (`unipc` or `euler` for Wan) |
+| `lora_specs` | string[] | Optional LoRAs, as `name:weight`, looked up in `--lora-dir` |
+| `output_format` | string | `mp4` or `webm` (model default when omitted) |
+
+For a synchronous MP4 response:
+
+```bash
+curl -fS http://127.0.0.1:8000/video -H 'content-type: application/json' \
+  -d '{"prompt":"A fox walking through snow","width":704,"height":480,
+       "frames":33,"steps":8,"sampler":"unipc","output_format":"mp4"}' \
+  -o fox.mp4
+```
+
+### Image-to-video (I2V)
+
+Send an existing PNG or JPEG as the first frame with the `image` field. Its value
+is base64 of the raw file bytes, **not** a `data:` URL or a file path. The
+request field is `image`, not `image_b64`. For example, on Linux:
+
+```bash
+IMAGE_B64="$(base64 -w 0 reference.png)"
+curl -fS http://127.0.0.1:8000/video \
+  -H 'content-type: application/json' \
+  --data-binary "{\"prompt\":\"The camera moves forward as the fox walks\",\"image\":\"$IMAGE_B64\",\"width\":704,\"height\":480,\"frames\":33,\"steps\":8,\"output_format\":\"mp4\"}" \
+  -o fox_i2v.mp4
+```
+
+The image is cover-cropped to the requested output size and encoded as first-frame
+conditioning. For a platform-independent Python-based example, see the
+[Wan 2.2 model page](models/wan22.md#image-to-video-i2v). To queue I2V instead,
+send the same request to `POST /videos` and poll its job ID.
+
+### Asynchronous jobs
+
+For asynchronous generation, send the same body to `/videos`. A successful
+request returns HTTP 202 with `id`, `status`, `model` and `created_at`. Poll
+`GET /videos/{id}`: the `progress` object reports `stage`, `step` and `of`.
+Once `status` becomes `completed`, download `/videos/{id}/content`. This returns
+HTTP 409 until completion. To stop a queued or running job use
+`POST /videos/{id}/cancel`. The queue returns HTTP 429 when full.
+
+The normal `GET /lora` endpoint also lists LoRAs available to a loaded video
+model. Only LoRA factors matching the transformer's supported layers are
+applied; unsupported targets are logged as unused.
 
 ## `GET /health`
 

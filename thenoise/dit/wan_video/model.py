@@ -99,6 +99,7 @@ class WanNativeBlock(nn.Module):
         self.ffn_dropout = weights.ffn.net[1]
         self.scale_shift_table = weights.scale_shift_table
 
+    @torch.compile(fullgraph=False)
     def forward(self, x: Tensor, context: Tensor, temb: Tensor, rope: Tensor) -> Tensor:
         # I2V supplies [B, N, 6, D]; T2V supplies [B, 6, D].
         if temb.ndim == 4:

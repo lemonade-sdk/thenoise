@@ -191,3 +191,29 @@ def test_video_defaults_are_owned_by_the_model():
     changed = request.to_spec().resolve(updated)
     assert (changed.steps, changed.sampler) == (7, "euler")
 
+def test_sync_video_reuses_resolver_and_cleans_on_failure(tmp_path):
+    seen = []
+
+    def render(spec, token, progress, path):
+        seen.append(spec)
+        path.write_bytes(b"partial")
+        if len(seen) == 1:
+            raise RuntimeError("encoder failed")
+        path.write_bytes(b"complete")
+
+    jobs = VideoJobs(render, tmp_path, model="Wan2.2-TI2V-5B",
+                     resolve=WanVideo.resolve_video)
+    try:
+        with pytest.raises(RuntimeError, match="encoder failed"):
+            jobs.render_sync(VideoSpec(prompt="fox", frames=9))
+        assert not list(tmp_path.glob("sync_*"))
+        output = jobs.render_sync(VideoSpec(prompt="fox", frames=9,
+                                            lora_specs=["style:0.5"]))
+        assert output.read_bytes() == b"complete"
+        assert seen[-1].lora_specs == ["style:0.5"]
+        output.unlink()
+    finally:
+        jobs.close()
+
+
+

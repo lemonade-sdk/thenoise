@@ -4,14 +4,18 @@ from __future__ import annotations
 import base64
 import binascii
 import io
+import logging
 from typing import Literal, Optional
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.background import BackgroundTask
 from pydantic import BaseModel, ConfigDict
 
 from .jobs import VideoJobs
 from .spec import VideoSpec
+
+log = logging.getLogger("uvicorn.error")
 
 
 class VideoRequest(BaseModel):
@@ -30,6 +34,7 @@ class VideoRequest(BaseModel):
     seed: Optional[int] = None
     output_format: Optional[Literal["mp4", "webm"]] = None
     sampler: Optional[str] = None
+    lora_specs: Optional[list[str]] = None
     image: Optional[str] = None  # base64-encoded PNG/JPEG initial frame for I2V
 
     def to_spec(self) -> VideoSpec:
@@ -55,13 +60,29 @@ class VideoRequest(BaseModel):
 
 
 def install_video_routes(app: FastAPI, jobs: VideoJobs, model_name: str) -> None:
-    @app.post("/v1/videos", status_code=202)
-    def create_video(req: VideoRequest):
+    def checked_spec(req: VideoRequest) -> VideoSpec:
         if req.model and req.model != model_name:
-            return JSONResponse({"error": f"model {req.model!r} is not loaded"}, status_code=400)
+            raise ValueError(f"model {req.model!r} is not loaded")
+        return req.to_spec()
+
+    @app.post("/video")
+    def generate_video(req: VideoRequest):
+        """Return the generated video directly, using the same renderer as video jobs."""
         try:
-            spec = req.to_spec()
-            snapshot = jobs.submit(spec)
+            path = jobs.render_sync(checked_spec(req))
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except Exception:
+            log.exception("synchronous video generation failed")
+            return JSONResponse({"error": "video generation failed"}, status_code=500)
+        media = "video/mp4" if path.suffix == ".mp4" else "video/webm"
+        return FileResponse(path, media_type=media,
+                            background=BackgroundTask(path.unlink, missing_ok=True))
+
+    @app.post("/videos", status_code=202)
+    def create_video(req: VideoRequest):
+        try:
+            snapshot = jobs.submit(checked_spec(req))
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         except OverflowError as e:
@@ -70,14 +91,14 @@ def install_video_routes(app: FastAPI, jobs: VideoJobs, model_name: str) -> None
             return JSONResponse({"error": str(e)}, status_code=503)
         return {key: snapshot[key] for key in ("id", "status", "model", "created_at")}
 
-    @app.get("/v1/videos/{video_id}")
+    @app.get("/videos/{video_id}")
     def get_video(video_id: str):
         result = jobs.status(video_id)
         if result is None:
             return JSONResponse({"error": "unknown video"}, status_code=404)
         return result
 
-    @app.get("/v1/videos/{video_id}/content")
+    @app.get("/videos/{video_id}/content")
     def get_video_content(video_id: str):
         status, path = jobs.content(video_id)
         if status == "not_found":
@@ -89,7 +110,7 @@ def install_video_routes(app: FastAPI, jobs: VideoJobs, model_name: str) -> None
         media = "video/mp4" if path.suffix == ".mp4" else "video/webm"
         return FileResponse(path, media_type=media)
 
-    @app.post("/v1/videos/{video_id}/cancel")
+    @app.post("/videos/{video_id}/cancel")
     def cancel_video(video_id: str):
         if not jobs.cancel(video_id):
             return JSONResponse({"error": "video not found or not cancellable"}, status_code=409)

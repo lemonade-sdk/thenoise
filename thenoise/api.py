@@ -263,9 +263,10 @@ def create_app(runtime, *, video_jobs=None, video_model: str = "") -> FastAPI:
     def loras():
         """List available LoRA names (short, no .safetensors suffix)."""
         pipeline = runtime.pipeline
-        if pipeline is None:
+        model = pipeline if pipeline is not None else getattr(runtime, "video_model", None)
+        if model is None:
             return Response(status_code=503, content="no model is loaded")
-        return {"loras": pipeline.list_loras()}
+        return {"loras": model.list_loras()}
 
     @app.get("/upscalers")
     def upscalers():

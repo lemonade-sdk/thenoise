@@ -21,6 +21,7 @@ class ResolvedVideo:
     output_format: str
     image: Optional[bytes]
     sampler: str
+    lora_specs: Optional[list[str]]
 
     @property
     def mode(self) -> str:
@@ -34,6 +35,7 @@ class ResolvedVideo:
             "guidance_scale": self.guidance_scale, "seed": self.seed,
             "output_format": self.output_format,
             "sampler": self.sampler,
+            "lora_specs": self.lora_specs,
         }
 
 
@@ -52,6 +54,7 @@ class VideoSpec:
     output_format: Optional[str] = None
     image: Optional[bytes] = None
     sampler: Optional[str] = None
+    lora_specs: Optional[list[str]] = None
 
     def resolve(self, defaults: Mapping[str, Any]) -> ResolvedVideo:
         """Resolve omitted options from the selected model's preferences."""
@@ -92,5 +95,5 @@ class VideoSpec:
             width=width, height=height, frame_count=frames, fps=fps,
             steps=steps, guidance_scale=guidance_scale, seed=seed,
             output_format=output_format, image=self.image,
-            sampler=sampler,
+            sampler=sampler, lora_specs=self.lora_specs,
         )
