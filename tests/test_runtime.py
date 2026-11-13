@@ -37,6 +37,48 @@ def test_empty_runtime(catalog):
     assert runtime.pipeline is None
 
 
+def test_video_weights_are_ready_when_runtime_load_returns(catalog, monkeypatch):
+    from thenoise.models.video_base import VideoModel
+    import thenoise.models as model_catalog
+
+    events = []
+
+    class FakeVideo(VideoModel):
+        name = "video-test"
+        DEFAULT_PREFS = {}
+
+        @staticmethod
+        def detect(_checkpoint):
+            return True
+
+        def load_weights(self):
+            events.append("loaded")
+
+        def generate(self, spec, token, progress, output):
+            raise AssertionError("not part of this test")
+
+        def _clear_weights(self):
+            pass
+
+    catalog()
+    monkeypatch.setattr(model_catalog, "resolve", lambda _path: FakeVideo)
+    rt = Runtime(Settings(device="cpu", offload_device="cpu"))
+    rt.load(ModelPaths("dit", "vae", "te"))
+    assert events == ["loaded"]
+    assert rt.model_name == "video-test"
+    rt.reload()
+    assert events == ["loaded", "loaded"]
+
+    class FailingVideo(FakeVideo):
+        def load_weights(self):
+            raise RuntimeError("corrupt video checkpoint")
+
+    monkeypatch.setattr(model_catalog, "resolve", lambda _path: FailingVideo)
+    with pytest.raises(RuntimeError, match="corrupt video checkpoint"):
+        rt.load(ModelPaths("dit", "vae", "te"))
+    assert rt.available() == []  # never publish an incompletely loaded adapter
+
+
 def test_load_resolves_the_model_from_the_dit_and_passes_the_paths_through(catalog):
     constructed = catalog()
     runtime = Runtime(Settings(device="cpu", offload_device="cpu"))

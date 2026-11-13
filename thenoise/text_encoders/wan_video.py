@@ -13,7 +13,7 @@ from torch.nn import functional as F
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention
-from thenoise.utils.checkpoint_weights import load_mapped_weights
+from thenoise.utils.loader import load_mapped_safetensors
 from thenoise.utils.model_dir import find_weight_file
 
 
@@ -178,10 +178,9 @@ def load_wan_text_encoder(model_dir: str | Path, *, dtype: torch.dtype = torch.f
             raise ValueError("Comfy UMT5 checkpoint is missing embedded spiece_model")
         if sf.get_slice("spiece_model").get_dtype() != "U8":
             raise ValueError("invalid Comfy UMT5 sentencepiece tokenizer data")
-        load_mapped_weights(
-            sf, model, _text_key, dtype_for=lambda _: dtype,
-            excluded=frozenset({"spiece_model"}), check_cancel=check_cancel,
-            label="UMT5",
-        )
         tokenizer = WanSentencePiece(sf.get_tensor("spiece_model").numpy().tobytes())
+    load_mapped_safetensors(
+        model, checkpoint, _text_key, dtype_for=lambda _: dtype,
+        excluded=frozenset({"spiece_model"}), check_cancel=check_cancel, label="UMT5",
+    )
     return model.eval(), tokenizer

@@ -1,4 +1,4 @@
-"""Wan 2.2 TI2V-5B checkpoint loader for Comfy-Org single-file weights."""
+"""Wan 2.2 Comfy-Org 5B / 14B transformer checkpoint loaders."""
 from __future__ import annotations
 
 import math
@@ -8,10 +8,9 @@ from typing import Callable
 
 import torch
 from torch import nn
-from safetensors import safe_open
 
 from thenoise.dit.quantized import QuantizedLinear
-from thenoise.utils.checkpoint_weights import load_mapped_weights
+from thenoise.utils.loader import load_mapped_safetensors
 from thenoise.utils.model_dir import find_weight_file
 from thenoise.utils.wan_weights import wan_dit_key
 from .model import WanNativeDiT
@@ -24,6 +23,10 @@ _TI2V_CONFIG = dict(
     cross_attn_norm=True, qk_norm="rms_norm_across_heads",
     image_dim=None, added_kv_proj_dim=None,
     rope_max_seq_len=1024, eps=1e-6,
+)
+_T2V_14B_CONFIG = _TI2V_CONFIG | dict(
+    in_channels=16, out_channels=16, num_attention_heads=40,
+    num_layers=40, ffn_dim=13824,
 )
 
 
@@ -90,14 +93,15 @@ class _WanWeightModel(nn.Module):
         self.config = config
         dim = config.num_attention_heads * config.attention_head_dim
         self.rope = _WanWeightsRoPE(config.attention_head_dim, config.patch_size)
-        self.patch_embedding = nn.Conv3d(48, dim, kernel_size=config.patch_size, stride=config.patch_size)
+        self.patch_embedding = nn.Conv3d(config.in_channels, dim, kernel_size=config.patch_size,
+                                         stride=config.patch_size)
         self.condition_embedder = _WanWeightsCondition(dim, config.text_dim, config.freq_dim)
         self.blocks = nn.ModuleList([
             _WanWeightsBlock(dim, config.num_attention_heads, config.ffn_dim, config.eps)
             for _ in range(config.num_layers)
         ])
         self.norm_out = nn.LayerNorm(dim, eps=config.eps, elementwise_affine=False)
-        self.proj_out = QuantizedLinear(dim, 48 * math.prod(config.patch_size))
+        self.proj_out = QuantizedLinear(dim, config.out_channels * math.prod(config.patch_size))
         self.scale_shift_table = nn.Parameter(torch.empty(1, 2, dim))
 
 
@@ -113,23 +117,34 @@ def load_wan_native_transformer(
     model_dir: str | Path, *, dtype: torch.dtype = torch.bfloat16,
     check_cancel: Callable[[], None] | None = None,
     _test_config: dict | None = None,
+    expert: str | None = None,
 ) -> WanNativeDiT:
-    """Read the ComfyUI WanModel layout without constructing a Diffusers module."""
+    """Read native ComfyUI Wan weights; 14B expects an explicit expert file."""
     if dtype not in (torch.bfloat16, torch.float16, torch.float32):
-        raise ValueError("Wan TI2V-5B uses FP16/BF16/FP32 execution")
-    config = SimpleNamespace(**(_TI2V_CONFIG | (_test_config or {})))
+        raise ValueError("Wan uses FP16/BF16/FP32 execution")
+    if expert not in (None, "high", "low"):
+        raise ValueError("Wan expert must be 'high' or 'low'")
+    config = SimpleNamespace(**((_T2V_14B_CONFIG if expert else _TI2V_CONFIG)
+                                | (_test_config or {})))
     with torch.device("meta"):
         weights = _WanWeightModel(config)
-    checkpoint = find_weight_file(
-        model_dir, "diffusion_models",
-        ("wan2.2_ti2v_5B_fp16.safetensors", "wan2.2_ti2v_5B_bf16.safetensors"),
-    )
+    if expert:
+        checkpoint = Path(model_dir)
+        if not checkpoint.is_file():
+            raise FileNotFoundError(
+                f"Wan 14B {expert}-noise DiT checkpoint must be a file: {checkpoint}"
+            )
+    else:
+        checkpoint = find_weight_file(
+            model_dir, "diffusion_models",
+            ("wan2.2_ti2v_5B_fp16.safetensors", "wan2.2_ti2v_5B_bf16.safetensors"),
+        )
     if check_cancel:
         check_cancel()
-    with safe_open(str(checkpoint), framework="pt", device="cpu") as file:
-        load_mapped_weights(
-            file, weights, wan_dit_key,
-            dtype_for=lambda key: torch.float32 if _fp32_key(key) else dtype,
-            excluded=frozenset(), check_cancel=check_cancel, label="Wan transformer",
-        )
+    load_mapped_safetensors(
+        weights, checkpoint, wan_dit_key,
+        dtype_for=lambda key: torch.float32 if _fp32_key(key) else dtype,
+        check_cancel=check_cancel, label="Wan transformer",
+        quantized=bool(expert),
+    )
     return WanNativeDiT.from_weights(weights.eval())

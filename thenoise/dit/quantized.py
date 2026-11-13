@@ -46,6 +46,8 @@ class QuantizedLinear(nn.Module):
             self.register_parameter("bias", None)
         self._reset_parameters()
         self._quantized = False
+        # The input scale belongs to the quantized layer, not to its loader.
+        self.register_buffer("input_scale", None, persistent=False)
         # Runtime LoRA branch: non-persistent buffers, so they follow the module
         # across devices and dtype casts but never reach a state_dict.
         self.register_buffer("_lora_down", None, persistent=False)
@@ -58,15 +60,18 @@ class QuantizedLinear(nn.Module):
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
             nn.init.uniform_(self.bias, -bound, bound)
 
-    def load_quantized(self, qt: QuantizedTensor) -> None:
-        """Switch this layer to a pre-quantized weight of any layout.
+    def load_quantized(
+        self, qt: QuantizedTensor, *, input_scale: torch.Tensor | None = None,
+    ) -> None:
+        """Install a quantized weight and its optional calibrated FP8 input scale.
 
-        Frees the BF16 ``weight`` parameter and registers ``qt``, which carries its
-        own layout profile, as the ``weight`` buffer.
+        The weight becomes a buffer; the non-persistent input scale follows it
+        across devices without becoming part of the checkpoint state.
         """
         del self.weight
         self.register_buffer("weight", qt)
         self._quantized = True
+        self.input_scale = input_scale.reshape(()) if input_scale is not None else None
 
     # ------------------------------------------------------------------- LoRA
 
@@ -171,6 +176,26 @@ class QuantizedLinear(nn.Module):
         return F.linear(F.linear(x, self._lora_down), self._lora_up)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Only quantized layers loaded with calibrated FP8 input scaling take
+        # this path; all others use the standard linear dispatch.
+        scale = self.input_scale
+        if scale is not None:
+            original_shape = x.shape
+            flat = x.reshape(-1, original_shape[-1])
+            # FP8 matrix kernels require FP16/BF16 bias, independent of
+            # the checkpoint's original bias dtype.
+            compute_dtype = (
+                flat.dtype if flat.dtype in (torch.float16, torch.bfloat16)
+                else torch.bfloat16
+            )
+            qx = QuantizedTensor.from_float(
+                flat.to(compute_dtype), "TensorCoreFP8Layout", scale=scale
+            )
+            bias = self.bias.to(compute_dtype) if self.bias is not None else None
+            y = F.linear(qx, self.weight, bias)
+            if self._lora_down is not None:
+                y = y + self._lora_branch(flat)
+            return y.to(x.dtype).reshape(*original_shape[:-1], self.out_features)
         y = F.linear(x, self.weight, self.bias)
         if self._lora_down is not None:
             y = y + self._lora_branch(x)

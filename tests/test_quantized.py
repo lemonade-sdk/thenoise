@@ -72,6 +72,51 @@ def test_quantized_linear_load_quantized_and_forward(qt, stored_dtype):
     assert out.dtype == torch.bfloat16
 
 
+def test_quantized_linear_owns_optional_fp8_activation_scale():
+    layer = QuantizedLinear(IN_F, OUT_F, bias=False)
+    assert layer.input_scale is None
+    layer.load_quantized(wrapped_fp8_tensor(), input_scale=torch.tensor([0.75]))
+    assert layer.input_scale.item() == pytest.approx(0.75)
+    assert "input_scale" not in layer.state_dict()
+    assert layer.input_scale.device == layer.weight.device
+
+
+def test_streaming_fp8_uses_quantized_linear_input_scale(tmp_path):
+    from safetensors.torch import save_file
+    from thenoise.utils.loader import load_mapped_safetensors
+
+    path = tmp_path / "fp8.safetensors"
+    raw = torch.ones(OUT_F, IN_F, dtype=torch.float16).to(torch.float8_e4m3fn)
+    save_file({"q.weight": raw, "q.scale_weight": torch.tensor(1.0),
+               "q.scale_input": torch.tensor(0.5),
+               "scaled_fp8": torch.zeros(1)}, str(path))
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = QuantizedLinear(IN_F, OUT_F, bias=False)
+
+    with torch.device("meta"):
+        model = Model()
+    load_mapped_safetensors(model, path, lambda k: k,
+                            dtype_for=lambda _: torch.bfloat16,
+                            label="test", quantized=True)
+    assert isinstance(model.q.weight, QuantizedTensor)
+    assert model.q.input_scale.item() == pytest.approx(0.5)
+    assert "q.input_scale" not in model.state_dict()
+
+    # ComfyUI's two-value legacy marker disables activation quantization.
+    save_file({"q.weight": raw, "q.scale_weight": torch.tensor(1.0),
+               "q.scale_input": torch.tensor(0.5),
+               "scaled_fp8": torch.zeros(2)}, str(path))
+    with torch.device("meta"):
+        model = Model()
+    load_mapped_safetensors(model, path, lambda k: k,
+                            dtype_for=lambda _: torch.bfloat16,
+                            label="test", quantized=True)
+    assert model.q.input_scale is None
+
+
 @pytest.mark.parametrize("layout", ["int8", "fp8"])
 def test_quantized_linear_bake_lora_requantizes_in_place(layout):
     """The delta is baked into the stored low-bit weight, profile preserved."""

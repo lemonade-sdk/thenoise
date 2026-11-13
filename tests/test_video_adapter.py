@@ -147,6 +147,13 @@ def _spec(*, image=None):
                      steps=2, image=image).resolve(WanVideo.DEFAULT_PREFS)
 
 
+
+def test_native_model_can_be_initialized_before_first_request(fake_video):
+    video, calls = fake_video
+    video.load_weights()
+    video.load_weights()
+    assert calls == ["load_vae", "load_text", "load_dit"]
+
 def test_native_t2v_i2v_t2v_reuses_models(fake_video, tmp_path):
     video, calls = fake_video
     image = io.BytesIO()
@@ -191,6 +198,31 @@ def test_cancel_sampling_recovers_for_next_job(fake_video, tmp_path):
         video.generate(_spec(), token, cancel_after_one, tmp_path / "clip.mp4")
     video.generate(_spec(), Cancellation(), lambda *_: None, tmp_path / "clip.mp4")
     assert calls.count("load_dit") == 1
+
+
+def test_decode_progress_uses_shared_tqdm_style(fake_video, tmp_path, monkeypatch):
+    import thenoise.models.wan_video as wan
+
+    seen = []
+
+    class Bar:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def update(self, value):
+            seen.append(("update", value))
+
+    def fake_tqdm(*, total, desc):
+        seen.append((desc, total))
+        return Bar()
+
+    monkeypatch.setattr(wan, "tqdm", fake_tqdm)
+    video, _calls = fake_video
+    video.generate(_spec(), Cancellation(), lambda *_: None, tmp_path / "clip.mp4")
+    assert seen == [("decoding", 3), ("update", 1), ("update", 1), ("update", 1)]
 
 
 def test_decode_progress_and_recovery(fake_video, tmp_path):

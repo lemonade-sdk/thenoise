@@ -110,6 +110,9 @@ def build_parser() -> argparse.ArgumentParser:
     # and only the pixel-upscale tab is usable.
     serve = sub.add_parser("serve", help="run the FastAPI HTTP server")
     _add_model_paths(serve, required=False)
+    serve.add_argument("--dit-low", default="", metavar="PATH",
+                       help="Wan 2.2 T2V-A14B low-noise DiT checkpoint "
+                            "(--dit selects the high-noise expert)")
     _add_upscaler_args(serve)
     _add_controlmap_args(serve)
     serve.add_argument("--video-cache-dir", default="~/.cache/thenoise/videos", metavar="DIR",

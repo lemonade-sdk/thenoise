@@ -191,6 +191,56 @@ def test_video_defaults_are_owned_by_the_model():
     changed = request.to_spec().resolve(updated)
     assert (changed.steps, changed.sampler) == (7, "euler")
 
+def test_exit_clears_managed_video_cache_but_preserves_other_files(tmp_path):
+    cache = tmp_path / "video_cache"
+    cache.mkdir()
+    unrelated = cache / "important.mp4"
+    unrelated.write_bytes(b"user file")
+    stale = cache / ("vid_" + "0" * 32 + ".webm")
+    stale.write_bytes(b"old video")
+
+    def render(clip, token, progress, path):
+        path.write_bytes(b"complete")
+
+    jobs = VideoJobs(render, cache, model="wan")
+    sync = jobs.render_sync(spec(seed=21))
+    job_id = jobs.submit(spec(seed=22))["id"]
+    wait_until(lambda: jobs.status(job_id)["status"] == "completed")
+    async_path = jobs.content(job_id)[1]
+    assert sync.exists() and async_path.exists() and stale.exists()
+
+    jobs.close()
+    assert not sync.exists() and not async_path.exists() and not stale.exists()
+    assert unrelated.read_bytes() == b"user file"
+    jobs.close()  # repeated shutdown is harmless
+
+
+def test_exit_waits_for_running_worker_before_cache_cleanup(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+
+    def render(clip, token, progress, path):
+        entered.set()
+        assert release.wait(3)
+        path.write_bytes(b"partial")
+        token.check()
+
+    jobs = VideoJobs(render, tmp_path, model="wan")
+    job_id = jobs.submit(spec(seed=99))["id"]
+    assert entered.wait(2)
+    closer = threading.Thread(target=jobs.close)
+    closer.start()
+    try:
+        wait_until(lambda: jobs._jobs[job_id].token.requested)
+        assert closer.is_alive(), "shutdown must wait for the worker"
+    finally:
+        release.set()
+        closer.join(timeout=4)
+    assert not closer.is_alive()
+    assert jobs.status(job_id)["status"] == "canceled"
+    assert not list(tmp_path.glob("vid_*.webm"))
+
+
 def test_sync_video_reuses_resolver_and_cleans_on_failure(tmp_path):
     seen = []
 
