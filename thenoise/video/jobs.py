@@ -7,6 +7,7 @@ stage. This module intentionally has no FastAPI, torch or codec dependency.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import uuid
 from collections import deque
@@ -18,6 +19,9 @@ from typing import Callable, Optional
 from .spec import ResolvedVideo, VideoSpec
 
 log = logging.getLogger("uvicorn.error")
+
+# Only delete generated cache files, never unrelated files in --video-cache-dir.
+_VIDEO_CACHE_NAME = re.compile(r"(?:sync_|vid_)[0-9a-f]{32}\.(?:mp4|webm)\Z")
 
 
 def _now() -> str:
@@ -240,7 +244,7 @@ class VideoJobs:
                     job.target.unlink(missing_ok=True)
 
     def close(self) -> None:
-        """Request cancellation; the worker acknowledges it at the next safe point."""
+        """Stop the video worker, then remove managed video files from the cache."""
         with self._lock:
             self._closed = True
             for job in self._jobs.values():
@@ -250,3 +254,10 @@ class VideoJobs:
                         self._finish(job, "canceled")
             self._queued.clear()
             self._lock.notify_all()
+
+        if self._worker is not None and self._worker is not threading.current_thread():
+            self._worker.join()
+        if self._root.is_dir():
+            for path in self._root.iterdir():
+                if _VIDEO_CACHE_NAME.fullmatch(path.name) and path.is_file():
+                    path.unlink(missing_ok=True)
