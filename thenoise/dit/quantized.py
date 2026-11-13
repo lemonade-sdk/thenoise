@@ -171,6 +171,26 @@ class QuantizedLinear(nn.Module):
         return F.linear(F.linear(x, self._lora_down), self._lora_up)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # An optional calibrated FP8 activation scale is registered by the Wan 14B
+        # loader. All other models retain their original linear path.
+        scale = getattr(self, "input_scale", None)
+        if scale is not None:
+            original_shape = x.shape
+            flat = x.reshape(-1, original_shape[-1])
+            # FP8 scaled matmul requires FP16/BF16 bias even when the native
+            # Wan checkpoint keeps the corresponding bias in FP32.
+            compute_dtype = (
+                flat.dtype if flat.dtype in (torch.float16, torch.bfloat16)
+                else torch.bfloat16
+            )
+            qx = QuantizedTensor.from_float(
+                flat.to(compute_dtype), "TensorCoreFP8Layout", scale=scale
+            )
+            bias = self.bias.to(compute_dtype) if self.bias is not None else None
+            y = F.linear(qx, self.weight, bias)
+            if self._lora_down is not None:
+                y = y + self._lora_branch(flat)
+            return y.to(x.dtype).reshape(*original_shape[:-1], self.out_features)
         y = F.linear(x, self.weight, self.bias)
         if self._lora_down is not None:
             y = y + self._lora_branch(x)

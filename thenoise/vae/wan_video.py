@@ -16,12 +16,22 @@ from safetensors import safe_open
 
 from thenoise.utils.checkpoint_weights import load_mapped_weights
 from thenoise.utils.model_dir import find_weight_file
-from thenoise.utils.wan_weights import wan_vae_key
+from thenoise.utils.wan_weights import wan_vae_key, wan_vae21_key
 from thenoise.vae.wan22 import Wan22AttentionBlock, WAN22_LATENTS_MEAN, WAN22_LATENTS_STD
 
 CACHE_T = 2
 DecoderOutput = namedtuple("DecoderOutput", "sample")
 EncoderOutput = namedtuple("EncoderOutput", "latent_dist")
+
+# Wan 2.1's channelwise latent stats (same latent format as the 14B experts).
+_WAN21_LATENTS_MEAN = (
+    -0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508,
+    0.4134, -0.0715, 0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921,
+)
+_WAN21_LATENTS_STD = (
+    2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743,
+    3.2687, 2.1526, 2.8652, 1.5579, 1.6382, 1.1253, 2.8251, 1.9160,
+)
 
 
 class _GaussianPosterior:
@@ -221,9 +231,10 @@ class _MidBlock(nn.Module):
 
 
 class _ResidualDownBlock(nn.Module):
-    def __init__(self, in_dim, out_dim, dropout, num_res_blocks, *, temporal, down):
+    def __init__(self, in_dim, out_dim, dropout, num_res_blocks, *, temporal, down, residual=True):
         super().__init__()
-        self.avg_shortcut = _AvgDown3D(in_dim, out_dim, 2 if temporal else 1, 2 if down else 1)
+        self.avg_shortcut = (_AvgDown3D(in_dim, out_dim, 2 if temporal else 1,
+                                        2 if down else 1) if residual else None)
         resnets = []
         for _ in range(num_res_blocks):
             resnets.append(_ResidualBlock(in_dim, out_dim, dropout))
@@ -232,23 +243,24 @@ class _ResidualDownBlock(nn.Module):
         self.downsampler = _Resample(out_dim, "downsample3d" if temporal else "downsample2d") if down else None
 
     def forward(self, x, feat_cache=None, feat_idx=None):
-        original = x.clone()
+        original = x.clone() if self.avg_shortcut is not None else None
         for resnet in self.resnets:
             x = resnet(x, feat_cache, feat_idx)
         if self.downsampler is not None:
             x = self.downsampler(x, feat_cache, feat_idx)
-        return x + self.avg_shortcut(original)
+        return x + self.avg_shortcut(original) if original is not None else x
 
 
 class _Encoder3D(nn.Module):
-    def __init__(self, *, in_channels, dim, z_dim, dim_mult, num_res_blocks, temporal_downsample, dropout):
+    def __init__(self, *, in_channels, dim, z_dim, dim_mult, num_res_blocks,
+                 temporal_downsample, dropout, residual=True):
         super().__init__()
         dims = [dim * v for v in [1, *dim_mult]]
         self.conv_in = _CausalConv3D(in_channels, dims[0], 3, padding=1)
         self.down_blocks = nn.ModuleList([
             _ResidualDownBlock(dims[i], dims[i + 1], dropout, num_res_blocks,
                                temporal=(temporal_downsample[i] if i < len(dim_mult) - 1 else False),
-                               down=(i < len(dim_mult) - 1))
+                               down=(i < len(dim_mult) - 1), residual=residual)
             for i in range(len(dim_mult))
         ])
         self.mid_block = _MidBlock(dims[-1], dropout)
@@ -264,18 +276,20 @@ class _Encoder3D(nn.Module):
 
 
 class _ResidualUpBlock(nn.Module):
-    def __init__(self, in_dim, out_dim, num_res_blocks, dropout, *, temporal, up):
+    def __init__(self, in_dim, out_dim, num_res_blocks, dropout, *, temporal, up, residual=True):
         super().__init__()
-        self.avg_shortcut = _DupUp3D(in_dim, out_dim, 2 if temporal else 1, 2) if up else None
+        self.avg_shortcut = (_DupUp3D(in_dim, out_dim, 2 if temporal else 1, 2)
+                             if up and residual else None)
         resnets = []
         for _ in range(num_res_blocks + 1):
             resnets.append(_ResidualBlock(in_dim, out_dim, dropout))
             in_dim = out_dim
         self.resnets = nn.ModuleList(resnets)
-        self.upsampler = _Resample(out_dim, "upsample3d" if temporal else "upsample2d", out_dim) if up else None
+        self.upsampler = (_Resample(out_dim, "upsample3d" if temporal else "upsample2d",
+                                    out_dim if residual else out_dim // 2) if up else None)
 
     def forward(self, x, feat_cache=None, feat_idx=None, first_chunk=False):
-        shortcut = x.clone()
+        shortcut = x.clone() if self.avg_shortcut is not None else None
         for block in self.resnets:
             x = block(x, feat_cache, feat_idx)
         if self.upsampler is not None:
@@ -284,15 +298,17 @@ class _ResidualUpBlock(nn.Module):
 
 
 class _Decoder3D(nn.Module):
-    def __init__(self, *, dim, z_dim, dim_mult, num_res_blocks, temporal_upsample, dropout, out_channels):
+    def __init__(self, *, dim, z_dim, dim_mult, num_res_blocks, temporal_upsample,
+                 dropout, out_channels, residual=True):
         super().__init__()
         dims = [dim * v for v in [dim_mult[-1], *dim_mult[::-1]]]
         self.conv_in = _CausalConv3D(z_dim, dims[0], 3, padding=1)
         self.mid_block = _MidBlock(dims[0], dropout)
         self.up_blocks = nn.ModuleList([
-            _ResidualUpBlock(dims[i], dims[i + 1], num_res_blocks, dropout,
+            _ResidualUpBlock(dims[i] if residual or i == 0 else dims[i] // 2,
+                             dims[i + 1], num_res_blocks, dropout,
                              temporal=(temporal_upsample[i] if i < len(dim_mult) - 1 else False),
-                             up=(i < len(dim_mult) - 1))
+                             up=(i < len(dim_mult) - 1), residual=residual)
             for i in range(len(dim_mult))
         ])
         self.norm_out = _RMSNorm(dims[-1], images=False)
@@ -345,9 +361,9 @@ def _comfy_vae_config(overrides: dict | None = None) -> SimpleNamespace:
 
 
 class WanNativeVideoVAE(nn.Module):
-    """Independent causal 3D Wan 2.2 VAE with compatible encode/decode APIs.
+    """Independent causal 3D Wan video VAE with compatible encode/decode APIs.
 
-    Only the released 48-channel TI2V model is supported. The cached decoder
+    The 48ch 2.2 and 16ch 2.1 variants share causal building blocks. The cached decoder
     consumes latent frames individually, emitting one RGB frame for the first
     latent, then four for each subsequent latent. Cache state never crosses
     separate encode/decode calls. All weights remain FP32.
@@ -360,7 +376,7 @@ class WanNativeVideoVAE(nn.Module):
         self.encoder = _Encoder3D(
             in_channels=config.in_channels, dim=config.base_dim, z_dim=config.z_dim * 2,
             dim_mult=mult, num_res_blocks=config.num_res_blocks,
-            temporal_downsample=down, dropout=config.dropout,
+            temporal_downsample=down, dropout=config.dropout, residual=config.is_residual,
         )
         self.quant_conv = _CausalConv3D(config.z_dim * 2, config.z_dim * 2, 1)
         self.post_quant_conv = _CausalConv3D(config.z_dim, config.z_dim, 1)
@@ -368,6 +384,7 @@ class WanNativeVideoVAE(nn.Module):
             dim=config.decoder_base_dim, z_dim=config.z_dim, dim_mult=mult,
             num_res_blocks=config.num_res_blocks, temporal_upsample=down[::-1],
             dropout=config.dropout, out_channels=config.out_channels,
+            residual=config.is_residual,
         )
         self.clear_cache()
         self.use_tiling = False  # no silent fallback to unverified spatial tiles
@@ -414,7 +431,7 @@ class WanNativeVideoVAE(nn.Module):
 
     def decode(self, z: Tensor, return_dict: bool = True):
         if z.ndim != 5 or z.shape[1] != self.config.z_dim or z.shape[2] < 1:
-            raise ValueError("Wan VAE expects [B,48,T,H,W] latent video")
+            raise ValueError(f"Wan VAE expects [B,{self.config.z_dim},T,H,W] latent video")
         if self.dtype != torch.float32:
             raise RuntimeError("Wan causal video VAE must remain in FP32")
         self._onload_if_offloaded()
@@ -435,21 +452,31 @@ class WanNativeVideoVAE(nn.Module):
 
 def load_wan_native_video_vae(
     model_dir: str | Path, *, check_cancel: Callable[[], None] | None = None,
-    _test_config: dict | None = None,
+    _test_config: dict | None = None, wan21: bool = False,
 ) -> WanNativeVideoVAE:
-    """Read the ComfyUI WanVAE layout, computing causally in FP32."""
-    cfg = _comfy_vae_config(_test_config)
-    checkpoint = find_weight_file(model_dir, "vae", ("wan2.2_vae.safetensors",))
+    """Read native ComfyUI Wan 2.2 / Wan 2.1 causal VAE weights in FP32."""
+    if wan21:
+        overrides = dict(base_dim=96, decoder_base_dim=96, z_dim=16,
+                         in_channels=3, out_channels=3, patch_size=1,
+                         temperal_downsample=[False, True, True],
+                         scale_factor_spatial=8, is_residual=False,
+                         latents_mean=list(_WAN21_LATENTS_MEAN),
+                         latents_std=list(_WAN21_LATENTS_STD))
+        cfg = _comfy_vae_config(overrides | (_test_config or {}))
+        checkpoint = find_weight_file(model_dir, "vae", ("wan_2.1_vae.safetensors",))
+        mapper = lambda key: wan_vae21_key(key, num_res_blocks=cfg.num_res_blocks)
+    else:
+        cfg = _comfy_vae_config(_test_config)
+        checkpoint = find_weight_file(model_dir, "vae", ("wan2.2_vae.safetensors",))
+        mapper = lambda key: wan_vae_key(key, num_res_blocks=cfg.num_res_blocks)
     with torch.device("meta"):
         model = WanNativeVideoVAE(cfg)
     if check_cancel:
         check_cancel()
     with safe_open(str(checkpoint), framework="pt", device="cpu") as f:
-        # Comfy-Org's public VAE is FP16; FP32 execution is required.
         load_mapped_weights(
-            f, model, lambda key: wan_vae_key(key, num_res_blocks=cfg.num_res_blocks),
-            dtype_for=lambda _: torch.float32, excluded=frozenset(),
-            check_cancel=check_cancel, label="Wan VAE",
+            f, model, mapper, dtype_for=lambda _: torch.float32,
+            excluded=frozenset(), check_cancel=check_cancel, label="Wan VAE",
         )
     model.clear_cache()
     return model.eval()

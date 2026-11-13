@@ -147,10 +147,10 @@ class WanNativeDiT(nn.Module):
     def __init__(self, weights: nn.Module):
         super().__init__()
         cfg = weights.config
-        if (cfg.in_channels != 48 or cfg.out_channels != 48 or
+        if (cfg.in_channels not in (16, 48) or cfg.out_channels != cfg.in_channels or
                 getattr(cfg, "image_dim", None) is not None or
                 getattr(cfg, "added_kv_proj_dim", None) is not None):
-            raise ValueError("native Wan DiT supports only 48-channel TI2V-5B")
+            raise ValueError("native Wan DiT supports 48ch TI2V-5B or 16ch T2V-14B")
         self.config = cfg
         self.rope = WanNativeRoPE(weights.rope)
         self.patch_embedding = weights.patch_embedding
@@ -194,8 +194,8 @@ class WanNativeDiT(nn.Module):
             raise ValueError("native Wan DiT does not support attention adapters yet")
         b, c, t, h, w = hidden_states.shape
         pt, ph, pw = tuple(self.config.patch_size)
-        if c != 48 or t % pt or h % ph or w % pw:
-            raise ValueError("invalid 48-channel Wan latent geometry")
+        if c != self.config.in_channels or t % pt or h % ph or w % pw:
+            raise ValueError("invalid Wan latent geometry")
 
         rope = self.rope(hidden_states)
         x = self.patch_embedding(hidden_states.float()).to(hidden_states.dtype).flatten(2).transpose(1, 2).contiguous()

@@ -408,6 +408,20 @@ def _wan22_jobs(args: argparse.Namespace) -> list[Artifact]:
     ]
 
 
+def _wan22_14b_jobs(args: argparse.Namespace) -> list[Artifact]:
+    """Wan 2.2 T2V-A14B: high/low-noise DiTs, UMT5, and 16-channel Wan 2.1 VAE."""
+    repo = "Comfy-Org/Wan-2.2"
+    jobs = [
+        (f"dit ({noise} noise)", repo,
+         f"split_files/diffusion_models/wan2.2_t2v_{noise}_noise_14B_{args.variant}.safetensors")
+        for noise in ("high", "low")
+    ]
+    return jobs + [
+        ("text_encoder", repo, "split_files/text_encoders/umt5_xxl_fp16.safetensors"),
+        ("vae", repo, "split_files/vae/wan_2.1_vae.safetensors"),
+    ]
+
+
 #: Depth-Anything-V2: (variant) -> huggingface repo, with the files a control-map dir
 #: needs (config + weights + processor config).
 _DEPTH_REPOS = {
@@ -557,6 +571,15 @@ MODELS: dict[str, ModelSpec] = {
         "Wan 2.2 TI2V-5B (T2V / I2V)",
         _wan22_jobs,
         has_int8=False,
+    ),
+    "wan22-14b": ModelSpec(
+        "wan22-14b", "./models/wan22",
+        "Wan 2.2 T2V-A14B (two experts; FP8-scaled or FP16)",
+        _wan22_14b_jobs,
+        has_int8=False,
+        variant_supported=True,
+        variant_choices=("fp8_scaled", "fp16"),
+        default_variant="fp8_scaled",
     ),
     "esrgan": ModelSpec(
         "esrgan", "./models/esrgan",
