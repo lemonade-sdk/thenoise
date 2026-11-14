@@ -5,8 +5,9 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
+from thenoise.vae.wan_common import patchify, unpatchify
 from thenoise.vae.wan_video import (
-    _AttentionBlock, _CausalConv3D, _comfy_vae_config, _patchify, _unpatchify,
+    _AttentionBlock, _CausalConv3D, _comfy_vae_config,
     AutoencoderKLWanVideo, detect_latent_width, load_wan_video_vae,
 )
 from test_video_comfy_layout import _original_vae_key
@@ -62,9 +63,10 @@ def test_spatial_attention_uses_shared_wan22_kernel(monkeypatch, channels):
         result = block(x)
     torch.testing.assert_close(result, reference, rtol=1e-5, atol=1e-5)
 
+
 def test_patchify_exact():
     x = torch.arange(1 * 3 * 5 * 16 * 32).float().reshape(1, 3, 5, 16, 32)
-    assert torch.equal(_unpatchify(_patchify(x, 2), 2), x)
+    assert torch.equal(unpatchify(patchify(x, 2), 2), x)
 
 
 def test_causal_conv_cache_equivalent_to_whole_video():

@@ -23,11 +23,11 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
 
 from thenoise.utils.attention import single_head_attention
 from thenoise.utils.safetensors import load_safetensors
 from .fused import image_elems, strip_apply
+from .wan_common import RmsNorm, downsample2d, patchify, unpatchify, upsample2d
 from .qwen_image import QWEN_IMAGE_LATENTS_MEAN, QWEN_IMAGE_LATENTS_STD
 
 from thenoise.utils.setup_logging import setup_logging
@@ -38,32 +38,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def patchify(x: torch.Tensor, patch_size: int) -> torch.Tensor:
-    """``[B, C, H*p, W*p]`` -> ``[B, C*p*p, H, W]`` (row-major p x p blocks)."""
-    if patch_size == 1:
-        return x
-    return rearrange(x, "b c (h q) (w r) -> b (c r q) h w", q=patch_size, r=patch_size)
-
-
-def unpatchify(x: torch.Tensor, patch_size: int) -> torch.Tensor:
-    """Inverse of :func:`patchify`."""
-    if patch_size == 1:
-        return x
-    return rearrange(x, "b (c r q) h w -> b c (h q) (w r)", q=patch_size, r=patch_size)
-
-
-class Wan22RMSNorm(nn.Module):
-    """RMS norm over channels, preserving the scaling order of the reference."""
-
-    def __init__(self, dim: int) -> None:
-        super().__init__()
-        self.scale = dim**0.5
-        self.gamma = nn.Parameter(torch.ones(dim, 1, 1))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.normalize(x, dim=1).mul_(self.scale * self.gamma)
-
-
 class Wan22ResidualBlock(nn.Module):
     """v2_2 residual block; the fixed 7-slot ``residual`` and 1x1-conv ``shortcut``
     match the checkpoint's key layout."""
@@ -71,10 +45,10 @@ class Wan22ResidualBlock(nn.Module):
     def __init__(self, in_dim: int, out_dim: int) -> None:
         super().__init__()
         self.residual = nn.Sequential(
-            Wan22RMSNorm(in_dim),
+            RmsNorm(in_dim),
             nn.SiLU(inplace=True),
             nn.Conv2d(in_dim, out_dim, 3, padding=1),
-            Wan22RMSNorm(out_dim),
+            RmsNorm(out_dim),
             nn.SiLU(inplace=True),
             nn.Dropout(0.0),
             nn.Conv2d(out_dim, out_dim, 3, padding=1),
@@ -104,7 +78,7 @@ class Wan22AttentionBlock(nn.Module):
 
     def __init__(self, dim: int) -> None:
         super().__init__()
-        self.norm = Wan22RMSNorm(dim)
+        self.norm = RmsNorm(dim)
         self.to_qkv = nn.Conv2d(dim, dim * 3, 1)
         self.proj = nn.Conv2d(dim, dim, 1)
 
@@ -131,13 +105,7 @@ class Wan22Resample(nn.Module):
     def __init__(self, dim: int, upsample: bool) -> None:
         super().__init__()
         self.upsample = upsample
-        if upsample:
-            self.resample = nn.Sequential(
-                nn.Upsample(scale_factor=2, mode="nearest-exact"),
-                nn.Conv2d(dim, dim, 3, padding=1),
-            )
-        else:
-            self.resample = nn.Sequential(nn.ZeroPad2d((0, 1, 0, 1)), nn.Conv2d(dim, dim, 3, stride=(2, 2)))
+        self.resample = upsample2d(dim, dim) if upsample else downsample2d(dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.upsample:
@@ -288,7 +256,7 @@ def _middle(dim: int) -> nn.Sequential:
 
 def _head(dim: int, out_dim: int) -> nn.Sequential:
     """RMS -> SiLU -> 3x3 conv."""
-    return nn.Sequential(Wan22RMSNorm(dim), nn.SiLU(inplace=True), nn.Conv2d(dim, out_dim, 3, padding=1))
+    return nn.Sequential(RmsNorm(dim), nn.SiLU(inplace=True), nn.Conv2d(dim, out_dim, 3, padding=1))
 
 
 class Wan22Encoder(nn.Module):

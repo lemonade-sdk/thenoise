@@ -20,6 +20,7 @@ from thenoise.vae.wan22 import (
     LATENT_STATS, Wan22AttentionBlock,
 )
 from thenoise.vae.qwen_image import _WAN21_FAMILY_ARCH
+from thenoise.vae.wan_common import downsample2d, patchify, unpatchify
 
 logger = logging.getLogger(__name__)
 
@@ -96,15 +97,20 @@ class _CausalConv3D(nn.Conv3d):
 
 
 class _RMSNorm(nn.Module):
-    def __init__(self, channels: int, *, images: bool = True):
+    """RMS norm over channels, computed in FP32 for a half-precision codec.
+
+    Not the same arithmetic as the 2D codecs' norms, which is why it is not in
+    :mod:`thenoise.vae.wan_common`.
+    """
+
+    def __init__(self, channels: int):
         super().__init__()
         self.scale = channels ** 0.5
-        self.gamma = nn.Parameter(torch.ones((channels, 1, 1) if images else (channels, 1, 1, 1)))
-        self.bias = 0.0
+        self.gamma = nn.Parameter(torch.ones(channels, 1, 1, 1))
 
     def forward(self, x: Tensor) -> Tensor:
         norm = F.normalize(x.float() if x.dtype in (torch.float16, torch.bfloat16) else x, dim=1)
-        return norm.to(x.dtype) * self.scale * self.gamma + self.bias
+        return norm.to(x.dtype) * self.scale * self.gamma
 
 
 class _Upsample(nn.Upsample):
@@ -123,7 +129,7 @@ class _Resample(nn.Module):
             if mode == "upsample3d":
                 self.time_conv = _CausalConv3D(dim, dim * 2, (3, 1, 1), padding=(1, 0, 0))
         elif mode in ("downsample2d", "downsample3d"):
-            self.resample = nn.Sequential(nn.ZeroPad2d((0, 1, 0, 1)), nn.Conv2d(dim, dim, 3, stride=(2, 2)))
+            self.resample = downsample2d(dim)
             if mode == "downsample3d":
                 self.time_conv = _CausalConv3D(dim, dim, (3, 1, 1), stride=(2, 1, 1))
         else:
@@ -182,9 +188,9 @@ def _cached_conv(conv: _CausalConv3D, x: Tensor, cache: list | None, idx: list[i
 class _ResidualBlock(nn.Module):
     def __init__(self, in_dim: int, out_dim: int, dropout: float):
         super().__init__()
-        self.norm1 = _RMSNorm(in_dim, images=False)
+        self.norm1 = _RMSNorm(in_dim)
         self.conv1 = _CausalConv3D(in_dim, out_dim, 3, padding=1)
-        self.norm2 = _RMSNorm(out_dim, images=False)
+        self.norm2 = _RMSNorm(out_dim)
         self.dropout = nn.Dropout(dropout)
         self.conv2 = _CausalConv3D(out_dim, out_dim, 3, padding=1)
         self.conv_shortcut = _CausalConv3D(in_dim, out_dim, 1) if in_dim != out_dim else nn.Identity()
@@ -249,7 +255,7 @@ class _Encoder3D(nn.Module):
             for i in range(len(dim_mult))
         ])
         self.mid_block = _MidBlock(dims[-1], dropout)
-        self.norm_out = _RMSNorm(dims[-1], images=False)
+        self.norm_out = _RMSNorm(dims[-1])
         self.conv_out = _CausalConv3D(dims[-1], z_dim, 3, padding=1)
 
     def forward(self, x, feat_cache=None, feat_idx=None):
@@ -296,7 +302,7 @@ class _Decoder3D(nn.Module):
                              up=(i < len(dim_mult) - 1), residual=residual)
             for i in range(len(dim_mult))
         ])
-        self.norm_out = _RMSNorm(dims[-1], images=False)
+        self.norm_out = _RMSNorm(dims[-1])
         self.conv_out = _CausalConv3D(dims[-1], out_channels, 3, padding=1)
 
     def forward(self, x, feat_cache=None, feat_idx=None, first_chunk=False):
@@ -305,27 +311,6 @@ class _Decoder3D(nn.Module):
         for block in self.up_blocks:
             x = block(x, feat_cache, feat_idx, first_chunk=first_chunk)
         return _cached_conv(self.conv_out, F.silu(self.norm_out(x)), feat_cache, feat_idx)
-
-
-def _patchify(x: Tensor, p: int) -> Tensor:
-    if p == 1:
-        return x
-    b, c, t, h, w = x.shape
-    if h % p or w % p:
-        raise ValueError("Wan video size must be divisible by VAE patch size")
-    return (x.view(b, c, t, h // p, p, w // p, p)
-            .permute(0, 1, 6, 4, 2, 3, 5).contiguous()
-            .view(b, c * p * p, t, h // p, w // p))
-
-
-def _unpatchify(x: Tensor, p: int) -> Tensor:
-    if p == 1:
-        return x
-    b, cp, t, h, w = x.shape
-    c = cp // (p * p)
-    return (x.view(b, c, p, p, t, h, w)
-            .permute(0, 1, 4, 5, 3, 6, 2).contiguous()
-            .view(b, c, t, h * p, w * p))
 
 
 
@@ -500,7 +485,7 @@ class AutoencoderKLWanVideo(nn.Module):
                 f"Wan VAE expects [B,{self.pixel_channels},{step}*n+1,H,W] video")
         self._begin()
         try:
-            x = _patchify(x.to(dtype=self.dtype), self.config.patch_size)
+            x = patchify(x.to(dtype=self.dtype), self.config.patch_size)
             moments = []
             for i, start in enumerate(range(0, x.shape[2], step)):
                 # First frame alone; remaining frames in groups of `step`.
@@ -573,7 +558,7 @@ class AutoencoderKLWanVideo(nn.Module):
             for i in range(x.shape[2]):
                 chunk = self.decoder(x[:, :, i:i + 1], self._feat_map, [0],
                                      first_chunk=(i == 0))
-                yield _unpatchify(chunk, self.config.patch_size).clamp(-1.0, 1.0)
+                yield unpatchify(chunk, self.config.patch_size).clamp(-1.0, 1.0)
         finally:
             self.clear_cache()
 
