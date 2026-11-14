@@ -80,10 +80,10 @@ def test_causal_video_shape_and_cache_isolation(frames):
     vae = _vae()
     video = torch.randn(1, 3, frames, 16, 16)
     with torch.no_grad():
-        z = vae.encode(video).latent_dist.mode()
+        z = vae.encode(video)[0]
         assert z.shape == (1, 48, (frames - 1) // 4 + 1, 1, 1)
-        a = vae.decode(z).sample
-        b = vae.decode(z).sample
+        a = vae.decode(z)
+        b = vae.decode(z)
     assert a.shape == b.shape == video.shape
     assert torch.equal(a, b)
     assert all(entry is None for entry in vae._feat_map)
@@ -99,7 +99,7 @@ def test_decode_frames_are_the_whole_clip_in_order():
         streamed = torch.cat(list(vae.decode_to_pixel_frames(z)), dim=2)
         whole = vae.decode_to_pixels(z)
         # The canonical interface is the old call with the normalisation around it.
-        means = vae.decode(vae._denormalize(z)).sample
+        means = vae.decode(vae._denormalize(z))
     torch.testing.assert_close(streamed, whole, rtol=0, atol=0)
     torch.testing.assert_close(streamed, means, rtol=0, atol=0)
     assert all(entry is None for entry in vae._feat_map)
@@ -112,7 +112,7 @@ def test_pixels_to_latents_and_back_reaches_the_same_pixels():
     with torch.no_grad():
         canonical = vae.encode_pixels_to_latents(video)
         assert canonical.shape == (1, 48, 2, 1, 1)
-        assert not torch.equal(canonical, vae.encode(video).latent_dist.mode())
+        assert not torch.equal(canonical, vae.encode(video)[0])
         back = vae.decode_to_pixels(canonical)
     assert back.shape == video.shape
 
@@ -132,7 +132,7 @@ def test_comfy_fp16_checkpoint_loads_at_the_compute_dtype(tmp_path):
     assert torch.equal(vae.encoder.conv_in.weight,
                        source.encoder.conv_in.weight.half().bfloat16())
     with torch.no_grad():
-        result = vae.decode(torch.randn(1, 48, 2, 1, 1)).sample
+        result = vae.decode(torch.randn(1, 48, 2, 1, 1))
     assert result.shape == (1, 3, 5, 16, 16)
 
 

@@ -3,7 +3,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from conftest import wan_adapter, write_wan_dit
+from conftest import stub_wan_components, wan_adapter, write_wan_dit, write_wan_vae
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.models.config import ModelConfig
 from thenoise.models.wan_video import Wan22Model
@@ -19,8 +19,18 @@ def _config(tmp_path):
     (tmp_path / "loras").mkdir(exist_ok=True)
     return ModelConfig(
         dit_paths={"": write_wan_dit(tmp_path / "dit.safetensors")},
-        vae_path="vae", text_encoder_path="te",
+        vae_path=str(write_wan_vae(tmp_path / "vae.safetensors")),
+        text_encoder_path="te",
         device="cpu", offload_device="cpu", lora_dir=str(tmp_path / "loras"))
+
+
+@pytest.fixture(autouse=True)
+def stub_components(monkeypatch):
+    """LoRA bookkeeping never reaches the codec or the encoder, but the adapter loads
+    both as it is built."""
+    vae, text_encoder = stub_wan_components()
+    monkeypatch.setattr("thenoise.models.wan_video.load_wan_video_vae", vae)
+    monkeypatch.setattr("thenoise.models.wan_video.load_wan_text_encoder", text_encoder)
 
 
 def test_video_loras_use_the_shared_switch_and_decline_two_experts():

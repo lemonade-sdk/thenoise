@@ -26,11 +26,6 @@ NORM_EPS = 1e-6
 CHANNELS = {"ti2v_5b": 48, "t2v_14b": 16}
 
 
-@dataclass
-class WanNativeOutput:
-    sample: Tensor
-
-
 @dataclass(frozen=True)
 class Wan22Params:
     """The transformer geometry, as read out of the checkpoint header."""
@@ -278,14 +273,7 @@ class WanNativeDiT(nn.Module):
         hidden_states: Tensor,
         timestep: Tensor,
         encoder_hidden_states: Tensor,
-        encoder_hidden_states_image: Tensor | None = None,
-        return_dict: bool = True,
-        attention_kwargs: dict | None = None,
-    ):
-        if encoder_hidden_states_image is not None:
-            raise ValueError("Wan 2.2 has no CLIP-image embedding path")
-        if attention_kwargs:
-            raise ValueError("native Wan DiT does not support attention adapters yet")
+    ) -> Tensor:
         b, c, t, h, w = hidden_states.shape
         params = self.params
         pt, ph, pw = params.patch_size
@@ -308,4 +296,4 @@ class WanNativeDiT(nn.Module):
         x = self.proj_out(x)
         x = x.reshape(b, t // pt, h // ph, w // pw, pt, ph, pw, -1)
         x = x.permute(0, 7, 1, 4, 2, 5, 3, 6).flatten(6, 7).flatten(4, 5).flatten(2, 3)
-        return WanNativeOutput(x) if return_dict else (x,)
+        return x

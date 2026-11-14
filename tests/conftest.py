@@ -163,24 +163,82 @@ def write_wan_dit(path, *, channels: int = 48) -> str:
     })
 
 
+def write_wan_vae(path, *, channels: int = 48) -> str:
+    """Write a file whose header claims a Wan codec of that latent width.
+
+    The encoder output conv is the only entry in it, because that is all
+    `detect_latent_width` reads; the codec itself is stubbed by whoever points here.
+    """
+    return write_safetensors(path, {
+        "encoder.head.2.weight": torch.zeros(2 * channels, 1, 1, 1, 1),
+    })
+
+
+def stub_wan_components(channels: int = 48):
+    """Stand-ins for the two components a Wan adapter loads and a policy test never touches.
+
+    An adapter loads what it is pointed at as it is built, like every image adapter, so
+    even a test that only asks it about requests or LoRA names has to answer the loads.
+    The transformer is not stubbed: its header says which variant this is, which is what
+    most of these tests are really asking.
+    """
+    from thenoise.vae.wan_video import TEMPORAL_COMPRESSION
+
+    class VAE(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.z_dim = channels
+            self.temporal_compression = TEMPORAL_COMPRESSION
+            # The 2.1 family halves the spatial factor of its still-image codec.
+            self.spatial_compression = 16 if channels == 48 else 8
+
+        @property
+        def dtype(self):
+            return self.weight.dtype
+
+    class Text(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+
+    class Tokenizer:
+        def encode(self, prompt):
+            return (torch.ones(1, 4, dtype=torch.long),
+                    torch.ones(1, 4, dtype=torch.bool))
+
+    return (lambda _path, _device: VAE(),
+            lambda _path, _device: (Text(), Tokenizer()))
+
+
 def wan_adapter(variant: str = "ti2v_5b"):
     """A Wan adapter built for real on a throwaway tiny DiT of that variant.
 
-    Enough to ask it about requests, capabilities and schedules: construction reads
-    the DiT header to pick the variant, which is exactly what no fake path can do.
+    Enough to ask it about requests, capabilities and schedules: construction reads the
+    DiT header to pick the variant and the codec header to check it pairs, which is what
+    no fake path can do. An adapter loads its components as it is built, so the codec
+    and the text encoder are stood in for here — the transformer is the real one, since
+    its header is what the adapter is being asked about.
     """
     import tempfile
+    from unittest.mock import patch
 
     from thenoise.dit.wan_video.model import CHANNELS
     from thenoise.models.config import ModelConfig
     from thenoise.models.wan_video import Wan22Model
 
+    channels = CHANNELS[variant]
+    vae, text_encoder = stub_wan_components(channels)
     with tempfile.TemporaryDirectory() as work:
+        dit = write_wan_dit(Path(work) / "dit.safetensors", channels=channels)
         config = ModelConfig(
-            dit_paths={"": write_wan_dit(Path(work) / "dit.safetensors",
-                                         channels=CHANNELS[variant])},
-            vae_path="", text_encoder_path="", device="cpu", offload_device="cpu")
-        return Wan22Model(config=config)
+            # A two-expert variant is two files; one tiny transformer serves as both.
+            dit_paths=({"": dit} if variant != "t2v_14b" else {"": dit, "low": dit}),
+            vae_path=write_wan_vae(Path(work) / "vae.safetensors", channels=channels),
+            text_encoder_path="", device="cpu", offload_device="cpu")
+        with patch("thenoise.models.wan_video.load_wan_video_vae", vae), \
+             patch("thenoise.models.wan_video.load_wan_text_encoder", text_encoder):
+            return Wan22Model(config=config)
 
 
 def wan_prefs(variant: str = "ti2v_5b") -> dict:
@@ -778,8 +836,8 @@ class StubVideo(VideoModel):
     def detect(_checkpoint):
         return False
 
-    def load_weights(self):
-        self.calls["load_weights"] += 1
+    def _create_upscaler(self):
+        raise NotImplementedError(f"{self.name} has no latent upscaler")
 
     def _clear_weights(self):
         self.dit = None

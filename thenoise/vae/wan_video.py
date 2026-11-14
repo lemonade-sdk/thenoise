@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import logging
-from collections import namedtuple
 from types import SimpleNamespace
 from typing import Callable, Iterator
 
@@ -25,8 +24,6 @@ from thenoise.vae.qwen_image import _WAN21_FAMILY_ARCH
 logger = logging.getLogger(__name__)
 
 CACHE_T = 2
-DecoderOutput = namedtuple("DecoderOutput", "sample")
-EncoderOutput = namedtuple("EncoderOutput", "latent_dist")
 
 #: The Wan 2.1 16ch codec is not the 2.2 family: it predates the activation range
 #: that forced BF16 there, and its released weights ship FP16.
@@ -38,24 +35,6 @@ WAN21_COMPUTE_DTYPE = torch.float16
 #: codec is loaded. Spatial compression varies between the two codecs, so that one
 #: is a per-codec property instead.
 TEMPORAL_COMPRESSION = 4
-
-
-class _GaussianPosterior:
-    def __init__(self, moments: Tensor):
-        self.mean, self.logvar = moments.chunk(2, dim=1)
-        self.logvar = self.logvar.clamp(-30.0, 20.0)
-
-    def mode(self) -> Tensor:
-        return self.mean
-
-    def sample(self, generator: torch.Generator | None = None) -> Tensor:
-        # A CPU RNG must also work with a GPU-resident VAE.
-        random_device = self.mean.device
-        if generator is not None and generator.device.type == "cpu":
-            random_device = torch.device("cpu")
-        eps = torch.randn(self.mean.shape, generator=generator,
-                          device=random_device, dtype=self.mean.dtype).to(self.mean.device)
-        return self.mean + torch.exp(0.5 * self.logvar) * eps
 
 
 class _AvgDown3D(nn.Module):
@@ -357,7 +336,7 @@ def _comfy_vae_config(overrides: dict | None = None) -> SimpleNamespace:
         dim_mult=[1, 2, 4, 4], num_res_blocks=2,
         temperal_downsample=[False, True, True],
         dropout=0.0, is_residual=True, in_channels=12,
-        out_channels=12, patch_size=2, attn_scales=[],
+        out_channels=12, patch_size=2,
         compute_dtype=WAN22_COMPUTE_DTYPE,
     )
     if overrides:
@@ -466,8 +445,6 @@ class AutoencoderKLWanVideo(nn.Module):
         self.register_buffer("_latents_mean", mean, persistent=False)
         self.register_buffer("_latents_inv_std", (1.0 / mean.new_tensor(
             config.latents_std)).view(shape), persistent=False)
-        self.use_tiling = False  # no silent fallback to unverified spatial tiles
-        self.use_slicing = False
 
     @property
     def z_dim(self) -> int:
@@ -510,7 +487,13 @@ class AutoencoderKLWanVideo(nn.Module):
         if hook is not None and hasattr(hook, "pre_forward"):
             hook.pre_forward(self)
 
-    def encode(self, x: Tensor, return_dict: bool = True):
+    def encode(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        """Pixels in [-1, 1] -> the clip's distribution in the codec's own space.
+
+        Encoding is a distribution and the choice among its candidates belongs to the
+        caller, so both moments come back rather than one being pre-committed. Canonical
+        latents are the mean, normalized — which is what `encode_pixels_to_latents` returns.
+        """
         step = self.temporal_compression
         if x.ndim != 5 or x.shape[1] != self.pixel_channels or (x.shape[2] - 1) % step:
             raise ValueError(
@@ -524,8 +507,10 @@ class AutoencoderKLWanVideo(nn.Module):
                 chunk = x[:, :, :1] if i == 0 else x[:, :, 1 + step * (i - 1):1 + step * i]
                 moments.append(self.encoder(chunk, self._enc_feat_map, [0]))
             h = self.quant_conv(torch.cat(moments, dim=2))
-            posterior = _GaussianPosterior(h)
-            return EncoderOutput(posterior) if return_dict else (posterior,)
+            mean, logvar = h.chunk(2, dim=1)
+            # The range is the codec's own: released weights need logvar clamped before
+            # anybody exponentiates it.
+            return mean, logvar.clamp(-30.0, 20.0)
         finally:
             self.clear_cache()
 
@@ -540,11 +525,15 @@ class AutoencoderKLWanVideo(nn.Module):
         self._onload_if_offloaded()
         self.clear_cache()
 
-    def decode(self, z: Tensor, return_dict: bool = True):
+    def decode(self, z: Tensor) -> Tensor:
+        """Latents in the codec's own space -> every pixel frame at once, in [-1, 1].
+
+        The request-side entry point is `decode_to_pixels`, which takes *canonical*
+        latents and denormalizes on the way in; passing those here decodes noise.
+        """
         self._check_latents(z)
         self._begin()
-        out = torch.cat(list(self._decode_frames(z)), dim=2)
-        return DecoderOutput(out) if return_dict else (out,)
+        return torch.cat(list(self._decode_frames(z)), dim=2)
 
     def decode_to_pixel_frames(self, z: Tensor) -> Iterator[Tensor]:
         """Canonical latents -> clamped pixel frames, handed out as they are decoded.
@@ -563,7 +552,8 @@ class AutoencoderKLWanVideo(nn.Module):
 
     def encode_pixels_to_latents(self, pixels: Tensor) -> Tensor:
         """Pixels in [-1, 1] -> canonical latents."""
-        return self._normalize(self.encode(pixels).latent_dist.mode())
+        mean, _ = self.encode(pixels)
+        return self._normalize(mean)
 
     def _normalize(self, z: Tensor) -> Tensor:
         mean = self._latents_mean.to(z.device, z.dtype)
@@ -588,7 +578,8 @@ class AutoencoderKLWanVideo(nn.Module):
             self.clear_cache()
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.decode(self.encode(x).latent_dist.mode()).sample
+        mean, _ = self.encode(x)
+        return self.decode(mean)
 
 
 

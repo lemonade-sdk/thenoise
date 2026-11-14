@@ -33,9 +33,6 @@ def test_video_base_is_usable_without_wan(tmp_path):
                          "steps": 8, "guidance_scale": 1.0,
                          "output_format": "mp4", "sampler": "euler"}
 
-        def load_weights(self):
-            raise AssertionError("not a server startup test")
-
         def _clear_weights(self):
             self.extra_component = None
 
@@ -77,9 +74,11 @@ def test_every_released_variant_answers_every_request_preference():
         assert resolved.output_format == VideoModel.DEFAULT_PREFS["output_format"]
 
 
-def test_a_video_adapter_declines_the_image_only_features():
-    """One capability vocabulary, so `/health` needs no per-medium table: a clip says it
-    has no latent upscaler rather than inheriting the image base's `True`.
+def test_an_adapter_declines_the_features_it_does_not_implement():
+    """One capability vocabulary, so `/health` needs no per-medium table — and the
+    vocabulary is answered per model: `upscale` False is Wan's own declaration, not
+    something the video medium answers for it, because `_create_upscaler` is abstract
+    and a model has to say what it built.
     """
     model = wan_adapter()
     assert model.capability("video") and model.capability("t2v")

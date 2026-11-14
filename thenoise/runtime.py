@@ -99,9 +99,7 @@ class Runtime:
         logger.info("Loading model '%s'", name)
         with inference():
             model = cls(config=config)
-            video = isinstance(model, VideoModel)
-            if video:
-                model.load_weights()
+        video = isinstance(model, VideoModel)
         self._model = model
         self._model_name = name
         self._paths = paths

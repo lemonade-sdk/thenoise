@@ -13,7 +13,7 @@ import pytest
 import torch
 from PIL import Image
 
-from conftest import write_wan_dit
+from conftest import write_wan_dit, write_wan_vae
 from thenoise.models.config import ModelConfig
 from thenoise.models.wan_video import Wan22Model
 from thenoise.video.controller import VideoPipelineController
@@ -21,6 +21,14 @@ from thenoise.video.jobs import Cancellation, VideoCancelled
 from thenoise.video.spec import VideoSpec
 
 FRAMES_PER_CHUNK = (1, 4, 4)  # a causal codec's first latent frame decodes alone
+
+
+def _config(root):
+    """The paths `fake_video` stands its three loaders in for."""
+    return ModelConfig(
+        dit_paths={"": write_wan_dit(root / "dit.safetensors")},
+        vae_path=str(write_wan_vae(root / "vae.safetensors")),
+        text_encoder_path=str(root), device="cpu", offload_device="cpu")
 
 
 @pytest.fixture
@@ -71,9 +79,9 @@ def fake_video(tmp_path, monkeypatch):
         def dtype(self):
             return self.weight.dtype
 
-        def forward(self, x, timestep, encoder_hidden_states, return_dict):
+        def forward(self, x, timestep, encoder_hidden_states):
             calls.append("dit")
-            return (torch.zeros_like(x),)
+            return torch.zeros_like(x)
 
     class Text(torch.nn.Module):
         def __init__(self):
@@ -101,14 +109,9 @@ def fake_video(tmp_path, monkeypatch):
 
     monkeypatch.setattr("thenoise.video.controller.encode_video", stub_encode_video)
 
-    # The adapter reads the DiT header for its variant even though every loader here is a
-    # stub, so the file has to be a real (tiny) transformer.
-    video = Wan22Model(config=ModelConfig(
-        dit_paths={"": write_wan_dit(root / "dit.safetensors")},
-        vae_path=str(root), text_encoder_path=str(root),
-        device="cpu", offload_device="cpu"))
-    video.load_weights()  # as `Runtime.load` does; a render never loads for itself
-    calls.clear()
+    # The adapter reads the DiT and codec headers for its variant and its pairing even
+    # though every loader here is a stub, so both files have to be real.
+    video = Wan22Model(config=_config(root))
     return video, VideoPipelineController(video), calls
 
 
@@ -117,10 +120,12 @@ def _spec(video, *, image=None, **kwargs):
         prompt="fox", width=480, height=320, frames=9, steps=2, image=image, **kwargs))
 
 
-def test_loading_twice_loads_everything_once(fake_video):
-    video, _, _calls = fake_video
-    video.load_weights()
+def test_construction_loads_every_component_once(fake_video):
+    """There is no second entry point: an adapter is loaded when it is built."""
+    video, _, calls = fake_video
     assert video.dit is not None and video.text_encoder is not None
+    assert [calls.count(name) for name in
+            ("load_dit", "load_text", "load_vae")] == [1, 1, 1]
 
 
 def test_native_t2v_i2v_t2v_reuses_models(fake_video, tmp_path):
@@ -130,7 +135,7 @@ def test_native_t2v_i2v_t2v_reuses_models(fake_video, tmp_path):
     out = tmp_path / "out.mp4"
     for spec in (_spec(video), _spec(video, image=image.getvalue()), _spec(video)):
         controller.render(spec, Cancellation(), lambda *_: None, out)
-    assert "load_dit" not in calls  # a render never loads for itself
+    assert calls.count("load_dit") == 1  # a render never loads for itself
     # Only the I2V request encodes a first frame.
     assert calls.count("vae_encode") == 1
     assert video.vae.dtype is torch.float32
@@ -149,9 +154,13 @@ def test_unload_releases_weights_and_allows_reloading(fake_video, tmp_path):
     assert video.memory is not old_manager
     assert video.memory.weight_bytes("dit") == 0
 
-    video.load_weights()  # what a reload through `Runtime.load` does
-    controller.render(_spec(video), Cancellation(), lambda *_: None, tmp_path / "clip.mp4")
-    assert calls.count("load_dit") == calls.count("load_vae") == 1
+    # A reload is a rebuild, not a second call into the adapter that was unloaded.
+    fresh = Wan22Model(config=_config(tmp_path / "model"))
+    controller2 = VideoPipelineController(fresh)
+    controller2.render(_spec(fresh), Cancellation(), lambda *_: None,
+                       tmp_path / "again.mp4")
+    assert (tmp_path / "again.mp4").read_bytes() == b"video"
+    assert calls.count("load_dit") == calls.count("load_vae") == 2
 
 
 def test_cancel_sampling_recovers_for_next_job(fake_video, tmp_path):
@@ -165,7 +174,7 @@ def test_cancel_sampling_recovers_for_next_job(fake_video, tmp_path):
     with pytest.raises(VideoCancelled):
         controller.render(_spec(video), token, cancel_at_one, tmp_path / "clip.mp4")
     controller.render(_spec(video), Cancellation(), lambda *_: None, tmp_path / "clip.mp4")
-    assert "load_dit" not in calls  # a cancelled job leaves the components usable
+    assert calls.count("load_dit") == 1  # a cancelled job leaves the components usable
 
 
 def test_decode_progress_uses_shared_tqdm_style(fake_video, tmp_path, monkeypatch):

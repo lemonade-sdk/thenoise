@@ -104,7 +104,7 @@ class DiffusionModel(LoRASupport, ABC):
         # ``start_kv_caches`` / ``kv_cache`` / ``end_kv_caches`` protocol.
         "kv_cache": False,
         # A latent upscaler, i.e. ``_create_upscaler``. True because it is an abstract
-        # method every image adapter implements; a medium without one says False.
+        # method every model with one implements; a model without one says False.
         "upscale": True,
         # Anything at all temporal, i.e. a 5D latent and a video request surface.
         "video": False,

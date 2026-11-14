@@ -4,11 +4,11 @@ from pathlib import Path
 import pytest
 import torch
 
-from conftest import wan_adapter, write_wan_dit
+from conftest import wan_adapter, write_wan_dit, write_wan_vae
 from thenoise.dit.wan_video.model import Wan22Params, WanNativeDiT, detect_params
 from thenoise.dit.wan_video.sampling import get_sigmas
 from thenoise.models import resolve
-from thenoise.models.config import VideoSamplingParams
+from thenoise.models.config import ModelConfig, VideoSamplingParams
 from thenoise.models.wan_video import VARIANTS, Wan22Model, variant_for
 from thenoise.samplers import Step
 from thenoise.runtime import ModelPaths, Runtime, Settings
@@ -50,6 +50,19 @@ def test_a_two_expert_transformer_demands_its_second_file(tmp_path):
         Wan22Model.validate_paths({"": high, "low": high})
     Wan22Model.validate_paths(
         {"": high, "low": write_wan_dit(tmp_path / "low.safetensors", channels=16)})
+
+
+def test_a_codec_from_the_other_release_is_refused_from_the_headers(tmp_path):
+    """The clip's latent is the only thing that crosses between the two checkpoints, and
+    the normalization table is keyed by its width, so a mismatched `--vae` is answered
+    before either module is built rather than at the first denoising step.
+    """
+    config = ModelConfig(
+        dit_paths={"": write_wan_dit(tmp_path / "dit.safetensors", channels=48)},
+        vae_path=str(write_wan_vae(tmp_path / "vae.safetensors", channels=16)),
+        text_encoder_path="", device="cpu", offload_device="cpu")
+    with pytest.raises(ValueError, match="different Wan releases"):
+        Wan22Model(config=config)
 
 
 def test_a_single_expert_transformer_refuses_a_second_file(tmp_path):
@@ -196,8 +209,8 @@ def test_wan21_fp16_vae_decodes_float32_latents_and_clears_cache():
     with torch.inference_mode():
         vae = AutoencoderKLWanVideo(cfg).half().eval()
         latents = torch.randn(1, 16, 2, 2, 2, dtype=torch.float32)
-        first = vae.decode(latents).sample
-        second = vae.decode(latents).sample
+        first = vae.decode(latents)
+        second = vae.decode(latents)
         assert first.dtype == torch.float16
         assert first.shape == second.shape == (1, 3, 5, 16, 16)
         torch.testing.assert_close(first, second, rtol=0, atol=0)

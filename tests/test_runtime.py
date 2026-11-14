@@ -50,7 +50,8 @@ def test_video_weights_are_ready_when_runtime_load_returns(catalog, monkeypatch)
         def detect(_checkpoint):
             return True
 
-        def load_weights(self):
+        def __init__(self, *, config):
+            super().__init__(config=config)
             events.append("loaded")
 
     catalog()
@@ -63,7 +64,7 @@ def test_video_weights_are_ready_when_runtime_load_returns(catalog, monkeypatch)
     assert events == ["loaded", "loaded"]
 
     class FailingVideo(FakeVideo):
-        def load_weights(self):
+        def __init__(self, *, config):
             raise RuntimeError("corrupt video checkpoint")
 
     monkeypatch.setattr(model_catalog, "resolve", lambda _path: FailingVideo)

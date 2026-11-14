@@ -148,8 +148,8 @@ def test_comfy_checkpoint_dtype_and_forward(tmp_path):
     x = torch.randn(1, 48, 3, 4, 6)
     ctx = torch.randn(1, 5, TINY.text_dim)
     with torch.no_grad():
-        a = model(x, torch.tensor([500.0]), ctx, return_dict=False)[0]
-        b = model(x, torch.full((1, 18), 500.0), ctx, return_dict=False)[0]
+        a = model(x, torch.tensor([500.0]), ctx)
+        b = model(x, torch.full((1, 18), 500.0), ctx)
     assert a.shape == b.shape == x.shape
     assert torch.isfinite(a).all() and torch.isfinite(b).all()
     # One timestep per token, all equal, conditions the model exactly like one per batch.
@@ -166,7 +166,7 @@ def test_bf16_comfy_precision_exceptions(tmp_path):
     x = torch.randn(1, 48, 1, 4, 4, dtype=torch.bfloat16)
     context = torch.randn(1, 4, TINY.text_dim, dtype=torch.bfloat16)
     with torch.no_grad():
-        output = model(x, torch.tensor([500.0]), context).sample
+        output = model(x, torch.tensor([500.0]), context)
     assert output.dtype == torch.bfloat16
     assert torch.isfinite(output).all()
 
@@ -182,7 +182,7 @@ def test_fp16_compute_dtype_preserves_fp32_patch_embedding(tmp_path):
     x = torch.randn(1, 48, 1, 4, 4, dtype=torch.float32).to(model.dtype)
     context = torch.randn(1, 4, TINY.text_dim, dtype=torch.float32).to(model.dtype)
     with torch.no_grad():
-        output = model(x, torch.full((1, 4), 500.0), context).sample
+        output = model(x, torch.full((1, 4), 500.0), context)
     assert output.dtype == torch.float16
     assert output.shape == x.shape
     assert torch.isfinite(output).all()
@@ -212,7 +212,7 @@ def test_a_mixed_checkpoint_loads_at_one_trunk_dtype(tmp_path):
     x = torch.randn(1, 48, 1, 4, 4, dtype=torch.float16)
     context = torch.randn(1, 4, TINY.text_dim, dtype=torch.float16)
     with torch.no_grad():
-        output = model(x, torch.tensor([500.0]), context).sample
+        output = model(x, torch.tensor([500.0]), context)
     assert output.dtype == torch.float16
     assert torch.isfinite(output).all()
 

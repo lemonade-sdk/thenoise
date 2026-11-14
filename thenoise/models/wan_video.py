@@ -20,7 +20,7 @@ from thenoise.samplers import Step, sigma_steps
 from thenoise.text_encoders.wan_video import load_wan_text_encoder
 from thenoise.utils.image_tensor import cover_crop
 from thenoise.utils.wan_weights import wan_dit_key
-from thenoise.vae.wan_video import load_wan_video_vae, TEMPORAL_COMPRESSION
+from thenoise.vae.wan_video import detect_latent_width, load_wan_video_vae, TEMPORAL_COMPRESSION
 from thenoise.video.spec import ResolvedVideo, VideoSpec
 
 log = logging.getLogger("uvicorn.error")
@@ -83,7 +83,8 @@ class Wan22Model(VideoModel):
     """
 
     name = "wan22"
-    CAPABILITIES = {**VideoModel.CAPABILITIES, "t2v": True}
+    # A clip is made bigger by being generated bigger, not by upscaling a latent.
+    CAPABILITIES = {**VideoModel.CAPABILITIES, "t2v": True, "upscale": False}
     # The conditioned I2V frame is denoised at timestep zero, which is what the edit
     # contract already calls `index_timestep_zero`; there is no other method to offer.
     DEFAULT_PREFS = {**VideoModel.DEFAULT_PREFS, "ref_method": "index_timestep_zero"}
@@ -143,13 +144,37 @@ class Wan22Model(VideoModel):
         self.variant = variant_for(self.params)
         # `i2v` is the one capability a variant, rather than the model, decides.
         self.CAPABILITIES = {**self.CAPABILITIES, "i2v": self.variant.i2v}
-        self.dit = None
-        self.low_dit = None
-        self.text_encoder = None
-        self.tokenizer = None
-        self.vae = None
+        # Both headers are read before either module is built: the clip's latent is the
+        # only thing that crosses between them and the normalization table is keyed by
+        # its width, so a mismatched `--vae` is refused here rather than mid-run.
+        codec_width = detect_latent_width(self.vae_path)
+        if codec_width != self.params.in_channels:
+            raise ValueError(
+                f"--vae is a {codec_width}-channel codec, and {self.dit_path} denoises a "
+                f"{self.params.in_channels}-channel latent: these two checkpoints are "
+                "from different Wan releases")
+
         # The run's I2V conditioning: (first-frame latent, per-token timestep mask).
         self._clip = None
+        self.dit = load_wan_native_transformer(self.dit_path, self._load_target(self.dit_path))
+        self.low_dit = None
+        if self.variant.experts is not None:
+            low_path = self.dit_paths["low"]
+            self.low_dit = load_wan_native_transformer(low_path, self._load_target(low_path))
+        self.text_encoder, self.tokenizer = load_wan_text_encoder(
+            self.text_encoder_path, self._load_target(self.text_encoder_path))
+        self.vae = load_wan_video_vae(self.vae_path, self._load_target(self.vae_path))
+        self.memory.register("dit", self.dit)
+        if self.low_dit is not None:
+            self.memory.register("dit_low", self.low_dit)
+        self.memory.register("text_encoder", self.text_encoder)
+        self.memory.register("vae", self.vae)
+        log.info("Wan 2.2 %s loaded (%s)", self.variant.name,
+                 "two experts" if self.low_dit is not None else "one transformer")
+
+    # ------------------------------------------------------------ latent upscaler
+    def _create_upscaler(self):
+        raise NotImplementedError(f"{self.name} has no latent upscaler")
 
     # ------------------------------------------------------------ preferences
     @property
@@ -178,36 +203,7 @@ class Wan22Model(VideoModel):
                                        upward=resolved.explicit_frames),
         )
 
-    # ------------------------------------------------------------ loading
-    def load_weights(self) -> None:
-        self._load()
-
-    def _load(self) -> None:
-        if self.dit is not None:
-            return
-        vae = load_wan_video_vae(self.vae_path, self._load_target(self.vae_path))
-        if vae.z_dim != self.params.in_channels:
-            raise ValueError(
-                f"--vae is a {vae.z_dim}-channel codec, and {self.dit_path} denoises a "
-                f"{self.params.in_channels}-channel latent: these two checkpoints are "
-                "from different Wan releases")
-        text_encoder, tokenizer = load_wan_text_encoder(
-            self.text_encoder_path, self._load_target(self.text_encoder_path))
-        dit = load_wan_native_transformer(self.dit_path, self._load_target(self.dit_path))
-        low = None
-        if self.variant.experts is not None:
-            low_path = self.dit_paths["low"]
-            low = load_wan_native_transformer(low_path, self._load_target(low_path))
-        self.memory.register("vae", vae)
-        self.memory.register("text_encoder", text_encoder)
-        self.memory.register("dit", dit)
-        if low is not None:
-            self.memory.register("dit_low", low)
-        self.vae, self.text_encoder, self.tokenizer = vae, text_encoder, tokenizer
-        self.dit, self.low_dit = dit, low
-        log.info("Wan 2.2 %s loaded (%s)", self.variant.name,
-                 "two experts" if low is not None else "one transformer")
-
+    # ------------------------------------------------------------ teardown
     def _clear_weights(self) -> None:
         self.vae = self.text_encoder = self.tokenizer = None
         self.dit = self.low_dit = None
@@ -341,8 +337,7 @@ class Wan22Model(VideoModel):
 
     @staticmethod
     def _velocity(module, x, timestep, context) -> torch.Tensor:
-        return module(x, timestep=timestep, encoder_hidden_states=context,
-                      return_dict=False)[0].float()
+        return module(x, timestep=timestep, encoder_hidden_states=context).float()
 
     # ------------------------------------------------------------ codec
     def decode_frames(self, latents: torch.Tensor) -> Iterator[torch.Tensor]:

@@ -43,9 +43,7 @@ class Segment:
 
 
 class VideoModel(DiffusionModel):
-    # A clip is made bigger by being generated bigger, not by upscaling a latent, so
-    # `upscale` is declined rather than left inherited from the image base.
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "video": True, "upscale": False}
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "video": True}
 
     #: The video preferences every adapter shares. What a release decides for itself —
     #: frame count, frame rate, size, steps — belongs to that release and is absent here;
@@ -98,10 +96,6 @@ class VideoModel(DiffusionModel):
 
     # ------------------------------------------------------------ teardown
     @abstractmethod
-    def load_weights(self) -> None:
-        """Load every component, before the server accepts a request."""
-
-    @abstractmethod
     def _clear_weights(self) -> None:
         """Drop model-owned references to modules and tokenizer state."""
 
@@ -112,7 +106,3 @@ class VideoModel(DiffusionModel):
         # The old manager still references registered modules and residency state.
         # Rebuild it so a subsequent load is not marked resident.
         self.memory = MemoryManager(self.device, self.offload_device)
-
-    # ------------------------------------------------------------ image-only hooks
-    def _create_upscaler(self):
-        raise NotImplementedError(f"{self.name} has no latent upscaler")
