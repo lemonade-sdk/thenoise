@@ -12,8 +12,10 @@ from torch.nn import functional as F
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import attention
+from thenoise.utils.positions import grid_positions
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.safetensors import MemoryEfficientSafeOpen, unwrap_key
+from thenoise.utils.timestep import timestep_embedding
 
 #: Wan's released transformers are 128-wide-headed with a 1e-6 norm epsilon. Neither is
 #: a shape in the file, so the family supplies them.
@@ -110,17 +112,6 @@ def detect_params(dit_path: str) -> Wan22Params:
     )
 
 
-def _timestep_embedding(t: Tensor, dim: int) -> Tensor:
-    """Wan's cosine/sine timestep embedding."""
-    half = dim // 2
-    scale = torch.exp(
-        -math.log(10_000) * torch.arange(half, device=t.device, dtype=torch.float32) / half
-    )
-    angle = t.reshape(-1, 1).float() * scale[None]
-    embedding = torch.cat((torch.cos(angle), torch.sin(angle)), dim=-1)
-    return F.pad(embedding, (0, dim % 2))
-
-
 class WanNativeRoPE(nn.Module):
     """3D RoPE frequencies for the patch grid, built once per latent shape."""
 
@@ -144,9 +135,7 @@ class WanNativeRoPE(nn.Module):
         t, h, w = t // pt, h // ph, w // pw
         key = (t, h, w, latents.device)
         if key != self._shape_device:
-            axes = [torch.arange(n, device=latents.device, dtype=torch.float32)
-                    for n in (t, h, w)]
-            grid = torch.stack(torch.meshgrid(*axes, indexing="ij"), dim=-1)
+            grid = grid_positions([t, h, w], device=latents.device)
             self._frequencies.store("grid", grid.reshape(1, -1, 3))
             self._shape_device = key
         return self._frequencies["grid"]
@@ -218,10 +207,8 @@ class WanNativeCondition(nn.Module):
         self.text_linear_2 = QuantizedLinear(params.dim, params.dim)
 
     def forward(self, timestep: Tensor, context: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        tokens = timestep.shape[1] if timestep.ndim == 2 else None
-        ts = _timestep_embedding(timestep, self.freq_dim)
-        if tokens is not None:
-            ts = ts.unflatten(0, (-1, tokens))
+        # The adapter hands over a timestep already in Wan's [0, 1000] range.
+        ts = timestep_embedding(timestep, self.freq_dim, time_factor=1.0)
         ts = ts.to(dtype=self.time_linear_1.weight.dtype)
         temb = self.time_linear_2(F.silu(self.time_linear_1(ts))).to(dtype=context.dtype)
         mod = self.time_proj(F.silu(temb))

@@ -17,7 +17,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from conftest import IMAGE_CATALOG, IMAGE_CATALOG_IDS
+from conftest import CATALOG_IDS, IMAGE_CATALOG, IMAGE_CATALOG_IDS, MODEL_CATALOG
 from thenoise.models import (
     AnimaModel,
     Fibo2Model,
@@ -33,6 +33,7 @@ from thenoise.models import (
     ZImageModel,
 )
 from thenoise.models.base import DiffusionModel
+from thenoise.models.wan_video import VARIANTS
 from thenoise.models.config import SamplingParams
 from thenoise.utils.math import round_up
 
@@ -90,6 +91,9 @@ BARE = {
     },
     "qwen_image": {"vae": _vae(16, 8), "dit": SimpleNamespace(patch_size=2)},
     "qwen_image21": {"vae": _vae(64, 16, pixel_channels=4)},
+    # A clip's schedule reads its variant's flow shift and nothing else: no VAE, no
+    # DiT, no frame count.
+    "wan22": {"variant": VARIANTS["ti2v_5b"]},
 }
 
 # The adapters whose step schedule shifts with the image token count. Krea 2 is
@@ -98,7 +102,7 @@ BARE = {
 RESOLUTION_AWARE = {"flux_klein", "qwen_image", "qwen_image21", "ming_image"}
 
 
-@pytest.mark.parametrize("model_cls", IMAGE_CATALOG, ids=IMAGE_CATALOG_IDS)
+@pytest.mark.parametrize("model_cls", MODEL_CATALOG, ids=CATALOG_IDS)
 @pytest.mark.parametrize("steps", [1, 4, 8])
 def test_schedule_contract(model_cls, steps):
     model = _bare(model_cls, **BARE[model_cls.name])
@@ -120,7 +124,7 @@ def test_schedule_contract(model_cls, steps):
     assert deltas[-1] == pytest.approx(ts[-1])
 
 
-@pytest.mark.parametrize("model_cls", IMAGE_CATALOG, ids=IMAGE_CATALOG_IDS)
+@pytest.mark.parametrize("model_cls", MODEL_CATALOG, ids=CATALOG_IDS)
 def test_schedule_resolution_dependence_matches_the_model(model_cls):
     small = _bare(model_cls, **BARE[model_cls.name]).schedule(_params(steps=8, width=512, height=512))
     large = _bare(model_cls, **BARE[model_cls.name]).schedule(_params(steps=8, width=1024, height=1024))
@@ -143,8 +147,13 @@ DEFAULT_ALIGN = 16
 
 
 @pytest.mark.parametrize("model_cls", IMAGE_CATALOG, ids=IMAGE_CATALOG_IDS)
-def test_resolve_size_aligns_to_the_patched_latent_grid(model_cls):
-    """Odd sizes are rounded up to the model's pixel alignment."""
+def test_image_sizes_round_up_to_the_patched_latent_grid(model_cls):
+    """Odd sizes are rounded up to the model's pixel alignment.
+
+    Video is not here because it rounds the same request *down* onto its 32 px cell:
+    a clip is fitted to geometry the codec and the patch grid agree on rather than
+    grown to satisfy a number. ``test_video_adapter`` pins 500x330 -> 480x320.
+    """
     align = ALIGN.get(model_cls.name, DEFAULT_ALIGN)
     model = _bare(model_cls, **BARE[model_cls.name])
     assert model.resolve_size(100, 60) == (round_up(100, align), round_up(60, align))
@@ -152,7 +161,7 @@ def test_resolve_size_aligns_to_the_patched_latent_grid(model_cls):
     assert model.resolve_size(1024, 512) == (1024, 512)
 
 
-@pytest.mark.parametrize("model_cls", IMAGE_CATALOG, ids=IMAGE_CATALOG_IDS)
+@pytest.mark.parametrize("model_cls", MODEL_CATALOG, ids=CATALOG_IDS)
 def test_percent_to_sigma_stays_strictly_below_one(model_cls):
     """ER-SDE divides by ``1 - sigma``: sigma_0 must be nudged below 1, never on it.
 
@@ -183,13 +192,17 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
     ],
     ids=IMAGE_CATALOG_IDS,
 )
-def test_model_capabilities(model_cls, edit, kv_cache):
+def test_image_model_capabilities_describe_the_adapter(model_cls, edit, kv_cache):
     """``CAPABILITIES`` must describe the adapter: the pipeline rejects a request the
     model cannot serve and ``/health`` lets the UI grey out what it lacks.
 
       * ``edit``     -> the reference encoder is really overridden.
       * ``kv_cache`` -> the shared cache protocol really starts a run cache, and
         freezing reference K/V needs a reference latent, so it implies ``edit``.
+
+    That first tie belongs to the image medium: a clip overrides ``encode_reference``
+    for its own reference frame while declaring ``edit`` False, so video's vocabulary is
+    pinned in ``test_video_shared.py`` instead.
     """
     model = _bare(model_cls, **BARE[model_cls.name])
     assert model.capability("edit") is edit

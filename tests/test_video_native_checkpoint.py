@@ -152,6 +152,8 @@ def test_comfy_checkpoint_dtype_and_forward(tmp_path):
         b = model(x, torch.full((1, 18), 500.0), ctx, return_dict=False)[0]
     assert a.shape == b.shape == x.shape
     assert torch.isfinite(a).all() and torch.isfinite(b).all()
+    # One timestep per token, all equal, conditions the model exactly like one per batch.
+    torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-6)
 
 
 def test_bf16_comfy_precision_exceptions(tmp_path):

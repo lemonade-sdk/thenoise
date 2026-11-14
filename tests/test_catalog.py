@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from conftest import IMAGE_CATALOG, IMAGE_CATALOG_IDS
+from conftest import CATALOG_IDS, IMAGE_CATALOG, IMAGE_CATALOG_IDS, MODEL_CATALOG
 from thenoise.models.base import DiffusionModel
 from thenoise.samplers import create_sampler
 from thenoise.upscale import (
@@ -18,12 +18,19 @@ from thenoise.upscale import (
 )
 
 
-@pytest.mark.parametrize("model", IMAGE_CATALOG, ids=IMAGE_CATALOG_IDS)
+@pytest.mark.parametrize("model", MODEL_CATALOG, ids=CATALOG_IDS)
 def test_model_defaults_are_a_usable_superset_of_the_base(model):
-    """A merge that drops a base preference KeyErrors at request time, and a typo'd
-    sampler name only blows up when somebody generates: tie both to the machinery.
-    """
+    """A merge that drops a base preference KeyErrors at request time."""
     assert set(DiffusionModel.DEFAULT_PREFS) <= set(model.DEFAULT_PREFS)
+
+
+@pytest.mark.parametrize("model", IMAGE_CATALOG, ids=IMAGE_CATALOG_IDS)
+def test_an_image_default_sampler_names_a_registered_solver(model):
+    """A typo'd sampler name only blows up when somebody generates: tie it to the
+    machinery. Video is not here because its recipe is per variant, layered over the
+    class defaults at resolve time; ``test_video_shared.py`` ties that layer to the
+    registry instead.
+    """
     create_sampler(model.DEFAULT_PREFS["sampler"], model)
 
 

@@ -720,7 +720,8 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
 
 KEYSET_IDS = sorted(MODEL_KEYSETS)
 CATALOG_IDS = [cls.name for cls in MODEL_CATALOG]
-# Image-model contracts do not apply to video models with 5D latents.
+# The contracts only the image medium answers to: a latent upscaler, and a sampler in
+# the class defaults (a video variant carries its own recipe, layered at resolve time).
 IMAGE_CATALOG = [cls for cls in MODEL_CATALOG if not issubclass(cls, VideoModel)]
 IMAGE_CATALOG_IDS = [cls.name for cls in IMAGE_CATALOG]
 
