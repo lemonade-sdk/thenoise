@@ -10,7 +10,7 @@ from thenoise.dit.wan_video.sampling import get_sigmas
 from thenoise.models.wan_video import Wan14BVideo, WanVideo
 from thenoise.utils.wan_weights import wan_vae21_key
 from thenoise.vae.wan_video import (
-    _comfy_vae_config, _WAN21_LATENTS_MEAN, _WAN21_LATENTS_STD,
+    _comfy_vae_config, _WAN21_LATENTS_MEAN, _WAN21_LATENTS_STD, _wan21_vae_config,
     WanNativeVideoVAE,
 )
 from thenoise.video.jobs import Cancellation
@@ -174,7 +174,7 @@ def test_wan21_latent_normalization_is_not_identity():
     torch.testing.assert_close(video._denormalize(normalized), z)
 
 
-def test_wan21_fp16_vae_loader_preserves_5b_dtype(monkeypatch):
+def test_each_video_vae_variant_loads_at_its_own_compute_dtype(monkeypatch):
     from thenoise.vae import wan_video as native_vae
 
     seen = []
@@ -188,15 +188,12 @@ def test_wan21_fp16_vae_loader_preserves_5b_dtype(monkeypatch):
     tiny = {"base_dim": 4, "decoder_base_dim": 4, "num_res_blocks": 1}
     native_vae.load_wan_native_video_vae("unused", wan21=True, _test_config=tiny)
     native_vae.load_wan_native_video_vae("unused", _test_config=tiny)
-    assert seen == [torch.float16, torch.float32]
+    assert seen == [torch.float16, torch.bfloat16]
 
 
 def test_wan21_fp16_vae_decodes_float32_latents_and_clears_cache():
-    cfg = _comfy_vae_config(dict(
+    cfg = _comfy_vae_config(_wan21_vae_config() | dict(
         base_dim=4, decoder_base_dim=4, num_res_blocks=1,
-        z_dim=16, in_channels=3, out_channels=3, patch_size=1,
-        scale_factor_spatial=8, is_residual=False,
-        temperal_downsample=[False, True, True],
     ))
     with torch.inference_mode():
         vae = WanNativeVideoVAE(cfg).half().eval()

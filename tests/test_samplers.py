@@ -134,6 +134,35 @@ def test_er_sde_is_seed_deterministic_but_seed_sensitive():
     assert not torch.equal(run(5), run(6))
 
 
+@pytest.mark.parametrize("name", sorted(SAMPLERS))
+def test_step_callback_runs_once_per_step_and_can_stop_the_solve(name):
+    """The callback is how a caller reports progress and cancels mid-solve, so the
+    shared ``Sampler.sample`` signature is only honest if every registered solver runs it.
+    """
+    schedule = _schedule(4)
+    seen = []
+
+    def note(x, step, total):
+        seen.append((step, total))
+        return x
+
+    create_sampler(name, _VelocityModel()).sample(
+        torch.randn(1, 4, 8, 8), schedule, None, 1.0, 3, step_callback=note
+    )
+    assert seen == [(step, 4) for step in range(1, 5)]
+
+    class Abort(Exception):
+        pass
+
+    def abort(x, step, total):
+        raise Abort
+
+    with pytest.raises(Abort):
+        create_sampler(name, _VelocityModel()).sample(
+            torch.randn(1, 4, 8, 8), schedule, None, 1.0, 3, step_callback=abort
+        )
+
+
 def test_er_sde_nudges_the_first_sigma_below_one():
     """``sigma/(1 - sigma)`` blows up at sigma == 1, so t=1 goes through the model's
     nudge rather than into the solver.

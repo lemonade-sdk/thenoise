@@ -47,11 +47,14 @@ def fake_video(tmp_path, monkeypatch):
             latent = torch.zeros(x.shape[0], 48, 1, x.shape[-2] // 16, x.shape[-1] // 16)
             return (types.SimpleNamespace(mode=lambda: latent),)
 
-        def decode(self, z, return_dict=False):
+        def decode_frames(self, z):
             calls.append("vae_decode")
-            for i in range(z.shape[2]):
-                self.decoder(z[:, :, i:i + 1])
-            return (torch.zeros(z.shape[0], 3, 4 * z.shape[2] - 3, z.shape[3] * 16, z.shape[4] * 16),)
+            try:
+                for i in range(z.shape[2]):
+                    self.decoder(z[:, :, i:i + 1])
+                    yield torch.zeros(z.shape[0], 3, 1, z.shape[3] * 16, z.shape[4] * 16)
+            finally:
+                self.clear_cache()
 
     class DiT(torch.nn.Module):
         def __init__(self):
@@ -130,7 +133,13 @@ def fake_video(tmp_path, monkeypatch):
     monkeypatch.setattr(wan.WanVideo, "_sample", sample)
     import thenoise.models.video_base as video_base
     monkeypatch.setattr(video_base, "MemoryManager", FakeMemory)
-    monkeypatch.setattr(wan, "encode_video", lambda frames, spec, tok, dest, progress: dest.write_bytes(b"video"))
+
+    def stub_encode_video(frames, _spec, _token, dest, _progress):
+        for _ in frames:  # a real muxer pulls frames lazily; so must this stub
+            pass
+        dest.write_bytes(b"video")
+
+    monkeypatch.setattr(wan, "encode_video", stub_encode_video)
 
     inference = types.ModuleType("thenoise.inference")
     from contextlib import nullcontext

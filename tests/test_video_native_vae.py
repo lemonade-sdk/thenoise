@@ -89,12 +89,33 @@ def test_causal_video_shape_and_cache_isolation(frames):
     assert all(entry is None for entry in vae._feat_map)
 
 
-def test_comfy_fp16_checkpoint_stays_fp32_inference(tmp_path):
+def test_decode_frames_are_the_whole_clip_in_order():
+    """Streaming the decode out one latent frame at a time must be the same
+    computation the one-call decode does, caches and all.
+    """
+    vae = _vae()
+    z = torch.randn(1, 48, 3, 1, 1)
+    with torch.no_grad():
+        streamed = torch.cat(list(vae.decode_frames(z)), dim=2)
+        whole = vae.decode(z).sample
+    torch.testing.assert_close(streamed, whole, rtol=0, atol=0)
+    assert all(entry is None for entry in vae._feat_map)
+
+
+def test_a_precision_nobody_measured_this_codec_at_is_refused():
+    """FP16 is where this family overflows; FP32 only costs, so it is allowed."""
+    with torch.no_grad():
+        with pytest.raises(RuntimeError, match="runs in torch.bfloat16"):
+            _vae().half().decode(torch.randn(1, 48, 1, 1, 1))
+
+
+def test_comfy_fp16_checkpoint_loads_at_the_compute_dtype(tmp_path):
     source = _write(tmp_path)
     vae = load_wan_native_video_vae(tmp_path, _test_config=TINY)
-    assert vae.dtype is torch.float32
+    assert vae.dtype is vae.compute_dtype is torch.bfloat16
     assert not any(p.is_meta for p in vae.parameters())
-    assert torch.equal(vae.encoder.conv_in.weight, source.encoder.conv_in.weight.half().float())
+    assert torch.equal(vae.encoder.conv_in.weight,
+                       source.encoder.conv_in.weight.half().bfloat16())
     with torch.no_grad():
         result = vae.decode(torch.randn(1, 48, 2, 1, 1)).sample
     assert result.shape == (1, 3, 5, 16, 16)

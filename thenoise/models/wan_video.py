@@ -139,8 +139,6 @@ class WanVideo(VideoModel):
             self.dit_path, dtype=torch.float16, check_cancel=token.check,
         )
         token.check()
-        if vae.dtype != torch.float32:
-            raise RuntimeError("Wan causal video VAE must remain in FP32")
         self.memory.register("vae", vae)
         self.memory.register("text_encoder", text_encoder)
         self.memory.register("dit", transformer)
@@ -232,7 +230,8 @@ class WanVideo(VideoModel):
             step_callback=step_done,
         )
 
-    def _decode(self, latents: torch.Tensor, token: Cancellation, progress):
+    def _frames(self, latents: torch.Tensor, token: Cancellation, progress):
+        """One PIL frame at a time, pulled from the decoder as the muxer wants it."""
         chunks = latents.shape[2]
         decoded = 0
 
@@ -249,16 +248,30 @@ class WanVideo(VideoModel):
 
             hooks.callback(self.vae.decoder.register_forward_pre_hook(before).remove)
             hooks.callback(self.vae.decoder.register_forward_hook(after).remove)
-            try:
-                video = self.vae.decode(self._denormalize(latents), return_dict=False)[0]
-                token.check()
-                return [pixels_to_pil(video[0, :, i]) for i in range(video.shape[2])]
-            finally:
-                self.vae.clear_cache()
+            for video in self.vae.decode_frames(self._denormalize(latents)):
+                for i in range(video.shape[2]):
+                    token.check()
+                    # uint8 is a finer step than a BF16 mantissa.
+                    yield pixels_to_pil(video[0, :, i].float())
+
+    def _render(self, latents, spec: ResolvedVideo, token: Cancellation, progress,
+                output: Path) -> None:
+        """Decode straight into the container: the clip never exists all at once.
+
+        Stays inside the ``vae`` stage because the generator pulls from the VAE as the
+        encoder drains it — which is also what lets one frame, rather than the clip,
+        size the stage's headroom.
+        """
+        progress("encoding", 0, spec.frame_count)
+        encode_video(self._frames(latents, token, progress), spec, token, output, progress)
 
     def generate(self, spec: ResolvedVideo, token: Cancellation, progress, output: Path) -> None:
         from thenoise.inference import inference, inference_lock
 
+        # One frame, not the clip: `_render` hands frames to the encoder as they are
+        # decoded, so nothing in the run grows with `frame_count`. Whether a long clip
+        # still wants more headroom than one frame is a measurement, not a correctness
+        # question.
         pixels = spec.width * spec.height
         with inference_lock, inference():
             if spec.lora_specs and not self.lora_dir:
@@ -289,12 +302,9 @@ class WanVideo(VideoModel):
             del positive, negative, condition
 
             with self.memory.stage("vae", pixels=pixels) as stage:
-                frames = stage.run(self._decode, latents, token, progress)
+                stage.run(self._render, latents, spec, token, progress, output)
             del latents
 
-        token.check()
-        progress("encoding", 0, spec.frame_count)
-        encode_video(frames, spec, token, output, progress)
         log.info("Wan video saved: %s", output)
 
     def _run_denoiser(self, latents, spec, positive, negative, condition,

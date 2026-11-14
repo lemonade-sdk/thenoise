@@ -27,6 +27,7 @@ from thenoise.dit.kvcache import KVCache
 from thenoise.memory import MemoryManager
 from thenoise.models.lora_support import LoRASupport
 from thenoise.utils.device_patches import apply_device_patches
+from thenoise.utils.dynamo import apply_recompile_limit
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.image_tensor import ReferenceSizing
 from thenoise.samplers import Step
@@ -139,7 +140,7 @@ class DiffusionModel(LoRASupport, ABC):
         # ``vae``; the pipeline controller stages them by name.
         self.memory = MemoryManager(self.device, self.offload_device)
 
-        torch._dynamo.config.recompile_limit = 64
+        apply_recompile_limit()
         apply_device_patches(self.device)
 
         # Cached LoRA factors, for clean switching between requests.

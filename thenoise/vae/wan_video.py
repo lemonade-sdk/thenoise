@@ -7,7 +7,7 @@ from __future__ import annotations
 from collections import namedtuple
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable
+from typing import Callable, Iterator
 
 import torch
 from torch import Tensor, nn
@@ -16,11 +16,18 @@ from torch.nn import functional as F
 from thenoise.utils.loader import load_mapped_safetensors
 from thenoise.utils.model_dir import find_weight_file
 from thenoise.utils.wan_weights import wan_vae_key, wan_vae21_key
-from thenoise.vae.wan22 import Wan22AttentionBlock, WAN22_LATENTS_MEAN, WAN22_LATENTS_STD
+from thenoise.vae.wan22 import (
+    COMPUTE_DTYPE as WAN22_COMPUTE_DTYPE,
+    Wan22AttentionBlock, WAN22_LATENTS_MEAN, WAN22_LATENTS_STD,
+)
 
 CACHE_T = 2
 DecoderOutput = namedtuple("DecoderOutput", "sample")
 EncoderOutput = namedtuple("EncoderOutput", "latent_dist")
+
+#: The Wan 2.1 16ch codec is not the 2.2 family: it predates the activation range
+#: that forced BF16 there, and its released weights ship FP16.
+WAN21_COMPUTE_DTYPE = torch.float16
 
 # Wan 2.1's channelwise latent stats (same latent format as the 14B experts).
 _WAN21_LATENTS_MEAN = (
@@ -352,11 +359,23 @@ def _comfy_vae_config(overrides: dict | None = None) -> SimpleNamespace:
         dropout=0.0, is_residual=True, in_channels=12,
         out_channels=12, patch_size=2, scale_factor_temporal=4,
         scale_factor_spatial=16, attn_scales=[],
+        compute_dtype=WAN22_COMPUTE_DTYPE,
         latents_mean=list(WAN22_LATENTS_MEAN), latents_std=list(WAN22_LATENTS_STD),
     )
     if overrides:
         cfg.update(overrides)
     return SimpleNamespace(**cfg)
+
+
+def _wan21_vae_config() -> dict:
+    """Overrides turning the 2.2 config into the Wan 2.1 16ch codec."""
+    return dict(base_dim=96, decoder_base_dim=96, z_dim=16,
+                in_channels=3, out_channels=3, patch_size=1,
+                temperal_downsample=[False, True, True],
+                scale_factor_spatial=8, is_residual=False,
+                compute_dtype=WAN21_COMPUTE_DTYPE,
+                latents_mean=list(_WAN21_LATENTS_MEAN),
+                latents_std=list(_WAN21_LATENTS_STD))
 
 
 class WanNativeVideoVAE(nn.Module):
@@ -365,7 +384,8 @@ class WanNativeVideoVAE(nn.Module):
     The 48ch 2.2 and 16ch 2.1 variants share causal building blocks. The cached decoder
     consumes latent frames individually, emitting one RGB frame for the first
     latent, then four for each subsequent latent. Cache state never crosses
-    separate encode/decode calls. Precision is set at checkpoint load time.
+    separate encode/decode calls. Precision is set at checkpoint load time and
+    recorded on the config as ``compute_dtype``.
     """
     def __init__(self, config: SimpleNamespace):
         super().__init__()
@@ -394,6 +414,10 @@ class WanNativeVideoVAE(nn.Module):
         return next(self.parameters()).dtype
 
     @property
+    def compute_dtype(self) -> torch.dtype:
+        return self.config.compute_dtype
+
+    @property
     def device(self) -> torch.device:
         return next(self.parameters()).device
 
@@ -411,10 +435,7 @@ class WanNativeVideoVAE(nn.Module):
     def encode(self, x: Tensor, return_dict: bool = True):
         if x.ndim != 5 or x.shape[1] != 3 or (x.shape[2] - 1) % 4:
             raise ValueError("Wan VAE expects [B,3,4*n+1,H,W] video")
-        if self.dtype not in (torch.float16, torch.float32):
-            raise RuntimeError("Wan causal video VAE requires FP16 or FP32 weights")
-        self._onload_if_offloaded()
-        self.clear_cache()
+        self._begin()
         try:
             x = _patchify(x.to(dtype=self.dtype), self.config.patch_size)
             moments = []
@@ -428,19 +449,40 @@ class WanNativeVideoVAE(nn.Module):
         finally:
             self.clear_cache()
 
-    def decode(self, z: Tensor, return_dict: bool = True):
-        if z.ndim != 5 or z.shape[1] != self.config.z_dim or z.shape[2] < 1:
-            raise ValueError(f"Wan VAE expects [B,{self.config.z_dim},T,H,W] latent video")
-        if self.dtype not in (torch.float16, torch.float32):
-            raise RuntimeError("Wan causal video VAE requires FP16 or FP32 weights")
+    def _begin(self) -> None:
+        """Enter one encode/decode call: the module's place, then a clean cache."""
+        if self.dtype not in (self.compute_dtype, torch.float32):
+            # FP32 is always allowed: it cannot overflow, it only costs. What is
+            # refused is a precision nobody measured this codec at.
+            raise RuntimeError(
+                f"Wan causal video VAE runs in {self.compute_dtype}, not {self.dtype}"
+            )
         self._onload_if_offloaded()
         self.clear_cache()
+
+    def decode(self, z: Tensor, return_dict: bool = True):
+        out = torch.cat(list(self.decode_frames(z)), dim=2)
+        return DecoderOutput(out) if return_dict else (out,)
+
+    def decode_frames(self, z: Tensor) -> Iterator[Tensor]:
+        """Pixels of each latent frame, handed out as the decoder produces them.
+
+        The causal caches make the decoder sequential whatever it is asked to do, so
+        yielding costs nothing and keeps a few frames alive instead of the clip: a
+        caller that encodes as it goes never allocates ``[3, T, H, W]`` at all.
+        """
+        if z.ndim != 5 or z.shape[1] != self.config.z_dim or z.shape[2] < 1:
+            raise ValueError(f"Wan VAE expects [B,{self.config.z_dim},T,H,W] latent video")
+        self._begin()
+        return self._decode_frames(z)
+
+    def _decode_frames(self, z: Tensor) -> Iterator[Tensor]:
         try:
             x = self.post_quant_conv(z.to(dtype=self.dtype))
-            frames = [self.decoder(x[:, :, i:i + 1], self._feat_map, [0], first_chunk=(i == 0))
-                      for i in range(x.shape[2])]
-            out = _unpatchify(torch.cat(frames, dim=2), self.config.patch_size).clamp(-1.0, 1.0)
-            return DecoderOutput(out) if return_dict else (out,)
+            for i in range(x.shape[2]):
+                chunk = self.decoder(x[:, :, i:i + 1], self._feat_map, [0],
+                                     first_chunk=(i == 0))
+                yield _unpatchify(chunk, self.config.patch_size).clamp(-1.0, 1.0)
         finally:
             self.clear_cache()
 
@@ -453,16 +495,10 @@ def load_wan_native_video_vae(
     model_dir: str | Path, *, check_cancel: Callable[[], None] | None = None,
     _test_config: dict | None = None, wan21: bool = False,
 ) -> WanNativeVideoVAE:
-    """Load Wan 2.1 in FP16 and preserve Wan 2.2 TI2V-5B FP32 precision."""
-    compute_dtype = torch.float16 if wan21 else torch.float32
+    """Load a Wan video VAE at its own ``compute_dtype``: FP16 for the 2.1 16ch
+    codec, BF16 for the 2.2 48ch one (see ``vae.wan22.COMPUTE_DTYPE``)."""
     if wan21:
-        overrides = dict(base_dim=96, decoder_base_dim=96, z_dim=16,
-                         in_channels=3, out_channels=3, patch_size=1,
-                         temperal_downsample=[False, True, True],
-                         scale_factor_spatial=8, is_residual=False,
-                         latents_mean=list(_WAN21_LATENTS_MEAN),
-                         latents_std=list(_WAN21_LATENTS_STD))
-        cfg = _comfy_vae_config(overrides | (_test_config or {}))
+        cfg = _comfy_vae_config(_wan21_vae_config() | (_test_config or {}))
         checkpoint = find_weight_file(model_dir, "vae", ("wan_2.1_vae.safetensors",))
         mapper = lambda key: wan_vae21_key(key, num_res_blocks=cfg.num_res_blocks)
     else:
@@ -474,7 +510,7 @@ def load_wan_native_video_vae(
     if check_cancel:
         check_cancel()
     load_mapped_safetensors(
-        model, checkpoint, mapper, dtype_for=lambda _: compute_dtype,
+        model, checkpoint, mapper, dtype_for=lambda _: cfg.compute_dtype,
         check_cancel=check_cancel, label="Wan VAE",
     )
     model.clear_cache()

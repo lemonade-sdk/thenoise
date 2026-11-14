@@ -17,6 +17,8 @@ from thenoise.memory import MemoryManager
 from thenoise.models.lora_support import LoRASupport
 from thenoise.models.config import ModelConfig
 from thenoise.utils.device import release_device_memory
+from thenoise.utils.device_patches import apply_device_patches
+from thenoise.utils.dynamo import apply_recompile_limit
 from thenoise.video.jobs import Cancellation
 from thenoise.video.spec import ResolvedVideo, VideoSpec
 
@@ -36,6 +38,9 @@ class VideoModel(LoRASupport, ABC):
         self.device = torch.device(config.device)
         self.offload_device = torch.device(config.offload_device)
         self.memory = MemoryManager(self.device, self.offload_device)
+
+        apply_recompile_limit()
+        apply_device_patches(self.device)
 
     @staticmethod
     @abstractmethod

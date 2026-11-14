@@ -424,6 +424,16 @@ def test_an_int8_bank_stays_int8():
     assert bank.expert_weight(0).shape == (32, 64)
 
 
+def test_an_int8_bank_declines_a_calibrated_input_scale():
+    """The loader offers ``load_quantized(qt, *, input_scale=None)`` to every quantized
+    module; a bank has no activation path to apply one to, so it refuses rather than
+    dropping a scale the checkpoint believed in.
+    """
+    bank = ExpertBank(2, 32, 64).eval().requires_grad_(False)
+    with pytest.raises(RuntimeError, match="cannot carry a calibrated input scale"):
+        bank.load_quantized(_int8_bank(bank), input_scale=torch.tensor(0.5))
+
+
 def test_the_expert_view_is_a_view_and_only_loses_one_step():
     """``expert_weight`` must never materialise the bank: it shares its storage, so a
     per-expert GEMM costs nothing extra however big the bank is.
