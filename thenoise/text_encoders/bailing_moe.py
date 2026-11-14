@@ -62,7 +62,6 @@ class BailingAttention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
-        kv_dim = self.num_kv_heads * self.head_dim
         # ``query_key_value``/``dense`` are the checkpoint's own names.
         self.query_key_value = QuantizedLinear(
             config.hidden_size, (self.num_heads + 2 * self.num_kv_heads) * self.head_dim, bias=False
@@ -114,8 +113,12 @@ class ExpertBank(nn.Module):
         nn.init.uniform_(self.weight, -bound, bound)
         self._quantized = False
 
-    def load_quantized(self, qt: torch.Tensor) -> None:
+    def load_quantized(
+        self, qt: torch.Tensor, *, input_scale: torch.Tensor | None = None
+    ) -> None:
         """Switch this bank to a low-bit weight of any layout (and stay low-bit)."""
+        if input_scale is not None:
+            raise RuntimeError("a quantized expert bank cannot carry a calibrated input scale")
         del self.weight  # free the full-precision bank
         self.register_buffer("weight", qt)
         self._quantized = True

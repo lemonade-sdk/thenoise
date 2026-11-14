@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from pathlib import Path
 from typing import Optional
 
 import torch
@@ -41,12 +42,15 @@ from thenoise.models import (  # noqa: E402
     MossImageModel,
     QwenImageModel,
     QwenImage21Model,
+    VideoModel,
+    Wan22Model,
     ZImageModel,
 )
 from thenoise.models.base import Conditioning, DiffusionModel  # noqa: E402
 from thenoise.models.config import ModelConfig, SamplingParams  # noqa: E402
 from thenoise.samplers import Step  # noqa: E402
 from thenoise.upscale import LatentUpscaler  # noqa: E402
+from thenoise.utils.lora_roles import DEFAULT_LORA_ROLE  # noqa: E402
 from thenoise.vae import AutoencoderKLFlux2  # noqa: E402
 
 
@@ -77,6 +81,172 @@ def write_key_checkpoint(path, keys) -> str:
     Detection reads names only, so the values never matter.
     """
     return write_safetensors(path, {k: torch.zeros(1) for k in keys})
+
+
+# ------------------------------------------------------------------ Wan 2.2 helpers
+
+#: The inverse of ``wan_dit_key``: this repository's module paths back to the names a
+#: Comfy-Org Wan checkpoint carries.
+_WAN_RAW_KEYS = {
+    "condition_embedder.text_linear_1.": "text_embedding.0.",
+    "condition_embedder.text_linear_2.": "text_embedding.2.",
+    "condition_embedder.time_linear_1.": "time_embedding.0.",
+    "condition_embedder.time_linear_2.": "time_embedding.2.",
+    "condition_embedder.time_proj.": "time_projection.1.",
+    "proj_out.": "head.head.",
+    "norm_out.": "head.norm.",
+    "scale_shift_table": "head.modulation",
+}
+
+_WAN_RAW_BLOCK_KEYS = (
+    ("attn1.to_q.", "self_attn.q."), ("attn1.to_k.", "self_attn.k."),
+    ("attn1.to_v.", "self_attn.v."), ("attn1.to_out.", "self_attn.o."),
+    ("attn1.norm_q.", "self_attn.norm_q."), ("attn1.norm_k.", "self_attn.norm_k."),
+    ("attn2.to_q.", "cross_attn.q."), ("attn2.to_k.", "cross_attn.k."),
+    ("attn2.to_v.", "cross_attn.v."), ("attn2.to_out.", "cross_attn.o."),
+    ("attn2.norm_q.", "cross_attn.norm_q."), ("attn2.norm_k.", "cross_attn.norm_k."),
+    ("ffn_in.", "ffn.0."), ("ffn_out.", "ffn.2."),
+)
+
+
+def wan_raw_key(key: str) -> str:
+    """One module path as a Wan checkpoint would spell it.
+
+    ComfyUI's ``norm2`` is the FFN norm and ``norm3`` the cross-attention one, the
+    reverse of this repository's, and a block's modulation table is its
+    ``scale_shift_table``.
+    """
+    for dest, src in _WAN_RAW_KEYS.items():
+        if key.startswith(dest):
+            return src + key[len(dest):]
+    if not key.startswith("blocks."):
+        return key
+    head, suffix = ".".join(key.split(".", 2)[:2]) + ".", key.split(".", 2)[2]
+    if suffix == "scale_shift_table":
+        return head + "modulation"
+    if suffix.startswith("norm2."):
+        return head + "norm3." + suffix[len("norm2."):]
+    for dest, src in _WAN_RAW_BLOCK_KEYS:
+        if suffix.startswith(dest):
+            return head + src + suffix[len(dest):]
+    return key
+
+
+def wan_tiny_params(channels: int = 48):
+    """A Wan transformer small enough to build in a test.
+
+    Still legal geometry for ``detect_params``: one 128-wide head, two blocks.
+    """
+    from thenoise.dit.wan_video.model import Wan22Params
+
+    return Wan22Params(in_channels=channels, out_channels=channels, dim=128,
+                       num_layers=2, ffn_dim=256, freq_dim=32, text_dim=32,
+                       patch_size=(1, 2, 2))
+
+
+def write_wan_dit(path, *, channels: int = 48) -> str:
+    """Write a tiny but shape-valid Wan 2.2 DiT under Comfy-Org's key names.
+
+    Anything that asks a transformer how big it is needs real shapes in the header, so
+    a throwaway file of zero scalars will not do.
+    """
+    from thenoise.dit.wan_video.model import WanNativeDiT
+
+    with torch.random.fork_rng():
+        torch.manual_seed(123)
+        source = WanNativeDiT(wan_tiny_params(channels))
+    with torch.no_grad():
+        for parameter in source.parameters():
+            parameter.uniform_(-0.1, 0.1)
+    return write_safetensors(path, {
+        wan_raw_key(name): value.detach().half().contiguous()
+        for name, value in source.state_dict().items()
+    })
+
+
+def write_wan_vae(path, *, channels: int = 48) -> str:
+    """Write a file whose header claims a Wan codec of that latent width.
+
+    The encoder output conv is the only entry in it, because that is all
+    `detect_latent_width` reads; the codec itself is stubbed by whoever points here.
+    """
+    return write_safetensors(path, {
+        "encoder.head.2.weight": torch.zeros(2 * channels, 1, 1, 1, 1),
+    })
+
+
+def stub_wan_components(channels: int = 48):
+    """Stand-ins for the two components a Wan adapter loads and a policy test never touches.
+
+    An adapter loads what it is pointed at as it is built, like every image adapter, so
+    even a test that only asks it about requests or LoRA names has to answer the loads.
+    The transformer is not stubbed: its header says which variant this is, which is what
+    most of these tests are really asking.
+    """
+    from thenoise.vae.wan_video import TEMPORAL_COMPRESSION
+
+    class VAE(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+            self.z_dim = channels
+            self.temporal_compression = TEMPORAL_COMPRESSION
+            # The 2.1 family halves the spatial factor of its still-image codec.
+            self.spatial_compression = 16 if channels == 48 else 8
+
+        @property
+        def dtype(self):
+            return self.weight.dtype
+
+    class Text(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(1))
+
+    class Tokenizer:
+        def encode(self, prompt):
+            return (torch.ones(1, 4, dtype=torch.long),
+                    torch.ones(1, 4, dtype=torch.bool))
+
+    return (lambda _path, _device: VAE(),
+            lambda _path, _device: (Text(), Tokenizer()))
+
+
+def wan_adapter(variant: str = "ti2v_5b"):
+    """A Wan adapter built for real on a throwaway tiny DiT of that variant.
+
+    Enough to ask it about requests, capabilities and schedules: construction reads the
+    DiT header to pick the variant and the codec header to check it pairs, which is what
+    no fake path can do. An adapter loads its components as it is built, so the codec
+    and the text encoder are stood in for here — the transformer is the real one, since
+    its header is what the adapter is being asked about.
+    """
+    import tempfile
+    from unittest.mock import patch
+
+    from thenoise.dit.wan_video.model import CHANNELS
+    from thenoise.models.config import ModelConfig
+    from thenoise.models.wan_video import Wan22Model
+
+    channels = CHANNELS[variant]
+    vae, text_encoder = stub_wan_components(channels)
+    with tempfile.TemporaryDirectory() as work:
+        dit = write_wan_dit(Path(work) / "dit.safetensors", channels=channels)
+        config = ModelConfig(
+            # A two-expert variant is two files; one tiny transformer serves as both.
+            dit_paths=({"": dit} if variant != "t2v_14b" else {"": dit, "low": dit}),
+            vae_path=write_wan_vae(Path(work) / "vae.safetensors", channels=channels),
+            text_encoder_path="", device="cpu", offload_device="cpu")
+        with patch("thenoise.models.wan_video.load_wan_video_vae", vae), \
+             patch("thenoise.models.wan_video.load_wan_text_encoder", text_encoder):
+            return Wan22Model(config=config)
+
+
+def wan_prefs(variant: str = "ti2v_5b") -> dict:
+    """The complete request defaults the given Wan variant resolves against."""
+    from thenoise.models.wan_video import VARIANTS, Wan22Model
+
+    return {**Wan22Model.DEFAULT_PREFS, **VARIANTS[variant].prefs}
 
 
 def comfy_quant(convrot: bool = True, groupsize: int = 256) -> torch.Tensor:
@@ -596,13 +766,22 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "final_layer.audio_out.weight",
         ],
     ),
+    "wan22": (
+        Wan22Model,
+        [
+            "patch_embedding.weight",
+            "blocks.0.self_attn.q.weight",
+            "text_embedding.0.weight",
+        ],
+    ),
     "unknown": (None, ["some.random.key", "blocks.0.attn.gate.weight"]),
 }
 
 KEYSET_IDS = sorted(MODEL_KEYSETS)
 CATALOG_IDS = [cls.name for cls in MODEL_CATALOG]
-# Image-model contracts do not apply to video models with 5D latents.
-IMAGE_CATALOG = [cls for cls in MODEL_CATALOG if not getattr(cls, "VIDEO", False)]
+# The contracts only the image medium answers to: a latent upscaler, and a sampler in
+# the class defaults (a video variant carries its own recipe, layered at resolve time).
+IMAGE_CATALOG = [cls for cls in MODEL_CATALOG if not issubclass(cls, VideoModel)]
 IMAGE_CATALOG_IDS = [cls.name for cls in IMAGE_CATALOG]
 
 
@@ -632,6 +811,65 @@ class StubLatentUpscaler(LatentUpscaler):
             dtype=latents.dtype,
             device=latents.device,
         )
+
+
+class StubVideo(VideoModel):
+    """A weight-free video adapter: enough of a codec and a DiT to drive a controller.
+
+    Its latent is the canonical 5D form, ``[1, 4, T, H/8, W/8]``, at a temporal
+    compression of 4 and one frame decoded per latent frame. Kernels answer zero, so a
+    test sees orchestration — staging, progress, cancellation, teardown — without maths.
+    """
+
+    name = "stub-video"
+    DEFAULT_PREFS = {**VideoModel.DEFAULT_PREFS, "width": 64, "height": 64,
+                     "frames": 5, "fps": 8, "steps": 2, "guidance_scale": 1.0,
+                     "sampler": "euler"}
+    Z_DIM = 4
+    SCALE = 8
+
+    def __init__(self, *, config):
+        super().__init__(config=config)
+        self.dit = torch.nn.Linear(1, 1)
+        self.calls = Counter()
+
+    @staticmethod
+    def detect(_checkpoint):
+        return False
+
+    def _create_upscaler(self):
+        raise NotImplementedError(f"{self.name} has no latent upscaler")
+
+    def _clear_weights(self):
+        self.dit = None
+
+    def encode_prompt(self, args):
+        self.calls["encode_prompt"] += 1
+        return Conditioning(cond=torch.zeros(1, 2, 4),
+                            null=torch.zeros(1, 2, 4) if args.guidance_scale > 1 else None)
+
+    def init_latents(self, params):
+        self.calls["init_latents"] += 1
+        return torch.zeros(1, self.Z_DIM, (params.frames - 1) // 4 + 1,
+                           params.height // self.SCALE, params.width // self.SCALE)
+
+    def schedule(self, params):
+        grid = torch.linspace(1.0, 0.0, params.steps + 1)
+        return [Step(t=grid[i], delta=grid[i] - grid[i + 1]) for i in range(params.steps)]
+
+    def denoise_step(self, latents, t, cond, guidance_scale, i):
+        self.calls["denoise_step"] += 1
+        return torch.zeros_like(latents)
+
+    def encode_reference(self, pixels):
+        self.calls["encode_reference"] += 1
+        return torch.zeros(1, self.Z_DIM, 1, pixels.shape[-2] // self.SCALE,
+                           pixels.shape[-1] // self.SCALE)
+
+    def decode_frames(self, latents):
+        for _ in range(latents.shape[2]):
+            yield torch.zeros(3, latents.shape[3] * self.SCALE,
+                              latents.shape[4] * self.SCALE)
 
 
 class StubModel(DiffusionModel):
@@ -669,7 +907,7 @@ class StubModel(DiffusionModel):
         super().__init__(
             config=config
             or ModelConfig(
-                dit_path="dit", vae_path="vae", text_encoder_path="te",
+                dit_paths={"": "dit"}, vae_path="vae", text_encoder_path="te",
                 offload_device="cpu", device="cpu", dtype=torch.float32, lora_dir=lora_dir,
             )
         )
@@ -736,10 +974,10 @@ class StubModel(DiffusionModel):
         h, w = latents.shape[-2:]
         return torch.zeros(3, h * self._VAE_SCALE, w * self._VAE_SCALE)
 
-    def switch_loras(self, lora_specs, dit):
+    def switch_loras(self, lora_specs, module, role=DEFAULT_LORA_ROLE):
         self.calls["switch_loras"] += 1
         self.lora_switches.append(list(lora_specs) if lora_specs else None)
-        return super().switch_loras(lora_specs, dit)
+        return super().switch_loras(lora_specs, module, role)
 
     def _create_upscaler(self) -> LatentUpscaler:
         return StubLatentUpscaler(self.UPSCALE_SCALE)
@@ -804,6 +1042,10 @@ def fake_model_cls():
             "name": name,
             "__init__": __init__,
             "detect": staticmethod(lambda f: False),
+            # A catalog entry answers for its own DiT files and releases its own state;
+            # these stand-ins have no opinions, and the adapter tests cover the real hooks.
+            "validate_paths": classmethod(lambda cls, dit_paths: None),
+            "unload": lambda self: None,
             # A model that declares no capability; tests override it via ``**attrs``.
             "CAPABILITIES": {},
             **attrs,

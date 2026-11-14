@@ -1,26 +1,22 @@
 """Central quant-aware checkpoint loaders.
 
-``load_dit`` loads a complete checkpoint for standard image models.
-``load_mapped_safetensors`` streams oversized models, VAEs and encoders one
-tensor at a time while reusing the same quantized layout builders.
+``load_dit`` and ``load_text_encoder_weights`` read a whole checkpoint, decide
+quantized or not from the file's own header, and assign it to a module built on meta.
 """
 from __future__ import annotations
 
 import dataclasses
 import json
 import logging
-from pathlib import Path
-from typing import Callable, Collection, Optional, Union
+from typing import Callable, Optional, Union
 
 import torch
-from safetensors import safe_open
 
 from comfy_kitchen.tensor import QuantizedTensor
 from comfy_kitchen.tensor.int8 import TensorWiseINT8Layout
 from comfy_kitchen.tensor.fp8 import TensorCoreFP8Layout
 
 from thenoise.utils.checkpoint import CHECKPOINT_MARKER_KEYS
-from thenoise.utils.checkpoint_weights import load_mapped_weights, validated_key_map
 from thenoise.utils.safetensors import (
     MemoryEfficientSafeOpen,
     WRAP_PREFIXES,
@@ -33,10 +29,14 @@ from thenoise.utils.setup_logging import setup_logging
 setup_logging()
 logger = logging.getLogger(__name__)
 
-# ComfyUI's quantized exporter: per-weight scale, and a U8 JSON marker recording
-# the layer's quantization profile.
-_WEIGHT_SCALE_SUFFIX = ".weight_scale"
+# ComfyUI's quantized exporter: per-weight scale, a calibrated per-activation scale
+# for FP8 layers, and a U8 JSON marker recording the layer's quantization profile.
+# Both spellings of each scale appear in the wild.
+_WEIGHT_SCALE_SUFFIXES = (".weight_scale", ".scale_weight")
+_INPUT_SCALE_SUFFIXES = (".scale_input", ".input_scale")
+_WEIGHT_SCALE_SUFFIX = _WEIGHT_SCALE_SUFFIXES[0]
 _COMFY_QUANT_SUFFIX = ".comfy_quant"
+_SCALED_FP8_MARKER = "scaled_fp8"
 
 RUNTIME_STATE_SUFFIXES: tuple[str, ...] = (".comfy_attention.config",)
 
@@ -85,6 +85,64 @@ for _name, _header in (("float8_e4m3fn", "F8_E4M3"), ("float8_e5m2", "F8_E5M2"))
         _QUANT_FORMATS[getattr(torch, _name)] = (_header, _build_fp8_qt)
 _QUANT_DTYPES = tuple(_QUANT_FORMATS)
 _QUANT_HEADER_DTYPES = {header for header, _ in _QUANT_FORMATS.values()}
+# FP8 is the only scheme exported with a calibrated activation scale, because its
+# range (not its precision) is what the scale buys.
+_FP8_DTYPES = tuple(dtype for dtype in _QUANT_FORMATS if dtype is not torch.int8)
+_FP8_HEADER_DTYPES = {_QUANT_FORMATS[dtype][0] for dtype in _FP8_DTYPES}
+
+
+def _strip_suffix(key: str, suffixes: tuple[str, ...]) -> Optional[str]:
+    """The part of ``key`` before one of ``suffixes``, or None if it has none."""
+    for suffix in suffixes:
+        if key.endswith(suffix):
+            return key[: -len(suffix)]
+    return None
+
+
+def _is_scaled_fp8_marker(key: str) -> bool:
+    """True for the checkpoint-level FP8 payload, wherever it is nested."""
+    return key == _SCALED_FP8_MARKER or key.endswith("." + _SCALED_FP8_MARKER)
+
+
+def _scaled_fp8_disables_activation_scale(payload: torch.Tensor) -> bool:
+    """ComfyUI's two-value legacy ``scaled_fp8`` payload marks a checkpoint whose
+    matmuls were exported to run in full precision."""
+    return payload.numel() == 2
+
+
+def _is_input_scale_valid(scale: torch.Tensor) -> bool:
+    """A calibrated activation scale is one finite positive number."""
+    flat = scale.detach().to(torch.float32).reshape(-1)
+    return flat.numel() == 1 and bool(torch.isfinite(flat).all()) and bool((flat > 0).all())
+
+
+def _activation_scale(
+    scale: Optional[torch.Tensor], marker: dict, full_precision_mm: bool
+) -> Optional[torch.Tensor]:
+    """The activation scale to install on a layer, or None.
+
+    A full-precision-matmul export disables it checkpoint-wide or per layer, and a
+    stored scale then has to be ignored rather than trusted.
+    """
+    if scale is None or full_precision_mm or marker.get("full_precision_matrix_mult"):
+        return None
+    return scale
+
+
+def _map_keys(state_dict: dict, key_map: Callable[[str], str], path: str) -> dict:
+    """Apply ``key_map``, refusing a map under which two keys collide.
+
+    A dict comprehension silently keeps the last of two keys that land on one module
+    path, and the strict load afterwards cannot tell that from a checkpoint that never
+    had the parameter.
+    """
+    mapped = {key_map(key): value for key, value in state_dict.items()}
+    if len(mapped) != len(state_dict):
+        raise RuntimeError(
+            f"{path}: {len(state_dict) - len(mapped)} of {len(state_dict)} checkpoint "
+            "keys map onto the same module parameter"
+        )
+    return mapped
 
 
 def load_text_encoder_weights(
@@ -118,7 +176,7 @@ def load_text_encoder_weights(
     if drop_keys:
         sd = {k: v for k, v in sd.items() if not k.startswith(drop_keys)}
     if key_map is not None:
-        sd = {key_map(k): v for k, v in sd.items()}
+        sd = _map_keys(sd, key_map, path)
 
     if is_quantized_checkpoint(path):
         load_quantized_state_dict(model, sd, dtype=dtype)
@@ -175,7 +233,7 @@ def load_dit(
     if drop_keys:
         sd = {k: v for k, v in sd.items() if not k.startswith(drop_keys)}
     if key_map is not None:
-        sd = {key_map(k): v for k, v in sd.items()}
+        sd = _map_keys(sd, key_map, path)
     if value_map is not None:
         sd = {nk: nv for nk, nv in (value_map(k, v) for k, v in sd.items())}
     if state_map is not None:
@@ -196,138 +254,6 @@ def load_dit(
     # Includes buffers (e.g. RoPE) not present in the checkpoint.
     model.to(device)
     return model
-
-
-def load_mapped_safetensors(
-    model: torch.nn.Module,
-    path: str | Path,
-    key_map: Callable[[str], str],
-    *,
-    dtype_for: Callable[[str], torch.dtype],
-    excluded: Collection[str] = (),
-    check_cancel: Callable[[], None] | None = None,
-    label: str = "checkpoint",
-    quantized: bool = False,
-) -> None:
-    """Strict, streaming load for huge checkpoints with model-specific key mapping.
-
-    Unlike ``load_safetensors``/``load_dit`` (which create a whole state dict),
-    the safetensors reader exposes one tensor at a time, avoiding an additional
-    whole-model state dict. The same float loader is shared by DiTs, VAEs
-    and text encoders; quantized metadata uses the existing layout builders.
-    """
-    # Keep CPU checkpoint weights file-backed; avoid copying them into
-    # anonymous RAM through the NumPy reader.
-    with safe_open(str(path), framework="pt", device="cpu") as source:
-        if quantized:
-            _load_mapped_quantized(source, model, key_map, dtype_for, excluded,
-                                   check_cancel, label)
-        else:
-            load_mapped_weights(
-                source, model, key_map, dtype_for=dtype_for, excluded=excluded,
-                check_cancel=check_cancel, label=label,
-            )
-    logger.info("Loaded %s checkpoint from %s", label, path)
-
-
-def _load_mapped_quantized(
-    source,
-    model: torch.nn.Module,
-    key_map: Callable[[str], str],
-    dtype_for: Callable[[str], torch.dtype],
-    excluded: Collection[str],
-    check_cancel: Callable[[], None] | None,
-    label: str,
-) -> None:
-    """Stream FP8/INT8 weights with legacy ComfyUI calibration metadata."""
-    # Imports remain local because QuantizedLinear depends on this loader.
-    from thenoise.dit.quantized import QuantizedLinear
-
-    keys = set(source.keys())
-    scales: dict[str, str] = {}
-    input_scales: dict[str, str] = {}
-    profiles: dict[str, str] = {}
-    ignored = set(excluded)
-    for raw in keys - ignored:
-        if raw.endswith((".weight_scale", ".scale_weight")):
-            suffix = ".weight_scale" if raw.endswith(".weight_scale") else ".scale_weight"
-            stem = raw[:-len(suffix)]
-            if stem in scales:
-                raise ValueError(f"{label} duplicate weight scale for {stem}")
-            scales[stem] = raw
-            ignored.add(raw)
-        elif raw.endswith((".scale_input", ".input_scale")):
-            suffix = ".scale_input" if raw.endswith(".scale_input") else ".input_scale"
-            stem = raw[:-len(suffix)]
-            if stem in input_scales:
-                raise ValueError(f"{label} duplicate input scale for {stem}")
-            input_scales[stem] = raw
-            ignored.add(raw)
-        elif raw.endswith(".comfy_quant"):
-            stem = raw[:-len(".comfy_quant")]
-            profiles[stem] = raw
-            ignored.add(raw)
-
-    markers = {k for k in keys - ignored
-               if unwrap_key(k).removeprefix("diffusion_model.") == "scaled_fp8"}
-    if len(markers) > 1:
-        raise ValueError(f"{label} duplicate scaled_fp8 markers")
-    ignored.update(markers)
-    full_precision_mm = bool(markers and source.get_tensor(next(iter(markers))).numel() == 2)
-
-    expected = {key: tuple(value.shape) for key, value in model.state_dict().items()}
-    mapped = validated_key_map(keys - ignored, key_map, set(expected))
-    quantized_weights: set[str] = set()
-    for raw, key in mapped.items():
-        entry = source.get_slice(raw)
-        if tuple(entry.get_shape()) != expected[key]:
-            raise ValueError(f"{label} shape mismatch: {raw} -> {key}")
-        kind = entry.get_dtype()
-        if kind in ("F8_E4M3", "F8_E5M2", "I8"):
-            if not raw.endswith(".weight") or raw[:-7] not in scales:
-                raise ValueError(f"{label} quantized weight without scale: {raw}")
-            if not isinstance(model.get_submodule(key[:-7]), QuantizedLinear):
-                raise ValueError(f"{label} quantized non-linear unsupported: {raw}")
-            quantized_weights.add(raw)
-        elif kind not in ("F16", "BF16", "F32"):
-            raise ValueError(f"{label} unsupported tensor dtype: {raw}: {kind}")
-    for stem in scales:
-        if stem + ".weight" not in quantized_weights:
-            raise ValueError(f"{label} orphan weight scale: {stem}")
-    for stem in (*input_scales, *profiles):
-        if stem + ".weight" not in quantized_weights:
-            raise ValueError(f"{label} orphan quantized metadata: {stem}")
-
-    calibrated: dict[str, torch.Tensor] = {}
-    for stem, raw in input_scales.items():
-        weight_raw = stem + ".weight"
-        if source.get_slice(weight_raw).get_dtype() not in ("F8_E4M3", "F8_E5M2"):
-            raise ValueError(f"{label} FP8 input scale on non-FP8 weight: {raw}")
-        scale = source.get_tensor(raw).float()
-        if scale.numel() != 1 or not torch.isfinite(scale).all() or not (scale > 0).all():
-            raise ValueError(f"{label} invalid FP8 input scale: {raw}")
-        calibrated[stem] = scale.reshape(())
-
-    for i, (raw, key) in enumerate(sorted(mapped.items())):
-        if check_cancel is not None and i % 8 == 0:
-            check_cancel()
-        tensor = source.get_tensor(raw)
-        if raw in quantized_weights:
-            stem = raw[:-7]
-            marker = (_parse_comfy_quant(source.get_tensor(profiles[stem]))
-                      if stem in profiles else {})
-            activation_scale = calibrated.get(stem)
-            if full_precision_mm or marker.get("full_precision_matrix_mult"):
-                activation_scale = None
-            model.get_submodule(key[:-7]).load_quantized(
-                _build_quantized_tensor(tensor, source.get_tensor(scales[stem]), marker, raw),
-                input_scale=activation_scale,
-            )
-        else:
-            model.load_state_dict({key: tensor.to(dtype=dtype_for(key))},
-                                  strict=False, assign=True)
-    if any(p.is_meta for p in model.parameters()):
-        raise RuntimeError(f"{label} checkpoint contains unloaded meta parameters")
 
 
 def _load_bf16(
@@ -360,8 +286,11 @@ def _load_bf16(
 def is_quantized_checkpoint(dit_path: str) -> bool:
     """Return True if ``dit_path`` is a quantized (INT8 or FP8) checkpoint.
 
-    Looks for any ``.weight_scale`` key in the safetensors header (after stripping
-    generic repackaging wrapper prefixes); reads the header only.
+    Looks for any weight-scale key in the safetensors header (after stripping
+    generic repackaging wrapper prefixes); reads the header only. Both spellings
+    count: ComfyUI's quantizer wrote ``.scale_weight`` before it wrote
+    ``.weight_scale``, and missing the older one would read a low-bit file as if it
+    were BF16.
     """
     with MemoryEfficientSafeOpen(dit_path) as f:
         for key in f.keys():
@@ -369,7 +298,7 @@ def is_quantized_checkpoint(dit_path: str) -> bool:
                 if key.startswith(prefix):
                     key = key[len(prefix):]
                     break
-            if key.endswith(_WEIGHT_SCALE_SUFFIX):
+            if _strip_suffix(key, _WEIGHT_SCALE_SUFFIXES) is not None:
                 return True
     return False
 
@@ -391,6 +320,30 @@ def _parse_comfy_quant(tensor: torch.Tensor) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def _is_quant_metadata(key: str) -> bool:
+    """True for the checkpoint keys that describe a quantized layer instead of being one."""
+    return (
+        _strip_suffix(key, _WEIGHT_SCALE_SUFFIXES) is not None
+        or _strip_suffix(key, _INPUT_SCALE_SUFFIXES) is not None
+        or key.endswith(_COMFY_QUANT_SUFFIX)
+        or _is_scaled_fp8_marker(key)
+    )
+
+
+def _take_input_scale(
+    module_path: str, input_scales: dict[str, torch.Tensor], weight: torch.Tensor, key: str
+) -> Optional[torch.Tensor]:
+    """Claim and check the calibrated activation scale stored for one quantized layer."""
+    scale = input_scales.pop(module_path, None)
+    if scale is None:
+        return None
+    if weight.dtype not in _FP8_DTYPES:
+        raise RuntimeError(f"FP8 input scale on non-FP8 weight: {key!r}")
+    if not _is_input_scale_valid(scale):
+        raise RuntimeError(f"invalid FP8 input scale: {key!r}")
+    return scale.detach().to(torch.float32).reshape(())
+
+
 def load_quantized_state_dict(
     model: torch.nn.Module,
     state_dict: dict[str, torch.Tensor],
@@ -403,35 +356,51 @@ def load_quantized_state_dict(
     other leaf parameter is replaced with the loaded tensor, cast to ``dtype`` when
     given (quantized kernels emit BF16, so full-precision params must match).
 
+    A calibrated FP8 ``.scale_input`` goes to the same ``load_quantized`` call, so
+    the whole-state and streaming loaders honour activation scaling identically.
+
     The per-layer ``.comfy_quant`` JSON marker is carried into the
     ``QuantizedTensor`` so each module rotates activations with the exact group size
     it was quantized at, and only when the layer was actually ConvRot-rotated.
 
     ``state_dict`` must already have generic wrapper prefixes stripped.
     """
-    # A low-bit ``.weight`` needs its ``.weight_scale``, and dict order does not
-    # guarantee the scale comes first.
+    # A low-bit ``.weight`` needs its scale siblings, and dict order does not
+    # guarantee they come first.
     scales: dict[str, torch.Tensor] = {}
-    for key, tensor in state_dict.items():
-        if key.endswith(_WEIGHT_SCALE_SUFFIX):
-            scales[key[: -len(_WEIGHT_SCALE_SUFFIX)]] = tensor
-
+    input_scales: dict[str, torch.Tensor] = {}
     markers: dict[str, dict] = {}
+    full_precision_mm = False
     for key, tensor in state_dict.items():
-        if key.endswith(_COMFY_QUANT_SUFFIX):
+        stem = _strip_suffix(key, _WEIGHT_SCALE_SUFFIXES)
+        if stem is not None:
+            if stem in scales:
+                raise RuntimeError(f"duplicate weight scale for {stem!r}")
+            scales[stem] = tensor
+        elif (stem := _strip_suffix(key, _INPUT_SCALE_SUFFIXES)) is not None:
+            input_scales[stem] = tensor
+        elif key.endswith(_COMFY_QUANT_SUFFIX):
             markers[key[: -len(_COMFY_QUANT_SUFFIX)]] = _parse_comfy_quant(tensor)
+        elif _is_scaled_fp8_marker(key):
+            full_precision_mm = _scaled_fp8_disables_activation_scale(tensor)
 
     for key, tensor in state_dict.items():
-        if key.endswith(_WEIGHT_SCALE_SUFFIX) or key.endswith(_COMFY_QUANT_SUFFIX):
+        if _is_quant_metadata(key):
             continue
         module_path, _, attr = key.rpartition(".")
         module = _submodule(model, module_path, key)
         if attr == "weight" and tensor.dtype in _QUANT_DTYPES:
+            activation_scale = _activation_scale(
+                _take_input_scale(module_path, input_scales, tensor, key),
+                markers.get(module_path, {}),
+                full_precision_mm,
+            )
             _switch_to_quantized(
                 module,
                 _build_quantized_tensor(tensor, scales.pop(module_path, None), markers.get(module_path, {}), key),
                 key,
                 dtype,
+                activation_scale,
             )
         elif isinstance(getattr(module, attr, None), torch.nn.Parameter):
             # ``set_data`` rejects meta params and dtype mismatches.
@@ -450,6 +419,16 @@ def load_quantized_state_dict(
         raise RuntimeError(
             f"orphan {_WEIGHT_SCALE_SUFFIX} keys in quantized checkpoint: {list(scales)[:5]}"
         )
+    if input_scales:
+        raise RuntimeError(
+            f"orphan {_INPUT_SCALE_SUFFIXES[0]} keys in quantized checkpoint: "
+            f"{list(input_scales)[:5]}"
+        )
+    # A parameter still on meta is a weight the checkpoint never carried: the
+    # state-dict walk above only sees what the file has.
+    if any(p.is_meta for p in model.parameters()):
+        missing = [n for n, p in model.named_parameters() if p.is_meta]
+        raise RuntimeError(f"checkpoint leaves {len(missing)} parameters unloaded: {missing[:5]}")
 
 
 def _build_quantized_tensor(
@@ -476,16 +455,23 @@ def _build_quantized_tensor(
 
 
 def _switch_to_quantized(
-    module: torch.nn.Module, qt: QuantizedTensor, key: str, dtype: Optional[torch.dtype]
+    module: torch.nn.Module,
+    qt: QuantizedTensor,
+    key: str,
+    dtype: Optional[torch.dtype],
+    input_scale: Optional[torch.Tensor] = None,
 ) -> None:
     """Put a quantized weight on ``module``: quantized if it can run one, else dequantized.
 
+    A quantized weight goes to any module speaking the loader's
+    ``load_quantized(qt, *, input_scale=None)`` protocol.
+
     A quantized **embedding** is the one other thing a text-encoder export stores; a
     row gather cannot run on a quantized table, so it is dequantized into the compute
-    dtype.
+    dtype — and has no GEMM left for an activation scale to calibrate.
     """
     if hasattr(module, "load_quantized"):
-        module.load_quantized(qt)
+        module.load_quantized(qt, input_scale=input_scale)
         return
     if isinstance(module, torch.nn.Embedding):
         weight = qt.dequantize()
@@ -563,7 +549,9 @@ def restore_quantized_layer(
         params=dataclasses.replace(module.weight.params, scale=scale),
         clone_params=False,
     )
-    module.load_quantized(qt)
+    # The activation scale belongs to the checkpoint's export, not to this layer's
+    # history: restoring the weight must not silently drop it.
+    module.load_quantized(qt, input_scale=getattr(module, "input_scale", None))
 
 
 __all__ = [

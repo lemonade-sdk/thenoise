@@ -18,9 +18,9 @@ from typing import Callable, Optional
 
 from .spec import ResolvedVideo, VideoSpec
 
-log = logging.getLogger("uvicorn.error")
+logger = logging.getLogger(__name__)
 
-# Only delete generated cache files, never unrelated files in --video-cache-dir.
+# Only delete generated cache files, never unrelated files beside them.
 _VIDEO_CACHE_NAME = re.compile(r"(?:sync_|vid_)[0-9a-f]{32}\.(?:mp4|webm)\Z")
 
 
@@ -148,7 +148,7 @@ class VideoJobs:
                                                 daemon=True)
                 self._worker.start()
             self._lock.notify()
-            log.info("Video %s queued (%s, %d frames, %dx%d)",
+            logger.info("Video %s queued (%s, %d frames, %dx%d)",
                      job.id, job.resolved["mode"], spec.frame_count, spec.width, spec.height)
             return job.snapshot()
 
@@ -194,7 +194,7 @@ class VideoJobs:
         # Raw I2V inputs may be 15 MiB each; do not retain them for the whole
         # history window after the renderer (or a queued cancellation) ends.
         job.spec = None
-        log.info("Video %s %s%s", job.id, status,
+        logger.info("Video %s %s%s", job.id, status,
                  f" ({job.target})" if status == "completed" else "")
 
     def _work(self) -> None:
@@ -210,7 +210,7 @@ class VideoJobs:
                 job.status = "running"
                 job.started_at = _now()
                 job.stage = "loading"
-            log.info("Video %s started", job.id)
+            logger.info("Video %s started", job.id)
 
             def progress(stage: str, step: int = 0, total: int = 0) -> None:
                 job.token.check()
@@ -218,7 +218,7 @@ class VideoJobs:
                     changed = job.stage != stage
                     job.stage, job.step, job.of = stage, step, total
                 if changed:
-                    log.info("Video %s: %s", job.id, stage)
+                    logger.info("Video %s: %s", job.id, stage)
 
             try:
                 job.token.check()
@@ -233,7 +233,7 @@ class VideoJobs:
                     if job.token.requested:
                         self._finish(job, "canceled")
                     else:
-                        log.exception("video %s failed", job.id)
+                        logger.exception("video %s failed", job.id)
                         job.error = f"{type(e).__name__}: {e}"
                         self._finish(job, "failed")
             else:

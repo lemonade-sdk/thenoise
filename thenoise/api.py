@@ -10,6 +10,9 @@ import os
 import base64
 from typing import List, Literal, Optional, Union
 
+from thenoise.api_errors import error, guarded
+from thenoise.utils.lora_roles import LoraSpecs
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -67,7 +70,9 @@ class _Text2ImageBody(BaseModel):
     upscale_factor: float = 1.0
     upscale_type: str = "refined"
     sampler: Optional[str] = None
-    lora_specs: Optional[List[str]] = None  # ["filename.safetensors:0.8", ...]
+    # ["filename.safetensors:0.8", ...], or by role on a model with more than one
+    # LoRA-able component: {"dit": [...], "dit_low": [...]}.
+    lora_specs: LoraSpecs = None
     pixel_upscaler: Optional[str] = None  # name (no .safetensors) in upscaler_dir
     kv_cache: Optional[bool] = None  # T2I opt-in, compatible edits auto; null = auto
     ref_method: Optional[str] = None  # reference conditioning (edit only; null = auto)
@@ -210,17 +215,9 @@ def create_app(runtime, *, video_jobs=None, video_model: str = "") -> FastAPI:
         return Response(content=content.getvalue(), media_type="image/png")
 
     def image_job(failure: str, action, out: str):
-        """Run one image-producing request, answering with the image or the failure.
-        A ``ValueError`` is the request's fault (400, echoed); anything else is 500 + log.
-        """
-        try:
-            image = action()
-        except ValueError as e:
-            return Response(status_code=400, content=str(e))
-        except Exception as e:
-            logger.exception("%s failed", failure)
-            return Response(status_code=500, content=f"{failure} failed: {e}")
-        return image_response(image, out)
+        """Run one image-producing request, answering with the image or the failure."""
+        return guarded(failure, action, lambda image: image_response(image, out),
+                   envelope=error)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, exc: RequestValidationError):
@@ -262,12 +259,14 @@ def create_app(runtime, *, video_jobs=None, video_model: str = "") -> FastAPI:
 
     @app.get("/lora")
     def loras():
-        """List available LoRA names (short, no .safetensors suffix)."""
-        pipeline = runtime.pipeline
-        model = pipeline if pipeline is not None else getattr(runtime, "video_model", None)
-        if model is None:
+        """Available LoRA names (short, no .safetensors suffix), plus the component roles
+        a `lora_specs` request may name for the loaded model.
+        """
+        controller = runtime.pipeline
+        if controller is None:
             return Response(status_code=503, content="no model is loaded")
-        return {"loras": model.list_loras()}
+        return {"loras": controller.list_loras(),
+                "roles": sorted(controller.model.lora_components())}
 
     @app.get("/upscalers")
     def upscalers():

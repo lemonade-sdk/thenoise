@@ -66,11 +66,12 @@ New models are added over time. PRs adding model support are welcome.
 
 | Model | Text-to-video | Image-to-video | Details |
 |---|---|---|---|
-| **Wan 2.2 TI2V-5B** | ✓ | ✓ | [wan22](docs/models/wan22.md) |
+| **Wan 2.2 TI2V-5B** | ✓ | ✓ | [wan22](docs/models/wan22.md#ti2v-5b) |
+| **Wan 2.2 T2V-A14B**, one expert per half of the schedule | ✓ | — | [wan22](docs/models/wan22.md#t2v-a14b-two-experts) |
 
 Video requests are supported synchronously (`POST /video`) and through the
 job API (`POST /videos`); see the [HTTP API](docs/api.md#video-generation).
-To animate a still image, follow the [image-to-video example](docs/models/wan22.md#image-to-video-i2v).
+To animate a still image, follow the [image-to-video example](docs/models/wan22.md#image-to-video).
 
 ## How does it compare to ComfyUI?
 
@@ -109,14 +110,6 @@ a warmup run.
 | Fibo 2.0 Turbo Edit · INT8-ConvRot · 4 steps | 9.2s | 35.6s |
 | H3-Image · INT8-ConvRot · 4 steps | 5.3s | 16.7s |
 
-*Video generation (text-to-video):*
-
-| Model and settings | Sampling time | Notes |
-|---|---:|---|
-| Wan 2.2 TI2V-5B, 704×480, 33 frames, UniPC, 8 steps | **28.8 s** | Strix Halo gfx1151, ROCm 10.1; end-to-end T2V completed, total time not recorded |
-
-The video VAE transient peaked at 24.6 GiB above the stage baseline during that run.
-See [Wan 2.2](docs/models/wan22.md) for the full test setup.
 
 *Image + simple instruction to edited image (editing):*
 

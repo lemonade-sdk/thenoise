@@ -11,6 +11,8 @@ import torch
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Union
 
+from thenoise.utils.lora_roles import LoraSpecs
+
 from thenoise.postprocess.options import PostprocessOptions, options_from
 from thenoise.utils.options import declared_knobs
 
@@ -20,16 +22,25 @@ if TYPE_CHECKING:  # pragma: no cover - only for annotations
 
 @dataclass
 class ModelConfig:
-    """Static load-time configuration for a model."""
+    """Static load-time configuration for a model.
 
-    dit_path: str
+    ``dit_paths`` holds the DiT checkpoint(s) by role: ``""`` is the primary one every
+    model takes, and any further role (``"low"`` for a two-expert model) belongs to the
+    adapter that asked for it.
+    """
+
+    dit_paths: dict[str, str]
     vae_path: str
     text_encoder_path: str
     offload_device: str      # where idle weights wait; the compute device offloads nothing
     device: str = "cuda"
     dtype: torch.dtype = torch.bfloat16
     lora_dir: Optional[str] = None
-    dit_low_path: Optional[str] = None
+
+    @property
+    def dit_path(self) -> str:
+        """The primary DiT."""
+        return self.dit_paths[""]
 
 
 @dataclass
@@ -67,7 +78,7 @@ class GenerateRequest:
     upscale_factor: float = 1.0
     upscale_type: str = "refined"
     sampler: Optional[str] = None
-    lora_specs: Optional[List[str]] = None
+    lora_specs: LoraSpecs = None
     pixel_upscaler: Optional[str] = None
     image: Optional[Union[Image.Image, List[Image.Image]]] = None
     # KV cache for supported models; T2I defaults off, editing may auto-enable.
@@ -94,4 +105,16 @@ class SamplingParams:
     kv_cache: bool = False
 
 
-__all__ = ["ModelConfig", "EncodePromptArgs", "GenerateRequest", "SamplingParams"]
+@dataclass(frozen=True)
+class VideoSamplingParams(SamplingParams):
+    """A clip's denoise-stage geometry: the image fields plus how long the clip is.
+
+    ``frames`` is the *resolved* count, already on the codec's temporal grid, because a
+    model seeds ``(frames - 1) / 4 + 1`` latent frames and must not re-derive it.
+    """
+
+    frames: int = 1
+
+
+__all__ = ["ModelConfig", "EncodePromptArgs", "GenerateRequest", "SamplingParams",
+           "VideoSamplingParams"]

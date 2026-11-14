@@ -574,12 +574,12 @@ MODELS: dict[str, ModelSpec] = {
     ),
     "wan22-14b": ModelSpec(
         "wan22-14b", "./models/wan22",
-        "Wan 2.2 T2V-A14B (two experts; FP8-scaled or FP16)",
+        "Wan 2.2 T2V-A14B (two experts; FP16 or FP8-scaled)",
         _wan22_14b_jobs,
         has_int8=False,
         variant_supported=True,
-        variant_choices=("fp8_scaled", "fp16"),
-        default_variant="fp8_scaled",
+        variant_choices=("fp16", "fp8_scaled"),
+        default_variant="fp16",
     ),
     "esrgan": ModelSpec(
         "esrgan", "./models/esrgan",

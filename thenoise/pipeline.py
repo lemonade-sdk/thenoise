@@ -19,7 +19,7 @@ import logging
 import math
 import random
 from dataclasses import dataclass, replace
-from typing import Optional, Sequence, Tuple
+from typing import Mapping, Optional, Sequence, Tuple
 
 import torch
 from PIL import Image
@@ -27,7 +27,7 @@ from PIL import Image
 from thenoise.inference import inference, inference_lock
 from thenoise.models.base import DiffusionModel, Conditioning
 from thenoise.models.config import EncodePromptArgs, GenerateRequest, SamplingParams
-from thenoise.samplers import Step, create_sampler
+from thenoise.samplers import Step, create_sampler, sigma_steps
 from thenoise.samplers.euler import EulerSampler
 from thenoise.upscale.pixel import PixelUpscalerManager
 from thenoise.utils.pipeline_cache import PipelineCache
@@ -39,6 +39,9 @@ from thenoise.utils.image_tensor import (
     resize_to_target,
 )
 from thenoise.postprocess import DECODE, PostprocessOptions, apply_stage
+from thenoise.utils.lora_roles import (
+    check_lora_roles, flat_lora_specs, lora_specs_by_role,
+)
 from thenoise.utils.png import build_pnginfo
 
 logger = logging.getLogger(__name__)
@@ -102,20 +105,6 @@ def _normalize_sigmas(
     return tuple(grid)
 
 
-def _sigma_steps(
-    grid: Sequence[float],
-    device: str,
-    dtype: torch.dtype,
-) -> list[Step]:
-    """Sigma grid (descending, ending on 0) -> one ``Step`` per grid gap.
-
-    Tensors are in the model's own device/dtype because ``denoise_step`` consumes
-    ``Step.t`` the way it consumes its own ``schedule()`` output.
-    """
-    ts = torch.tensor(list(grid), device=device, dtype=dtype)
-    return [Step(t=ts[i], delta=ts[i] - ts[i + 1]) for i in range(len(grid) - 1)]
-
-
 def _refine_schedule(
     sigma: float,
     steps: int,
@@ -128,7 +117,7 @@ def _refine_schedule(
     and every step stays conditioned above 0. A uniform grid also keeps a given
     sigma the same strength on every model.
     """
-    return _sigma_steps([sigma * (1 - i / steps) for i in range(steps + 1)], device, dtype)
+    return sigma_steps([sigma * (1 - i / steps) for i in range(steps + 1)], device, dtype)
 
 
 class PipelineController:
@@ -159,20 +148,23 @@ class PipelineController:
         prompt: str,
         negative_prompt: str,
         guidance_scale: float,
-        lora_specs: Optional[list[str]] = None,
+        lora_specs: Mapping[str, list[str]] | None = None,
         ref_key: Optional[Tuple] = None,
     ) -> Tuple:
         """Cache key for prompt conditioning.
 
         Includes ``lora_specs`` because the fused text is computed from the
-        LoRA-adjusted DiT weights. The edit path appends ``ref_key`` so encoders
-        whose conditioning depends on the input image invalidate correctly.
+        LoRA-adjusted DiT weights, keyed by role so a LoRA on one component is not
+        confused with the same file on another. The edit path appends ``ref_key`` so
+        encoders whose conditioning depends on the input image invalidate correctly.
         """
         base = (
             prompt,
             negative_prompt,
             guidance_scale,
-            tuple(sorted(lora_specs)) if lora_specs else None,
+            tuple(sorted((role, spec)
+                         for role, specs in (lora_specs or {}).items()
+                         for spec in specs)) or None,
         )
         if ref_key is None:
             return ("prompt",) + base
@@ -300,9 +292,14 @@ class PipelineController:
         if r.kv_cache and not model.capability("kv_cache"):
             raise ValueError(f"model '{model.name}' does not support the reference-latent KV cache")
 
+        # Roles are components of this model, so a request naming one it does not have
+        # is refused here rather than silently dropping the LoRAs at the switch.
+        loras = lora_specs_by_role(request.lora_specs)
+        check_lora_roles(loras, model.lora_components())
+
         prompt_key = self._cache_key_prompt(
             request.prompt, request.negative_prompt, r.guidance_scale,
-            request.lora_specs, ref_key=ref_key,
+            loras, ref_key=ref_key,
         )
         sampling_key = self._cache_key_sampling(
             prompt_key, r.width, r.height, r.steps, r.seed, r.effective_sampler,
@@ -357,7 +354,8 @@ class PipelineController:
                 latents = self._cache.sampling_get()
             else:
                 with memory.stage("dit", pixels=r.width * r.height) as s:
-                    model.switch_loras(request.lora_specs, model.dit)
+                    for role, module in model.lora_components().items():
+                        model.switch_loras(loras.get(role), module, role)
                     if not self._cache.prompt_hit(prompt_key):
                         cond = model.fuse_text(cond_raw)
                         self._cache.prompt_store(prompt_key, cond)
@@ -409,7 +407,7 @@ class PipelineController:
         else:
             x = model.prepare_latent(latents, cond, params)
         if sigmas is not None:
-            schedule = _sigma_steps(sigmas, model.device, model.dtype)
+            schedule = sigma_steps(sigmas, model.device, model.dtype)
         else:
             schedule = model.schedule(params)
         x = solver.sample(x, schedule, cond, params.guidance_scale, params.seed)
@@ -556,7 +554,7 @@ class PipelineController:
             upscale_type=r.upscale_type,
             sampler=r.effective_sampler,
             postprocess=postprocess,
-            lora_specs=request.lora_specs,
+            lora_specs=flat_lora_specs(lora_specs_by_role(request.lora_specs)) or None,
             pixel_upscaler=r.pixel_upscaler,
             sigmas=list(r.sigmas) if r.sigmas else None,
             ref_method=r.ref_method,

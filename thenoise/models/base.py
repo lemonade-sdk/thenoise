@@ -27,6 +27,7 @@ from thenoise.dit.kvcache import KVCache
 from thenoise.memory import MemoryManager
 from thenoise.models.lora_support import LoRASupport
 from thenoise.utils.device_patches import apply_device_patches
+from thenoise.utils.dynamo import apply_recompile_limit
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.image_tensor import ReferenceSizing
 from thenoise.samplers import Step
@@ -35,6 +36,7 @@ from thenoise.upscale import LatentUpscaler
 if TYPE_CHECKING:  # pragma: no cover - only for annotations
     from PIL import Image
 from thenoise.utils.checkpoint import checkpoint_bytes, detect_checkpoint_prefs
+from thenoise.utils.lora_roles import DEFAULT_LORA_ROLE
 from thenoise.utils.safetensors import unwrap_key
 
 logger = logging.getLogger(__name__)
@@ -91,9 +93,10 @@ class DiffusionModel(LoRASupport, ABC):
     REFINE_STEPS = 1
     REFINE_DENOISE = 0.25
 
-    # Which optional generation features this adapter implements. Adapters override
-    # only the entries they differ on, merging as above. Reported verbatim by
-    # ``/health`` so the UI can gate its controls.
+    # Which optional generation features this adapter implements — one vocabulary for
+    # image and video, so ``/health`` needs no per-medium table and ``capability()`` is
+    # one lookup. Adapters override only the entries they differ on, merging as above.
+    # Reported verbatim by ``/health`` so the UI can gate its controls.
     CAPABILITIES: ClassVar[Dict[str, bool]] = {
         # Reference-latent editing: image + instruction -> edited image. Requires
         # overriding ``encode_reference``/``pack_reference_latent``.
@@ -101,6 +104,14 @@ class DiffusionModel(LoRASupport, ABC):
         # Freeze the reference tokens' K/V across denoise steps through the shared
         # ``start_kv_caches`` / ``kv_cache`` / ``end_kv_caches`` protocol.
         "kv_cache": False,
+        # A latent upscaler, i.e. ``_create_upscaler``. True because it is an abstract
+        # method every model with one implements; a model without one says False.
+        "upscale": True,
+        # Anything at all temporal, i.e. a 5D latent and a video request surface.
+        "video": False,
+        # Text -> video, and image -> video.
+        "t2v": False,
+        "i2v": False,
     }
 
     # The run's caches: created by ``start_kv_caches``, dropped by ``end_kv_caches``.
@@ -122,10 +133,21 @@ class DiffusionModel(LoRASupport, ABC):
     def detect(f) -> bool:
         """Return True if the open safetensors handle ``f`` is this model's DiT."""
 
+    @classmethod
+    def validate_paths(cls, dit_paths: dict[str, str]) -> None:
+        """Reject a set of DiT files this model cannot use, before anything loads.
+
+        Adapters that need more than the primary checkpoint override this; the role
+        names are theirs, so the runtime never has to know them.
+        """
+        if len(dit_paths) > 1:
+            raise ValueError(f"{cls.name} takes one DiT checkpoint")
+
     def __init__(self, *, config: ModelConfig):
         self.device = config.device
         self.offload_device = config.offload_device
         self.dtype = config.dtype
+        self.dit_paths = config.dit_paths
         self.dit_path = config.dit_path
         self.vae_path = config.vae_path
         self.text_encoder_path = config.text_encoder_path
@@ -139,7 +161,7 @@ class DiffusionModel(LoRASupport, ABC):
         # ``vae``; the pipeline controller stages them by name.
         self.memory = MemoryManager(self.device, self.offload_device)
 
-        torch._dynamo.config.recompile_limit = 64
+        apply_recompile_limit()
         apply_device_patches(self.device)
 
         # Cached LoRA factors, for clean switching between requests.
@@ -149,22 +171,31 @@ class DiffusionModel(LoRASupport, ABC):
         self._upscaler: Optional[LatentUpscaler] = None
 
     # ------------------------------------------------------------ preferences
+    @property
+    def default_prefs(self) -> Dict[str, Any]:
+        """What an unset request field falls back to.
+
+        The class defaults with the loaded checkpoint's markers on top. A model that
+        ships several releases behind one adapter layers its per-release table between
+        the two — markers still win, because a checkpoint's own hint outranks a default
+        for the family it was released under.
+        """
+        return {**self.DEFAULT_PREFS, **self.checkpoint_prefs}
+
     def pref(self, name: str, request_value: Any = None) -> Any:
         """Resolve a generation preference: request > checkpoint marker > model default.
 
         ``request_value`` is what the API/CLI carried, or ``None`` when the user did
         not ask — that is how "auto" is represented on the wire.
         """
-        if name not in self.DEFAULT_PREFS:
-            raise KeyError(f"unknown preference {name!r}; known: {sorted(self.DEFAULT_PREFS)}")
+        defaults = self.default_prefs
+        if name not in defaults:
+            raise KeyError(f"unknown preference {name!r}; known: {sorted(defaults)}")
         if request_value is not None:
             value, source = request_value, "request"
         else:
-            detected = self.checkpoint_prefs.get(name)
-            if detected is not None:
-                value, source = detected, "checkpoint"
-            else:
-                value, source = self.DEFAULT_PREFS[name], "model default"
+            value = defaults[name]
+            source = ("checkpoint" if name in self.checkpoint_prefs else "model default")
         logger.debug("%s = %s (%s)", name, value, source)
         return value
 
@@ -182,6 +213,15 @@ class DiffusionModel(LoRASupport, ABC):
     def _load_target(self, path: str) -> str:
         """The device to build the weights at ``path`` on, the manager's decision."""
         return str(self.memory.device_for(checkpoint_bytes(path)))
+
+    # ------------------------------------------------------------ teardown
+    def unload(self) -> None:
+        """Drop whatever this instance holds that would outlive it.
+
+        The runtime calls it before releasing the device on a swap. Doing nothing is the
+        answer for an adapter whose weights are only reachable through itself; a codec's
+        feature cache or residency bookkeeping is not, and clears itself here.
+        """
 
     # ------------------------------------------------------------------ hooks
     @abstractmethod
@@ -336,6 +376,16 @@ class DiffusionModel(LoRASupport, ABC):
     def end_kv_caches(self) -> None:
         """Drop the run's caches. Call in ``finalize_latent``, before the VAE decode."""
         self._kv_caches = None
+
+    # ------------------------------------------------------- LoRA-able components
+    def lora_components(self) -> dict[str, torch.nn.Module]:
+        """This model's LoRA-able components, by the role a request names them with.
+
+        The keys are the roles `switch_loras` accepts and the wire may name, so a model
+        with a second component adds an entry here rather than a second list to keep in
+        step. The name is the one the component is registered for residency under.
+        """
+        return {DEFAULT_LORA_ROLE: self.dit}
 
     # ------------------------------------------------------- latent upscaler
     def get_upscaler(self) -> LatentUpscaler:

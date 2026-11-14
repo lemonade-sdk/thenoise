@@ -19,7 +19,7 @@ Start the server with [`serve`](cli.md#serve-a-model-over-http) and TheNoise exp
 |--------|------|-------------|
 | `GET` | `/` | Web UI |
 | `GET` | `/health` | Server status, loaded model and its capabilities (see below) |
-| `GET` | `/lora` | List available LoRA names |
+| `GET` | `/lora` | List available LoRA names, and the roles they can be given to |
 | `GET` | `/upscalers` | List available pixel upscaler names (works even with no model loaded) |
 | `GET` | `/postprocess` | Describe the post-decode knobs, in the order their filters run (works even with no model loaded) |
 | `POST` | `/upscale` | Pixel-upscale an input image (works even with no model loaded) |
@@ -51,7 +51,7 @@ the loaded model's defaults when optional fields are omitted.
 | `duration`, `fps` | number, integer | Duration in seconds and frames/second; explicit `frames` takes priority |
 | `steps`, `guidance_scale`, `seed` | number | Sampling parameters |
 | `sampler` | string | Model-supported sampler (`unipc` or `euler` for Wan) |
-| `lora_specs` | string[] | Optional LoRAs, as `name:weight`, looked up in `--lora-dir` |
+| `lora_specs` | string[] \| object | Optional LoRAs, as `name:weight`, looked up in `--lora-dir`. A model with more than one LoRA-able component also takes them by component: `{"dit": ["a:0.8"], "dit_low": ["b"]}` |
 | `output_format` | string | `mp4` or `webm` (model default when omitted) |
 
 For a synchronous MP4 response:
@@ -79,7 +79,7 @@ curl -fS http://127.0.0.1:8000/video \
 
 The image is cover-cropped to the requested output size and encoded as first-frame
 conditioning. For a platform-independent Python-based example, see the
-[Wan 2.2 model page](models/wan22.md#image-to-video-i2v). To queue I2V instead,
+[Wan 2.2 model page](models/wan22.md#image-to-video). To queue I2V instead,
 send the same request to `POST /videos` and poll its job ID.
 
 ### Asynchronous jobs
@@ -92,20 +92,28 @@ HTTP 409 until completion. To stop a queued or running job use
 `POST /videos/{id}/cancel`. The queue returns HTTP 429 when full.
 
 The normal `GET /lora` endpoint also lists LoRAs available to a loaded video
-model. Only LoRA factors matching the transformer's supported layers are
-applied; unsupported targets are logged as unused.
+model, along with the `roles` a `lora_specs` request may name. A bare list goes
+to the model's single transformer; a two-expert model offers `dit` and
+`dit_low`, so each expert can be given its own LoRA, and asking for a role the
+model does not have is refused at submit. Only LoRA factors matching the
+transformer's supported layers are applied; unsupported targets are logged as
+unused.
 
 ## `GET /health`
 
 ```json
-{"status": "ok", "models": ["qwen_image"], "capabilities": {"edit": true, "kv_cache": true}}
+{"status": "ok", "models": ["qwen_image"],
+ "capabilities": {"edit": true, "kv_cache": true, "upscale": true,
+               "video": false, "t2v": false, "i2v": false}}
 ```
 
 `models` is empty until a DiT is loaded, and `capabilities` is the loaded
 adapter's `CAPABILITIES` dict verbatim (`{}` with no model) - the web UI uses it
 to gate the Edit tab and the KV-cache control, and a request asking for a
 capability the model lacks is rejected with HTTP 400 rather than silently
-ignored.
+ignored. One vocabulary serves both mediums, so a video model answers the same
+keys with `video`/`t2v`/`i2v` true and `upscale` false, and `i2v` follows the
+released variant rather than the model name.
 
 ## `POST /text2image`
 
@@ -140,7 +148,7 @@ index_timestep_zero` (see [`/edit`](#post-edit)).
 | `tint` | `float` | `0.0` | White balance across the green–magenta axis: -1.0 greens, 1.0 magentas |
 | `sharpening` | `float` | `0.0` | RCAS sharpening strength, 0.0–1.0 |
 | `film_grain` | `float` | `0.0` | Film grain strength, 0.0–10.0 |
-| `lora_specs` | `string[]` | `null` | LoRA specs, e.g. `["style:0.8"]` |
+| `lora_specs` | `string[]` \| `object` | `null` | LoRA specs, e.g. `["style:0.8"]`, or by component on a two-expert model: `{"dit": ["a"], "dit_low": ["b"]}` |
 
 ### Response
 
@@ -371,7 +379,20 @@ the seed or prompt.
 
 ## Error semantics
 
+A route answers a refusal in the format it speaks.
+
+| Endpoints | Refusal body |
+|-----------|--------------|
+| `/text2image`, `/edit`, `/upscale`, `/controlmap`, `/video` | `text/plain`: the reason |
+| `/videos`, `/videos/{id}`, `/videos/{id}/content`, `/videos/{id}/cancel` | `{"error": "<reason>"}` |
+
 | Status | Meaning |
 |--------|---------|
-| `400` | Request asks for a capability the loaded model lacks (e.g. `/edit` without an editing model, `kv_cache` with `ref_method: index`), or an invalid field value |
-| `503` | No model loaded for `/text2image` / `/edit` |
+| `400` | A value the loaded model refuses: a capability it lacks (e.g. `/edit` without an editing model, `kv_cache` with `ref_method: index`), a sampler it does not implement, an `image` it cannot decode |
+| `404` | No such video job, or its content is gone |
+| `409` | Video job not in the state the request needs: content before completion, cancel after it settled |
+| `429` | The video queue is full |
+| `500` | Unexpected failure, logged with a traceback |
+| `503` | No model loaded for `/text2image` / `/edit`; a video job the service cannot take, because no video model is loaded or it is shutting down |
+
+A body the request contract itself refuses — an unknown field, a type it cannot read, a value outside its bounds (`frames: 0`) — is FastAPI's `422` JSON report.

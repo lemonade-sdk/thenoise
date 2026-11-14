@@ -24,12 +24,12 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 
 from thenoise.utils.attention import single_head_attention
 from thenoise.utils.safetensors import load_safetensors
 from thenoise.vae.fused import image_elems, strip_apply, strip_down
+from thenoise.vae.wan_common import RmsNorm, downsample2d, upsample2d
 
 from thenoise.utils.setup_logging import setup_logging
 
@@ -96,18 +96,6 @@ class DiagonalGaussianDistribution(object):
 # endregion diffusers-vae
 
 
-class QwenImageRMS_norm(nn.Module):
-    r"""RMS normalization over the channel dim of ``[B, C, H, W]`` (``gamma``: ``(C, 1, 1)``)."""
-
-    def __init__(self, dim: int) -> None:
-        super().__init__()
-        self.scale = dim**0.5
-        self.gamma = nn.Parameter(torch.ones(dim, 1, 1))
-
-    def forward(self, x):
-        return F.normalize(x, dim=1) * self.scale * self.gamma
-
-
 class QwenImageResample(nn.Module):
     r"""2D spatial resampling: ``upsample2d``, ``downsample2d``, else identity.
 
@@ -121,12 +109,9 @@ class QwenImageResample(nn.Module):
         self.mode = mode
 
         if mode == "upsample2d":
-            self.resample = nn.Sequential(
-                nn.Upsample(scale_factor=2.0, mode="nearest-exact"),
-                nn.Conv2d(dim, dim // 2, 3, padding=1),
-            )
+            self.resample = upsample2d(dim, dim // 2)
         elif mode == "downsample2d":
-            self.resample = nn.Sequential(nn.ZeroPad2d((0, 1, 0, 1)), nn.Conv2d(dim, dim, 3, stride=(2, 2)))
+            self.resample = downsample2d(dim)
         else:
             self.resample = nn.Identity()
 
@@ -153,9 +138,9 @@ class QwenImageResidualBlock(nn.Module):
         self.out_dim = out_dim
         self.nonlinearity = nn.SiLU()
 
-        self.norm1 = QwenImageRMS_norm(in_dim)
+        self.norm1 = RmsNorm(in_dim)
         self.conv1 = nn.Conv2d(in_dim, out_dim, 3, padding=1)
-        self.norm2 = QwenImageRMS_norm(out_dim)
+        self.norm2 = RmsNorm(out_dim)
         self.conv2 = nn.Conv2d(out_dim, out_dim, 3, padding=1)
         self.conv_shortcut = nn.Conv2d(in_dim, out_dim, 1) if in_dim != out_dim else nn.Identity()
 
@@ -188,7 +173,7 @@ class QwenImageAttentionBlock(nn.Module):
         super().__init__()
         self.dim = dim
 
-        self.norm = QwenImageRMS_norm(dim)
+        self.norm = RmsNorm(dim)
         self.to_qkv = nn.Conv2d(dim, dim * 3, 1)
         self.proj = nn.Conv2d(dim, dim, 1)
 
@@ -280,7 +265,7 @@ class QwenImageEncoder2d(nn.Module):
 
         self.mid_block = QwenImageMidBlock(out_dim, non_linearity, num_layers=1)
 
-        self.norm_out = QwenImageRMS_norm(out_dim)
+        self.norm_out = RmsNorm(out_dim)
         self.conv_out = nn.Conv2d(out_dim, z_dim, 3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -380,7 +365,7 @@ class QwenImageDecoder2d(nn.Module):
             if upsample_mode is not None:
                 scale *= 2.0
 
-        self.norm_out = QwenImageRMS_norm(out_dim)
+        self.norm_out = RmsNorm(out_dim)
         self.conv_out = nn.Conv2d(out_dim, output_channels, 3, padding=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
