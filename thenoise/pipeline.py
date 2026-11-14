@@ -250,10 +250,9 @@ class PipelineController:
             raise ValueError("edit requires an input image")
 
         # Without explicit width/height the first reference decides the output size.
-        local = request
-        if request.width is None and request.height is None:
-            width, height = model.default_edit_size(*images[0].size)
-            local = replace(request, width=width, height=height)
+        width, height = model.size_from_reference(request.width, request.height,
+                                                 images[0])
+        local = replace(request, width=width, height=height)
 
         r = self._resolve_pipeline(local, is_edit=True)
         ref_key = self._cache_key_reference(images, (r.width, r.height))
@@ -319,11 +318,9 @@ class PipelineController:
                     with memory.stage("vae", pixels=r.width * r.height) as s:
                         fitted = model.fit_references(self._edit_images(request),
                                                       (r.width, r.height))
-                        ref_latents = s.run(lambda: [
-                            model.encode_reference(
-                                pil_to_pixels(image, model.pixel_channels))  # [1,C,H,W]
-                            for image in fitted
-                        ])
+                        ref_latents = s.run(lambda: model.encode_references(
+                            [pil_to_pixels(image, model.pixel_channels)
+                             for image in fitted]))
                     self._cache.reference_store(ref_key, ref_latents)
 
             # Stage 1: prompt conditioning — text encoder only.

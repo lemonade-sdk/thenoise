@@ -23,7 +23,7 @@ HEAD_DIM = 128
 NORM_EPS = 1e-6
 
 #: Latent channels per variant, as they appear in the patch embedding.
-CHANNELS = {"ti2v_5b": 48, "t2v_14b": 16}
+CHANNELS = {"ti2v_5b": 48, "t2v_14b": 16, "i2v_14b": 36}
 
 
 @dataclass(frozen=True)

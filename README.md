@@ -68,6 +68,7 @@ New models are added over time. PRs adding model support are welcome.
 |---|---|---|---|
 | **Wan 2.2 TI2V-5B** | ✓ | ✓ | [wan22](docs/models/wan22.md#ti2v-5b) |
 | **Wan 2.2 T2V-A14B**, one expert per half of the schedule | ✓ | — | [wan22](docs/models/wan22.md#t2v-a14b-two-experts) |
+| **Wan 2.2 I2V-A14B**, the same experts at 36 input channels | — | ✓ | [wan22](docs/models/wan22.md#i2v-a14b) |
 
 Video requests are supported synchronously (`POST /video`) and through the
 job API (`POST /videos`); see the [HTTP API](docs/api.md#video-generation).

@@ -28,9 +28,14 @@ from thenoise.dit.wan_video.model import (
 from thenoise.dit.wan_video.sampling import FLOW_SHIFT, get_sigmas
 from thenoise.errors import ModelReloadNeeded
 from thenoise.models import resolve
-from thenoise.models.base import DiffusionModel
+from thenoise.models.base import Conditioning, DiffusionModel
 from thenoise.models.config import ModelConfig, VideoSamplingParams
-from thenoise.models.wan_video import VARIANTS, Wan22Model, variant_for
+from thenoise.models.wan_video import (
+    VARIANTS,
+    ClipReference,
+    Wan22Model,
+    variant_for,
+)
 from thenoise.runtime import ModelPaths, Runtime, Settings
 from thenoise.samplers import Step, create_sampler
 from thenoise.text_encoders.wan_video import (
@@ -1102,9 +1107,9 @@ def test_video_lora_names_cannot_escape_model_lora_directory(tmp_path):
 A14B = VARIANTS["t2v_14b"]
 
 
-def test_one_adapter_claims_both_transformers(tmp_path):
+def test_one_adapter_claims_every_transformer(tmp_path):
     """Detection stops at "a Wan 2.2 DiT": the variant is a shape read afterwards."""
-    for channels, name in ((48, "ti2v_5b"), (16, "t2v_14b")):
+    for channels, name in ((48, "ti2v_5b"), (16, "t2v_14b"), (36, "i2v_14b")):
         path = write_wan_dit(tmp_path / f"dit{channels}.safetensors", channels=channels)
         assert resolve(path) is Wan22Model
         assert variant_for(detect_params(path)) is VARIANTS[name]
@@ -1293,7 +1298,113 @@ def test_wan21_fp16_vae_decodes_float32_latents_and_clears_cache():
         assert all(item is None for item in vae._feat_map)
 
 
-def test_the_two_expert_variant_has_no_i2v():
+def test_the_t2v_pair_has_no_image_conditioning():
     assert A14B.i2v is False and VARIANTS["ti2v_5b"].i2v is True
-    with pytest.raises(ValueError, match="I2V"):
+    with pytest.raises(ValueError, match="no image conditioning"):
         wan_adapter("t2v_14b").resolve_video(VideoSpec(prompt="x", image=b"image"))
+
+
+# ------------------------------------------------ I2V-A14B (a concatenated reference)
+
+
+def test_the_concatenating_variant_is_read_from_the_patch_embedding():
+    """One tensor separates the two A14B releases, and it is the one a variant is."""
+    i2v = wan_adapter("i2v_14b")
+    assert i2v.variant is VARIANTS["i2v_14b"]
+    assert i2v.CAPABILITIES["i2v"] is True
+    assert i2v.pref("ref_method") == "concat_channels"
+    # Both pairs split the schedule in the same place; I2V runs a lower shift.
+    assert i2v.variant.experts.boundary == A14B.experts.boundary
+    assert i2v.variant.experts.flow_shift == 5.0 < A14B.experts.flow_shift
+
+
+def test_a_36_channel_transformer_is_refused_the_5b_codec(tmp_path):
+    """The pairing is noise + mask + reference, not the transformer's own width."""
+    from unittest.mock import patch
+
+    def config(codec_channels):
+        return ModelConfig(
+            dit_paths={"": write_wan_dit(tmp_path / f"hi{codec_channels}.safetensors",
+                                         channels=36),
+                       "low": write_wan_dit(tmp_path / f"lo{codec_channels}.safetensors",
+                                            channels=36)},
+            vae_path=str(write_wan_vae(tmp_path / f"vae{codec_channels}.safetensors",
+                                       channels=codec_channels)),
+            text_encoder_path="", device="cpu", offload_device="cpu")
+
+    for codec, ok in ((16, True), (48, False)):
+        vae, text = stub_wan_components(codec)
+        with patch("thenoise.models.wan_video.load_wan_video_vae", vae), \
+             patch("thenoise.models.wan_video.load_wan_text_encoder", text):
+            if ok:
+                assert Wan22Model(config=config(codec)).variant is VARIANTS["i2v_14b"]
+            else:
+                with pytest.raises(ValueError, match="different Wan releases"):
+                    Wan22Model(config=config(codec))
+
+
+def test_the_reference_is_encoded_as_the_clip_it_seeds():
+    """Upstream conditions on the frame followed by mid-grey, not on one frame repeated."""
+    model = wan_adapter("i2v_14b")
+    seen = []
+
+    def encode(pixels):
+        seen.append(pixels)
+        _, _, frames, height, width = pixels.shape
+        return torch.zeros(1, model.vae.z_dim, (frames - 1) // 4 + 1,
+                           height // model.vae.spatial_compression,
+                           width // model.vae.spatial_compression)
+
+    model.vae.encode_pixels_to_latents = encode
+    [latent] = model.encode_references([torch.ones(3, 32, 32)], frames=5)
+    clip, = seen
+    assert clip.shape == (1, 3, 5, 32, 32)
+    assert torch.equal(clip[0, :, 0], torch.ones(3, 32, 32))
+    assert torch.count_nonzero(clip[:, :, 1:]) == 0  # mid grey is 0 in [-1, 1]
+    assert latent.shape[1] == model.vae.z_dim
+
+
+def test_the_reference_channels_are_mask_then_reference():
+    model = wan_adapter("i2v_14b")
+    latents = torch.zeros(1, 16, 3, 4, 5)
+    reference = torch.arange(1 * 16 * 3 * 4 * 5,
+                             dtype=torch.float32).reshape(1, 16, 3, 4, 5)
+    assert model.prepare_latent(latents, None, None, ref=[reference],
+                                ref_method="concat_channels") is latents
+    channels = model._clip.channels
+    assert channels.shape == (1, 20, 3, 4, 5)
+    mask = channels[:, :4]
+    assert torch.equal(mask[:, :, 0], torch.ones(1, 4, 4, 5))
+    assert torch.count_nonzero(mask[:, :, 1:]) == 0
+    torch.testing.assert_close(channels[:, 4:], reference.to(channels.dtype),
+                               rtol=0, atol=0)
+
+
+def test_a_reference_of_the_wrong_clip_length_is_refused():
+    model = wan_adapter("i2v_14b")
+    with pytest.raises(ValueError, match="reference latent is"):
+        model.prepare_latent(torch.zeros(1, 16, 3, 4, 5), None, None,
+                             ref=[torch.zeros(1, 16, 1, 4, 5)],
+                             ref_method="concat_channels")
+
+
+def test_every_forward_pass_carries_the_reference_beside_the_noise(monkeypatch):
+    model = wan_adapter("i2v_14b")
+    seen = []
+    monkeypatch.setattr(Wan22Model, "_velocity", staticmethod(
+        lambda module, x, timestep, context: seen.append(x.shape[1]) or x))
+    model._segment = types.SimpleNamespace(module=model.dit)
+    model._clip = ClipReference(channels=torch.zeros(1, 20, 2, 2, 2))
+    model.denoise_step(torch.zeros(1, 16, 2, 2, 2), 0.5,
+                       Conditioning(cond=None, null=None), 4.0, 0)
+    assert seen == [36]
+
+
+def test_a_generated_first_frame_survives_a_concatenated_reference():
+    """Only the timestep-zero variant hands its own frame back; here the first frame
+    came out of the network, and it is the output."""
+    model = wan_adapter("i2v_14b")
+    model._clip = ClipReference(channels=torch.zeros(1, 20, 2, 2, 2))
+    latents = torch.ones(1, 16, 2, 2, 2)
+    assert torch.equal(model.finalize_latent(latents, None), latents)
+    assert model._clip is None

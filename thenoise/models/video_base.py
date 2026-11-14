@@ -14,6 +14,7 @@ registry and in :attr:`Segment.stage`, which is what lets the controller stage, 
 from __future__ import annotations
 
 import dataclasses
+import io
 from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Iterator, Optional, Sequence
@@ -23,6 +24,7 @@ import torch
 from thenoise.memory import MemoryManager
 from thenoise.models.base import DiffusionModel
 from thenoise.samplers import Step
+from thenoise.utils.image_tensor import load_image
 from thenoise.utils.lora_roles import check_lora_roles
 from thenoise.video.spec import ResolvedVideo, VideoSpec
 
@@ -65,6 +67,12 @@ class VideoModel(DiffusionModel):
 
     def resolve_video(self, spec: VideoSpec) -> ResolvedVideo:
         """Resolve optional request values, then the size onto this model's grid."""
+        # A reference answers the size when the request named none, as it does for a
+        # still edit; `resolve_size` below rounds the answer onto the grid.
+        if spec.image is not None and self.capability("i2v"):
+            width, height = self.size_from_reference(
+                spec.width, spec.height, load_image(io.BytesIO(spec.image)))
+            spec = spec.model_copy(update={"width": width, "height": height})
         resolved = spec.resolve(self.default_prefs)
         # Answered here rather than at the switch, so `/videos` refuses a role this
         # model does not have at submit instead of minutes into the job.

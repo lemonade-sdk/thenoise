@@ -1,16 +1,16 @@
 # Wan 2.2
 
-Two Wan 2.2 releases are supported, and they are different models rather than two
-sizes of one.
+Three released Wan 2.2 transformers are supported, in two families that are
+different models rather than two sizes of one.
 
 | | TI2V-5B | T2V-A14B |
 |---|---|---|
-| Modes | text-to-video, image-to-video | text-to-video |
+| Modes | text-to-video, image-to-video | text-to-video, or image-to-video with the I2V pair |
 | Transformer | one checkpoint (`--dit`) | two experts: `--dit` high noise, `--dit-low` low noise |
-| Latent and codec | 48 channels, Wan 2.2 causal 3D VAE, BF16 compute | 16 channels, Wan 2.1 causal 3D VAE, FP16 compute |
+| Latent and codec | 48 channels, Wan 2.2 causal 3D VAE, BF16 compute | 16 channels, Wan 2.1 causal 3D VAE, FP16 compute; the I2V pair's transformer takes 36, the extra 20 being mask and reference |
 | Text encoder | UMT5-XXL, FP16 file, BF16 compute | the same file |
 | Samplers | UniPC or Euler | UniPC or Euler |
-| Defaults | 1280×704, 33 frames, 24 FPS, 12 steps, CFG 5.0, UniPC, WebM, fixed Wan flow shift | 832×480, 33 frames, 16 FPS, 40 steps, Euler, CFG 4.0, flow shift 12, high/low boundary 0.875 |
+| Defaults | 1280×704, 33 frames, 24 FPS, 12 steps, CFG 5.0, UniPC, WebM, fixed Wan flow shift | 832×480, 33 frames, 16 FPS, 40 steps, Euler, CFG 4.0, flow shift 12 (5 for the I2V pair), high/low boundary 0.875 |
 
 Both answer the same video request over the same [HTTP API](../api.md#video-generation):
 `POST /video` generates and returns the clip, `POST /videos` queues a job. Output is
@@ -125,8 +125,8 @@ which keeps both on the card when they fit; do not run both as resident GPU mode
 32 GiB card. The single `guidance_scale` a request carries is the high-noise CFG (4.0 by
 default); low-noise CFG is 0.75× that (3.0 by default).
 
-**T2V only**: 14B I2V is a separate 36-channel model with a CLIP-Vision path, which this
-engine does not load.
+An `image` in the request is refused by these two files: image-to-video is
+[its own pair of experts](#i2v-a14b).
 
 ### Download
 
@@ -171,6 +171,49 @@ Each expert is LoRA-able on its own:
 
 A bare list belongs to the high-noise expert, so a LoRA meant for the whole clip is
 sent under both roles. `GET /lora` lists the roles this model offers.
+
+## I2V-A14B
+
+The image-to-video A14B pair is the T2V trunk with a wider door: 36 channels, the 20
+extra being a mask and the reference clip concatenated onto the noise at every step.
+Two experts, the same 0.875 handover, Euler, the same LoRA roles — the flow shift is 5
+rather than 12, and there is no CLIP vision tower anywhere in it.
+
+### Download
+
+```bash
+.venv/bin/python scripts/download.py --model wan22-14b-i2v
+```
+
+```
+models/wan22/split_files/
+  diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors
+  diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors
+  text_encoders/umt5_xxl_fp16.safetensors
+  vae/wan_2.1_vae.safetensors
+```
+
+### Serve and generate
+
+```bash
+./thenoise.sh serve \
+  --dit ./models/wan22/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors \
+  --dit-low ./models/wan22/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors \
+  --vae ./models/wan22/split_files/vae/wan_2.1_vae.safetensors \
+  --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors
+```
+
+```bash
+curl -s localhost:8000/video -H 'content-type: application/json' --data-binary @- \
+  -o fox_i2v.mp4 <<'JSON'
+{"model": "wan22", "prompt": "a fox in the snow", "image": "<base64 PNG>"}
+JSON
+```
+
+Omit `width` and `height` and the reference decides the clip's size, as it does for an
+image edit: its aspect ratio at the 832×480 this variant defaults to. The 5B path
+conditions differently — its first frame is denoised at timestep zero instead of being
+concatenated — but asks for the same request.
 
 ## Video jobs
 

@@ -228,14 +228,20 @@ def wan_adapter(variant: str = "ti2v_5b"):
     from thenoise.models.config import ModelConfig
     from thenoise.models.wan_video import Wan22Model
 
+    from thenoise.models.wan_video import VARIANTS
+
+    spec = VARIANTS[variant]
     channels = CHANNELS[variant]
-    vae, text_encoder = stub_wan_components(channels)
+    # A variant that concatenates its reference has a trunk wider than the codec it
+    # pairs with, which is exactly the relation the adapter checks.
+    codec = (channels - 4) // 2 if spec.ref_method == "concat_channels" else channels
+    vae, text_encoder = stub_wan_components(codec)
     with tempfile.TemporaryDirectory() as work:
         dit = write_wan_dit(Path(work) / "dit.safetensors", channels=channels)
         config = ModelConfig(
             # A two-expert variant is two files; one tiny transformer serves as both.
-            dit_paths=({"": dit} if variant != "t2v_14b" else {"": dit, "low": dit}),
-            vae_path=write_wan_vae(Path(work) / "vae.safetensors", channels=channels),
+            dit_paths=({"": dit, "low": dit} if spec.experts else {"": dit}),
+            vae_path=write_wan_vae(Path(work) / "vae.safetensors", channels=codec),
             text_encoder_path="", device="cpu", offload_device="cpu")
         with patch("thenoise.models.wan_video.load_wan_video_vae", vae), \
              patch("thenoise.models.wan_video.load_wan_text_encoder", text_encoder):
@@ -246,7 +252,11 @@ def wan_prefs(variant: str = "ti2v_5b") -> dict:
     """The complete request defaults the given Wan variant resolves against."""
     from thenoise.models.wan_video import VARIANTS, Wan22Model
 
-    return {**Wan22Model.DEFAULT_PREFS, **VARIANTS[variant].prefs}
+    spec = VARIANTS[variant]
+    prefs = {**Wan22Model.DEFAULT_PREFS, **spec.prefs}
+    if spec.ref_method is not None:
+        prefs["ref_method"] = spec.ref_method
+    return prefs
 
 
 def comfy_quant(convrot: bool = True, groupsize: int = 256) -> torch.Tensor:

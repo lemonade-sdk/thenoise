@@ -27,6 +27,22 @@ logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(frozen=True)
+class ClipReference:
+    """What a reference contributes to every forward pass of one clip.
+
+    The two halves are the two ways Wan 2.2 conditions on an image, and a variant uses
+    exactly one of them.
+    """
+
+    #: TI2V-5B: a latent frame re-injected before every forward and never denoised.
+    first_frame: torch.Tensor | None = None
+    #: TI2V-5B: per-token timestep, zero on the conditioned frame.
+    timestep_mask: torch.Tensor | None = None
+    #: I2V-A14B: mask and reference clip, concatenated onto the noise.
+    channels: torch.Tensor | None = None
+
+
+@dataclasses.dataclass(frozen=True)
 class Experts:
     """A two-expert schedule: where the sigma hands over, and how the low-noise half
     differs."""
@@ -45,6 +61,10 @@ class Variant:
     prefs: dict
     i2v: bool
     experts: Experts | None
+    #: How a reference enters this transformer, when it takes one at all. Unset means
+    #: the model default, which is the right answer for every variant but the one
+    #: whose width says the reference is concatenated.
+    ref_method: str | None = None
 
 
 #: One entry per released transformer, keyed by the variant name `CHANNELS` gives the
@@ -62,6 +82,15 @@ VARIANTS: dict[str, Variant] = {variant.name: variant for variant in (
                    guidance_scale=4.0, sampler="euler"),
         i2v=False,
         experts=Experts(boundary=0.875, flow_shift=12.0, low_cfg_ratio=3.0 / 4.0)),
+    Variant(
+        name="i2v_14b",
+        prefs=dict(width=832, height=480, frames=33, fps=16, steps=40,
+                   guidance_scale=4.0, sampler="euler"),
+        i2v=True,
+        # The same handover as the T2V pair, at upstream's I2V shift, which is
+        # well below the 12 the T2V pair runs at.
+        experts=Experts(boundary=0.875, flow_shift=5.0, low_cfg_ratio=3.0 / 4.0),
+        ref_method="concat_channels"),
 )}
 
 
@@ -76,18 +105,28 @@ def variant_for(params: Wan22Params) -> Variant:
 class Wan22Model(VideoModel):
     """Wan 2.2 from Comfy-Org checkpoints.
 
-    One adapter covers TI2V-5B and the two-expert T2V-A14B: the DiT header says which
+    One adapter covers TI2V-5B and the two A14B pairs: the DiT header says which
     variant this is, and ``VARIANTS`` says what follows from that — request defaults,
-    whether I2V exists at all, which codec, and whether a second expert file is
-    required. I2V with a CLIP image tower would be a third variant, not this file.
+    whether I2V exists at all, how a reference enters, which codec, and whether a
+    second expert file is required. Wan 2.1's I2V, which adds a CLIP vision tower and
+    an `img_emb` projection to the same trunk, would be a different file.
     """
 
     name = "wan22"
     # A clip is made bigger by being generated bigger, not by upscaling a latent.
     CAPABILITIES = {**VideoModel.CAPABILITIES, "t2v": True, "upscale": False}
-    # The conditioned I2V frame is denoised at timestep zero, which is what the edit
-    # contract already calls `index_timestep_zero`; there is no other method to offer.
+    # The answer for the variants that say nothing: the conditioned I2V frame is
+    # denoised at timestep zero, which is what the edit contract calls
+    # `index_timestep_zero`.
     DEFAULT_PREFS = {**VideoModel.DEFAULT_PREFS, "ref_method": "index_timestep_zero"}
+
+    def pref(self, name: str, request_value=None):
+        """Which transformer this is decides how a reference enters, so that one
+        setting comes from the variant: nothing the caller asks for can make a
+        16-channel trunk take a concatenated one."""
+        if name == "ref_method" and self.variant.ref_method is not None:
+            return self.variant.ref_method
+        return super().pref(name, request_value)
 
     @staticmethod
     def detect(f) -> bool:
@@ -148,14 +187,18 @@ class Wan22Model(VideoModel):
         # only thing that crosses between them and the normalization table is keyed by
         # its width, so a mismatched `--vae` is refused here rather than mid-run.
         codec_width = detect_latent_width(self.vae_path)
-        if codec_width != self.params.in_channels:
+        transformer_width = self.params.in_channels
+        # A transformer whose reference is concatenated is wider than the codec by the
+        # mask and the reference latent itself: noise + 4 + reference.
+        if transformer_width not in (codec_width, 2 * codec_width + 4):
             raise ValueError(
                 f"--vae is a {codec_width}-channel codec, and {self.dit_path} denoises a "
-                f"{self.params.in_channels}-channel latent: these two checkpoints are "
-                "from different Wan releases")
+                f"{transformer_width}-channel latent. The two pair only at "
+                f"{codec_width} channels, or at {2 * codec_width + 4} for a reference "
+                "concatenated onto the noise: these checkpoints are from different "
+                "Wan releases")
 
-        # The run's I2V conditioning: (first-frame latent, per-token timestep mask).
-        self._clip = None
+        self._clip: ClipReference | None = None
         self.dit = load_wan_native_transformer(self.dit_path, self._load_target(self.dit_path))
         self.low_dit = None
         if self.variant.experts is not None:
@@ -204,13 +247,27 @@ class Wan22Model(VideoModel):
         if resolved.sampler not in ("euler", "unipc"):
             raise ValueError("Wan 2.2 supports only euler or unipc samplers")
         if resolved.image is not None and not self.variant.i2v:
-            raise ValueError("Wan 2.2 T2V-A14B does not support I2V (requires CLIP vision)")
+            raise ValueError(
+                "this Wan 2.2 A14B transformer has no image conditioning: it takes a "
+                f"{self.params.in_channels}-channel latent, so an I2V run needs the "
+                "I2V pair, whose experts take 36")
         return dataclasses.replace(
             resolved,
             frame_count=wan_frame_grid(resolved.frame_count,
                                        compression=TEMPORAL_COMPRESSION,
                                        upward=resolved.explicit_frames),
         )
+
+    def default_edit_size(self, width: int, height: int) -> tuple[int, int]:
+        """A reference's aspect ratio at the area this variant defaults to.
+
+        The image answer scales to `EDIT_DEFAULT_AREA`, which is a still-image
+        number: a 14B clip is asked for 832x480 and should not inherit a reference's
+        2K area.
+        """
+        prefs = self.variant.prefs
+        scale = (prefs["width"] * prefs["height"] / (width * height)) ** 0.5
+        return round(width * scale), round(height * scale)
 
     # ------------------------------------------------------------ teardown
     def _clear_weights(self) -> None:
@@ -247,10 +304,28 @@ class Wan22Model(VideoModel):
         latents = torch.randn(shape, generator=rng, dtype=torch.float32)
         return latents.to(self.device)
 
+    def encode_references(self, images, frames=1):
+        """The reference as this transformer wants it: one latent per frame, or one
+        latent for the clip the reference seeds.
+
+        Upstream encodes the frame followed by mid-grey frames, which in this codec's
+        [-1, 1] range is zeros; the mask is built from the latent grid later, since
+        that is where its temporal groups live.
+        """
+        if self.pref("ref_method") != "concat_channels":
+            return super().encode_references(images, frames)
+        frame, = images
+        clip = frame.new_zeros((frames, *frame.shape))
+        clip[0] = frame
+        return [self.vae.encode_pixels_to_latents(
+            clip.permute(1, 0, 2, 3)[None].to(self.device))]
+
     def prepare_latent(self, latents, cond, params, ref=None, ref_method="index"):
-        """Seed the clip; with a reference, condition its first frame at timestep zero."""
+        """Seed the clip with the reference, however this variant takes one."""
         if not ref:
             return latents
+        if ref_method == "concat_channels":
+            return self._concat_reference(latents, ref[0])
         if ref_method != "index_timestep_zero":
             raise ValueError(
                 "Wan 2.2 I2V conditions its first frame at timestep zero; it has no"
@@ -270,7 +345,28 @@ class Wan22Model(VideoModel):
         # to the token grid the DiT sees.
         patch_mask = mask.expand(-1, -1, -1, h, w)
         patch_mask = patch_mask[:, 0, ::patch_t, ::patch_h, ::patch_w].flatten(1)
-        self._clip = (condition.to(self.dit.dtype), patch_mask)
+        self._clip = ClipReference(first_frame=condition.to(self.dit.dtype),
+                                   timestep_mask=patch_mask)
+        return latents
+
+    def _concat_reference(self, latents, reference):
+        """The fixed 20 channels every step is concatenated with: a mask, then the
+        reference clip.
+
+        Their order and polarity are upstream's, not a free choice: the mask is the
+        inverse of the sampler's, so a latent frame that is *given* carries 1, and its
+        single channel is repeated across four. The noise is left alone; the reference
+        conditions the run through these channels rather than by replacing frames.
+        """
+        if reference.shape != latents.shape:
+            raise ValueError(
+                f"I2V reference latent is {tuple(reference.shape)} for noise of "
+                f"{tuple(latents.shape)}")
+        given = torch.zeros((1, 1) + latents.shape[2:], device=latents.device,
+                            dtype=self.dit.dtype)
+        given[:, :, :1] = 1.0
+        self._clip = ClipReference(channels=torch.cat(
+            [given.repeat(1, 4, 1, 1, 1), reference.to(self.dit.dtype)], dim=1))
         return latents
 
     def finalize_latent(self, latents, params):
@@ -279,7 +375,8 @@ class Wan22Model(VideoModel):
         Every forward already re-injected it, so this only decides what the codec sees.
         """
         if self._clip is not None:
-            latents[:, :, :1] = self._clip[0].to(latents.dtype)
+            if self._clip.first_frame is not None:
+                latents[:, :, :1] = self._clip.first_frame.to(latents.dtype)
             self._clip = None
         return latents
 
@@ -318,18 +415,20 @@ class Wan22Model(VideoModel):
     def denoise_step(self, latents, t, cond, guidance_scale: float, i: int) -> torch.Tensor:
         module = self._segment.module
         x = latents.to(module.dtype)
-        condition, patch_mask = (None, None) if self._clip is None else self._clip
-        if condition is not None:
+        clip = ClipReference() if self._clip is None else self._clip
+        if clip.channels is not None:
+            x = torch.cat([x, clip.channels.to(x.dtype)], dim=1)
+        elif clip.first_frame is not None:
             x = x.clone()
-            x[:, :, :1] = condition
+            x[:, :, :1] = clip.first_frame
         timestep = float(t) * 1000.0
-        if patch_mask is None:
+        if clip.timestep_mask is None:
             # A per-batch timestep keeps the modulation [B, 6, D] instead of the token
             # grid's, which is the difference between fitting and not fitting.
             timestep = torch.full((x.shape[0],), timestep,
                                   device=x.device, dtype=torch.float32)
         else:
-            timestep = patch_mask * timestep
+            timestep = clip.timestep_mask * timestep
         vel = self._velocity(module, x, timestep, cond.cond)
         if cond.null is None:
             return vel

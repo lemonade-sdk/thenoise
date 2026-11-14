@@ -303,6 +303,16 @@ class DiffusionModel(LoRASupport, ABC):
         scale = (self.EDIT_DEFAULT_AREA / (width * height)) ** 0.5
         return round(width * scale), round(height * scale)
 
+    def size_from_reference(self, width: int | None, height: int | None,
+                            reference) -> tuple[int, int]:
+        """What a request named, or the reference's size when it named neither.
+
+        `default_edit_size` is what turns the reference into this model's answer.
+        """
+        if width is None and height is None:
+            return self.default_edit_size(*reference.size)
+        return width, height
+
     def percent_to_sigma(self, percent: float) -> float:
         """Map a percent (0..1) to a sigma, used by the sampler's SNR offset.
 
@@ -336,6 +346,18 @@ class DiffusionModel(LoRASupport, ABC):
     def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
         """Encode input pixels (``[C,H,W]`` in [-1, 1]) into the canonical latent."""
         raise NotImplementedError(f"{self.name} does not support reference editing")
+
+    def encode_references(self, pixels: list[torch.Tensor],
+                          frames: int = 1) -> list[torch.Tensor]:
+        """The latents a run conditions on, from fitted images: one per image, unless
+        the model takes its reference some other way.
+
+        `frames` is the temporal extent the run spans. A model whose reference is one
+        latent for a whole clip has to override this rather than be handed per-frame
+        latents, because the codec is causal: the later latent frames of a clip are not
+        the first one repeated.
+        """
+        return [self.encode_reference(image) for image in pixels]
 
     def pack_reference_latent(
         self,

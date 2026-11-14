@@ -70,9 +70,11 @@ class VideoPipelineController:
                 image = load_image(io.BytesIO(spec.image))
                 with model.memory.stage("vae", pixels=pixels) as stage:
                     ref = stage.run(
-                        lambda: [model.encode_reference(pil_to_pixels(f, model.pixel_channels))
-                                 for f in model.fit_references([image],
-                                                               (spec.width, spec.height))])
+                        lambda: model.encode_references(
+                            [pil_to_pixels(f, model.pixel_channels)
+                             for f in model.fit_references([image],
+                                                           (spec.width, spec.height))],
+                            frames=spec.frame_count))
                 token.check()
 
             latents = model.init_latents(params)
