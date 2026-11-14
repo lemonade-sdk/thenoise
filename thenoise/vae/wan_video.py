@@ -78,6 +78,41 @@ class _DupUp3D(nn.Module):
                    x.size(4) * self.factor_s, x.size(6) * self.factor_s)
         return x[:, :, self.factor_t - 1:] if first_chunk else x
 
+    def add_to(self, x: Tensor, out: Tensor, first_chunk: bool = False) -> Tensor:
+        """Add the duplicated shortcut into ``out``, never building the duplicate.
+
+        The duplicate is ``factor_t * factor_s * factor_s`` times the block's input and is
+        only ever added to something, so holding it buys nothing; the walk below adds one
+        sub-position at a time instead. Any channel ratio that does not decompose into a
+        strided slice takes the materialised path.
+        """
+        ft, fs = self.factor_t, self.factor_s
+        b, in_channels, t, h, w = x.shape
+        expected = (b, self.out_channels, t * ft - (ft - 1 if first_chunk else 0),
+                    h * fs, w * fs)
+        if tuple(out.shape) != expected:
+            raise ValueError(f"DupUp target must have shape {expected},"
+                             f" got {tuple(out.shape)}")
+        if in_channels % self.out_channels:
+            return out.add_(self(x, first_chunk))
+        stride = in_channels // self.out_channels
+        if stride * self.repeats != ft * fs * fs:
+            return out.add_(self(x, first_chunk))
+
+        for k in range(ft):
+            src_t, dest_t = 0, k
+            if first_chunk:
+                src_t, dest_t = (0, 0) if k == ft - 1 else (1, k + 1)
+            if src_t >= t:
+                continue
+            source = x if src_t == 0 else x[:, :, src_t:]
+            dest = out[:, :, dest_t::ft]
+            for r in range(fs):
+                for c in range(fs):
+                    channel = ((k * fs + r) * fs + c) // self.repeats
+                    dest[:, :, :, r::fs, c::fs].add_(source[:, channel::stride])
+        return out
+
 
 class _CausalConv3D(nn.Conv3d):
     """Same parameter names and left-temporal-padding semantics as Wan."""
@@ -234,12 +269,12 @@ class _ResidualDownBlock(nn.Module):
         self.downsampler = _Resample(out_dim, "downsample3d" if temporal else "downsample2d") if down else None
 
     def forward(self, x, feat_cache=None, feat_idx=None):
-        original = x.clone() if self.avg_shortcut is not None else None
+        shortcut = x if self.avg_shortcut is not None else None
         for resnet in self.resnets:
             x = resnet(x, feat_cache, feat_idx)
         if self.downsampler is not None:
             x = self.downsampler(x, feat_cache, feat_idx)
-        return x + self.avg_shortcut(original) if original is not None else x
+        return x.add_(self.avg_shortcut(shortcut)) if shortcut is not None else x
 
 
 class _Encoder3D(nn.Module):
@@ -280,12 +315,13 @@ class _ResidualUpBlock(nn.Module):
                                     out_dim if residual else out_dim // 2) if up else None)
 
     def forward(self, x, feat_cache=None, feat_idx=None, first_chunk=False):
-        shortcut = x.clone() if self.avg_shortcut is not None else None
+        shortcut = x if self.avg_shortcut is not None else None
         for block in self.resnets:
             x = block(x, feat_cache, feat_idx)
         if self.upsampler is not None:
             x = self.upsampler(x, feat_cache, feat_idx)
-        return x + self.avg_shortcut(shortcut, first_chunk=first_chunk) if self.avg_shortcut else x
+        return (self.avg_shortcut.add_to(shortcut, x, first_chunk=first_chunk)
+                if self.avg_shortcut is not None else x)
 
 
 class _Decoder3D(nn.Module):

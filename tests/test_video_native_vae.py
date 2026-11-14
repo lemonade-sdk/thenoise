@@ -7,7 +7,8 @@ from safetensors.torch import save_file
 
 from thenoise.vae.wan_common import patchify, unpatchify
 from thenoise.vae.wan_video import (
-    _AttentionBlock, _CausalConv3D, _comfy_vae_config,
+    _AttentionBlock, _CausalConv3D, _DupUp3D, _ResidualDownBlock, _ResidualUpBlock,
+    _comfy_vae_config,
     AutoencoderKLWanVideo, detect_latent_width, load_wan_video_vae,
 )
 from test_video_comfy_layout import _original_vae_key
@@ -164,3 +165,52 @@ def test_official_comfy_vae_topology_meta():
     assert vae.config.z_dim == 48
     assert vae.config.base_dim == 160
     assert all(p.is_meta for p in vae.parameters())
+
+
+@pytest.mark.parametrize("in_c,out_c,factor_t",
+                         [(8, 4, 1), (8, 4, 2), (4, 4, 2), (8, 8, 2), (4, 8, 2)])
+@pytest.mark.parametrize("t,first_chunk",
+                         [(1, True), (1, False), (2, False), (3, True), (3, False)])
+def test_dupup_add_to_is_the_duplicate_added(in_c, out_c, factor_t, t, first_chunk):
+    """The fused shortcut adds what building the duplicate and adding it would have.
+
+    ``(4, 8, 2)`` is the ratio that cannot decompose into a strided slice, so it covers
+    the fallback alongside the walk.
+    """
+    up = _DupUp3D(in_c, out_c, factor_t, factor_s=2)
+    x = torch.randn(1, in_c, t, 3, 5)
+    with torch.no_grad():
+        expected = up(x, first_chunk=first_chunk)
+        got = up.add_to(x.clone(), torch.zeros_like(expected), first_chunk=first_chunk)
+    assert torch.equal(got, expected)
+
+
+def test_dupup_add_to_refuses_a_target_of_the_wrong_shape():
+    up = _DupUp3D(8, 4, 2, factor_s=2)
+    x = torch.randn(1, 8, 2, 3, 5)
+    with pytest.raises(ValueError, match="must have shape"):
+        up.add_to(x, torch.zeros(1, 4, 2, 6, 10))
+
+
+@pytest.mark.parametrize("temporal", [False, True])
+def test_an_up_block_leaves_the_tensor_it_was_handed_alone(temporal):
+    """The shortcut an up block adds is its input, not a copy of it, which holds only
+    because no stage in this codec writes into what it was given.
+    """
+    block = _ResidualUpBlock(4, 4, 1, 0.0, temporal=temporal, up=True)
+    # A temporal block only sees one latent frame per call, with the feature cache that
+    # carries the causal state across calls, so that is the shape fed to it here.
+    x = torch.randn(1, 4, 1 if temporal else 2, 4, 4)
+    before = x.clone()
+    with torch.no_grad():
+        block(x, [None] * 16, [0], first_chunk=temporal)
+    assert torch.equal(x, before)
+
+
+def test_a_down_block_leaves_the_tensor_it_was_handed_alone():
+    block = _ResidualDownBlock(4, 4, 0.0, 1, temporal=False, down=True)
+    x = torch.randn(1, 4, 2, 4, 4)
+    before = x.clone()
+    with torch.no_grad():
+        block(x, None, None)
+    assert torch.equal(x, before)
