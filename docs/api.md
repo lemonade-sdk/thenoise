@@ -50,6 +50,7 @@ the loaded model's defaults when optional fields are omitted.
 | `frames` | integer | Desired frame count (Wan uses a `4n+1` grid) |
 | `duration`, `fps` | number, integer | Duration in seconds and frames/second; explicit `frames` takes priority |
 | `steps`, `guidance_scale`, `seed` | number | Sampling parameters |
+| `flow_shift` | number | Noise schedule shift. Defaults to the model's release value |
 | `sampler` | string | Model-supported sampler (`unipc` or `euler` for Wan) |
 | `lora_specs` | string[] \| object | Optional LoRAs, as `name:weight`, looked up in `--lora-dir`. A model with more than one LoRA-able component also takes them by component: `{"dit": ["a:0.8"], "dit_low": ["b"]}` |
 | `output_format` | string | `mp4` or `webm` (model default when omitted) |

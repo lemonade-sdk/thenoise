@@ -114,6 +114,7 @@ class VideoSamplingParams(SamplingParams):
     """
 
     frames: int = 1
+    flow_shift: float = 1.0
 
 
 __all__ = ["ModelConfig", "EncodePromptArgs", "GenerateRequest", "SamplingParams",

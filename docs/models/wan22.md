@@ -10,7 +10,7 @@ different models rather than two sizes of one.
 | Latent and codec | 48 channels, Wan 2.2 causal 3D VAE, BF16 compute | 16 channels, Wan 2.1 causal 3D VAE, FP16 compute; the I2V pair's transformer takes 36, the extra 20 being mask and reference |
 | Text encoder | UMT5-XXL, FP16 file, BF16 compute | the same file |
 | Samplers | UniPC or Euler | UniPC or Euler |
-| Defaults | 1280×704, 33 frames, 24 FPS, 12 steps, CFG 5.0, UniPC, WebM, fixed Wan flow shift | 832×480, 33 frames, 16 FPS, 40 steps, Euler, CFG 4.0, flow shift 12 (5 for the I2V pair), high/low boundary 0.875 |
+| Defaults | 1280×704, 33 frames, 24 FPS, 12 steps, CFG 5.0, UniPC, WebM, flow shift 5 | 832×480, 33 frames, 16 FPS, 40 steps, Euler, CFG 4.0, flow shift 12, high/low boundary 0.875 (the I2V pair: shift 5, boundary 0.900, CFG 3.5 on both halves) |
 
 Both answer the same video request over the same [HTTP API](../api.md#video-generation):
 `POST /video` generates and returns the clip, `POST /videos` queues a job. Output is
@@ -176,8 +176,10 @@ sent under both roles. `GET /lora` lists the roles this model offers.
 
 The image-to-video A14B pair is the T2V trunk with a wider door: 36 channels, the 20
 extra being a mask and the reference clip concatenated onto the noise at every step.
-Two experts, the same 0.875 handover, Euler, the same LoRA roles — the flow shift is 5
-rather than 12, and there is no CLIP vision tower anywhere in it.
+Two experts, Euler, the same LoRA roles, and no CLIP vision tower anywhere in it.
+Its own release numbers differ from the T2V pair: flow shift 5 rather than 12, the
+handover at 0.900 rather than 0.875, and CFG 3.5 on both halves rather than 3.0 on
+the low one.
 
 ### Download
 

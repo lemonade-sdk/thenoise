@@ -1,15 +1,12 @@
-"""Wan 2.2 TI2V-5B flow schedule (fixed model shift)."""
+"""Wan 2.2's flow schedule: sigmas shifted by whatever the run asked for."""
 from __future__ import annotations
 
 import math
 
 from thenoise.utils.math import generalized_time_shift
 
-# Wan 2.2 TI2V-5B checkpoint's training/inference shift, not an API control.
-FLOW_SHIFT = 5.0
 
-
-def get_sigmas(steps: int, *, shift: float = FLOW_SHIFT) -> list[float]:
+def get_sigmas(steps: int, *, shift: float) -> list[float]:
     return [generalized_time_shift(1 - i / steps, math.log(shift), 1.0)
             for i in range(steps)] + [0.0]
 

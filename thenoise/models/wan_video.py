@@ -12,7 +12,7 @@ import torch
 
 from thenoise.dit.wan_video.checkpoint import load_wan_native_transformer
 from thenoise.dit.wan_video.model import CHANNELS, Wan22Params, detect_params
-from thenoise.dit.wan_video.sampling import FLOW_SHIFT, get_sigmas, wan_frame_grid
+from thenoise.dit.wan_video.sampling import get_sigmas, wan_frame_grid
 from thenoise.models.base import Conditioning
 from thenoise.models.config import EncodePromptArgs
 from thenoise.models.video_base import Segment, VideoModel
@@ -48,8 +48,8 @@ class Experts:
     differs."""
 
     boundary: float
-    flow_shift: float
-    #: Upstream ships guidance 4.0 high and 3.0 low.
+    #: The low-noise half's CFG as a fraction of the request's. T2V-A14B ships 3.0
+    #: against a high-noise 4.0; the I2V pair keeps the same value on both halves.
     low_cfg_ratio: float
 
 
@@ -74,22 +74,23 @@ VARIANTS: dict[str, Variant] = {variant.name: variant for variant in (
     Variant(
         name="ti2v_5b",
         prefs=dict(width=1280, height=704, frames=33, fps=24, steps=12,
-                   guidance_scale=5.0, sampler="unipc"),
+                   guidance_scale=5.0, sampler="unipc", flow_shift=5.0),
         i2v=True, experts=None),
     Variant(
         name="t2v_14b",
         prefs=dict(width=832, height=480, frames=33, fps=16, steps=40,
-                   guidance_scale=4.0, sampler="euler"),
+                   guidance_scale=4.0, sampler="euler", flow_shift=12.0),
         i2v=False,
-        experts=Experts(boundary=0.875, flow_shift=12.0, low_cfg_ratio=3.0 / 4.0)),
+        experts=Experts(boundary=0.875, low_cfg_ratio=3.0 / 4.0)),
     Variant(
         name="i2v_14b",
         prefs=dict(width=832, height=480, frames=33, fps=16, steps=40,
-                   guidance_scale=4.0, sampler="euler"),
+                   guidance_scale=3.5, sampler="euler", flow_shift=5.0),
         i2v=True,
-        # The same handover as the T2V pair, at upstream's I2V shift, which is
-        # well below the 12 the T2V pair runs at.
-        experts=Experts(boundary=0.875, flow_shift=5.0, low_cfg_ratio=3.0 / 4.0),
+        # The pair's own release defaults, which differ from the T2V pair in all
+        # three numbers: a handover later in the schedule, at half its shift, with
+        # no CFG reduction on the low-noise half.
+        experts=Experts(boundary=0.900, low_cfg_ratio=1.0),
         ref_method="concat_channels"),
 )}
 
@@ -381,9 +382,7 @@ class Wan22Model(VideoModel):
         return latents
 
     def schedule(self, params) -> list[Step]:
-        experts = self.variant.experts
-        shift = experts.flow_shift if experts is not None else FLOW_SHIFT
-        return sigma_steps(get_sigmas(params.steps, shift=shift),
+        return sigma_steps(get_sigmas(params.steps, shift=params.flow_shift),
                            self.device, torch.float32)
 
     def segments(self, params, schedule, guidance_scale) -> list[Segment]:

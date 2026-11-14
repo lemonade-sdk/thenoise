@@ -25,7 +25,7 @@ from thenoise.dit.wan_video.model import (
     WanNativeRoPE,
     detect_params,
 )
-from thenoise.dit.wan_video.sampling import FLOW_SHIFT, get_sigmas
+from thenoise.dit.wan_video.sampling import get_sigmas
 from thenoise.errors import ModelReloadNeeded
 from thenoise.models import resolve
 from thenoise.models.base import Conditioning, DiffusionModel
@@ -685,9 +685,11 @@ def test_a_down_block_leaves_the_tensor_it_was_handed_alone():
 
 # ----------------------------------------------------------------- Schedule
 
-def test_wan_fixed_flow_shift():
-    assert FLOW_SHIFT == 5.0
-    sigmas = get_sigmas(4)
+def test_the_flow_shifts_are_the_ones_the_releases_ship():
+    assert VARIANTS["ti2v_5b"].prefs["flow_shift"] == 5.0
+    assert VARIANTS["i2v_14b"].prefs["flow_shift"] == 5.0
+    assert VARIANTS["t2v_14b"].prefs["flow_shift"] == 12.0
+    sigmas = get_sigmas(4, shift=5.0)
     assert sigmas[0] == 1.0 and sigmas[-1] == 0.0
     assert all(a > b for a, b in zip(sigmas, sigmas[1:]))
     assert wan_adapter().resolve_video(VideoSpec(prompt="x", frames=10)).frame_count == 13
@@ -706,7 +708,7 @@ def test_shared_sampler_constant_velocity_and_step_callback(shape, sampler):
             return torch.ones_like(x)
 
     x = torch.zeros(shape)
-    sigmas = get_sigmas(5)
+    sigmas = get_sigmas(5, shift=5.0)
     schedule = [Step(torch.tensor(s), torch.tensor(s - next_s))
                 for s, next_s in zip(sigmas, sigmas[1:])]
     events = []
@@ -1214,7 +1216,8 @@ def test_the_two_experts_split_the_schedule_at_the_sigma_boundary():
     high, low = object(), object()
     model.dit, model.low_dit = high, low
     steps = model.schedule(VideoSamplingParams(height=64, width=64, steps=4, seed=1,
-                                               guidance_scale=4.0, sampler="euler"))
+                                               guidance_scale=4.0, sampler="euler",
+                                               flow_shift=A14B.prefs["flow_shift"]))
     spans = model.segments(None, steps, guidance_scale=4.0)
 
     assert [s.stage for s in spans] == ["dit", "dit_low"]
@@ -1223,7 +1226,7 @@ def test_the_two_experts_split_the_schedule_at_the_sigma_boundary():
     assert sum(len(s.steps) for s in spans) == len(steps)
     # Upstream ships guidance 4.0 on the high half and 3.0 on the low.
     assert spans[1].guidance_scale == pytest.approx(4.0 * A14B.experts.low_cfg_ratio)
-    sigmas = get_sigmas(4, shift=A14B.experts.flow_shift)
+    sigmas = get_sigmas(4, shift=A14B.prefs["flow_shift"])
     assert sigmas[2] > A14B.experts.boundary > sigmas[3]
 
 
@@ -1313,9 +1316,10 @@ def test_the_concatenating_variant_is_read_from_the_patch_embedding():
     assert i2v.variant is VARIANTS["i2v_14b"]
     assert i2v.CAPABILITIES["i2v"] is True
     assert i2v.pref("ref_method") == "concat_channels"
-    # Both pairs split the schedule in the same place; I2V runs a lower shift.
-    assert i2v.variant.experts.boundary == A14B.experts.boundary
-    assert i2v.variant.experts.flow_shift == 5.0 < A14B.experts.flow_shift
+    # The pair's own release schedule: later handover, half the T2V shift.
+    assert i2v.variant.experts.boundary == 0.900 > A14B.experts.boundary
+    assert i2v.variant.prefs["flow_shift"] == 5.0 < A14B.prefs["flow_shift"]
+    assert i2v.variant.experts.low_cfg_ratio == 1.0
 
 
 def test_a_36_channel_transformer_is_refused_the_5b_codec(tmp_path):
@@ -1408,3 +1412,24 @@ def test_a_generated_first_frame_survives_a_concatenated_reference():
     latents = torch.ones(1, 16, 2, 2, 2)
     assert torch.equal(model.finalize_latent(latents, None), latents)
     assert model._clip is None
+
+
+def test_a_request_can_ask_for_the_shift_it_needs():
+    model = wan_adapter("t2v_14b")
+    assert model.resolve_video(VideoSpec(prompt="x")).flow_shift == 12.0
+    assert model.resolve_video(
+        VideoSpec(prompt="x", flow_shift=5.0)).flow_shift == 5.0
+
+
+def test_a_four_step_distilled_run_hands_each_expert_half_the_schedule():
+    """The 4-step LoRA workflow is two samplers over steps 0-2 and 2-4, at shift 5.
+    Upstream's timestep threshold reaches the same split there, and no split of its own
+    -- but only if the run asks for that shift, since the pair defaults to 12."""
+    model = wan_adapter("i2v_14b")
+    model.dit, model.low_dit = object(), object()
+    for shift, split in ((5.0, [2, 2]), (12.0, [3, 1])):
+        steps = model.schedule(VideoSamplingParams(height=64, width=64, steps=4, seed=1,
+                                                   guidance_scale=1.0, sampler="euler",
+                                                   flow_shift=shift))
+        spans = model.segments(None, steps, guidance_scale=1.0)
+        assert [len(s.steps) for s in spans] == split, shift

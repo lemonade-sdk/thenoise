@@ -57,7 +57,7 @@ class VideoPipelineController:
             params = VideoSamplingParams(
                 height=spec.height, width=spec.width, steps=spec.steps, seed=spec.seed,
                 guidance_scale=spec.guidance_scale, sampler=spec.sampler,
-                frames=spec.frame_count,
+                frames=spec.frame_count, flow_shift=spec.flow_shift,
             )
             with model.memory.stage("text_encoder", pixels=pixels) as stage:
                 cond = stage.run(model.encode_prompt, EncodePromptArgs(

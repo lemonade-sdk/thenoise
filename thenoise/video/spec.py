@@ -27,6 +27,7 @@ class ResolvedVideo:
     fps: int
     steps: int
     guidance_scale: float
+    flow_shift: float
     seed: int
     output_format: str
     image: bytes | None
@@ -69,6 +70,7 @@ class VideoSpec(BaseModel):
     fps: _Positive | None = None
     steps: _Positive | None = None
     guidance_scale: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None = None
+    flow_shift: _PositiveFinite | None = None
     seed: int | None = None
     output_format: Literal["mp4", "webm"] | None = None
     image: Annotated[bytes, Field(min_length=1)] | None = None
@@ -102,12 +104,14 @@ class VideoSpec(BaseModel):
         negative_prompt = pref("negative_prompt")
         width, height = pref("width"), pref("height")
         fps, steps = pref("fps"), pref("steps")
-        guidance_scale = pref("guidance_scale")
+        guidance_scale, flow_shift = pref("guidance_scale"), pref("flow_shift")
         output_format, sampler = pref("output_format"), pref("sampler")
         if min(width, height, fps, steps) <= 0:
             raise ValueError("width, height, fps and steps must be positive")
         if not math.isfinite(guidance_scale) or guidance_scale < 0:
             raise ValueError("guidance_scale must be finite and nonnegative")
+        if not math.isfinite(flow_shift) or flow_shift <= 0:
+            raise ValueError("flow_shift must be finite and positive")
         if not sampler:
             raise ValueError("sampler must not be empty")
         if output_format not in ("mp4", "webm"):
@@ -121,7 +125,8 @@ class VideoSpec(BaseModel):
         return ResolvedVideo(
             prompt=self.prompt, negative_prompt=negative_prompt,
             width=width, height=height, frame_count=frames, fps=fps,
-            steps=steps, guidance_scale=guidance_scale, seed=seed,
+            steps=steps, guidance_scale=guidance_scale, flow_shift=flow_shift,
+            seed=seed,
             output_format=output_format, image=self.image,
             sampler=sampler, lora_specs=lora_specs_by_role(self.lora_specs),
             explicit_frames=self.frames is not None,

@@ -44,7 +44,8 @@ def test_wan_frame_grid_and_duration():
 REJECTED = ({"width": -1}, {"fps": 0}, {"frames": 0}, {"duration": 0.0},
             {"guidance_scale": float("nan")}, {"guidance_scale": -0.5},
             {"guidance_scale": float("inf")}, {"sampler": ""}, {"image": b""},
-            {"seed": -(2**63) - 1}, {"output_format": "avi"})
+            {"seed": -(2**63) - 1}, {"output_format": "avi"},
+            {"flow_shift": 0}, {"flow_shift": float("nan")})
 
 
 @pytest.mark.parametrize("bad", REJECTED)

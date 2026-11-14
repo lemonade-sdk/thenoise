@@ -31,7 +31,8 @@ def test_video_base_is_usable_without_wan(tmp_path):
         DEFAULT_PREFS = {**VideoModel.DEFAULT_PREFS,
                          "width": 640, "height": 384, "frames": 17, "fps": 25,
                          "steps": 8, "guidance_scale": 1.0,
-                         "output_format": "mp4", "sampler": "euler"}
+                         "output_format": "mp4", "sampler": "euler",
+                         "flow_shift": 5.0}
 
         def _clear_weights(self):
             self.extra_component = None

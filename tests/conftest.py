@@ -834,7 +834,7 @@ class StubVideo(VideoModel):
     name = "stub-video"
     DEFAULT_PREFS = {**VideoModel.DEFAULT_PREFS, "width": 64, "height": 64,
                      "frames": 5, "fps": 8, "steps": 2, "guidance_scale": 1.0,
-                     "sampler": "euler"}
+                     "sampler": "euler", "flow_shift": 5.0}
     Z_DIM = 4
     SCALE = 8
 

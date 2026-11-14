@@ -34,7 +34,7 @@ from thenoise.models import (
 )
 from thenoise.models.base import DiffusionModel
 from thenoise.models.wan_video import VARIANTS
-from thenoise.models.config import SamplingParams
+from thenoise.models.config import VideoSamplingParams
 from thenoise.utils.math import round_up
 
 
@@ -49,7 +49,9 @@ def _bare(cls, **attrs):
 
 
 def _params(steps=8, width=1024, height=1024):
-    return SamplingParams(
+    # The video subclass: the catalog holds video adapters, whose params carry the
+    # schedule's shift. An image kernel ignores what the subclass adds.
+    return VideoSamplingParams(
         height=height, width=width, steps=steps, seed=0, guidance_scale=1.0, sampler="euler"
     )
 
