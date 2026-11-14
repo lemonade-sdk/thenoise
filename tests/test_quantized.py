@@ -83,9 +83,9 @@ def test_quantized_linear_owns_optional_fp8_activation_scale():
     assert layer.input_scale.device == layer.weight.device
 
 
-def test_streaming_fp8_uses_quantized_linear_input_scale(tmp_path):
+def test_fp8_activation_scale_reaches_a_whole_state_load(tmp_path):
     from safetensors.torch import save_file
-    from thenoise.utils.loader import load_mapped_safetensors
+    from thenoise.utils.loader import load_dit
 
     path = tmp_path / "fp8.safetensors"
     raw = torch.ones(OUT_F, IN_F, dtype=torch.float16).to(torch.float8_e4m3fn)
@@ -100,9 +100,7 @@ def test_streaming_fp8_uses_quantized_linear_input_scale(tmp_path):
 
     with torch.device("meta"):
         model = Model()
-    load_mapped_safetensors(model, path, lambda k: k,
-                            dtype_for=lambda _: torch.bfloat16,
-                            label="test", quantized=True)
+    load_dit(model, str(path), device="cpu", dtype=torch.bfloat16)
     assert isinstance(model.q.weight, QuantizedTensor)
     assert model.q.input_scale.item() == pytest.approx(0.5)
     assert "q.input_scale" not in model.state_dict()
@@ -113,9 +111,7 @@ def test_streaming_fp8_uses_quantized_linear_input_scale(tmp_path):
                "scaled_fp8": torch.zeros(2)}, str(path))
     with torch.device("meta"):
         model = Model()
-    load_mapped_safetensors(model, path, lambda k: k,
-                            dtype_for=lambda _: torch.bfloat16,
-                            label="test", quantized=True)
+    load_dit(model, str(path), device="cpu", dtype=torch.bfloat16)
     assert model.q.input_scale is None
 
 

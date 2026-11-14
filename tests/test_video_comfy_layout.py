@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import re
-from types import SimpleNamespace
 
-import pytest
 import torch
 
-from thenoise.utils.wan_weights import wan_dit_key, wan_vae_key, validated_key_map
-from thenoise.vae.wan_video import _comfy_vae_config, WanNativeVideoVAE, load_wan_native_video_vae
+from thenoise.utils.wan_weights import wan_dit_key, wan_vae_key
+from thenoise.vae.wan_video import _comfy_vae_config, WanNativeVideoVAE
 
 
 def _original_vae_key(key: str, depth: int = 1) -> str:
@@ -59,26 +57,20 @@ def test_vae_comfy_key_map_full_topology():
         print("missing", sorted(names - mapped)[:25]); print("extra", sorted(mapped-names)[:25])
     assert len(raw) == len(names)
     assert mapped == names
-    assert len(validated_key_map(raw, lambda x: wan_vae_key(x, num_res_blocks=1), names)) == len(names)
-
-
-def test_no_unexpected_or_alias_keys():
-    with pytest.raises(ValueError, match="duplicates"):
-        validated_key_map({"one", "two"}, lambda x: "same", {"same"})
-    with pytest.raises(ValueError, match="missing"):
-        validated_key_map({"one"}, lambda x: x, {"one", "two"})
 
 
 def test_dit_comfy_names():
     expected = {
-        "text_embedding.0.weight": "condition_embedder.text_embedder.linear_1.weight",
+        "text_embedding.0.weight": "condition_embedder.text_linear_1.weight",
+        "time_embedding.2.bias": "condition_embedder.time_linear_2.bias",
         "time_projection.1.bias": "condition_embedder.time_proj.bias",
         "head.modulation": "scale_shift_table",
         "blocks.0.norm2.weight": "blocks.0.norm3.weight",
         "blocks.0.norm3.weight": "blocks.0.norm2.weight",
         "blocks.10.self_attn.q.weight": "blocks.10.attn1.to_q.weight",
-        "blocks.5.cross_attn.o.bias": "blocks.5.attn2.to_out.0.bias",
-        "blocks.2.ffn.0.weight": "blocks.2.ffn.net.0.proj.weight",
-        "blocks.2.ffn.2.weight": "blocks.2.ffn.net.2.weight",
+        "blocks.5.cross_attn.o.bias": "blocks.5.attn2.to_out.bias",
+        "blocks.2.ffn.0.weight": "blocks.2.ffn_in.weight",
+        "blocks.2.ffn.2.weight": "blocks.2.ffn_out.weight",
+        "blocks.7.self_attn.o.weight": "blocks.7.attn1.to_out.weight",
     }
     assert {k: wan_dit_key(k) for k in expected} == expected

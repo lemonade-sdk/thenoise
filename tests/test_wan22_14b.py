@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from thenoise.dit.wan_video.checkpoint import _T2V_14B_CONFIG, _WanWeightModel
+from thenoise.dit.wan_video.model import Wan22Params, WanNativeDiT
 from thenoise.dit.wan_video.sampling import get_sigmas
 from thenoise.models.wan_video import Wan14BVideo, WanVideo
 from thenoise.utils.wan_weights import wan_vae21_key
@@ -34,31 +34,6 @@ def test_14b_catalog_detection_does_not_regress_5b():
     f = Checkpoint()
     assert Wan14BVideo.detect(f)
     assert not WanVideo.detect(f)
-
-
-def test_14b_loads_explicitly_named_experts(tmp_path, monkeypatch):
-    from thenoise.dit.wan_video import checkpoint as loader
-
-    opened = []
-
-    class FakeWeights:
-        def eval(self):
-            return self
-
-    monkeypatch.setattr(loader, "_WanWeightModel", lambda config: FakeWeights())
-    monkeypatch.setattr(loader, "load_mapped_safetensors",
-                        lambda weights, path, *_args, **_kwargs: opened.append(str(path)))
-    monkeypatch.setattr(loader.WanNativeDiT, "from_weights", lambda weights: weights)
-
-    high = tmp_path / "renamed_a.safetensors"
-    low = tmp_path / "renamed_b.safetensors"
-    high.write_bytes(b"high")
-    low.write_bytes(b"low")
-    loader.load_wan_native_transformer(high, expert="high")
-    loader.load_wan_native_transformer(low, expert="low")
-    assert opened == [str(high), str(low)]
-    with pytest.raises(FileNotFoundError, match="low-noise"):
-        loader.load_wan_native_transformer(tmp_path, expert="low")
 
 
 def test_14b_requires_two_distinct_expert_paths(tmp_path, monkeypatch):
@@ -96,12 +71,15 @@ def test_14b_requires_two_distinct_expert_paths(tmp_path, monkeypatch):
 
 
 def test_14b_topology_meta_and_vae21_key_mapping():
+    params = Wan22Params(in_channels=16, out_channels=16, dim=5120, num_layers=40,
+                         ffn_dim=13824, freq_dim=256, text_dim=4096, patch_size=(1, 2, 2))
     with torch.device("meta"):
-        dit = _WanWeightModel(SimpleNamespace(**_T2V_14B_CONFIG))
+        dit = WanNativeDiT(params)
+    assert params.heads == 40
     assert dit.patch_embedding.weight.shape == (5120, 16, 1, 2, 2)
     assert dit.proj_out.weight.shape == (64, 5120)
     assert len(dit.blocks) == 40
-    assert dit.blocks[0].ffn.net[0].proj.weight.shape == (13824, 5120)
+    assert dit.blocks[0].ffn_in.weight.shape == (13824, 5120)
 
     vae_cfg = _comfy_vae_config(dict(base_dim=8, decoder_base_dim=8, z_dim=16,
                                     in_channels=3, out_channels=3, patch_size=1,

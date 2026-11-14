@@ -83,9 +83,8 @@ def fake_video(tmp_path, monkeypatch):
         calls.append("load_vae")
         return VAE()
 
-    def load_dit(_root, *, dtype, check_cancel):
+    def load_dit(_path, _device, *, check_cancel):
         check_cancel()
-        assert dtype is torch.float16
         calls.append("load_dit")
         return DiT()
 

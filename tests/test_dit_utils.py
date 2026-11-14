@@ -9,7 +9,7 @@ import math
 import pytest
 import torch
 
-from conftest import write_safetensors
+from conftest import write_key_checkpoint, write_safetensors
 from thenoise.dit.anima.utils import _count_anima_blocks
 from thenoise.utils.text_encoder import QWEN_VL_DROP_IDX, compute_drop_idx
 from thenoise.dit.krea2.sampling import (
@@ -411,3 +411,36 @@ def test_drop_idx_counts_markers_rather_than_assuming_a_prefix_length():
     assert compute_drop_idx(t2i) == QWEN_VL_DROP_IDX
     assert compute_drop_idx(edit) == 64
     assert compute_drop_idx(torch.tensor([151644, 1, 2, 3])) == 0  # no user turn at all
+
+
+def test_a_key_map_that_collides_is_refused(tmp_path):
+    """Two checkpoint keys landing on one parameter must not lose one in silence.
+
+    A dict comprehension keeps the last, and a strict load afterwards cannot tell
+    that from a checkpoint that never carried the parameter.
+    """
+    from thenoise.utils.loader import load_dit
+
+    path = write_key_checkpoint(tmp_path / "two.safetensors", ["a.weight", "b.weight"])
+    with pytest.raises(RuntimeError, match="same module parameter"):
+        load_dit(torch.nn.Linear(2, 2), path, device="cpu", key_map=lambda key: "weight")
+
+
+def test_a_cancel_stops_the_shared_checkpoint_read(tmp_path):
+    """A queued job has to be abandonable during a multi-gigabyte read."""
+    from thenoise.utils.loader import load_dit
+
+    class Stop(Exception):
+        pass
+
+    path = write_key_checkpoint(tmp_path / "many.safetensors",
+                                [f"t{i}.weight" for i in range(4)])
+    seen = []
+
+    def stop():
+        seen.append(1)
+        raise Stop
+
+    with pytest.raises(Stop):
+        load_dit(torch.nn.Linear(2, 2), path, device="cpu", check_cancel=stop)
+    assert seen == [1]

@@ -3,17 +3,20 @@ from __future__ import annotations
 
 import re
 
-from thenoise.utils.checkpoint_weights import validated_key_map
-
 
 def wan_dit_key(raw: str) -> str:
-    """Map ComfyUI WanModel weights to TheNoise's TI2V-5B DiT structure."""
-    name = raw.removeprefix("model.diffusion_model.").removeprefix("diffusion_model.")
+    """Map ComfyUI WanModel weights to TheNoise DiT module paths.
+
+    Generic repackaging wrappers are the loader's business (``strip_wrap_prefixes``);
+    this map holds only Wan's own renames, so the module is the one place a path is
+    spelled.
+    """
+    name = raw
     roots = {
-        "text_embedding.0.": "condition_embedder.text_embedder.linear_1.",
-        "text_embedding.2.": "condition_embedder.text_embedder.linear_2.",
-        "time_embedding.0.": "condition_embedder.time_embedder.linear_1.",
-        "time_embedding.2.": "condition_embedder.time_embedder.linear_2.",
+        "text_embedding.0.": "condition_embedder.text_linear_1.",
+        "text_embedding.2.": "condition_embedder.text_linear_2.",
+        "time_embedding.0.": "condition_embedder.time_linear_1.",
+        "time_embedding.2.": "condition_embedder.time_linear_2.",
         "time_projection.1.": "condition_embedder.time_proj.",
         "head.norm.": "norm_out.",
         "head.head.": "proj_out.",
@@ -38,17 +41,17 @@ def wan_dit_key(raw: str) -> str:
         ("self_attn.q.", "attn1.to_q."),
         ("self_attn.k.", "attn1.to_k."),
         ("self_attn.v.", "attn1.to_v."),
-        ("self_attn.o.", "attn1.to_out.0."),
+        ("self_attn.o.", "attn1.to_out."),
         ("self_attn.norm_q.", "attn1.norm_q."),
         ("self_attn.norm_k.", "attn1.norm_k."),
         ("cross_attn.q.", "attn2.to_q."),
         ("cross_attn.k.", "attn2.to_k."),
         ("cross_attn.v.", "attn2.to_v."),
-        ("cross_attn.o.", "attn2.to_out.0."),
+        ("cross_attn.o.", "attn2.to_out."),
         ("cross_attn.norm_q.", "attn2.norm_q."),
         ("cross_attn.norm_k.", "attn2.norm_k."),
-        ("ffn.0.", "ffn.net.0.proj."),
-        ("ffn.2.", "ffn.net.2."),
+        ("ffn.0.", "ffn_in."),
+        ("ffn.2.", "ffn_out."),
     ):
         if suffix.startswith(src):
             return f"{block}.{dst}{suffix[len(src):]}"

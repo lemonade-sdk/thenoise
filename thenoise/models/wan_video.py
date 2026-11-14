@@ -81,19 +81,7 @@ class WanVideo(VideoModel):
             stem = (stem.removeprefix("transformer.")
                     .removeprefix("model.diffusion_model.")
                     .removeprefix("diffusion_model."))
-            stem = wan_dit_key(stem + ".weight").removesuffix(".weight")
-            stem = re.sub(r"^(blocks\.\d+)\.ffn\.net\.0\.proj$", r"\1.ffn_in", stem)
-            stem = re.sub(r"^(blocks\.\d+)\.ffn\.net\.2$", r"\1.ffn_out", stem)
-            for raw, target in (
-                ("time_embedder.linear_1", "time_linear_1"),
-                ("time_embedder.linear_2", "time_linear_2"),
-                ("time_proj", "time_proj"),
-                ("text_embedder.linear_1", "text_linear_1"),
-                ("text_embedder.linear_2", "text_linear_2"),
-            ):
-                stem = stem.replace("condition_embedder." + raw,
-                                    "condition_embedder." + target)
-            return stem + suffix
+            return wan_dit_key(stem + ".weight").removesuffix(".weight") + suffix
         return key
 
     def __init__(self, *, config):
@@ -139,7 +127,7 @@ class WanVideo(VideoModel):
         )
         token.check()
         transformer = load_wan_native_transformer(
-            self.dit_path, dtype=torch.float16, check_cancel=token.check,
+            self.dit_path, self._load_target(self.dit_path), check_cancel=token.check,
         )
         token.check()
         self.memory.register("vae", vae)
@@ -184,7 +172,7 @@ class WanVideo(VideoModel):
     def _sample(self, latents: torch.Tensor, spec: ResolvedVideo,
                 positive: torch.Tensor, negative: torch.Tensor | None,
                 condition: torch.Tensor | None, token: Cancellation, progress) -> torch.Tensor:
-        patch_t, patch_h, patch_w = self.transformer.config.patch_size
+        patch_t, patch_h, patch_w = self.transformer.params.patch_size
         b, _, t, h, w = latents.shape
         mask = torch.ones((b, 1, t, 1, 1), device=latents.device, dtype=torch.float32)
         if condition is not None:
@@ -369,11 +357,11 @@ class Wan14BVideo(WanVideo):
         )
         token.check()
         high = load_wan_native_transformer(
-            self.dit_path, dtype=torch.bfloat16, check_cancel=token.check, expert="high",
+            self.dit_path, self._load_target(self.dit_path), check_cancel=token.check,
         )
         token.check()
         low = load_wan_native_transformer(
-            self.dit_low_path, dtype=torch.bfloat16, check_cancel=token.check, expert="low",
+            self.dit_low_path, self._load_target(self.dit_low_path), check_cancel=token.check,
         )
         token.check()
         self.memory.register("vae", vae)
