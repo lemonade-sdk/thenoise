@@ -174,21 +174,13 @@ def test_wan21_latent_normalization_is_not_identity():
     torch.testing.assert_close(video._denormalize(normalized), z)
 
 
-def test_each_video_vae_variant_loads_at_its_own_compute_dtype(monkeypatch):
-    from thenoise.vae import wan_video as native_vae
-
-    seen = []
-
-    monkeypatch.setattr(native_vae, "find_weight_file", lambda *args: "unused.safetensors")
-
-    def capture_dtype(_model, _path, _mapper, *, dtype_for, **_kwargs):
-        seen.append(dtype_for("encoder.conv_in.weight"))
-
-    monkeypatch.setattr(native_vae, "load_mapped_safetensors", capture_dtype)
-    tiny = {"base_dim": 4, "decoder_base_dim": 4, "num_res_blocks": 1}
-    native_vae.load_wan_native_video_vae("unused", wan21=True, _test_config=tiny)
-    native_vae.load_wan_native_video_vae("unused", _test_config=tiny)
-    assert seen == [torch.float16, torch.bfloat16]
+def test_each_video_codec_declares_its_own_compute_dtype():
+    """The 48ch 2.2 codec runs at the 2.2 family's BF16 (see
+    ``vae.wan22.COMPUTE_DTYPE``), the 16ch 2.1 codec at the FP16 it ships in; the
+    loader moves the module to whatever its config declares.
+    """
+    assert _comfy_vae_config().compute_dtype is torch.bfloat16
+    assert _comfy_vae_config(_wan21_vae_config()).compute_dtype is torch.float16
 
 
 def test_wan21_fp16_vae_decodes_float32_latents_and_clears_cache():

@@ -32,7 +32,7 @@ def _write(root, *, missing=False, wrong_shape=False):
     if wrong_shape:
         raw[next(iter(raw))] = torch.zeros(2, 2, dtype=torch.float16)
     save_file(raw, str(path))
-    return source
+    return path, source
 
 
 
@@ -110,8 +110,8 @@ def test_a_precision_nobody_measured_this_codec_at_is_refused():
 
 
 def test_comfy_fp16_checkpoint_loads_at_the_compute_dtype(tmp_path):
-    source = _write(tmp_path)
-    vae = load_wan_native_video_vae(tmp_path, _test_config=TINY)
+    path, source = _write(tmp_path)
+    vae = load_wan_native_video_vae(str(path), "cpu", config=_comfy_vae_config(TINY))
     assert vae.dtype is vae.compute_dtype is torch.bfloat16
     assert not any(p.is_meta for p in vae.parameters())
     assert torch.equal(vae.encoder.conv_in.weight,
@@ -121,11 +121,11 @@ def test_comfy_fp16_checkpoint_loads_at_the_compute_dtype(tmp_path):
     assert result.shape == (1, 3, 5, 16, 16)
 
 
-@pytest.mark.parametrize("damage", ["missing", "shape"])
-def test_comfy_checkpoint_rejects_invalid_weights(tmp_path, damage):
-    _write(tmp_path, missing=damage == "missing", wrong_shape=damage == "shape")
-    with pytest.raises(ValueError, match="mismatch"):
-        load_wan_native_video_vae(tmp_path, _test_config=TINY)
+@pytest.mark.parametrize("damage,raises", [("missing", "Missing key"), ("shape", "size mismatch")])
+def test_comfy_checkpoint_rejects_invalid_weights(tmp_path, damage, raises):
+    path, _ = _write(tmp_path, missing=damage == "missing", wrong_shape=damage == "shape")
+    with pytest.raises(RuntimeError, match=raises):
+        load_wan_native_video_vae(str(path), "cpu", config=_comfy_vae_config(TINY))
 
 
 def test_official_comfy_vae_topology_meta():

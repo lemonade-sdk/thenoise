@@ -1,20 +1,25 @@
 """UMT5-XXL encoder for Comfy-Org Wan checkpoints."""
 from __future__ import annotations
 
+import logging
 import math
-from pathlib import Path
 from typing import Callable
 
 import sentencepiece as spm
 import torch
-from safetensors import safe_open
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+logger = logging.getLogger(__name__)
+
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention
-from thenoise.utils.loader import load_mapped_safetensors
-from thenoise.utils.model_dir import find_weight_file
+from thenoise.utils.loader import is_quantized_checkpoint, load_text_encoder_weights
+from thenoise.utils.safetensors import MemoryEfficientSafeOpen
+
+#: UMT5's gated FFN can overflow FP16 before its final normalization. BF16 keeps the
+#: FP16 checkpoint's memory footprint but widens the exponent.
+COMPUTE_DTYPE = torch.bfloat16
 
 
 class _T5Norm(nn.Module):
@@ -159,28 +164,47 @@ def _text_key(name: str) -> str:
     return name.removeprefix("text_encoders.").removeprefix("umt5xxl.transformer.").removeprefix("transformer.")
 
 
-def load_wan_text_encoder(model_dir: str | Path, *, dtype: torch.dtype = torch.float16,
-                          check_cancel: Callable[[], None] | None = None,
-                          _test_config: dict | None = None) -> tuple[WanUMT5, WanSentencePiece]:
-    """Load Comfy-Org's UMT5 weights and tokenizer without Transformers."""
-    checkpoint = find_weight_file(
-        model_dir, "text_encoders",
-        ("umt5_xxl_fp16.safetensors", "umt5_xxl_fp8_e4m3fn_scaled.safetensors"),
-    )
-    if "fp8" in checkpoint.name:
-        raise ValueError("FP8 UMT5 is not yet supported; use umt5_xxl_fp16.safetensors")
-    with torch.device("meta"):
-        model = WanUMT5(**(_test_config or {}))
-    if check_cancel:
-        check_cancel()
-    with safe_open(str(checkpoint), framework="pt", device="cpu") as sf:
-        if "spiece_model" not in sf.keys():
-            raise ValueError("Comfy UMT5 checkpoint is missing embedded spiece_model")
-        if sf.get_slice("spiece_model").get_dtype() != "U8":
+def _tokenizer_proto(path: str) -> bytes:
+    """The SentencePiece proto ComfyUI embeds in its UMT5 file.
+
+    It is tokenizer payload rather than module state, so the weight load drops the
+    key and this reads it on its own.
+    """
+    with MemoryEfficientSafeOpen(path) as f:
+        if "spiece_model" not in f.keys():
+            raise ValueError(f"{path} is missing its embedded spiece_model tokenizer")
+        if f.header["spiece_model"]["dtype"] != "U8":
             raise ValueError("invalid Comfy UMT5 sentencepiece tokenizer data")
-        tokenizer = WanSentencePiece(sf.get_tensor("spiece_model").numpy().tobytes())
-    load_mapped_safetensors(
-        model, checkpoint, _text_key, dtype_for=lambda _: dtype,
-        excluded=frozenset({"spiece_model"}), check_cancel=check_cancel, label="UMT5",
+        return f.get_tensor("spiece_model").numpy().tobytes()
+
+
+def load_wan_text_encoder(
+    path: str,
+    device: str | torch.device,
+    dtype: torch.dtype | None = None,
+    *,
+    params: dict | None = None,
+    check_cancel: Callable[[], None] | None = None,
+) -> tuple[WanUMT5, WanSentencePiece]:
+    """Load Comfy-Org's UMT5 weights and its embedded tokenizer, without Transformers.
+
+    Quantized (FP8-scaled) and plain files both load here: the shared loader picks
+    from the header, so nothing guesses from the filename. A plain file is read with
+    its own dtypes and the module moved afterwards, which keeps the read from holding
+    a second copy of an 11 GB encoder; a quantized one needs its full-precision
+    tensors at the compute dtype while they are assigned, because quantized kernels
+    emit BF16.
+    """
+    proto = _tokenizer_proto(path)
+    compute = dtype or COMPUTE_DTYPE
+    quantized = is_quantized_checkpoint(path)
+    logger.info("Loading %sUMT5 from %s", "quantized " if quantized else "", path)
+    with torch.device("meta"):
+        model = WanUMT5(**(params or {}))
+    load_text_encoder_weights(
+        model, path, device=device, dtype=compute if quantized else None,
+        key_map=_text_key, drop_keys=("spiece_model",), check_cancel=check_cancel,
     )
-    return model.eval(), tokenizer
+    if not quantized:
+        model.to(dtype=compute)
+    return model.eval(), WanSentencePiece(proto)

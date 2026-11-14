@@ -78,7 +78,7 @@ def fake_video(tmp_path, monkeypatch):
         def encode(self, prompt):
             return torch.ones(1, 16, dtype=torch.long), torch.ones(1, 16, dtype=torch.bool)
 
-    def load_vae(_root, *, check_cancel):
+    def load_vae(_path, _device, *, check_cancel):
         check_cancel()
         calls.append("load_vae")
         return VAE()
@@ -89,9 +89,8 @@ def fake_video(tmp_path, monkeypatch):
         calls.append("load_dit")
         return DiT()
 
-    def load_text(_root, *, dtype, check_cancel):
+    def load_text(_path, _device, *, check_cancel):
         check_cancel()
-        assert dtype is torch.bfloat16
         calls.append("load_text")
         return Text(), Tokenizer()
 
@@ -119,6 +118,9 @@ def fake_video(tmp_path, monkeypatch):
 
         def register(self, key, value):
             self.items[key] = value
+
+        def device_for(self, nbytes):
+            return "cpu"
 
         def stage(self, *args, **kwargs):
             return FakeStage()

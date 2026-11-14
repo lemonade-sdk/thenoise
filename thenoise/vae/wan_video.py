@@ -4,8 +4,8 @@
 """Native causal Wan video VAE with model-specific compute precision."""
 from __future__ import annotations
 
+import logging
 from collections import namedtuple
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable, Iterator
 
@@ -13,13 +13,14 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from thenoise.utils.loader import load_mapped_safetensors
-from thenoise.utils.model_dir import find_weight_file
+from thenoise.utils.loader import load_dit
 from thenoise.utils.wan_weights import wan_vae_key, wan_vae21_key
 from thenoise.vae.wan22 import (
     COMPUTE_DTYPE as WAN22_COMPUTE_DTYPE,
     Wan22AttentionBlock, WAN22_LATENTS_MEAN, WAN22_LATENTS_STD,
 )
+
+logger = logging.getLogger(__name__)
 
 CACHE_T = 2
 DecoderOutput = namedtuple("DecoderOutput", "sample")
@@ -492,26 +493,29 @@ class WanNativeVideoVAE(nn.Module):
 
 
 def load_wan_native_video_vae(
-    model_dir: str | Path, *, check_cancel: Callable[[], None] | None = None,
-    _test_config: dict | None = None, wan21: bool = False,
+    vae_path: str,
+    device: str | torch.device,
+    dtype: torch.dtype | None = None,
+    *,
+    wan21: bool = False,
+    config: SimpleNamespace | None = None,
+    check_cancel: Callable[[], None] | None = None,
 ) -> WanNativeVideoVAE:
-    """Load a Wan video VAE at its own ``compute_dtype``: FP16 for the 2.1 16ch
-    codec, BF16 for the 2.2 48ch one (see ``vae.wan22.COMPUTE_DTYPE``)."""
-    if wan21:
-        cfg = _comfy_vae_config(_wan21_vae_config() | (_test_config or {}))
-        checkpoint = find_weight_file(model_dir, "vae", ("wan_2.1_vae.safetensors",))
-        mapper = lambda key: wan_vae21_key(key, num_res_blocks=cfg.num_res_blocks)
-    else:
-        cfg = _comfy_vae_config(_test_config)
-        checkpoint = find_weight_file(model_dir, "vae", ("wan2.2_vae.safetensors",))
-        mapper = lambda key: wan_vae_key(key, num_res_blocks=cfg.num_res_blocks)
+    """Load a Wan video VAE from ``vae_path``.
+
+    The file is read with its own dtypes and the module then moved to ``dtype``, so
+    the read never holds a second copy of the codec; ``dtype`` defaults to the
+    codec's own ``compute_dtype``. ``config`` replaces the geometry, which every
+    released file shares.
+    """
+    cfg = config or (_comfy_vae_config(_wan21_vae_config()) if wan21 else _comfy_vae_config())
+    key_map = ((lambda key: wan_vae21_key(key, num_res_blocks=cfg.num_res_blocks)) if wan21
+               else (lambda key: wan_vae_key(key, num_res_blocks=cfg.num_res_blocks)))
+    logger.info("Loading Wan %s video VAE from %s", "2.1" if wan21 else "2.2", vae_path)
     with torch.device("meta"):
         model = WanNativeVideoVAE(cfg)
-    if check_cancel:
-        check_cancel()
-    load_mapped_safetensors(
-        model, checkpoint, mapper, dtype_for=lambda _: cfg.compute_dtype,
-        check_cancel=check_cancel, label="Wan VAE",
-    )
+    load_dit(model, vae_path, device=device, dtype=None, key_map=key_map,
+             check_cancel=check_cancel)
+    model.to(dtype=dtype or cfg.compute_dtype)
     model.clear_cache()
     return model.eval()

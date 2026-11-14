@@ -16,6 +16,7 @@ import torch
 from thenoise.memory import MemoryManager
 from thenoise.models.lora_support import LoRASupport
 from thenoise.models.config import ModelConfig
+from thenoise.utils.checkpoint import checkpoint_bytes
 from thenoise.utils.device import release_device_memory
 from thenoise.utils.device_patches import apply_device_patches
 from thenoise.utils.dynamo import apply_recompile_limit
@@ -46,6 +47,10 @@ class VideoModel(LoRASupport, ABC):
     @abstractmethod
     def detect(checkpoint) -> bool:
         """Recognize the model from an open checkpoint."""
+
+    def _load_target(self, path: str) -> str:
+        """The device to build the weights at ``path`` on, the manager's decision."""
+        return str(self.memory.device_for(checkpoint_bytes(path)))
 
     @classmethod
     def resolve_video(cls, spec: VideoSpec) -> ResolvedVideo:

@@ -141,6 +141,7 @@ def load_text_encoder_weights(
     dtype: Optional[torch.dtype] = None,
     key_map: Optional[Callable[[str], str]] = None,
     drop_keys: Optional[tuple[str, ...]] = None,
+    check_cancel: Optional[Callable[[], None]] = None,
 ) -> torch.nn.Module:
     """Load a text-encoder checkpoint (single safetensors file), auto-selecting
     quantized vs BF16. No sharded-file support.
@@ -154,10 +155,13 @@ def load_text_encoder_weights(
     multimodal file ships an image tower the text-to-image conditioner does not
     build, and some store their tokenizer as a U8 payload tensor; dropping keeps the
     load strict.
+
+    ``check_cancel`` is called per tensor read: an oversized checkpoint can sit in
+    the reader long enough that abandoning a queued job matters.
     """
     device = torch.device(device)
 
-    sd = load_safetensors(path, device=device, dtype=None)
+    sd = load_safetensors(path, device=device, dtype=None, check_cancel=check_cancel)
     sd = {k: v for k, v in sd.items() if k != "lm_head" and not k.startswith("lm_head.")}
     sd = drop_runtime_state(sd)
     sd = drop_checkpoint_markers(sd)
@@ -196,6 +200,7 @@ def load_dit(
     key_map: Optional[Callable[[str], str]] = None,
     value_map: Optional[Callable[[str, torch.Tensor], tuple[str, torch.Tensor]]] = None,
     state_map: Optional[Callable[[dict], dict]] = None,
+    check_cancel: Optional[Callable[[], None]] = None,
 ) -> torch.nn.Module:
     """Load a DiT checkpoint into ``model`` (constructed on meta), selecting
     quantized vs BF16 automatically.
@@ -215,7 +220,7 @@ def load_dit(
     device = torch.device(device)
 
     # Load once and prepare before branching so both paths see the same dict.
-    sd = load_dit_safetensors(path, device=device, dtype=None)
+    sd = load_dit_safetensors(path, device=device, dtype=None, check_cancel=check_cancel)
     sd = drop_runtime_state(sd)
     sd = drop_checkpoint_markers(sd)
     if drop_keys:
@@ -407,8 +412,11 @@ def _load_bf16(
 def is_quantized_checkpoint(dit_path: str) -> bool:
     """Return True if ``dit_path`` is a quantized (INT8 or FP8) checkpoint.
 
-    Looks for any ``.weight_scale`` key in the safetensors header (after stripping
-    generic repackaging wrapper prefixes); reads the header only.
+    Looks for any weight-scale key in the safetensors header (after stripping
+    generic repackaging wrapper prefixes); reads the header only. Both spellings
+    count: ComfyUI's quantizer wrote ``.scale_weight`` before it wrote
+    ``.weight_scale``, and missing the older one would read a low-bit file as if it
+    were BF16.
     """
     with MemoryEfficientSafeOpen(dit_path) as f:
         for key in f.keys():
@@ -416,7 +424,7 @@ def is_quantized_checkpoint(dit_path: str) -> bool:
                 if key.startswith(prefix):
                     key = key[len(prefix):]
                     break
-            if key.endswith(_WEIGHT_SCALE_SUFFIX):
+            if _strip_suffix(key, _WEIGHT_SCALE_SUFFIXES) is not None:
                 return True
     return False
 
@@ -492,6 +500,8 @@ def load_quantized_state_dict(
     for key, tensor in state_dict.items():
         stem = _strip_suffix(key, _WEIGHT_SCALE_SUFFIXES)
         if stem is not None:
+            if stem in scales:
+                raise RuntimeError(f"duplicate weight scale for {stem!r}")
             scales[stem] = tensor
         elif (stem := _strip_suffix(key, _INPUT_SCALE_SUFFIXES)) is not None:
             input_scales[stem] = tensor
@@ -540,6 +550,11 @@ def load_quantized_state_dict(
             f"orphan {_INPUT_SCALE_SUFFIXES[0]} keys in quantized checkpoint: "
             f"{list(input_scales)[:5]}"
         )
+    # A parameter still on meta is a weight the checkpoint never carried: the
+    # state-dict walk above only sees what the file has.
+    if any(p.is_meta for p in model.parameters()):
+        missing = [n for n, p in model.named_parameters() if p.is_meta]
+        raise RuntimeError(f"checkpoint leaves {len(missing)} parameters unloaded: {missing[:5]}")
 
 
 def _build_quantized_tensor(

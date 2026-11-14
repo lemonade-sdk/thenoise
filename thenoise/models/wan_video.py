@@ -127,12 +127,15 @@ class WanVideo(VideoModel):
         token.check()
         if self.transformer is not None:
             return
-        vae = load_wan_native_video_vae(self.vae_path, check_cancel=token.check)
+        vae = load_wan_native_video_vae(
+            self.vae_path, self._load_target(self.vae_path), check_cancel=token.check,
+        )
         token.check()
         # UMT5's gated FFN can overflow FP16 before its final normalization.
         # BF16 preserves the FP16 checkpoint's memory footprint but widens the exponent.
         text_encoder, tokenizer = load_wan_text_encoder(
-            self.text_encoder_path, dtype=torch.bfloat16, check_cancel=token.check,
+            self.text_encoder_path, self._load_target(self.text_encoder_path),
+            check_cancel=token.check,
         )
         token.check()
         transformer = load_wan_native_transformer(
@@ -356,10 +359,13 @@ class Wan14BVideo(WanVideo):
             return
         if not self.dit_low_path:
             raise ValueError("Wan 2.2 T2V-A14B requires --dit-low")
-        vae = load_wan_native_video_vae(self.vae_path, check_cancel=token.check, wan21=True)
+        vae = load_wan_native_video_vae(
+            self.vae_path, self._load_target(self.vae_path), wan21=True, check_cancel=token.check,
+        )
         token.check()
         text_encoder, tokenizer = load_wan_text_encoder(
-            self.text_encoder_path, dtype=torch.bfloat16, check_cancel=token.check,
+            self.text_encoder_path, self._load_target(self.text_encoder_path),
+            check_cancel=token.check,
         )
         token.check()
         high = load_wan_native_transformer(
