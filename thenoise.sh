@@ -14,6 +14,17 @@ VENV_DIR="$PROJECT_DIR/.venv"
 export PYTHONNOUSERSITE=1
 unset PYTHONPATH PYTHONHOME
 
+# An explicit backend overrides auto-detection. An already working torch
+# installation is otherwise preserved without prompting on every launch.
+BACKEND_PREFERENCE="${THENOISE_BACKEND:-auto}"
+case "$BACKEND_PREFERENCE" in
+  auto|rocm|cuda) ;;
+  *)
+    echo "Error: THENOISE_BACKEND must be auto, rocm, or cuda." >&2
+    exit 2
+    ;;
+esac
+
 # ---- 1. Check that uv is available ----------------------------------------
 if ! command -v uv &>/dev/null; then
   cat <<'UV_HELP'
@@ -81,18 +92,55 @@ detect_gfx_arch() {
   return 1
 }
 
+# Use nvidia-smi's actual GPU listing, rather than only checking whether the
+# binary is installed (it can exist even when no NVIDIA GPU is accessible).
+detect_nvidia() {
+  command -v nvidia-smi &>/dev/null &&
+    nvidia-smi -L 2>/dev/null | grep -Eq '^GPU [0-9]+:'
+}
+
 select_install_backend() {
+  local has_amd=no has_nvidia=no answer=""
+
+  # GFX_ARCH still chooses the ROCm wheel architecture; it is not an explicit
+  # backend preference. Use THENOISE_BACKEND to skip the mixed-GPU prompt.
   if [ -n "${GFX_ARCH:-}" ]; then
-    INSTALL_BACKEND="rocm"
+    has_amd=yes
   elif GFX_ARCH="$(detect_gfx_arch)"; then
-    INSTALL_BACKEND="rocm"
+    has_amd=yes
     echo "Auto-detected GFX_ARCH=$GFX_ARCH"
-  elif command -v nvidia-smi &>/dev/null && nvidia-smi -L &>/dev/null; then
-    INSTALL_BACKEND="cuda"
+  fi
+  if detect_nvidia; then
+    has_nvidia=yes
+  fi
+
+  if [ "$BACKEND_PREFERENCE" != auto ]; then
+    INSTALL_BACKEND="$BACKEND_PREFERENCE"
+  elif [ "$has_amd" = yes ]; then
+    INSTALL_BACKEND=rocm
+    if [ "$has_nvidia" = yes ]; then
+      if [ -t 0 ]; then
+        printf 'Detected AMD (%s) and NVIDIA GPUs. AMD/ROCm is the default. Install NVIDIA CUDA instead? [y/N] ' "$GFX_ARCH" >&2
+        if IFS= read -r answer; then
+          case "$answer" in
+            y|Y|yes|YES|Yes) INSTALL_BACKEND=cuda ;;
+          esac
+        fi
+      else
+        echo 'Detected AMD and NVIDIA GPUs; defaulting to ROCm. Set THENOISE_BACKEND=cuda to use NVIDIA.' >&2
+      fi
+    fi
+  elif [ "$has_nvidia" = yes ]; then
+    INSTALL_BACKEND=cuda
   else
-    INSTALL_BACKEND="rocm"
-    GFX_ARCH="gfx1151"
-    echo "Warning: no GPU detected; falling back to GFX_ARCH=gfx1151." >&2
+    INSTALL_BACKEND=rocm
+    echo 'Warning: no GPU detected; falling back to ROCm/gfx1151.' >&2
+  fi
+
+  # Keep the original gfx1151 fallback for machines where sysfs probing fails
+  # (or users who explicitly request ROCm without a detected GFX architecture).
+  if [ "$INSTALL_BACKEND" = rocm ] && [ -z "${GFX_ARCH:-}" ]; then
+    GFX_ARCH=gfx1151
   fi
 }
 
@@ -119,7 +167,10 @@ if installed="$(probe_torch 2>/dev/null)"; then
   read -r backend torch_version torchvision_version available <<< "$installed"
 fi
 
-if [ -z "$installed" ] || { [ -n "${GFX_ARCH:-}" ] && [ "$backend" != "rocm" ]; }; then
+if [ -z "$installed" ] || \
+   { [ "$BACKEND_PREFERENCE" = rocm ] && [ "$backend" != rocm ]; } || \
+   { [ "$BACKEND_PREFERENCE" = cuda ] && [ "$backend" != cuda ]; } || \
+   { [ "$BACKEND_PREFERENCE" = auto ] && [ -n "${GFX_ARCH:-}" ] && [ "$backend" != rocm ] && ! detect_nvidia; }; then
   select_install_backend
   install_torch
   installed=""
