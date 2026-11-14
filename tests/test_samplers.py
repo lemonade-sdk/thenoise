@@ -188,3 +188,19 @@ def test_sigma_steps_walk_the_grid_verbatim():
     assert sum(float(s.delta) for s in sub) == pytest.approx(1.0)  # lands on x0
     # Tensors in the model's dtype, not floats: Anima's denoise_step calls t.expand().
     assert all(isinstance(s.t, torch.Tensor) for s in sub)
+
+
+@pytest.mark.parametrize("name", sorted(SAMPLERS))
+def test_every_solver_waits_for_the_step_it_reported(name, monkeypatch):
+    """The step count a caller sees is only honest if the host cannot run ahead of the
+    device: a solver that queues kernels measures submission rather than compute, and asks
+    for the next step's activations before this step's are free.
+    """
+    syncs = []
+    monkeypatch.setattr("thenoise.samplers.base.synchronize_device",
+                        lambda device: syncs.append(device.type))
+
+    create_sampler(name, _VelocityModel()).sample(
+        torch.randn(1, 4, 8, 8), _schedule(3), None, 1.0, 3)
+
+    assert syncs == ["cpu"] * 3

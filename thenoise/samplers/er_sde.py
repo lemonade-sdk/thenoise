@@ -106,5 +106,6 @@ class ErSdeSampler(Sampler):
             old_denoised = denoised
             if step_callback is not None:
                 x = step_callback(x, i + 1, len(schedule))
+            self.sync(x)
 
         return x

@@ -6,7 +6,6 @@ from typing import Callable, List
 import torch
 from tqdm import tqdm
 
-from thenoise.utils.device import synchronize_device
 from .base import Sampler, Step
 
 
@@ -29,5 +28,5 @@ class EulerSampler(Sampler):
             x = x.to(dtype)
             if step_callback is not None:
                 x = step_callback(x, i + 1, len(schedule))
-            synchronize_device(x.device)
+            self.sync(x)
         return x
