@@ -1,13 +1,16 @@
-"""Small no-download tests for the Wan 2.2 A14B expert path."""
+"""The two-expert Wan 2.2 A14B path, and the 2.1 codec it decodes with."""
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from thenoise.dit.wan_video.model import Wan22Params, WanNativeDiT
+from conftest import wan_adapter, write_wan_dit
+from thenoise.dit.wan_video.model import Wan22Params, WanNativeDiT, detect_params
 from thenoise.dit.wan_video.sampling import get_sigmas
-from thenoise.models.wan_video import Wan14BVideo, WanVideo
+from thenoise.models import resolve
+from thenoise.models.wan_video import VARIANTS, Wan22Model, variant_for
+from thenoise.runtime import ModelPaths, Runtime, Settings
 from thenoise.utils.wan_weights import wan_vae21_key
 from thenoise.vae.wan_video import (
     _comfy_vae_config, _WAN21_LATENTS_MEAN, _WAN21_LATENTS_STD, _wan21_vae_config,
@@ -16,58 +19,68 @@ from thenoise.vae.wan_video import (
 from thenoise.video.jobs import Cancellation
 from thenoise.video.spec import VideoSpec
 
-
-def test_14b_catalog_detection_does_not_regress_5b():
-    class Shape:
-        def get_shape(self):
-            return (5120, 16, 1, 2, 2)
-
-    class Checkpoint:
-        def keys(self):
-            return ("patch_embedding.weight", "blocks.0.self_attn.q.weight",
-                    "text_embedding.0.weight")
-
-        def get_slice(self, name):
-            assert name == "patch_embedding.weight"
-            return Shape()
-
-    f = Checkpoint()
-    assert Wan14BVideo.detect(f)
-    assert not WanVideo.detect(f)
+A14B = VARIANTS["t2v_14b"]
 
 
-def test_14b_requires_two_distinct_expert_paths(tmp_path, monkeypatch):
+def test_one_adapter_claims_both_transformers(tmp_path):
+    """Detection stops at "a Wan 2.2 DiT": the variant is a shape read afterwards."""
+    for channels, name in ((48, "ti2v_5b"), (16, "t2v_14b")):
+        path = write_wan_dit(tmp_path / f"dit{channels}.safetensors", channels=channels)
+        assert resolve(path) is Wan22Model
+        assert variant_for(detect_params(path)) is VARIANTS[name]
+
+
+def test_the_model_name_is_one_machine_string():
+    assert Wan22Model.name == "wan22"
+    assert wan_adapter("ti2v_5b").CAPABILITIES["i2v"] is True
+    assert wan_adapter("t2v_14b").CAPABILITIES["i2v"] is False
+
+
+def test_a_two_expert_transformer_demands_its_second_file(tmp_path):
+    high = write_wan_dit(tmp_path / "high.safetensors", channels=16)
+    with pytest.raises(ValueError, match="--dit-low"):
+        Wan22Model.validate_paths({"": high})
+    with pytest.raises(FileNotFoundError, match="low-noise"):
+        Wan22Model.validate_paths({"": high, "low": str(tmp_path / "gone.safetensors")})
+    with pytest.raises(ValueError, match="different checkpoints"):
+        Wan22Model.validate_paths({"": high, "low": high})
+    Wan22Model.validate_paths(
+        {"": high, "low": write_wan_dit(tmp_path / "low.safetensors", channels=16)})
+
+
+def test_a_single_expert_transformer_refuses_a_second_file(tmp_path):
+    with pytest.raises(ValueError, match="one expert"):
+        Wan22Model.validate_paths({
+            "": write_wan_dit(tmp_path / "a.safetensors"),
+            "low": write_wan_dit(tmp_path / "b.safetensors"),
+        })
+
+
+def test_runtime_maps_the_cli_flags_into_roles(tmp_path, monkeypatch):
+    """The runtime hands the adapter the paths by role and keeps no Wan knowledge."""
     import thenoise.models as catalog
-    from thenoise.runtime import ModelPaths, Runtime, Settings
 
     class StubVideo:
-        name = "Wan2.2-T2V-A14B"
-        TWO_EXPERT_DIT = True
+        name = "stub"
         VIDEO = True
+        validated = []
 
         def __init__(self, *, config):
             self.config = config
 
+        @classmethod
+        def validate_paths(cls, dit_paths):
+            cls.validated.append(dict(dit_paths))
+
     monkeypatch.setattr(catalog, "resolve", lambda path: StubVideo)
     rt = Runtime(Settings(device="cpu", offload_device="cpu"))
-    high = str(tmp_path / "first.safetensors")
-    low = str(tmp_path / "second.safetensors")
-    with pytest.raises(ValueError, match="requires --dit-low"):
-        rt.load(ModelPaths(high, "vae", "te"))
-    with pytest.raises(ValueError, match="different checkpoints"):
-        rt.load(ModelPaths(high, "vae", "te", dit_low_path=high))
-    with pytest.raises(FileNotFoundError, match="low-noise"):
-        rt.load(ModelPaths(high, "vae", "te", dit_low_path=low))
+    high, low = str(tmp_path / "high.safetensors"), str(tmp_path / "low.safetensors")
+    Path(high).write_bytes(b"high")
     Path(low).write_bytes(b"low")
     rt.load(ModelPaths(high, "vae", "te", dit_low_path=low))
-    assert rt.model.config.dit_low_path == low
-
-    class SingleDit(StubVideo):
-        TWO_EXPERT_DIT = False
-
-    monkeypatch.setattr(catalog, "resolve", lambda path: SingleDit)
-    with pytest.raises(ValueError, match="only supported"):
-        rt.load(ModelPaths(high, "vae", "te", dit_low_path=low))
+    assert StubVideo.validated == [{"": high, "low": low}]
+    assert rt.model.config.dit_paths == {"": high, "low": low}
+    assert rt.model.config.dit_path == high
 
 
 def test_14b_topology_meta_and_vae21_key_mapping():
@@ -110,16 +123,14 @@ def test_14b_uses_separate_experts_and_single_progress_clock():
             return self.weight.dtype
 
         def forward(self, x, timestep, encoder_hidden_states, return_dict):
-            assert timestep.shape == (1,)  # scalar WAN14 timestep, not 5B token mask
+            assert timestep.shape == (1,)  # scalar A14B timestep, not 5B token mask
             self.sigmas.append(timestep.item() / 1000)
             return (torch.zeros_like(x),)
 
-    model = Wan14BVideo(config=SimpleNamespace(
-        dit_path="unused", vae_path="unused", text_encoder_path="unused",
-        device="cpu", offload_device="cpu"))
+    model = wan_adapter("t2v_14b")
     model.transformer = Expert()
     model.low_transformer = Expert()
-    model.memory.register("dit_high", model.transformer)
+    model.memory.register("dit", model.transformer)
     model.memory.register("dit_low", model.low_transformer)
     spec = model.resolve_video(VideoSpec(prompt="fox", width=64, height=64,
                                          frames=5, steps=4, sampler="euler",
@@ -132,20 +143,17 @@ def test_14b_uses_separate_experts_and_single_progress_clock():
     assert len(model.transformer.sigmas) == 3
     assert len(model.low_transformer.sigmas) == 1
     assert progress == [("sampling", i, 4) for i in range(1, 5)]
-    sigmas = get_sigmas(4, shift=model.FLOW_SHIFT)
-    assert sigmas[2] > model.BOUNDARY > sigmas[3]
+    sigmas = get_sigmas(4, shift=A14B.experts.flow_shift)
+    assert sigmas[2] > A14B.experts.boundary > sigmas[3]
 
 
 def test_wan21_latent_normalization_is_not_identity():
     assert len(_WAN21_LATENTS_MEAN) == len(_WAN21_LATENTS_STD) == 16
     assert _WAN21_LATENTS_MEAN[0] == -0.7571
     assert _WAN21_LATENTS_STD[0] == 2.8184
-    video = Wan14BVideo(config=SimpleNamespace(
-        dit_path="unused", vae_path="unused", text_encoder_path="unused",
-        device="cpu", offload_device="cpu"))
+    video = wan_adapter("t2v_14b")
     video.vae = SimpleNamespace(config=SimpleNamespace(
-        z_dim=16, latents_mean=_WAN21_LATENTS_MEAN,
-        latents_std=_WAN21_LATENTS_STD))
+        z_dim=16, latents_mean=_WAN21_LATENTS_MEAN, latents_std=_WAN21_LATENTS_STD))
     z = torch.randn(1, 16, 2, 3, 4)
     normalized = video._normalize(z)
     assert not torch.allclose(z, normalized)
@@ -176,6 +184,7 @@ def test_wan21_fp16_vae_decodes_float32_latents_and_clears_cache():
         assert all(item is None for item in vae._feat_map)
 
 
-def test_14b_rejects_image_input():
+def test_the_two_expert_variant_has_no_i2v():
+    assert A14B.i2v is False and VARIANTS["ti2v_5b"].i2v is True
     with pytest.raises(ValueError, match="I2V"):
-        Wan14BVideo.resolve_video(VideoSpec(prompt="x", image=b"image"))
+        wan_adapter("t2v_14b").resolve_video(VideoSpec(prompt="x", image=b"image"))

@@ -20,16 +20,25 @@ if TYPE_CHECKING:  # pragma: no cover - only for annotations
 
 @dataclass
 class ModelConfig:
-    """Static load-time configuration for a model."""
+    """Static load-time configuration for a model.
 
-    dit_path: str
+    ``dit_paths`` holds the DiT checkpoint(s) by role: ``""`` is the primary one every
+    model takes, and any further role (``"low"`` for a two-expert model) belongs to the
+    adapter that asked for it.
+    """
+
+    dit_paths: dict[str, str]
     vae_path: str
     text_encoder_path: str
     offload_device: str      # where idle weights wait; the compute device offloads nothing
     device: str = "cuda"
     dtype: torch.dtype = torch.bfloat16
     lora_dir: Optional[str] = None
-    dit_low_path: Optional[str] = None
+
+    @property
+    def dit_path(self) -> str:
+        """The primary DiT."""
+        return self.dit_paths[""]
 
 
 @dataclass

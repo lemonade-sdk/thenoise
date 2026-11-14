@@ -12,7 +12,9 @@ from PIL import Image
 
 from thenoise.video.jobs import Cancellation, VideoCancelled
 from thenoise.video.spec import VideoSpec
-from thenoise.models.wan_video import WanVideo
+from conftest import wan_prefs, write_wan_dit
+from thenoise.models.config import ModelConfig
+from thenoise.models.wan_video import Wan22Model
 
 
 @pytest.fixture
@@ -78,7 +80,7 @@ def fake_video(tmp_path, monkeypatch):
         def encode(self, prompt):
             return torch.ones(1, 16, dtype=torch.long), torch.ones(1, 16, dtype=torch.bool)
 
-    def load_vae(_path, _device):
+    def load_vae(_path, _device, *, wan21=False):
         calls.append("load_vae")
         return VAE()
 
@@ -128,7 +130,7 @@ def fake_video(tmp_path, monkeypatch):
     monkeypatch.setattr(wan, "load_wan_native_video_vae", load_vae)
     monkeypatch.setattr(wan, "load_wan_native_transformer", load_dit)
     monkeypatch.setattr(wan, "load_wan_text_encoder", load_text)
-    monkeypatch.setattr(wan.WanVideo, "_sample", sample)
+    monkeypatch.setattr(wan.Wan22Model, "_sample", sample)
     import thenoise.models.video_base as video_base
     monkeypatch.setattr(video_base, "MemoryManager", FakeMemory)
 
@@ -144,14 +146,18 @@ def fake_video(tmp_path, monkeypatch):
     inference.inference = nullcontext
     inference.inference_lock = threading.Lock()
     monkeypatch.setitem(sys.modules, "thenoise.inference", inference)
-    config = types.SimpleNamespace(dit_path=str(root), vae_path=str(root),
-                                   text_encoder_path=str(root), device="cpu", offload_device="cpu")
-    return WanVideo(config=config), calls
+    # The adapter reads the DiT header for its variant even though every loader here
+    # is a stub, so the file has to be a real (tiny) transformer.
+    config = ModelConfig(
+        dit_paths={"": write_wan_dit(root / "dit.safetensors")},
+        vae_path=str(root), text_encoder_path=str(root),
+        device="cpu", offload_device="cpu")
+    return Wan22Model(config=config), calls
 
 
 def _spec(*, image=None):
     return VideoSpec(prompt="fox", width=480, height=320, frames=9,
-                     steps=2, image=image).resolve(WanVideo.DEFAULT_PREFS)
+                     steps=2, image=image).resolve(wan_prefs())
 
 
 

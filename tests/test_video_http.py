@@ -12,7 +12,7 @@ from PIL import Image
 
 from thenoise.video.http import install_video_routes
 from thenoise.video.jobs import VideoJobs
-from thenoise.models.wan_video import WanVideo
+from conftest import wan_adapter
 
 
 def until(predicate, timeout=2):
@@ -33,7 +33,7 @@ def test_video_http_t2v_and_i2v_and_content(tmp_path):
         path.write_bytes(b"\x1aE\xdf\xa3" + b"video")
 
     jobs = VideoJobs(fake_render, tmp_path, model="Wan2.2-TI2V-5B",
-                     resolve=WanVideo.resolve_video)
+                     resolve=wan_adapter().resolve_video)
     app = FastAPI()
     install_video_routes(app, jobs, "Wan2.2-TI2V-5B")
     try:
@@ -86,7 +86,7 @@ def test_video_http_cancel_running_and_rejection(tmp_path):
         path.write_bytes(b"clip")
 
     jobs = VideoJobs(fake_render, tmp_path, model="Wan2.2-TI2V-5B",
-                     resolve=WanVideo.resolve_video)
+                     resolve=wan_adapter().resolve_video)
     app = FastAPI()
     install_video_routes(app, jobs, "Wan2.2-TI2V-5B")
     try:

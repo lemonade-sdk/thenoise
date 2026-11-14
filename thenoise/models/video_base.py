@@ -32,6 +32,7 @@ class VideoModel(LoRASupport, ABC):
 
     def __init__(self, *, config: ModelConfig):
         self.dit_path = config.dit_path
+        self.dit_paths = config.dit_paths
         self.vae_path = config.vae_path
         self.text_encoder_path = config.text_encoder_path
         self.lora_dir = getattr(config, "lora_dir", None)
@@ -48,14 +49,24 @@ class VideoModel(LoRASupport, ABC):
     def detect(checkpoint) -> bool:
         """Recognize the model from an open checkpoint."""
 
+    @classmethod
+    def validate_paths(cls, dit_paths: dict[str, str]) -> None:
+        """Reject DiT files this model cannot use, before anything loads."""
+        if len(dit_paths) > 1:
+            raise ValueError(f"{cls.name} takes one DiT checkpoint")
+
     def _load_target(self, path: str) -> str:
         """The device to build the weights at ``path`` on, the manager's decision."""
         return str(self.memory.device_for(checkpoint_bytes(path)))
 
-    @classmethod
-    def resolve_video(cls, spec: VideoSpec) -> ResolvedVideo:
+    @property
+    def default_prefs(self) -> dict[str, Any]:
+        """The preferences an unset request field falls back to."""
+        return self.DEFAULT_PREFS
+
+    def resolve_video(self, spec: VideoSpec) -> ResolvedVideo:
         """Resolve optional request values using this model's preferences."""
-        return spec.resolve(cls.DEFAULT_PREFS)
+        return spec.resolve(self.default_prefs)
 
     @abstractmethod
     def load_weights(self) -> None:

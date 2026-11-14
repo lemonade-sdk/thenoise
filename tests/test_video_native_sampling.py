@@ -4,7 +4,7 @@ import torch
 
 from thenoise.dit.wan_video.sampling import get_sigmas, FLOW_SHIFT
 from thenoise.samplers import create_sampler, Step
-from thenoise.models.wan_video import WanVideo
+from conftest import wan_adapter
 from thenoise.video.spec import VideoSpec
 
 
@@ -13,9 +13,9 @@ def test_wan_fixed_flow_shift():
     sigmas = get_sigmas(4)
     assert sigmas[0] == 1.0 and sigmas[-1] == 0.0
     assert all(a > b for a, b in zip(sigmas, sigmas[1:]))
-    assert WanVideo.resolve_video(VideoSpec(prompt="x", frames=10)).frame_count == 13
+    assert wan_adapter().resolve_video(VideoSpec(prompt="x", frames=10)).frame_count == 13
     with pytest.raises(ValueError, match="supports only"):
-        WanVideo.resolve_video(VideoSpec(prompt="x", sampler="unknown"))
+        wan_adapter().resolve_video(VideoSpec(prompt="x", sampler="unknown"))
 
 
 @pytest.mark.parametrize("shape", [(1, 8, 4, 6), (1, 48, 3, 4, 6)])

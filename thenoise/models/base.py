@@ -123,6 +123,16 @@ class DiffusionModel(LoRASupport, ABC):
     def detect(f) -> bool:
         """Return True if the open safetensors handle ``f`` is this model's DiT."""
 
+    @classmethod
+    def validate_paths(cls, dit_paths: dict[str, str]) -> None:
+        """Reject a set of DiT files this model cannot use, before anything loads.
+
+        Adapters that need more than the primary checkpoint override this; the role
+        names are theirs, so the runtime never has to know them.
+        """
+        if len(dit_paths) > 1:
+            raise ValueError(f"{cls.name} takes one DiT checkpoint")
+
     def __init__(self, *, config: ModelConfig):
         self.device = config.device
         self.offload_device = config.offload_device

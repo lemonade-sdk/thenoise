@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Optional
 
 from thenoise.errors import ModelReloadNeeded
@@ -39,6 +38,13 @@ class ModelPaths:
     text_encoder_path: str
     lora_dir: str = ""
     dit_low_path: str = ""
+
+    @property
+    def dit_paths(self) -> dict[str, str]:
+        """The DiT files by role; what a role means is the adapter's, not ours."""
+        if self.dit_low_path:
+            return {"": self.dit_path, "low": self.dit_low_path}
+        return {"": self.dit_path}
 
 
 class NotLoadedError(RuntimeError):
@@ -76,27 +82,15 @@ class Runtime:
 
         cls = resolve(paths.dit_path)
         name = cls.name
-
-        if getattr(cls, "TWO_EXPERT_DIT", False):
-            if not paths.dit_low_path:
-                raise ValueError("Wan 2.2 T2V-A14B requires --dit-low")
-            high = Path(paths.dit_path).resolve()
-            low = Path(paths.dit_low_path).resolve()
-            if high == low:
-                raise ValueError("--dit and --dit-low must be different checkpoints")
-            if not low.is_file():
-                raise FileNotFoundError(f"low-noise DiT checkpoint not found: {low}")
-        elif paths.dit_low_path:
-            raise ValueError("--dit-low is only supported by Wan 2.2 T2V-A14B")
+        cls.validate_paths(paths.dit_paths)
 
         config = ModelConfig(
-            dit_path=paths.dit_path,
+            dit_paths=paths.dit_paths,
             vae_path=paths.vae_path,
             text_encoder_path=paths.text_encoder_path,
             device=self._settings.device,
             offload_device=self._settings.offload_device,
             lora_dir=paths.lora_dir or None,
-            dit_low_path=paths.dit_low_path or None,
         )
 
         self._unload()  # swap: only one model resident at a time

@@ -109,6 +109,7 @@ def _counting_model(events: list):
         name = "fake"
         CAPABILITIES: dict = {}
         detect = staticmethod(lambda path: False)
+        validate_paths = classmethod(lambda cls, dit_paths: None)
 
         def __init__(self, **kwargs):
             events.append("built")

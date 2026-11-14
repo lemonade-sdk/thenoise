@@ -6,15 +6,15 @@ from types import SimpleNamespace
 import torch
 
 from thenoise.models.video_base import VideoModel
-from thenoise.models.wan_video import WanVideo
+from thenoise.models.wan_video import Wan22Model
 from thenoise.vae.wan22 import WAN22_LATENTS_MEAN, WAN22_LATENTS_STD
 from thenoise.vae.wan_video import _comfy_vae_config
 from thenoise.video.spec import VideoSpec
 
 
 def test_video_model_contract_and_shared_latent_statistics():
-    assert issubclass(WanVideo, VideoModel)
-    assert WanVideo.resolve_video.__func__ is not VideoModel.resolve_video.__func__
+    assert issubclass(Wan22Model, VideoModel)
+    assert Wan22Model.resolve_video is not VideoModel.resolve_video
     config = _comfy_vae_config()
     assert config.latents_mean == WAN22_LATENTS_MEAN
     assert config.latents_std == WAN22_LATENTS_STD
@@ -45,7 +45,8 @@ def test_video_base_is_usable_without_wan(tmp_path, monkeypatch):
             self.extra_component = None
 
     config = SimpleNamespace(
-        dit_path=str(tmp_path / "dit"), vae_path=str(tmp_path / "vae"),
+        dit_path=str(tmp_path / "dit"), dit_paths={"": str(tmp_path / "dit")},
+        vae_path=str(tmp_path / "vae"),
         text_encoder_path=str(tmp_path / "text"), device="cpu", offload_device="cpu",
     )
     model = AnotherVideo(config=config)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from pathlib import Path
 from typing import Optional
 
 import torch
@@ -41,6 +42,7 @@ from thenoise.models import (  # noqa: E402
     MossImageModel,
     QwenImageModel,
     QwenImage21Model,
+    Wan22Model,
     ZImageModel,
 )
 from thenoise.models.base import Conditioning, DiffusionModel  # noqa: E402
@@ -77,6 +79,114 @@ def write_key_checkpoint(path, keys) -> str:
     Detection reads names only, so the values never matter.
     """
     return write_safetensors(path, {k: torch.zeros(1) for k in keys})
+
+
+# ------------------------------------------------------------------ Wan 2.2 helpers
+
+#: The inverse of ``wan_dit_key``: this repository's module paths back to the names a
+#: Comfy-Org Wan checkpoint carries.
+_WAN_RAW_KEYS = {
+    "condition_embedder.text_linear_1.": "text_embedding.0.",
+    "condition_embedder.text_linear_2.": "text_embedding.2.",
+    "condition_embedder.time_linear_1.": "time_embedding.0.",
+    "condition_embedder.time_linear_2.": "time_embedding.2.",
+    "condition_embedder.time_proj.": "time_projection.1.",
+    "proj_out.": "head.head.",
+    "norm_out.": "head.norm.",
+    "scale_shift_table": "head.modulation",
+}
+
+_WAN_RAW_BLOCK_KEYS = (
+    ("attn1.to_q.", "self_attn.q."), ("attn1.to_k.", "self_attn.k."),
+    ("attn1.to_v.", "self_attn.v."), ("attn1.to_out.", "self_attn.o."),
+    ("attn1.norm_q.", "self_attn.norm_q."), ("attn1.norm_k.", "self_attn.norm_k."),
+    ("attn2.to_q.", "cross_attn.q."), ("attn2.to_k.", "cross_attn.k."),
+    ("attn2.to_v.", "cross_attn.v."), ("attn2.to_out.", "cross_attn.o."),
+    ("attn2.norm_q.", "cross_attn.norm_q."), ("attn2.norm_k.", "cross_attn.norm_k."),
+    ("ffn_in.", "ffn.0."), ("ffn_out.", "ffn.2."),
+)
+
+
+def wan_raw_key(key: str) -> str:
+    """One module path as a Wan checkpoint would spell it.
+
+    ComfyUI's ``norm2`` is the FFN norm and ``norm3`` the cross-attention one, the
+    reverse of this repository's, and a block's modulation table is its
+    ``scale_shift_table``.
+    """
+    for dest, src in _WAN_RAW_KEYS.items():
+        if key.startswith(dest):
+            return src + key[len(dest):]
+    if not key.startswith("blocks."):
+        return key
+    head, suffix = ".".join(key.split(".", 2)[:2]) + ".", key.split(".", 2)[2]
+    if suffix == "scale_shift_table":
+        return head + "modulation"
+    if suffix.startswith("norm2."):
+        return head + "norm3." + suffix[len("norm2."):]
+    for dest, src in _WAN_RAW_BLOCK_KEYS:
+        if suffix.startswith(dest):
+            return head + src + suffix[len(dest):]
+    return key
+
+
+def wan_tiny_params(channels: int = 48):
+    """A Wan transformer small enough to build in a test.
+
+    Still legal geometry for ``detect_params``: one 128-wide head, two blocks.
+    """
+    from thenoise.dit.wan_video.model import Wan22Params
+
+    return Wan22Params(in_channels=channels, out_channels=channels, dim=128,
+                       num_layers=2, ffn_dim=256, freq_dim=32, text_dim=32,
+                       patch_size=(1, 2, 2))
+
+
+def write_wan_dit(path, *, channels: int = 48) -> str:
+    """Write a tiny but shape-valid Wan 2.2 DiT under Comfy-Org's key names.
+
+    Anything that asks a transformer how big it is needs real shapes in the header, so
+    a throwaway file of zero scalars will not do.
+    """
+    from thenoise.dit.wan_video.model import WanNativeDiT
+
+    with torch.random.fork_rng():
+        torch.manual_seed(123)
+        source = WanNativeDiT(wan_tiny_params(channels))
+    with torch.no_grad():
+        for parameter in source.parameters():
+            parameter.uniform_(-0.1, 0.1)
+    return write_safetensors(path, {
+        wan_raw_key(name): value.detach().half().contiguous()
+        for name, value in source.state_dict().items()
+    })
+
+
+def wan_adapter(variant: str = "ti2v_5b"):
+    """A Wan adapter built for real on a throwaway tiny DiT of that variant.
+
+    Enough to ask it about requests, capabilities and schedules: construction reads
+    the DiT header to pick the variant, which is exactly what no fake path can do.
+    """
+    import tempfile
+
+    from thenoise.dit.wan_video.model import CHANNELS
+    from thenoise.models.config import ModelConfig
+    from thenoise.models.wan_video import Wan22Model
+
+    with tempfile.TemporaryDirectory() as work:
+        config = ModelConfig(
+            dit_paths={"": write_wan_dit(Path(work) / "dit.safetensors",
+                                         channels=CHANNELS[variant])},
+            vae_path="", text_encoder_path="", device="cpu", offload_device="cpu")
+        return Wan22Model(config=config)
+
+
+def wan_prefs(variant: str = "ti2v_5b") -> dict:
+    """The complete request defaults the given Wan variant resolves against."""
+    from thenoise.models.wan_video import VARIANTS, Wan22Model
+
+    return {**Wan22Model.DEFAULT_PREFS, **VARIANTS[variant].prefs}
 
 
 def comfy_quant(convrot: bool = True, groupsize: int = 256) -> torch.Tensor:
@@ -596,6 +706,14 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "final_layer.audio_out.weight",
         ],
     ),
+    "wan22": (
+        Wan22Model,
+        [
+            "patch_embedding.weight",
+            "blocks.0.self_attn.q.weight",
+            "text_embedding.0.weight",
+        ],
+    ),
     "unknown": (None, ["some.random.key", "blocks.0.attn.gate.weight"]),
 }
 
@@ -669,7 +787,7 @@ class StubModel(DiffusionModel):
         super().__init__(
             config=config
             or ModelConfig(
-                dit_path="dit", vae_path="vae", text_encoder_path="te",
+                dit_paths={"": "dit"}, vae_path="vae", text_encoder_path="te",
                 offload_device="cpu", device="cpu", dtype=torch.float32, lora_dir=lora_dir,
             )
         )
@@ -804,6 +922,9 @@ def fake_model_cls():
             "name": name,
             "__init__": __init__,
             "detect": staticmethod(lambda f: False),
+            # A catalog entry answers for its own DiT files; these stand-ins have no
+            # opinions, and the adapter tests cover the real hooks.
+            "validate_paths": classmethod(lambda cls, dit_paths: None),
             # A model that declares no capability; tests override it via ``**attrs``.
             "CAPABILITIES": {},
             **attrs,

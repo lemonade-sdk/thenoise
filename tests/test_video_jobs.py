@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from thenoise.video.jobs import VideoJobs
-from thenoise.models.wan_video import WanVideo
+from conftest import wan_adapter, wan_prefs
 from thenoise.video.spec import VideoSpec
 
 
@@ -23,7 +23,7 @@ def wait_until(predicate, timeout=3):
 
 def spec(**kwargs):
     return VideoSpec(prompt="a fox in snow", width=480, height=320,
-                     frames=9, **kwargs).resolve(WanVideo.DEFAULT_PREFS)
+                     frames=9, **kwargs).resolve(wan_prefs())
 
 
 def test_wan_frame_grid_and_duration():
@@ -32,18 +32,18 @@ def test_wan_frame_grid_and_duration():
     assert (a.frame_count, a.fps) == (9, 8)
     assert a.public()["duration"] == 9 / 8
     # Request parsing is model-neutral. The Wan model applies its temporal grid.
-    from thenoise.models.wan_video import WanVideo
-    assert WanVideo.resolve_video(VideoSpec(prompt="x", frames=10)).frame_count == 13
-    assert WanVideo.resolve_video(VideoSpec(prompt="x", frames=17)).frame_count == 17
+    resolve = wan_adapter().resolve_video
+    assert resolve(VideoSpec(prompt="x", frames=10)).frame_count == 13
+    assert resolve(VideoSpec(prompt="x", frames=17)).frame_count == 17
     # Precisely halfway: Lemonade's std::round picks the larger 4n+1 count.
-    assert WanVideo.resolve_video(VideoSpec(prompt="x", duration=11/8, fps=8)).frame_count == 13
+    assert resolve(VideoSpec(prompt="x", duration=11/8, fps=8)).frame_count == 13
 
 
 def test_video_validation_fails_before_job_creation():
     for bad in (dict(width=-1), dict(fps=0), dict(guidance_scale=float("nan")),
                 dict(output_format="avi")):
         with pytest.raises(ValueError):
-            VideoSpec(prompt="valid", **bad).resolve(WanVideo.DEFAULT_PREFS)
+            VideoSpec(prompt="valid", **bad).resolve(wan_prefs())
 
 
 def test_cancel_running_job_does_not_kill_worker_or_next_job(tmp_path):
@@ -157,7 +157,7 @@ def test_completed_i2v_releases_input_media_but_retains_mode(tmp_path):
                      tmp_path, model="wan")
     try:
         clip = VideoSpec(prompt="a fox", image=b"large-binary-reference" * 10000,
-                         width=480, height=320, frames=9).resolve(WanVideo.DEFAULT_PREFS)
+                         width=480, height=320, frames=9).resolve(wan_prefs())
         job_id = jobs.submit(clip)["id"]
         wait_until(lambda: jobs.status(job_id)["status"] == "completed")
         status = jobs.status(job_id)
@@ -170,9 +170,9 @@ def test_completed_i2v_releases_input_media_but_retains_mode(tmp_path):
 
 
 def test_frame_count_does_not_have_a_static_limit():
-    from thenoise.models.wan_video import WanVideo
-    assert VideoSpec(prompt="fox", frames=1000).resolve(WanVideo.DEFAULT_PREFS).frame_count == 1000
-    assert WanVideo.resolve_video(VideoSpec(prompt="fox", frames=1000)).frame_count == 1001
+    resolve = wan_adapter().resolve_video
+    assert VideoSpec(prompt="fox", frames=1000).resolve(wan_prefs()).frame_count == 1000
+    assert resolve(VideoSpec(prompt="fox", frames=1000)).frame_count == 1001
 
 
 def test_video_defaults_are_owned_by_the_model():
@@ -181,13 +181,13 @@ def test_video_defaults_are_owned_by_the_model():
     request = VideoRequest(prompt="fox")
     assert request.width is None and request.steps is None
     assert request.fps is None and request.sampler is None
-    resolved = WanVideo.resolve_video(request.to_spec())
-    assert resolved.width == WanVideo.DEFAULT_PREFS["width"]
-    assert resolved.steps == WanVideo.DEFAULT_PREFS["steps"]
-    assert resolved.sampler == WanVideo.DEFAULT_PREFS["sampler"]
+    resolved = wan_adapter().resolve_video(request.to_spec())
+    assert resolved.width == wan_prefs()["width"]
+    assert resolved.steps == wan_prefs()["steps"]
+    assert resolved.sampler == wan_prefs()["sampler"]
 
     # The generic contract follows model preferences, not HTTP-side literals.
-    updated = {**WanVideo.DEFAULT_PREFS, "steps": 7, "sampler": "euler"}
+    updated = {**wan_prefs(), "steps": 7, "sampler": "euler"}
     changed = request.to_spec().resolve(updated)
     assert (changed.steps, changed.sampler) == (7, "euler")
 
@@ -252,7 +252,7 @@ def test_sync_video_reuses_resolver_and_cleans_on_failure(tmp_path):
         path.write_bytes(b"complete")
 
     jobs = VideoJobs(render, tmp_path, model="Wan2.2-TI2V-5B",
-                     resolve=WanVideo.resolve_video)
+                     resolve=wan_adapter().resolve_video)
     try:
         with pytest.raises(RuntimeError, match="encoder failed"):
             jobs.render_sync(VideoSpec(prompt="fox", frames=9))
