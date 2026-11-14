@@ -1,4 +1,6 @@
-# Wan 2.2 TI2V-5B
+# Wan 2.2
+
+## TI2V-5B
 
 **Native text-to-video and image-to-video**, using the Comfy-Org Wan 2.2 5B
 checkpoint, UMT5 text encoder and a causal 3D video VAE. Output is MP4/H.264
@@ -134,3 +136,34 @@ only supported DiT projections, reports unmatched keys and switches LoRAs
 between requests. The FP8 text-encoder checkpoint is not supported.
 
 See the [HTTP API](../api.md#video-generation) for parameters and responses.
+
+## T2V-A14B (two experts)
+
+This model uses **two** separately loaded DiTs (high-/low-noise), the **Wan 2.1
+16-channel VAE** (`wan_2.1_vae.safetensors`), and the same FP16 UMT5 encoder as
+5B. Pass **both expert files explicitly**: `--dit` selects high noise and
+`--dit-low` selects low noise. File names and directories are not inspected to
+infer the expert role. FP16 and ComfyUI FP8-scaled experts are supported.
+The native Wan 2.1 VAE uses FP16 compute.
+Both experts are swapped by the normal device memory manager at the sigma
+boundary; do not run both as resident GPU models on a 32 GiB card.
+
+```bash
+./thenoise.sh serve \
+  --dit ./models/wan22/split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp8_scaled.safetensors \
+  --dit-low ./models/wan22/split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp8_scaled.safetensors \
+  --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors \
+  --vae ./models/wan22/split_files/vae/wan_2.1_vae.safetensors \
+  --port 8000
+
+curl -fS http://127.0.0.1:8000/video -H 'content-type: application/json' \
+  -d '{"prompt":"A fox walking through snow","width":704,"height":480,
+       "frames":33,"steps":12,"sampler":"euler","output_format":"mp4"}' \
+  -o fox_14b.mp4
+```
+
+Defaults: 832x480, 33 frames, 16 FPS, 40 steps, Euler, CFG 4.0,
+flow shift 12, and high/low boundary 0.875. The single API CFG value
+is the high-noise CFG (4.0 by default); low-noise CFG is 0.75x (3.0 by default).
+**T2V only**: 14B I2V uses a separate 36-channel
+model and CLIP-Vision path; 14B LoRAs are not part of this patch.

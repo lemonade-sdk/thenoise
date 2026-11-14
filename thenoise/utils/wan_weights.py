@@ -55,6 +55,18 @@ def wan_dit_key(raw: str) -> str:
     return f"{block}.{suffix}"
 
 
+def wan_vae21_key(raw: str, *, num_res_blocks: int = 2) -> str:
+    """Map Wan 2.1's flat VAE stages onto the shared causal VAE modules."""
+    name = raw.removeprefix("vae.")
+    match = re.match(r"^(encoder|decoder)\.(downsamples|upsamples)\.(\d+)\.(.*)$", name)
+    if match:
+        part, group, index, suffix = match.groups()
+        width = num_res_blocks + (1 if part == "encoder" else 2)
+        stage, sub = divmod(int(index), width)
+        name = f"{part}.{group}.{stage}.{group}.{sub}.{suffix}"
+    return wan_vae_key(name, num_res_blocks=num_res_blocks)
+
+
 def wan_vae_key(raw: str, *, num_res_blocks: int = 2) -> str:
     """Map ComfyUI WanVAE (vae2_2.py) to TheNoise's causal 3D VAE."""
     name = raw.removeprefix("vae.")

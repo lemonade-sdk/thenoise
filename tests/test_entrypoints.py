@@ -124,6 +124,7 @@ def test_serve_builds_settings_and_loads_model(monkeypatch, fake_runtime):
         [
             "serve",
             "--dit", "d.safetensors",
+            "--dit-low", "low.safetensors",
             "--vae", "v.safetensors",
             "--text-encoder", "t.safetensors",
             "--lora-dir", "loras",
@@ -148,6 +149,7 @@ def test_serve_builds_settings_and_loads_model(monkeypatch, fake_runtime):
         vae_path="v.safetensors",
         text_encoder_path="t.safetensors",
         lora_dir="loras",
+        dit_low_path="low.safetensors",
     )
 
 

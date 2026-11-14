@@ -18,7 +18,7 @@ def _serve(args) -> None:
     # Load the model only when all three checkpoints are supplied; otherwise
     # serve model-free (upscale only).
     model_paths = [args.dit, args.vae, args.text_encoder]
-    if any(model_paths):
+    if any(model_paths) or args.dit_low:
         if not all(model_paths):
             raise SystemExit(
                 "serve: to load a model you must supply --dit, --vae and "
@@ -30,6 +30,7 @@ def _serve(args) -> None:
                 vae_path=args.vae,
                 text_encoder_path=args.text_encoder,
                 lora_dir=args.lora_dir,
+                dit_low_path=args.dit_low,
             ),
         )
 

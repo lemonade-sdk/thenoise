@@ -185,13 +185,14 @@ def _is_options_problem(error: dict) -> bool:
 
 def create_app(runtime, *, video_jobs=None, video_model: str = "") -> FastAPI:
     from contextlib import asynccontextmanager
+    from asyncio import to_thread
 
     @asynccontextmanager
     async def video_lifespan(_app: FastAPI):
         try:
             yield
         finally:
-            video_jobs.close()
+            await to_thread(video_jobs.close)
 
     app = FastAPI(title="thenoise", version=__version__,
                   lifespan=video_lifespan if video_jobs is not None else None)

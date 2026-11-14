@@ -29,6 +29,7 @@ class ModelConfig:
     device: str = "cuda"
     dtype: torch.dtype = torch.bfloat16
     lora_dir: Optional[str] = None
+    dit_low_path: Optional[str] = None
 
 
 @dataclass

@@ -48,6 +48,10 @@ class VideoModel(LoRASupport, ABC):
         return spec.resolve(cls.DEFAULT_PREFS)
 
     @abstractmethod
+    def load_weights(self) -> None:
+        """Load all model components before the server starts accepting requests."""
+
+    @abstractmethod
     def generate(
         self, spec: ResolvedVideo, token: Cancellation,
         progress: Callable[[str, int, int], None], output: Path,

@@ -9,8 +9,8 @@ from thenoise.utils.math import generalized_time_shift
 FLOW_SHIFT = 5.0
 
 
-def get_sigmas(steps: int) -> list[float]:
-    return [generalized_time_shift(1 - i / steps, math.log(FLOW_SHIFT), 1.0)
+def get_sigmas(steps: int, *, shift: float = FLOW_SHIFT) -> list[float]:
+    return [generalized_time_shift(1 - i / steps, math.log(shift), 1.0)
             for i in range(steps)] + [0.0]
 
 
