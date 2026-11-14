@@ -36,10 +36,10 @@ def _serve(args) -> None:
 
     video_jobs = None
     video_model = ""
-    if getattr(runtime, "video_model", None) is not None:
+    if runtime.video:
         from .video.service import create_video_service
         video_jobs, video_model = create_video_service(
-            runtime.video_model,
+            runtime,
             cache_dir=str(Path(args.video_cache_dir).expanduser()),
         )
 

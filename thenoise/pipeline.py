@@ -27,7 +27,7 @@ from PIL import Image
 from thenoise.inference import inference, inference_lock
 from thenoise.models.base import DiffusionModel, Conditioning
 from thenoise.models.config import EncodePromptArgs, GenerateRequest, SamplingParams
-from thenoise.samplers import Step, create_sampler
+from thenoise.samplers import Step, create_sampler, sigma_steps
 from thenoise.samplers.euler import EulerSampler
 from thenoise.upscale.pixel import PixelUpscalerManager
 from thenoise.utils.pipeline_cache import PipelineCache
@@ -102,20 +102,6 @@ def _normalize_sigmas(
     return tuple(grid)
 
 
-def _sigma_steps(
-    grid: Sequence[float],
-    device: str,
-    dtype: torch.dtype,
-) -> list[Step]:
-    """Sigma grid (descending, ending on 0) -> one ``Step`` per grid gap.
-
-    Tensors are in the model's own device/dtype because ``denoise_step`` consumes
-    ``Step.t`` the way it consumes its own ``schedule()`` output.
-    """
-    ts = torch.tensor(list(grid), device=device, dtype=dtype)
-    return [Step(t=ts[i], delta=ts[i] - ts[i + 1]) for i in range(len(grid) - 1)]
-
-
 def _refine_schedule(
     sigma: float,
     steps: int,
@@ -128,7 +114,7 @@ def _refine_schedule(
     and every step stays conditioned above 0. A uniform grid also keeps a given
     sigma the same strength on every model.
     """
-    return _sigma_steps([sigma * (1 - i / steps) for i in range(steps + 1)], device, dtype)
+    return sigma_steps([sigma * (1 - i / steps) for i in range(steps + 1)], device, dtype)
 
 
 class PipelineController:
@@ -409,7 +395,7 @@ class PipelineController:
         else:
             x = model.prepare_latent(latents, cond, params)
         if sigmas is not None:
-            schedule = _sigma_steps(sigmas, model.device, model.dtype)
+            schedule = sigma_steps(sigmas, model.device, model.dtype)
         else:
             schedule = model.schedule(params)
         x = solver.sample(x, schedule, cond, params.guidance_scale, params.seed)

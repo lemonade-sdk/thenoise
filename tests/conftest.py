@@ -42,6 +42,7 @@ from thenoise.models import (  # noqa: E402
     MossImageModel,
     QwenImageModel,
     QwenImage21Model,
+    VideoModel,
     Wan22Model,
     ZImageModel,
 )
@@ -720,7 +721,7 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
 KEYSET_IDS = sorted(MODEL_KEYSETS)
 CATALOG_IDS = [cls.name for cls in MODEL_CATALOG]
 # Image-model contracts do not apply to video models with 5D latents.
-IMAGE_CATALOG = [cls for cls in MODEL_CATALOG if not getattr(cls, "VIDEO", False)]
+IMAGE_CATALOG = [cls for cls in MODEL_CATALOG if not issubclass(cls, VideoModel)]
 IMAGE_CATALOG_IDS = [cls.name for cls in IMAGE_CATALOG]
 
 
@@ -750,6 +751,65 @@ class StubLatentUpscaler(LatentUpscaler):
             dtype=latents.dtype,
             device=latents.device,
         )
+
+
+class StubVideo(VideoModel):
+    """A weight-free video adapter: enough of a codec and a DiT to drive a controller.
+
+    Its latent is the canonical 5D form, ``[1, 4, T, H/8, W/8]``, at a temporal
+    compression of 4 and one frame decoded per latent frame. Kernels answer zero, so a
+    test sees orchestration — staging, progress, cancellation, teardown — without maths.
+    """
+
+    name = "stub-video"
+    DEFAULT_PREFS = {**VideoModel.DEFAULT_PREFS, "width": 64, "height": 64,
+                     "frames": 5, "fps": 8, "steps": 2, "guidance_scale": 1.0,
+                     "sampler": "euler"}
+    Z_DIM = 4
+    SCALE = 8
+
+    def __init__(self, *, config):
+        super().__init__(config=config)
+        self.dit = torch.nn.Linear(1, 1)
+        self.calls = Counter()
+
+    @staticmethod
+    def detect(_checkpoint):
+        return False
+
+    def load_weights(self):
+        self.calls["load_weights"] += 1
+
+    def _clear_weights(self):
+        self.dit = None
+
+    def encode_prompt(self, args):
+        self.calls["encode_prompt"] += 1
+        return Conditioning(cond=torch.zeros(1, 2, 4),
+                            null=torch.zeros(1, 2, 4) if args.guidance_scale > 1 else None)
+
+    def init_latents(self, params):
+        self.calls["init_latents"] += 1
+        return torch.zeros(1, self.Z_DIM, (params.frames - 1) // 4 + 1,
+                           params.height // self.SCALE, params.width // self.SCALE)
+
+    def schedule(self, params):
+        grid = torch.linspace(1.0, 0.0, params.steps + 1)
+        return [Step(t=grid[i], delta=grid[i] - grid[i + 1]) for i in range(params.steps)]
+
+    def denoise_step(self, latents, t, cond, guidance_scale, i):
+        self.calls["denoise_step"] += 1
+        return torch.zeros_like(latents)
+
+    def encode_reference(self, pixels):
+        self.calls["encode_reference"] += 1
+        return torch.zeros(1, self.Z_DIM, 1, pixels.shape[-2] // self.SCALE,
+                           pixels.shape[-1] // self.SCALE)
+
+    def decode_frames(self, latents):
+        for _ in range(latents.shape[2]):
+            yield torch.zeros(3, latents.shape[3] * self.SCALE,
+                              latents.shape[4] * self.SCALE)
 
 
 class StubModel(DiffusionModel):
@@ -922,9 +982,10 @@ def fake_model_cls():
             "name": name,
             "__init__": __init__,
             "detect": staticmethod(lambda f: False),
-            # A catalog entry answers for its own DiT files; these stand-ins have no
-            # opinions, and the adapter tests cover the real hooks.
+            # A catalog entry answers for its own DiT files and releases its own state;
+            # these stand-ins have no opinions, and the adapter tests cover the real hooks.
             "validate_paths": classmethod(lambda cls, dit_paths: None),
+            "unload": lambda self: None,
             # A model that declares no capability; tests override it via ``**attrs``.
             "CAPABILITIES": {},
             **attrs,

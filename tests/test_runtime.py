@@ -6,6 +6,7 @@ import threading
 import pytest
 
 import thenoise.models as model_catalog
+from conftest import StubVideo
 from thenoise.errors import ModelReloadNeeded
 from thenoise.inference import inference_lock
 from thenoise.runtime import ModelPaths, NotLoadedError, Runtime, Settings
@@ -38,14 +39,12 @@ def test_empty_runtime(catalog):
 
 
 def test_video_weights_are_ready_when_runtime_load_returns(catalog, monkeypatch):
-    from thenoise.models.video_base import VideoModel
     import thenoise.models as model_catalog
 
     events = []
 
-    class FakeVideo(VideoModel):
+    class FakeVideo(StubVideo):
         name = "video-test"
-        DEFAULT_PREFS = {}
 
         @staticmethod
         def detect(_checkpoint):
@@ -53,12 +52,6 @@ def test_video_weights_are_ready_when_runtime_load_returns(catalog, monkeypatch)
 
         def load_weights(self):
             events.append("loaded")
-
-        def generate(self, spec, token, progress, output):
-            raise AssertionError("not part of this test")
-
-        def _clear_weights(self):
-            pass
 
     catalog()
     monkeypatch.setattr(model_catalog, "resolve", lambda _path: FakeVideo)
@@ -110,6 +103,7 @@ def _counting_model(events: list):
         CAPABILITIES: dict = {}
         detect = staticmethod(lambda path: False)
         validate_paths = classmethod(lambda cls, dit_paths: None)
+        unload = lambda self: None  # noqa: E731 - a stand-in catalog entry
 
         def __init__(self, **kwargs):
             events.append("built")

@@ -1,20 +1,26 @@
-"""Native video lifecycle and cancellation checks."""
+"""The video controller driving an adapter: lifecycle, streaming, progress, cancellation.
+
+The three component loaders are the only stubs. Staging, the sampler, the kernel contract,
+the streamed decode and the job's progress clock all run for real, because that is what
+this file is about.
+"""
 from __future__ import annotations
 
 import io
-import sys
-import threading
 import types
 
 import pytest
 import torch
 from PIL import Image
 
-from thenoise.video.jobs import Cancellation, VideoCancelled
-from thenoise.video.spec import VideoSpec
-from conftest import wan_prefs, write_wan_dit
+from conftest import write_wan_dit
 from thenoise.models.config import ModelConfig
 from thenoise.models.wan_video import Wan22Model
+from thenoise.video.controller import VideoPipelineController
+from thenoise.video.jobs import Cancellation, VideoCancelled
+from thenoise.video.spec import VideoSpec
+
+FRAMES_PER_CHUNK = (1, 4, 4)  # a causal codec's first latent frame decodes alone
 
 
 @pytest.fixture
@@ -23,18 +29,13 @@ def fake_video(tmp_path, monkeypatch):
     root.mkdir()
     calls = []
 
-    class Decoder(torch.nn.Module):
-        def forward(self, z):
-            return z
-
     class VAE(torch.nn.Module):
         def __init__(self):
             super().__init__()
-            self.weight = torch.nn.Parameter(torch.tensor([1.0012345], dtype=torch.float32))
+            self.weight = torch.nn.Parameter(torch.tensor([1.0], dtype=torch.float32))
             self.config = types.SimpleNamespace(
                 z_dim=48, latents_mean=[0.0] * 48, latents_std=[1.0] * 48,
             )
-            self.decoder = Decoder()
             self.cache_clears = 0
 
         @property
@@ -53,8 +54,8 @@ def fake_video(tmp_path, monkeypatch):
             calls.append("vae_decode")
             try:
                 for i in range(z.shape[2]):
-                    self.decoder(z[:, :, i:i + 1])
-                    yield torch.zeros(z.shape[0], 3, 1, z.shape[3] * 16, z.shape[4] * 16)
+                    yield torch.zeros(z.shape[0], 3, FRAMES_PER_CHUNK[i],
+                                      z.shape[3] * 16, z.shape[4] * 16)
             finally:
                 self.clear_cache()
 
@@ -62,11 +63,15 @@ def fake_video(tmp_path, monkeypatch):
         def __init__(self):
             super().__init__()
             self.weight = torch.nn.Parameter(torch.ones(1, dtype=torch.float16))
-            self.config = types.SimpleNamespace(patch_size=(1, 2, 2))
+            self.params = types.SimpleNamespace(patch_size=(1, 2, 2))
 
         @property
         def dtype(self):
             return self.weight.dtype
+
+        def forward(self, x, timestep, encoder_hidden_states, return_dict):
+            calls.append("dit")
+            return (torch.zeros_like(x),)
 
     class Text(torch.nn.Module):
         def __init__(self):
@@ -80,142 +85,88 @@ def fake_video(tmp_path, monkeypatch):
         def encode(self, prompt):
             return torch.ones(1, 16, dtype=torch.long), torch.ones(1, 16, dtype=torch.bool)
 
-    def load_vae(_path, _device, *, wan21=False):
-        calls.append("load_vae")
-        return VAE()
-
-    def load_dit(_path, _device):
-        calls.append("load_dit")
-        return DiT()
-
-    def load_text(_path, _device):
-        calls.append("load_text")
-        return Text(), Tokenizer()
-
-    def sample(_self, latents, spec, positive, negative, condition, token, progress):
-        calls.append("sample_" + ("i2v" if condition is not None else "t2v"))
-        for i in range(spec.steps):
-            token.check()
-            progress("sampling", i + 1, spec.steps)
-        return latents
-
-    class FakeStage:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            return False
-
-        @staticmethod
-        def run(func, *args):
-            return func(*args)
-
-    class FakeMemory:
-        def __init__(self, *args):
-            self.items = {}
-
-        def register(self, key, value):
-            self.items[key] = value
-
-        def device_for(self, nbytes):
-            return "cpu"
-
-        def stage(self, *args, **kwargs):
-            return FakeStage()
-
-        def offload(self, *args):
-            pass
-
-    import thenoise.models.wan_video as wan
-    monkeypatch.setattr(wan, "load_wan_native_video_vae", load_vae)
-    monkeypatch.setattr(wan, "load_wan_native_transformer", load_dit)
-    monkeypatch.setattr(wan, "load_wan_text_encoder", load_text)
-    monkeypatch.setattr(wan.Wan22Model, "_sample", sample)
-    import thenoise.models.video_base as video_base
-    monkeypatch.setattr(video_base, "MemoryManager", FakeMemory)
+    monkeypatch.setattr("thenoise.models.wan_video.load_wan_native_video_vae",
+                        lambda _path, _device, *, wan21=False: calls.append("load_vae") or VAE())
+    monkeypatch.setattr("thenoise.models.wan_video.load_wan_native_transformer",
+                        lambda _path, _device: calls.append("load_dit") or DiT())
+    monkeypatch.setattr("thenoise.models.wan_video.load_wan_text_encoder",
+                        lambda _path, _device: calls.append("load_text") or (Text(), Tokenizer()))
 
     def stub_encode_video(frames, _spec, _token, dest, _progress):
         for _ in frames:  # a real muxer pulls frames lazily; so must this stub
             pass
         dest.write_bytes(b"video")
 
-    monkeypatch.setattr(wan, "encode_video", stub_encode_video)
+    monkeypatch.setattr("thenoise.video.controller.encode_video", stub_encode_video)
 
-    inference = types.ModuleType("thenoise.inference")
-    from contextlib import nullcontext
-    inference.inference = nullcontext
-    inference.inference_lock = threading.Lock()
-    monkeypatch.setitem(sys.modules, "thenoise.inference", inference)
-    # The adapter reads the DiT header for its variant even though every loader here
-    # is a stub, so the file has to be a real (tiny) transformer.
-    config = ModelConfig(
+    # The adapter reads the DiT header for its variant even though every loader here is a
+    # stub, so the file has to be a real (tiny) transformer.
+    video = Wan22Model(config=ModelConfig(
         dit_paths={"": write_wan_dit(root / "dit.safetensors")},
         vae_path=str(root), text_encoder_path=str(root),
-        device="cpu", offload_device="cpu")
-    return Wan22Model(config=config), calls
+        device="cpu", offload_device="cpu"))
+    video.load_weights()  # as `Runtime.load` does; a render never loads for itself
+    calls.clear()
+    return video, VideoPipelineController(video), calls
 
 
-def _spec(*, image=None):
-    return VideoSpec(prompt="fox", width=480, height=320, frames=9,
-                     steps=2, image=image).resolve(wan_prefs())
+def _spec(video, *, image=None, **kwargs):
+    return video.resolve_video(VideoSpec(
+        prompt="fox", width=480, height=320, frames=9, steps=2, image=image, **kwargs))
 
 
-
-def test_native_model_can_be_initialized_before_first_request(fake_video):
-    video, calls = fake_video
+def test_loading_twice_loads_everything_once(fake_video):
+    video, _, _calls = fake_video
     video.load_weights()
-    video.load_weights()
-    assert calls == ["load_vae", "load_text", "load_dit"]
+    assert video.dit is not None and video.text_encoder is not None
+
 
 def test_native_t2v_i2v_t2v_reuses_models(fake_video, tmp_path):
-    video, calls = fake_video
+    video, controller, calls = fake_video
     image = io.BytesIO()
-    Image.new("RGB", (16, 16), "red").save(image, format="PNG")
+    Image.new("RGB", (64, 64), "red").save(image, format="PNG")
     out = tmp_path / "out.mp4"
-    for spec in (_spec(), _spec(image=image.getvalue()), _spec()):
-        video.generate(spec, Cancellation(), lambda *_: None, out)
-    assert calls[:3] == ["load_vae", "load_text", "load_dit"]
-    assert calls.count("load_dit") == calls.count("load_text") == 1
-    assert [s for s in calls if s.startswith("sample_")] == ["sample_t2v", "sample_i2v", "sample_t2v"]
+    for spec in (_spec(video), _spec(video, image=image.getvalue()), _spec(video)):
+        controller.render(spec, Cancellation(), lambda *_: None, out)
+    assert "load_dit" not in calls  # a render never loads for itself
+    # Only the I2V request encodes a first frame.
+    assert calls.count("vae_encode") == 1
     assert video.vae.dtype is torch.float32
-    assert video.transformer.dtype is torch.float16
+    assert video.dit.dtype is torch.float16
     assert video.text_encoder.weight.dtype is torch.bfloat16
     assert out.read_bytes() == b"video"
 
 
-def test_unload_releases_weights_and_allows_reloading(fake_video, tmp_path, monkeypatch):
-    video, calls = fake_video
-    video.generate(_spec(), Cancellation(), lambda *_: None, tmp_path / "clip.mp4")
-    import thenoise.models.video_base as video_base
-    released = []
-    monkeypatch.setattr(video_base, "release_device_memory", released.append)
+def test_unload_releases_weights_and_allows_reloading(fake_video, tmp_path):
+    video, controller, calls = fake_video
+    controller.render(_spec(video), Cancellation(), lambda *_: None, tmp_path / "clip.mp4")
+    old_manager = video.memory
 
     video.unload()
-    assert video.vae is video.text_encoder is video.transformer is video.tokenizer is None
-    assert video.memory.items == {}
-    assert released == [video.device]
+    assert (video.vae, video.text_encoder, video.tokenizer, video.dit) == (None,) * 4
+    assert video.memory is not old_manager
+    assert video.memory.weight_bytes("dit") == 0
 
-    video.generate(_spec(), Cancellation(), lambda *_: None, tmp_path / "clip.mp4")
-    assert calls.count("load_dit") == calls.count("load_vae") == 2
+    video.load_weights()  # what a reload through `Runtime.load` does
+    controller.render(_spec(video), Cancellation(), lambda *_: None, tmp_path / "clip.mp4")
+    assert calls.count("load_dit") == calls.count("load_vae") == 1
 
 
 def test_cancel_sampling_recovers_for_next_job(fake_video, tmp_path):
-    video, calls = fake_video
+    video, controller, calls = fake_video
     token = Cancellation()
 
-    def cancel_after_one(stage, *_):
-        if stage == "sampling":
+    def cancel_at_one(stage, step, _total):
+        if stage == "sampling" and step == 1:
             token.cancel()
 
     with pytest.raises(VideoCancelled):
-        video.generate(_spec(), token, cancel_after_one, tmp_path / "clip.mp4")
-    video.generate(_spec(), Cancellation(), lambda *_: None, tmp_path / "clip.mp4")
-    assert calls.count("load_dit") == 1
+        controller.render(_spec(video), token, cancel_at_one, tmp_path / "clip.mp4")
+    controller.render(_spec(video), Cancellation(), lambda *_: None, tmp_path / "clip.mp4")
+    assert "load_dit" not in calls  # a cancelled job leaves the components usable
 
 
 def test_decode_progress_uses_shared_tqdm_style(fake_video, tmp_path, monkeypatch):
-    import thenoise.models.wan_video as wan
-
     seen = []
 
     class Bar:
@@ -228,23 +179,30 @@ def test_decode_progress_uses_shared_tqdm_style(fake_video, tmp_path, monkeypatc
         def update(self, value):
             seen.append(("update", value))
 
-    def fake_tqdm(*, total, desc):
-        seen.append((desc, total))
-        return Bar()
-
-    monkeypatch.setattr(wan, "tqdm", fake_tqdm)
-    video, _calls = fake_video
-    video.generate(_spec(), Cancellation(), lambda *_: None, tmp_path / "clip.mp4")
-    assert seen == [("decoding", 3), ("update", 1), ("update", 1), ("update", 1)]
+    monkeypatch.setattr("thenoise.video.controller.tqdm",
+                        lambda *, total, desc: seen.append((desc, total)) or Bar())
+    video, controller, _calls = fake_video
+    controller.render(_spec(video), Cancellation(), lambda *_: None, tmp_path / "clip.mp4")
+    assert seen == [("decoding", 9)] + [("update", 1)] * 9
 
 
 def test_decode_progress_and_recovery(fake_video, tmp_path):
-    video, calls = fake_video
+    video, controller, _calls = fake_video
     events = []
-    video.generate(_spec(), Cancellation(), lambda *e: events.append(e), tmp_path / "clip.mp4")
-    assert ("decoding", 0, 3) in events
-    assert [e for e in events if e[0] == "decoding" and e[1] > 0] == [
-        ("decoding", 1, 3), ("decoding", 2, 3), ("decoding", 3, 3)
+    controller.render(_spec(video), Cancellation(), lambda *e: events.append(e),
+                      tmp_path / "clip.mp4")
+    assert ("sampling", 1, 2) in events
+    assert [e for e in events if e[0] == "decoding"] == [
+        ("decoding", i, 9) for i in range(10)
     ]
     assert ("encoding", 0, 9) in events
     assert video.vae.cache_clears >= 1
+
+
+def test_an_unresolved_size_and_frame_count_reach_the_kernels(fake_video):
+    """The controller resolves nothing itself; the adapter's grid decides."""
+    video, controller, _calls = fake_video
+    spec = controller.resolve(VideoSpec(prompt="fox", width=500, height=330, duration=1.2))
+    # 1.2 s at the variant's 24 fps, then onto the codec's 4n+1 grid.
+    assert (spec.width, spec.height, spec.frame_count) == (480, 320, 29)
+    assert spec.explicit_frames is False

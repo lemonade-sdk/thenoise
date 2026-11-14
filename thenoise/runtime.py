@@ -73,12 +73,14 @@ class Runtime:
         )
         self._controlmap = ControlMapController(self._controlmaps)
         self._pipeline = None
+        self._video = False
 
     def load(self, paths: ModelPaths) -> None:
         from .models import resolve
         from .models.config import ModelConfig
         from .models.video_base import VideoModel
         from .pipeline import PipelineController
+        from .video.controller import VideoPipelineController
 
         cls = resolve(paths.dit_path)
         name = cls.name
@@ -97,13 +99,17 @@ class Runtime:
         logger.info("Loading model '%s'", name)
         with inference():
             model = cls(config=config)
-            if isinstance(model, VideoModel):
+            video = isinstance(model, VideoModel)
+            if video:
                 model.load_weights()
         self._model = model
         self._model_name = name
         self._paths = paths
-        self._pipeline = (None if getattr(self._model, "VIDEO", False)
-                          else PipelineController(self._model, self._pixel_upscalers))
+        self._video = video
+        # Both mediums get a controller, so `run` — the lock, the rebuild-and-retry of a
+        # model that reports itself unfit — is one path whatever was loaded.
+        self._pipeline = (VideoPipelineController(model) if video else
+                          PipelineController(model, self._pixel_upscalers))
 
     def reload(self) -> None:
         """Rebuild the loaded model from its checkpoints, which clears an unfit state."""
@@ -143,8 +149,10 @@ class Runtime:
             return
         logger.info("Unloading model '%s'", self._model_name)
         self._pipeline = None
+        self._model.unload()  # drops the references the instance itself holds
         self._model = None
         self._model_name = None
+        self._video = False
         release_device_memory(self._settings.device)
 
     @property
@@ -159,9 +167,9 @@ class Runtime:
         return self._pipeline
 
     @property
-    def video_model(self):
-        """The loaded video model, or None for image/model-free serving."""
-        return self._model if getattr(self._model, "VIDEO", False) else None
+    def video(self) -> bool:
+        """Whether the loaded model serves video rather than images."""
+        return self._video
 
     @property
     def pixel_upscalers(self):

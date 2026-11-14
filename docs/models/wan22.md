@@ -146,7 +146,10 @@ This model uses **two** separately loaded DiTs (high-/low-noise), the **Wan 2.1
 infer the expert role. FP16 and ComfyUI FP8-scaled experts are supported.
 The native Wan 2.1 VAE uses FP16 compute.
 Both experts are swapped by the normal device memory manager at the sigma
-boundary; do not run both as resident GPU models on a 32 GiB card.
+boundary, which keeps both on the card when they fit; do not run both as
+resident GPU models on a 32 GiB card. LoRAs are not supported on this variant —
+the engine refuses `lora_specs` rather than merge them into only one of the two
+experts.
 
 ```bash
 ./thenoise.sh serve \

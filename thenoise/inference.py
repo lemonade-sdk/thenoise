@@ -11,9 +11,10 @@ Two orthogonal knobs, one primitive each:
   BatchNorm running stats) plus ``requires_grad_(False)`` weights, declared once at
   load time.
 
-The mode is set at exactly four boundaries, one per public entry point:
-``PipelineController.generate`` / ``.edit``, ``PixelUpscaleController.upscale``,
-``ControlMapController.run`` and ``Runtime.load``. Anything else runs inside one of them
+The mode is set at exactly five boundaries, one per public entry point:
+``PipelineController.generate`` / ``.edit``, ``VideoPipelineController.render``,
+``PixelUpscaleController.upscale``, ``ControlMapController.run`` and
+``Runtime.load``. Anything else runs inside one of them
 and inherits the mode — including the pipeline cache, whose inference tensors are written
 and read inside the same boundary. The two helpers that mutate weights in place
 (``utils.lora``, ``upscale.sesqui_net``) open their own boundary.

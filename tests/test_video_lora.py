@@ -23,9 +23,15 @@ def _config(tmp_path):
         device="cpu", offload_device="cpu", lora_dir=str(tmp_path / "loras"))
 
 
-def test_video_and_image_share_lora_switch_implementation():
-    assert Wan22Model.switch_loras is DiffusionModel.switch_loras
+def test_video_loras_use_the_shared_switch_and_decline_two_experts():
+    """Listing and switching come from ``LoRASupport`` — the single-expert case is proved
+    by the apply/undo test below. All Wan adds is refusing a LoRA it could only apply to
+    one of its two DiTs (plan C14 lifts that by role.)
+    """
     assert Wan22Model.list_loras is DiffusionModel.list_loras
+    assert Wan22Model._lora_key_map is not DiffusionModel._lora_key_map
+    with pytest.raises(ValueError, match="expert-specific"):
+        wan_adapter("t2v_14b").switch_loras(["style"], torch.nn.Module())
 
 
 @pytest.mark.parametrize("raw,canonical", [

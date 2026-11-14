@@ -27,6 +27,15 @@ def test_model_defaults_are_a_usable_superset_of_the_base(model):
     create_sampler(model.DEFAULT_PREFS["sampler"], model)
 
 
+@pytest.mark.parametrize("model", IMAGE_CATALOG, ids=IMAGE_CATALOG_IDS)
+def test_every_image_adapter_supplies_a_latent_upscaler(model):
+    """``_create_upscaler`` stays abstract, which is what lets ``upscale`` be a base
+    capability rather than a claim each adapter repeats — as long as no image adapter
+    inherits the refusal a video adapter answers with.
+    """
+    assert "_create_upscaler" in vars(model)
+
+
 @pytest.fixture(scope="module")
 def latent_upscalers():
     """Each registered latent format loaded once (a few MB of committed weights)."""

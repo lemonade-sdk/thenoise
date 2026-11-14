@@ -9,14 +9,15 @@ from conftest import wan_adapter, write_wan_dit
 from thenoise.dit.wan_video.model import Wan22Params, WanNativeDiT, detect_params
 from thenoise.dit.wan_video.sampling import get_sigmas
 from thenoise.models import resolve
+from thenoise.models.config import VideoSamplingParams
 from thenoise.models.wan_video import VARIANTS, Wan22Model, variant_for
+from thenoise.samplers import Step
 from thenoise.runtime import ModelPaths, Runtime, Settings
 from thenoise.utils.wan_weights import wan_vae21_key
 from thenoise.vae.wan_video import (
     _comfy_vae_config, _WAN21_LATENTS_MEAN, _WAN21_LATENTS_STD, _wan21_vae_config,
     WanNativeVideoVAE,
 )
-from thenoise.video.jobs import Cancellation
 from thenoise.video.spec import VideoSpec
 
 A14B = VARIANTS["t2v_14b"]
@@ -111,40 +112,29 @@ def test_14b_topology_meta_and_vae21_key_mapping():
         "encoder.down_blocks.0.resnets.0.norm1.gamma")
 
 
-def test_14b_uses_separate_experts_and_single_progress_clock():
-    class Expert(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.weight = torch.nn.Parameter(torch.zeros((), dtype=torch.float32))
-            self.sigmas = []
-
-        @property
-        def dtype(self):
-            return self.weight.dtype
-
-        def forward(self, x, timestep, encoder_hidden_states, return_dict):
-            assert timestep.shape == (1,)  # scalar A14B timestep, not 5B token mask
-            self.sigmas.append(timestep.item() / 1000)
-            return (torch.zeros_like(x),)
-
+def test_the_two_experts_split_the_schedule_at_the_sigma_boundary():
     model = wan_adapter("t2v_14b")
-    model.transformer = Expert()
-    model.low_transformer = Expert()
-    model.memory.register("dit", model.transformer)
-    model.memory.register("dit_low", model.low_transformer)
-    spec = model.resolve_video(VideoSpec(prompt="fox", width=64, height=64,
-                                         frames=5, steps=4, sampler="euler",
-                                         guidance_scale=1.0, seed=123))
-    progress = []
-    out = model._run_denoiser(torch.zeros(1, 16, 2, 8, 8), spec,
-                              torch.zeros(1, 2, 16), None, None,
-                              Cancellation(), lambda *e: progress.append(e), 64 * 64)
-    assert out.shape == (1, 16, 2, 8, 8)
-    assert len(model.transformer.sigmas) == 3
-    assert len(model.low_transformer.sigmas) == 1
-    assert progress == [("sampling", i, 4) for i in range(1, 5)]
+    high, low = object(), object()
+    model.dit, model.low_dit = high, low
+    steps = model.schedule(VideoSamplingParams(height=64, width=64, steps=4, seed=1,
+                                               guidance_scale=4.0, sampler="euler"))
+    spans = model.segments(None, steps, guidance_scale=4.0)
+
+    assert [s.stage for s in spans] == ["dit", "dit_low"]
+    assert [s.module for s in spans] == [high, low]
+    assert [len(s.steps) for s in spans] == [3, 1]
+    assert sum(len(s.steps) for s in spans) == len(steps)
+    # Upstream ships guidance 4.0 on the high half and 3.0 on the low.
+    assert spans[1].guidance_scale == pytest.approx(4.0 * A14B.experts.low_cfg_ratio)
     sigmas = get_sigmas(4, shift=A14B.experts.flow_shift)
     assert sigmas[2] > A14B.experts.boundary > sigmas[3]
+
+
+def test_a_single_expert_variant_answers_one_segment():
+    model = wan_adapter()
+    model.dit = object()
+    spans = model.segments(None, [Step(t=torch.zeros(()), delta=torch.zeros(()))], 5.0)
+    assert [s.stage for s in spans] == ["dit"]
 
 
 def test_wan21_latent_normalization_is_not_identity():

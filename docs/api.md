@@ -98,14 +98,18 @@ applied; unsupported targets are logged as unused.
 ## `GET /health`
 
 ```json
-{"status": "ok", "models": ["qwen_image"], "capabilities": {"edit": true, "kv_cache": true}}
+{"status": "ok", "models": ["qwen_image"],
+ "capabilities": {"edit": true, "kv_cache": true, "upscale": true,
+               "video": false, "t2v": false, "i2v": false}}
 ```
 
 `models` is empty until a DiT is loaded, and `capabilities` is the loaded
 adapter's `CAPABILITIES` dict verbatim (`{}` with no model) - the web UI uses it
 to gate the Edit tab and the KV-cache control, and a request asking for a
 capability the model lacks is rejected with HTTP 400 rather than silently
-ignored.
+ignored. One vocabulary serves both mediums, so a video model answers the same
+keys with `video`/`t2v`/`i2v` true and `upscale` false, and `i2v` follows the
+released variant rather than the model name.
 
 ## `POST /text2image`
 

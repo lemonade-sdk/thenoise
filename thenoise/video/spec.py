@@ -22,6 +22,7 @@ class ResolvedVideo:
     image: Optional[bytes]
     sampler: str
     lora_specs: Optional[list[str]]
+    explicit_frames: bool = False
 
     @property
     def mode(self) -> str:
@@ -82,7 +83,8 @@ class VideoSpec:
             raise ValueError("frames must be positive")
         if self.duration is not None and (not math.isfinite(self.duration) or self.duration <= 0):
             raise ValueError("duration must be finite and positive")
-        frames = (self.frames if self.frames is not None else
+        explicit_frames = self.frames is not None
+        frames = (self.frames if explicit_frames else
                   max(1, math.floor(self.duration * fps + 0.5))
                   if self.duration is not None else defaults["frames"])
         if output_format not in ("mp4", "webm"):
@@ -96,4 +98,5 @@ class VideoSpec:
             steps=steps, guidance_scale=guidance_scale, seed=seed,
             output_format=output_format, image=self.image,
             sampler=sampler, lora_specs=self.lora_specs,
+            explicit_frames=explicit_frames,
         )

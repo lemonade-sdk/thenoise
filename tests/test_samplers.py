@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from conftest import StubModel
-from thenoise.pipeline import _sigma_steps
+from thenoise.samplers import sigma_steps
 from thenoise.samplers import SAMPLERS, Step, create_sampler
 from thenoise.samplers.er_sde import ErSdeSampler
 from thenoise.samplers.euler import EulerSampler
@@ -84,7 +84,7 @@ def test_one_denoise_step_per_schedule_step(name):
 def test_solvers_accept_an_arbitrary_custom_sigma_grid(name):
     """User sigmas need neither uniform spacing nor a full-strength start."""
     model = _VelocityModel()
-    schedule = _sigma_steps([0.9, 0.7, 0.65, 0.2, 0.0], "cpu", torch.float32)
+    schedule = sigma_steps([0.9, 0.7, 0.65, 0.2, 0.0], "cpu", torch.float32)
 
     out = create_sampler(name, model).sample(
         torch.randn(1, 4, 8, 8), schedule, None, guidance_scale=1.0, seed=7
@@ -178,3 +178,13 @@ def test_er_sde_nudges_the_first_sigma_below_one():
     assert torch.isfinite(out).all()
 
 
+
+
+def test_sigma_steps_walk_the_grid_verbatim():
+    sub = sigma_steps([1.0, 0.6, 0.2, 0.0], "cpu", torch.float32)
+
+    assert [float(s.t) for s in sub] == pytest.approx([1.0, 0.6, 0.2])
+    assert [float(s.delta) for s in sub] == pytest.approx([0.4, 0.4, 0.2])
+    assert sum(float(s.delta) for s in sub) == pytest.approx(1.0)  # lands on x0
+    # Tensors in the model's dtype, not floats: Anima's denoise_step calls t.expand().
+    assert all(isinstance(s.t, torch.Tensor) for s in sub)

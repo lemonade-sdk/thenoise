@@ -103,4 +103,16 @@ class SamplingParams:
     kv_cache: bool = False
 
 
-__all__ = ["ModelConfig", "EncodePromptArgs", "GenerateRequest", "SamplingParams"]
+@dataclass(frozen=True)
+class VideoSamplingParams(SamplingParams):
+    """A clip's denoise-stage geometry: the image fields plus how long the clip is.
+
+    ``frames`` is the *resolved* count, already on the codec's temporal grid, because a
+    model seeds ``(frames - 1) / 4 + 1`` latent frames and must not re-derive it.
+    """
+
+    frames: int = 1
+
+
+__all__ = ["ModelConfig", "EncodePromptArgs", "GenerateRequest", "SamplingParams",
+           "VideoSamplingParams"]
