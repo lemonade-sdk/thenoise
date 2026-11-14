@@ -176,10 +176,8 @@ sent under both roles. `GET /lora` lists the roles this model offers.
 
 The image-to-video A14B pair is the T2V trunk with a wider door: 36 channels, the 20
 extra being a mask and the reference clip concatenated onto the noise at every step.
-Two experts, Euler, the same LoRA roles, and no CLIP vision tower anywhere in it.
-Its own release numbers differ from the T2V pair: flow shift 5 rather than 12, the
-handover at 0.900 rather than 0.875, and CFG 3.5 on both halves rather than 3.0 on
-the low one.
+Two experts, Euler, the same LoRA roles, and no CLIP vision tower anywhere in it. Its
+release numbers are its own — see [what to send](#what-to-send).
 
 ### Download
 
@@ -216,6 +214,22 @@ Omit `width` and `height` and the reference decides the clip's size, as it does 
 image edit: its aspect ratio at the 832×480 this variant defaults to. The 5B path
 conditions differently — its first frame is denoised at timestep zero instead of being
 concatenated — but asks for the same request.
+
+## What to send
+
+Defaults are what each release ships, so a request that names nothing gets them. The
+4-step recipes are the lightx2v LoRA pairs; they want a different shift and CFG than the
+files they are loaded onto.
+
+| Run | `steps` | `flow_shift` | `guidance_scale` | `lora_specs` |
+|---|---|---|---|---|
+| T2V-A14B | 40 | 12 | 4.0 | — |
+| T2V-A14B, 4-step | 4 | 5 | 1.0 | `{"dit": ["wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise"], "dit_low": ["…_low_noise"]}` |
+| I2V-A14B | 40 | 5 | 3.5 | — |
+| I2V-A14B, 4-step | 4 | 5 | 1.0 | `{"dit": ["wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise"], "dit_low": ["…_low_noise"]}` |
+
+Each half takes its own LoRA file, named for the mode of the pair it belongs to. At CFG
+1.0 the negative prompt is not sent at all, so a distilled run needs none.
 
 ## Video jobs
 
