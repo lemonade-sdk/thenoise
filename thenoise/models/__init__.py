@@ -15,7 +15,7 @@ from .moss_image import MossImageModel
 from .zimage import ZImageModel
 from .qwen_image import QwenImageModel
 from .qwen_image21 import QwenImage21Model
-from .wan_video import WanVideo, Wan14BVideo
+from .wan_video import Wan22Model
 
 MODEL_CATALOG: list[type] = [
     Krea2Model,
@@ -30,8 +30,7 @@ MODEL_CATALOG: list[type] = [
     QwenImage21Model,
     MossImageModel,
     Fibo2Model,
-    WanVideo,
-    Wan14BVideo,
+    Wan22Model,
 ]
 
 

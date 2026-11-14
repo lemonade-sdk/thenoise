@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from conftest import StubModel
-from thenoise.pipeline import _sigma_steps
+from thenoise.samplers import sigma_steps
 from thenoise.samplers import SAMPLERS, Step, create_sampler
 from thenoise.samplers.er_sde import ErSdeSampler
 from thenoise.samplers.euler import EulerSampler
@@ -84,7 +84,7 @@ def test_one_denoise_step_per_schedule_step(name):
 def test_solvers_accept_an_arbitrary_custom_sigma_grid(name):
     """User sigmas need neither uniform spacing nor a full-strength start."""
     model = _VelocityModel()
-    schedule = _sigma_steps([0.9, 0.7, 0.65, 0.2, 0.0], "cpu", torch.float32)
+    schedule = sigma_steps([0.9, 0.7, 0.65, 0.2, 0.0], "cpu", torch.float32)
 
     out = create_sampler(name, model).sample(
         torch.randn(1, 4, 8, 8), schedule, None, guidance_scale=1.0, seed=7
@@ -134,6 +134,35 @@ def test_er_sde_is_seed_deterministic_but_seed_sensitive():
     assert not torch.equal(run(5), run(6))
 
 
+@pytest.mark.parametrize("name", sorted(SAMPLERS))
+def test_step_callback_runs_once_per_step_and_can_stop_the_solve(name):
+    """The callback is how a caller reports progress and cancels mid-solve, so the
+    shared ``Sampler.sample`` signature is only honest if every registered solver runs it.
+    """
+    schedule = _schedule(4)
+    seen = []
+
+    def note(x, step, total):
+        seen.append((step, total))
+        return x
+
+    create_sampler(name, _VelocityModel()).sample(
+        torch.randn(1, 4, 8, 8), schedule, None, 1.0, 3, step_callback=note
+    )
+    assert seen == [(step, 4) for step in range(1, 5)]
+
+    class Abort(Exception):
+        pass
+
+    def abort(x, step, total):
+        raise Abort
+
+    with pytest.raises(Abort):
+        create_sampler(name, _VelocityModel()).sample(
+            torch.randn(1, 4, 8, 8), schedule, None, 1.0, 3, step_callback=abort
+        )
+
+
 def test_er_sde_nudges_the_first_sigma_below_one():
     """``sigma/(1 - sigma)`` blows up at sigma == 1, so t=1 goes through the model's
     nudge rather than into the solver.
@@ -149,3 +178,29 @@ def test_er_sde_nudges_the_first_sigma_below_one():
     assert torch.isfinite(out).all()
 
 
+
+
+def test_sigma_steps_walk_the_grid_verbatim():
+    sub = sigma_steps([1.0, 0.6, 0.2, 0.0], "cpu", torch.float32)
+
+    assert [float(s.t) for s in sub] == pytest.approx([1.0, 0.6, 0.2])
+    assert [float(s.delta) for s in sub] == pytest.approx([0.4, 0.4, 0.2])
+    assert sum(float(s.delta) for s in sub) == pytest.approx(1.0)  # lands on x0
+    # Tensors in the model's dtype, not floats: Anima's denoise_step calls t.expand().
+    assert all(isinstance(s.t, torch.Tensor) for s in sub)
+
+
+@pytest.mark.parametrize("name", sorted(SAMPLERS))
+def test_every_solver_waits_for_the_step_it_reported(name, monkeypatch):
+    """The step count a caller sees is only honest if the host cannot run ahead of the
+    device: a solver that queues kernels measures submission rather than compute, and asks
+    for the next step's activations before this step's are free.
+    """
+    syncs = []
+    monkeypatch.setattr("thenoise.samplers.base.synchronize_device",
+                        lambda device: syncs.append(device.type))
+
+    create_sampler(name, _VelocityModel()).sample(
+        torch.randn(1, 4, 8, 8), _schedule(3), None, 1.0, 3)
+
+    assert syncs == ["cpu"] * 3

@@ -408,12 +408,17 @@ def _wan22_jobs(args: argparse.Namespace) -> list[Artifact]:
     ]
 
 
-def _wan22_14b_jobs(args: argparse.Namespace) -> list[Artifact]:
-    """Wan 2.2 T2V-A14B: high/low-noise DiTs, UMT5, and 16-channel Wan 2.1 VAE."""
+def _wan22_14b_jobs(args: argparse.Namespace,
+                     mode: str = "t2v") -> list[Artifact]:
+    """Wan 2.2 A14B: high/low-noise DiTs, UMT5, and 16-channel Wan 2.1 VAE.
+
+    Both released A14B pairs are the same trunk with the same neighbours; only the
+    file name says whether the transformer takes a concatenated reference.
+    """
     repo = "Comfy-Org/Wan-2.2"
     jobs = [
         (f"dit ({noise} noise)", repo,
-         f"split_files/diffusion_models/wan2.2_t2v_{noise}_noise_14B_{args.variant}.safetensors")
+         f"split_files/diffusion_models/wan2.2_{mode}_{noise}_noise_14B_{args.variant}.safetensors")
         for noise in ("high", "low")
     ]
     return jobs + [
@@ -574,12 +579,21 @@ MODELS: dict[str, ModelSpec] = {
     ),
     "wan22-14b": ModelSpec(
         "wan22-14b", "./models/wan22",
-        "Wan 2.2 T2V-A14B (two experts; FP8-scaled or FP16)",
+        "Wan 2.2 T2V-A14B (two experts; FP16 or FP8-scaled)",
         _wan22_14b_jobs,
         has_int8=False,
         variant_supported=True,
-        variant_choices=("fp8_scaled", "fp16"),
-        default_variant="fp8_scaled",
+        variant_choices=("fp16", "fp8_scaled"),
+        default_variant="fp16",
+    ),
+    "wan22-14b-i2v": ModelSpec(
+        "wan22-14b-i2v", "./models/wan22",
+        "Wan 2.2 I2V-A14B (two experts; FP16 or FP8-scaled)",
+        lambda args: _wan22_14b_jobs(args, "i2v"),
+        has_int8=False,
+        variant_supported=True,
+        variant_choices=("fp16", "fp8_scaled"),
+        default_variant="fp16",
     ),
     "esrgan": ModelSpec(
         "esrgan", "./models/esrgan",

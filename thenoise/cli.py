@@ -115,8 +115,9 @@ def build_parser() -> argparse.ArgumentParser:
                             "(--dit selects the high-noise expert)")
     _add_upscaler_args(serve)
     _add_controlmap_args(serve)
-    serve.add_argument("--video-cache-dir", default="~/.cache/thenoise/videos", metavar="DIR",
-                       help="directory for completed video clips")
+    serve.add_argument("--cache-dir", default="~/.cache/thenoise", metavar="DIR",
+                       help="directory for generated files; completed video clips land "
+                            "in <cache-dir>/videos")
     serve.add_argument("--host", default="127.0.0.1",
                        help="bind host (default: 127.0.0.1)")
     serve.add_argument("--port", type=int, default=8000,

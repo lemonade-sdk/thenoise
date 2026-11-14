@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Callable, List
 
 import torch
 
+from thenoise.utils.device import synchronize_device
+
 if TYPE_CHECKING:
     from thenoise.models.base import Conditioning, DiffusionModel
 
@@ -24,6 +26,16 @@ class Sampler(ABC):
 
     def __init__(self, model: "DiffusionModel"):
         self.model = model
+
+    def sync(self, x: torch.Tensor) -> None:
+        """Wait for the step just taken, once per step, at the end of every solver loop.
+
+        A loop that lets the host run ahead measures the submission of kernels rather
+        than their execution, so the progress a caller reports drifts from what the device
+        has finished — and asks the allocator for the next step's activations before this
+        step's are released.
+        """
+        synchronize_device(x.device)
 
     @abstractmethod
     def sample(

@@ -95,7 +95,7 @@ def _config(tmp_path, *, offload_device="cpu"):
         device="cuda",
         offload_device=offload_device,
         dtype=torch.float32,
-        dit_path=str(tmp_path / "dit.safetensors"),
+        dit_paths={"": str(tmp_path / "dit.safetensors")},
         vae_path=str(tmp_path / "vae.safetensors"),
         text_encoder_path=str(tmp_path / "te"),
     )

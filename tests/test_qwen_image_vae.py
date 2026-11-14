@@ -10,11 +10,8 @@ import torch
 import torch.nn as nn
 
 from thenoise.vae import AutoencoderKLQwenImage
-from thenoise.vae.qwen_image import (
-    QwenImageResample,
-    QwenImageResidualBlock,
-    QwenImageRMS_norm,
-)
+from thenoise.vae.qwen_image import QwenImageResample, QwenImageResidualBlock
+from thenoise.vae.wan_common import RmsNorm
 import thenoise.vae.fused as fused_module
 
 
@@ -44,7 +41,7 @@ def test_the_norm_is_the_one_a_strip_can_compute_for_itself():
 
     Where a GroupNorm codec has to carry whole-frame statistics in, this one needs none.
     """
-    norm = QwenImageRMS_norm(6).float().eval().requires_grad_(False)
+    norm = RmsNorm(6).float().eval().requires_grad_(False)
     x = torch.randn(1, 6, 8, 3)
     with torch.no_grad():
         whole = norm(x)

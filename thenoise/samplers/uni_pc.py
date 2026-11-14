@@ -104,4 +104,5 @@ class UniPCSampler(Sampler):
             x = solver.step(x.float(), sigma, max(0.0, next_sigma), velocity).to(dtype)
             if step_callback is not None:
                 x = step_callback(x, i + 1, len(schedule))
+            self.sync(x)
         return x

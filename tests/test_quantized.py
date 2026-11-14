@@ -4,6 +4,8 @@ CPU (comfy_kitchen's eager backend), no GPU and no real checkpoints.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 import torch
 from comfy_kitchen.tensor import QuantizedTensor
@@ -81,9 +83,9 @@ def test_quantized_linear_owns_optional_fp8_activation_scale():
     assert layer.input_scale.device == layer.weight.device
 
 
-def test_streaming_fp8_uses_quantized_linear_input_scale(tmp_path):
+def test_fp8_activation_scale_reaches_a_whole_state_load(tmp_path):
     from safetensors.torch import save_file
-    from thenoise.utils.loader import load_mapped_safetensors
+    from thenoise.utils.loader import load_dit
 
     path = tmp_path / "fp8.safetensors"
     raw = torch.ones(OUT_F, IN_F, dtype=torch.float16).to(torch.float8_e4m3fn)
@@ -98,9 +100,7 @@ def test_streaming_fp8_uses_quantized_linear_input_scale(tmp_path):
 
     with torch.device("meta"):
         model = Model()
-    load_mapped_safetensors(model, path, lambda k: k,
-                            dtype_for=lambda _: torch.bfloat16,
-                            label="test", quantized=True)
+    load_dit(model, str(path), device="cpu", dtype=torch.bfloat16)
     assert isinstance(model.q.weight, QuantizedTensor)
     assert model.q.input_scale.item() == pytest.approx(0.5)
     assert "q.input_scale" not in model.state_dict()
@@ -111,9 +111,7 @@ def test_streaming_fp8_uses_quantized_linear_input_scale(tmp_path):
                "scaled_fp8": torch.zeros(2)}, str(path))
     with torch.device("meta"):
         model = Model()
-    load_mapped_safetensors(model, path, lambda k: k,
-                            dtype_for=lambda _: torch.bfloat16,
-                            label="test", quantized=True)
+    load_dit(model, str(path), device="cpu", dtype=torch.bfloat16)
     assert model.q.input_scale is None
 
 
@@ -429,8 +427,6 @@ def test_bake_ratio_ignores_the_rows_a_fused_lora_never_touches():
 
 def test_a_lora_the_layer_cannot_measure_bakes():
     """No step estimate (FP8) and a zero delta both mean "no opinion" -> bake."""
-    from thenoise.utils.lora import apply_lora_to_model
-
     layer = QuantizedLinear(IN_F, OUT_F, bias=False)
     layer.load_quantized(wrapped_fp8_tensor())
     assert layer.apply_lora(LoraFactors(*_tiny_lora_factors(gain=1e-6))) is (
@@ -542,6 +538,77 @@ def test_load_quantized_state_dict_orphan_scale_raises():
         load_quantized_state_dict(TinyDiT(), sd)
 
 
+def _fp8_marker(**profile) -> torch.Tensor:
+    """A ``comfy_quant`` marker as ComfyUI's FP8 exporter writes it."""
+    payload = {"format": "float8_e4m3fn", **profile}
+    return torch.tensor(list(json.dumps(payload).encode("utf-8")), dtype=torch.uint8)
+
+
+@pytest.mark.parametrize("suffix", [".scale_input", ".input_scale"])
+def test_load_quantized_state_dict_installs_the_fp8_activation_scale(suffix):
+    """An FP8 export carries a calibrated activation scale next to the weight; the
+    whole-state loader installs it just as the streaming loader does."""
+    model = TinyDiT()
+    load_quantized_state_dict(
+        model,
+        int8_tensors(
+            weight_dtype=torch.float8_e4m3fn,
+            extra={f"q{suffix}": torch.tensor(0.5)},
+        ),
+    )
+
+    assert model.q.input_scale.item() == pytest.approx(0.5)
+    assert "q.input_scale" not in model.state_dict()
+    assert model.q(_bf16_x()).dtype == torch.bfloat16
+
+
+@pytest.mark.parametrize("disabler", ["checkpoint", "layer"])
+def test_full_precision_fp8_export_keeps_its_activation_scale_unused(disabler):
+    """A full-precision-matmul export flags itself checkpoint-wide or per layer, and
+    then the stored scale is stale by construction."""
+    extra = (
+        {"scaled_fp8": torch.zeros(2)}
+        if disabler == "checkpoint"
+        else {"q.comfy_quant": _fp8_marker(full_precision_matrix_mult=True)}
+    )
+    model = TinyDiT()
+    load_quantized_state_dict(
+        model,
+        int8_tensors(
+            weight_dtype=torch.float8_e4m3fn,
+            marker=_fp8_marker() if disabler == "checkpoint" else None,
+            extra={"q.scale_input": torch.tensor(0.5), **extra},
+        ),
+    )
+    assert model.q._quantized is True
+    assert model.q.input_scale is None
+
+
+def test_load_quantized_state_dict_refuses_an_input_scale_on_an_int8_weight():
+    sd = int8_tensors(extra={"q.scale_input": torch.tensor(0.5)})
+    with pytest.raises(RuntimeError, match="FP8 input scale on non-FP8 weight"):
+        load_quantized_state_dict(TinyDiT(), sd)
+
+
+@pytest.mark.parametrize(
+    "scale",
+    [torch.tensor(0.0), torch.tensor(-1.0), torch.tensor(float("nan")),
+     torch.tensor([0.5, 0.6])],
+    ids=["zero", "negative", "nan", "two-values"],
+)
+def test_load_quantized_state_dict_refuses_an_unusable_input_scale(scale):
+    sd = int8_tensors(weight_dtype=torch.float8_e4m3fn, extra={"q.scale_input": scale})
+    with pytest.raises(RuntimeError, match="invalid FP8 input scale"):
+        load_quantized_state_dict(TinyDiT(), sd)
+
+
+def test_load_quantized_state_dict_orphan_input_scale_raises():
+    """An activation scale for a layer that is not quantized cannot be honoured."""
+    sd = int8_tensors(extra={"plain.scale_input": torch.tensor(0.5)})
+    with pytest.raises(RuntimeError, match="orphan .scale_input"):
+        load_quantized_state_dict(TinyDiT(), sd)
+
+
 # --------------------------------------------------------------- load_dit
 
 
@@ -567,6 +634,20 @@ def test_load_dit_int8_and_fp8(tmp_path, kwargs):
         assert model.q.weight._qdata.dtype == weight_dtype
         assert model.plain.weight.dtype == torch.bfloat16
         assert model.q(_bf16_x()).shape == (4, OUT_F)
+
+
+def test_load_dit_installs_the_fp8_activation_scale(tmp_path):
+    """An FP8 image checkpoint carries ``.scale_input``; the whole-state path used to
+    stop on the key instead of loading, so no image model ever ran with it."""
+    path, _ = int8_checkpoint(
+        tmp_path / "fp8.safetensors",
+        weight_dtype=torch.float8_e4m3fn,
+        extra={"q.scale_input": torch.tensor(0.5)},
+    )
+    model = load_dit(TinyDiT(), path, device="cpu", dtype=torch.bfloat16)
+
+    assert model.q.weight._qdata.dtype == torch.float8_e4m3fn
+    assert model.q.input_scale.item() == pytest.approx(0.5)
 
 
 @pytest.mark.parametrize("quantized", [False, True], ids=["bf16", "int8"])

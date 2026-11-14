@@ -13,7 +13,17 @@ from typing import Optional
 import torch
 from torch._dynamo import maybe_mark_dynamic
 
-__all__ = ["mark_token_axis"]
+__all__ = ["RECOMPILE_LIMIT", "apply_recompile_limit", "mark_token_axis"]
+
+#: Dynamo's own ceiling is 8 recompiles; a run meets one graph per shape it hands the
+#: compiled blocks — resolution, reference count, and for a two-expert model which
+#: expert is running — and passing the ceiling aborts the run rather than slowing it.
+RECOMPILE_LIMIT = 64
+
+
+def apply_recompile_limit() -> None:
+    """Raise Dynamo's recompile ceiling to what this engine's runs need (global)."""
+    torch._dynamo.config.recompile_limit = RECOMPILE_LIMIT
 
 
 def mark_token_axis(*tensors: Optional[torch.Tensor], dim: int = 1) -> None:

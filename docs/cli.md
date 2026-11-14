@@ -41,9 +41,12 @@ Then open <http://localhost:8000/> for the web UI. Full endpoint reference:
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--dit-low` | — | Wan 2.2 T2V-A14B low-noise DiT checkpoint; `--dit` then selects the high-noise expert |
 | `--host` | `127.0.0.1` | Bind host |
 | `--port` | `8000` | Bind port |
 | `--upscaler-dir` | — | Directory containing pixel upscaler `.safetensors` files (e.g. Real-ESRGAN); selected per-request via `pixel_upscaler` |
+| `--controlmap-dir` | — | Directory of control-map checkpoints; each subdirectory's `config.json` declares the kind it implements |
+| `--cache-dir` | `~/.cache/thenoise` | Where generated files are kept; completed video clips land in `<cache-dir>/videos` |
 
 ## Generate a single image
 

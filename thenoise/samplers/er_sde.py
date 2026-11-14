@@ -6,7 +6,7 @@ from the model's velocity.
 """
 from __future__ import annotations
 
-from typing import List
+from typing import Callable, List
 
 import torch
 from tqdm import tqdm
@@ -23,6 +23,7 @@ class ErSdeSampler(Sampler):
         guidance_scale: float,
         seed: int,
         desc: str = "sampling",
+        step_callback: Callable[[torch.Tensor, int, int], torch.Tensor] | None = None,
     ) -> torch.Tensor:
         model = self.model
         dtype = x.dtype
@@ -103,5 +104,8 @@ class ErSdeSampler(Sampler):
                 x = xf.to(dtype)
 
             old_denoised = denoised
+            if step_callback is not None:
+                x = step_callback(x, i + 1, len(schedule))
+            self.sync(x)
 
         return x

@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,6 +34,8 @@ class FakePipeline:
         self.edit_requests = []
         self.generate_error = generate_error
         self.edit_error = edit_error
+        # `/lora` asks the loaded model which components a LoRA can be given to.
+        self.model = SimpleNamespace(lora_components=lambda: {"dit": object()})
 
     @staticmethod
     def _image(size=(8, 8)):
@@ -141,10 +144,12 @@ def test_health_with_nothing_loaded():
 # ----------------------------------------------------------------------- /lora
 
 
-def test_lora_lists_the_model_names(client):
+def test_lora_lists_the_model_names_and_the_roles_they_can_be_given_to(client):
     res = client(_runtime()).get("/lora")
     assert res.status_code == 200
-    assert res.json() == {"loras": ["style", "pose"]}
+    # One component, so every client keeps sending a bare list; a two-expert model
+    # adds its second role here and the UI gets a picker without new code.
+    assert res.json() == {"loras": ["style", "pose"], "roles": ["dit"]}
 
 
 def test_lora_requires_a_loaded_model(client):

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Optional
 
 from thenoise.errors import ModelReloadNeeded
@@ -40,6 +39,13 @@ class ModelPaths:
     lora_dir: str = ""
     dit_low_path: str = ""
 
+    @property
+    def dit_paths(self) -> dict[str, str]:
+        """The DiT files by role; what a role means is the adapter's, not ours."""
+        if self.dit_low_path:
+            return {"": self.dit_path, "low": self.dit_low_path}
+        return {"": self.dit_path}
+
 
 class NotLoadedError(RuntimeError):
     """Raised when no model is loaded."""
@@ -67,49 +73,41 @@ class Runtime:
         )
         self._controlmap = ControlMapController(self._controlmaps)
         self._pipeline = None
+        self._video = False
 
     def load(self, paths: ModelPaths) -> None:
         from .models import resolve
         from .models.config import ModelConfig
         from .models.video_base import VideoModel
         from .pipeline import PipelineController
+        from .video.controller import VideoPipelineController
 
         cls = resolve(paths.dit_path)
         name = cls.name
-
-        if getattr(cls, "TWO_EXPERT_DIT", False):
-            if not paths.dit_low_path:
-                raise ValueError("Wan 2.2 T2V-A14B requires --dit-low")
-            high = Path(paths.dit_path).resolve()
-            low = Path(paths.dit_low_path).resolve()
-            if high == low:
-                raise ValueError("--dit and --dit-low must be different checkpoints")
-            if not low.is_file():
-                raise FileNotFoundError(f"low-noise DiT checkpoint not found: {low}")
-        elif paths.dit_low_path:
-            raise ValueError("--dit-low is only supported by Wan 2.2 T2V-A14B")
+        cls.validate_paths(paths.dit_paths)
 
         config = ModelConfig(
-            dit_path=paths.dit_path,
+            dit_paths=paths.dit_paths,
             vae_path=paths.vae_path,
             text_encoder_path=paths.text_encoder_path,
             device=self._settings.device,
             offload_device=self._settings.offload_device,
             lora_dir=paths.lora_dir or None,
-            dit_low_path=paths.dit_low_path or None,
         )
 
         self._unload()  # swap: only one model resident at a time
         logger.info("Loading model '%s'", name)
         with inference():
             model = cls(config=config)
-            if isinstance(model, VideoModel):
-                model.load_weights()
+        video = isinstance(model, VideoModel)
         self._model = model
         self._model_name = name
         self._paths = paths
-        self._pipeline = (None if getattr(self._model, "VIDEO", False)
-                          else PipelineController(self._model, self._pixel_upscalers))
+        self._video = video
+        # Both mediums get a controller, so `run` — the lock, the rebuild-and-retry of a
+        # model that reports itself unfit — is one path whatever was loaded.
+        self._pipeline = (VideoPipelineController(model) if video else
+                          PipelineController(model, self._pixel_upscalers))
 
     def reload(self) -> None:
         """Rebuild the loaded model from its checkpoints, which clears an unfit state."""
@@ -149,8 +147,10 @@ class Runtime:
             return
         logger.info("Unloading model '%s'", self._model_name)
         self._pipeline = None
+        self._model.unload()  # drops the references the instance itself holds
         self._model = None
         self._model_name = None
+        self._video = False
         release_device_memory(self._settings.device)
 
     @property
@@ -165,9 +165,9 @@ class Runtime:
         return self._pipeline
 
     @property
-    def video_model(self):
-        """The loaded video model, or None for image/model-free serving."""
-        return self._model if getattr(self._model, "VIDEO", False) else None
+    def video(self) -> bool:
+        """Whether the loaded model serves video rather than images."""
+        return self._video
 
     @property
     def pixel_upscalers(self):

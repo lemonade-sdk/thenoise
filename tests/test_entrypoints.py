@@ -74,6 +74,7 @@ class _FakeRuntime:
     def __init__(self, settings):
         self.settings = settings
         self.loaded = None
+        self.video = False
         self.pipeline = _FakePipeline()
         self.upscaler = _FakeUpscaler()
         # Weight-free and I/O-free, so options/availability stay the real ones.
