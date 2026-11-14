@@ -153,7 +153,6 @@ def load_text_encoder_weights(
     dtype: Optional[torch.dtype] = None,
     key_map: Optional[Callable[[str], str]] = None,
     drop_keys: Optional[tuple[str, ...]] = None,
-    check_cancel: Optional[Callable[[], None]] = None,
 ) -> torch.nn.Module:
     """Load a text-encoder checkpoint (single safetensors file), auto-selecting
     quantized vs BF16. No sharded-file support.
@@ -167,13 +166,10 @@ def load_text_encoder_weights(
     multimodal file ships an image tower the text-to-image conditioner does not
     build, and some store their tokenizer as a U8 payload tensor; dropping keeps the
     load strict.
-
-    ``check_cancel`` is called per tensor read: an oversized checkpoint can sit in
-    the reader long enough that abandoning a queued job matters.
     """
     device = torch.device(device)
 
-    sd = load_safetensors(path, device=device, dtype=None, check_cancel=check_cancel)
+    sd = load_safetensors(path, device=device, dtype=None)
     sd = {k: v for k, v in sd.items() if k != "lm_head" and not k.startswith("lm_head.")}
     sd = drop_runtime_state(sd)
     sd = drop_checkpoint_markers(sd)
@@ -212,7 +208,6 @@ def load_dit(
     key_map: Optional[Callable[[str], str]] = None,
     value_map: Optional[Callable[[str, torch.Tensor], tuple[str, torch.Tensor]]] = None,
     state_map: Optional[Callable[[dict], dict]] = None,
-    check_cancel: Optional[Callable[[], None]] = None,
 ) -> torch.nn.Module:
     """Load a DiT checkpoint into ``model`` (constructed on meta), selecting
     quantized vs BF16 automatically.
@@ -232,7 +227,7 @@ def load_dit(
     device = torch.device(device)
 
     # Load once and prepare before branching so both paths see the same dict.
-    sd = load_dit_safetensors(path, device=device, dtype=None, check_cancel=check_cancel)
+    sd = load_dit_safetensors(path, device=device, dtype=None)
     sd = drop_runtime_state(sd)
     sd = drop_checkpoint_markers(sd)
     if drop_keys:

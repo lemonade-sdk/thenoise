@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Callable, Optional
+from typing import Optional
 
 import torch
 
@@ -23,7 +23,6 @@ def load_wan_native_transformer(
     dtype: Optional[torch.dtype] = None,
     *,
     params: Optional[Wan22Params] = None,
-    check_cancel: Optional[Callable[[], None]] = None,
 ) -> WanNativeDiT:
     """Load a Wan transformer — plain or FP8-scaled, 5B or one 14B expert.
 
@@ -40,6 +39,6 @@ def load_wan_native_transformer(
     load_dit(
         model, dit_path, device=device,
         dtype=dtype or (QUANTIZED_COMPUTE_DTYPE if quantized else None),
-        key_map=wan_dit_key, check_cancel=check_cancel,
+        key_map=wan_dit_key,
     )
     return model.pin_modulation_precision().eval()

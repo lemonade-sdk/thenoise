@@ -78,18 +78,15 @@ def fake_video(tmp_path, monkeypatch):
         def encode(self, prompt):
             return torch.ones(1, 16, dtype=torch.long), torch.ones(1, 16, dtype=torch.bool)
 
-    def load_vae(_path, _device, *, check_cancel):
-        check_cancel()
+    def load_vae(_path, _device):
         calls.append("load_vae")
         return VAE()
 
-    def load_dit(_path, _device, *, check_cancel):
-        check_cancel()
+    def load_dit(_path, _device):
         calls.append("load_dit")
         return DiT()
 
-    def load_text(_path, _device, *, check_cancel):
-        check_cancel()
+    def load_text(_path, _device):
         calls.append("load_text")
         return Text(), Tokenizer()
 

@@ -424,23 +424,3 @@ def test_a_key_map_that_collides_is_refused(tmp_path):
     path = write_key_checkpoint(tmp_path / "two.safetensors", ["a.weight", "b.weight"])
     with pytest.raises(RuntimeError, match="same module parameter"):
         load_dit(torch.nn.Linear(2, 2), path, device="cpu", key_map=lambda key: "weight")
-
-
-def test_a_cancel_stops_the_shared_checkpoint_read(tmp_path):
-    """A queued job has to be abandonable during a multi-gigabyte read."""
-    from thenoise.utils.loader import load_dit
-
-    class Stop(Exception):
-        pass
-
-    path = write_key_checkpoint(tmp_path / "many.safetensors",
-                                [f"t{i}.weight" for i in range(4)])
-    seen = []
-
-    def stop():
-        seen.append(1)
-        raise Stop
-
-    with pytest.raises(Stop):
-        load_dit(torch.nn.Linear(2, 2), path, device="cpu", check_cancel=stop)
-    assert seen == [1]

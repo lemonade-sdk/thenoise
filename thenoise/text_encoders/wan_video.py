@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Callable
 
 import sentencepiece as spm
 import torch
@@ -184,7 +183,6 @@ def load_wan_text_encoder(
     dtype: torch.dtype | None = None,
     *,
     params: dict | None = None,
-    check_cancel: Callable[[], None] | None = None,
 ) -> tuple[WanUMT5, WanSentencePiece]:
     """Load Comfy-Org's UMT5 weights and its embedded tokenizer, without Transformers.
 
@@ -203,7 +201,7 @@ def load_wan_text_encoder(
         model = WanUMT5(**(params or {}))
     load_text_encoder_weights(
         model, path, device=device, dtype=compute if quantized else None,
-        key_map=_text_key, drop_keys=("spiece_model",), check_cancel=check_cancel,
+        key_map=_text_key, drop_keys=("spiece_model",),
     )
     if not quantized:
         model.to(dtype=compute)

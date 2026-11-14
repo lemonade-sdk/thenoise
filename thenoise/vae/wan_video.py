@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 from collections import namedtuple
 from types import SimpleNamespace
-from typing import Callable, Iterator
+from typing import Iterator
 
 import torch
 from torch import Tensor, nn
@@ -499,7 +499,6 @@ def load_wan_native_video_vae(
     *,
     wan21: bool = False,
     config: SimpleNamespace | None = None,
-    check_cancel: Callable[[], None] | None = None,
 ) -> WanNativeVideoVAE:
     """Load a Wan video VAE from ``vae_path``.
 
@@ -514,8 +513,7 @@ def load_wan_native_video_vae(
     logger.info("Loading Wan %s video VAE from %s", "2.1" if wan21 else "2.2", vae_path)
     with torch.device("meta"):
         model = WanNativeVideoVAE(cfg)
-    load_dit(model, vae_path, device=device, dtype=None, key_map=key_map,
-             check_cancel=check_cancel)
+    load_dit(model, vae_path, device=device, dtype=None, key_map=key_map)
     model.to(dtype=dtype or cfg.compute_dtype)
     model.clear_cache()
     return model.eval()

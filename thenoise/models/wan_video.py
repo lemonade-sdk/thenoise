@@ -115,20 +115,12 @@ class WanVideo(VideoModel):
         token.check()
         if self.transformer is not None:
             return
-        vae = load_wan_native_video_vae(
-            self.vae_path, self._load_target(self.vae_path), check_cancel=token.check,
-        )
+        vae = load_wan_native_video_vae(self.vae_path, self._load_target(self.vae_path))
         token.check()
-        # UMT5's gated FFN can overflow FP16 before its final normalization.
-        # BF16 preserves the FP16 checkpoint's memory footprint but widens the exponent.
         text_encoder, tokenizer = load_wan_text_encoder(
-            self.text_encoder_path, self._load_target(self.text_encoder_path),
-            check_cancel=token.check,
-        )
+            self.text_encoder_path, self._load_target(self.text_encoder_path))
         token.check()
-        transformer = load_wan_native_transformer(
-            self.dit_path, self._load_target(self.dit_path), check_cancel=token.check,
-        )
+        transformer = load_wan_native_transformer(self.dit_path, self._load_target(self.dit_path))
         token.check()
         self.memory.register("vae", vae)
         self.memory.register("text_encoder", text_encoder)
@@ -347,22 +339,15 @@ class Wan14BVideo(WanVideo):
             return
         if not self.dit_low_path:
             raise ValueError("Wan 2.2 T2V-A14B requires --dit-low")
-        vae = load_wan_native_video_vae(
-            self.vae_path, self._load_target(self.vae_path), wan21=True, check_cancel=token.check,
-        )
+        vae = load_wan_native_video_vae(self.vae_path, self._load_target(self.vae_path),
+                                        wan21=True)
         token.check()
         text_encoder, tokenizer = load_wan_text_encoder(
-            self.text_encoder_path, self._load_target(self.text_encoder_path),
-            check_cancel=token.check,
-        )
+            self.text_encoder_path, self._load_target(self.text_encoder_path))
         token.check()
-        high = load_wan_native_transformer(
-            self.dit_path, self._load_target(self.dit_path), check_cancel=token.check,
-        )
+        high = load_wan_native_transformer(self.dit_path, self._load_target(self.dit_path))
         token.check()
-        low = load_wan_native_transformer(
-            self.dit_low_path, self._load_target(self.dit_low_path), check_cancel=token.check,
-        )
+        low = load_wan_native_transformer(self.dit_low_path, self._load_target(self.dit_low_path))
         token.check()
         self.memory.register("vae", vae)
         self.memory.register("text_encoder", text_encoder)

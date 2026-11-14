@@ -3,7 +3,7 @@ import torch
 import json
 import struct
 from pathlib import Path
-from typing import Callable, Dict, Union, Optional
+from typing import Dict, Union, Optional
 
 from thenoise.utils.setup_logging import setup_logging
 from thenoise.utils.device import synchronize_device
@@ -149,12 +149,11 @@ def load_dit_safetensors(
     device: Union[str, torch.device],
     dtype: Optional[torch.dtype] = None,
     drop_keys: Optional[tuple[str, ...]] = None,
-    check_cancel: Optional[Callable[[], None]] = None,
 ) -> dict[str, torch.Tensor]:
     """Load a DiT checkpoint state dict, stripping generic repackaging wrapper
     prefixes so raw and repackaged checkpoints load identically.
     """
-    sd = load_safetensors(path, device=device, dtype=dtype, check_cancel=check_cancel)
+    sd = load_safetensors(path, device=device, dtype=dtype)
     sd = strip_wrap_prefixes(sd)
     if drop_keys:
         sd = {k: v for k, v in sd.items() if not k.startswith(drop_keys)}
@@ -165,19 +164,12 @@ def load_safetensors(
     path: str,
     device: Union[str, torch.device],
     dtype: Optional[torch.dtype] = None,
-    check_cancel: Optional[Callable[[], None]] = None,
 ) -> dict[str, torch.Tensor]:
-    """Load a safetensors file into a state dict using the memory-efficient reader.
-
-    ``check_cancel``, when given, runs between tensors: reading tens of gigabytes
-    takes long enough that a queued job may be worth abandoning midway.
-    """
+    """Load a safetensors file into a state dict using the memory-efficient reader."""
     state_dict = {}
     device = torch.device(device) if device is not None else None
     with MemoryEfficientSafeOpen(path) as f:
         for key in f.keys():
-            if check_cancel is not None:
-                check_cancel()
             state_dict[key] = f.get_tensor(key, device=device, dtype=dtype)
         synchronize_device(device)
     return state_dict
