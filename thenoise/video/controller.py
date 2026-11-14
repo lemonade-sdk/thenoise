@@ -24,7 +24,7 @@ from thenoise.video.container import encode_video
 from thenoise.video.jobs import Cancellation
 from thenoise.video.spec import ResolvedVideo, VideoSpec
 
-log = logging.getLogger("uvicorn.error")
+logger = logging.getLogger(__name__)
 
 
 class VideoPipelineController:
@@ -97,7 +97,7 @@ class VideoPipelineController:
                 stage.run(self._mux, x, spec, token, progress, output)
             del x
 
-        log.info("Video saved: %s", output)
+        logger.info("Video saved: %s", output)
 
     def _denoise(self, x, segment, cond, params, token: Cancellation, progress,
                  done: int, total: int):

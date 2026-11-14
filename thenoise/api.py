@@ -10,6 +10,7 @@ import os
 import base64
 from typing import List, Literal, Optional, Union
 
+from thenoise.api_errors import error, guarded
 from thenoise.utils.lora_roles import LoraSpecs
 
 from fastapi import FastAPI, Request
@@ -214,17 +215,9 @@ def create_app(runtime, *, video_jobs=None, video_model: str = "") -> FastAPI:
         return Response(content=content.getvalue(), media_type="image/png")
 
     def image_job(failure: str, action, out: str):
-        """Run one image-producing request, answering with the image or the failure.
-        A ``ValueError`` is the request's fault (400, echoed); anything else is 500 + log.
-        """
-        try:
-            image = action()
-        except ValueError as e:
-            return Response(status_code=400, content=str(e))
-        except Exception as e:
-            logger.exception("%s failed", failure)
-            return Response(status_code=500, content=f"{failure} failed: {e}")
-        return image_response(image, out)
+        """Run one image-producing request, answering with the image or the failure."""
+        return guarded(failure, action, lambda image: image_response(image, out),
+                   envelope=error)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, exc: RequestValidationError):

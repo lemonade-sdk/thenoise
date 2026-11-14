@@ -8,15 +8,16 @@ import logging
 from typing import Literal, Optional
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, ConfigDict
 
+from ..api_errors import error, guarded, json_error
 from ..utils.lora_roles import LoraSpecs
 from .jobs import VideoJobs
 from .spec import VideoSpec
 
-log = logging.getLogger("uvicorn.error")
+logger = logging.getLogger(__name__)
 
 
 class VideoRequest(BaseModel):
@@ -68,54 +69,51 @@ def install_video_routes(app: FastAPI, jobs: VideoJobs, model_name: str) -> None
             raise ValueError(f"model {req.model!r} is not loaded")
         return req.to_spec()
 
-    @app.post("/video")
-    def generate_video(req: VideoRequest):
-        """Return the generated video directly, using the same renderer as video jobs."""
-        try:
-            path = jobs.render_sync(checked_spec(req))
-        except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=400)
-        except Exception:
-            log.exception("synchronous video generation failed")
-            return JSONResponse({"error": "video generation failed"}, status_code=500)
+    def video_file(path):
         media = "video/mp4" if path.suffix == ".mp4" else "video/webm"
+        # The file exists to be handed out once, so it goes with the response.
         return FileResponse(path, media_type=media,
                             background=BackgroundTask(path.unlink, missing_ok=True))
 
+    @app.post("/video")
+    def generate_video(req: VideoRequest):
+        """Return the generated video directly, using the same renderer as video jobs."""
+        return guarded("video generation",
+                       lambda: jobs.render_sync(checked_spec(req)), video_file,
+                       envelope=error)
+
+    # Everything past here is the job API, which answers JSON -- refusals included.
     @app.post("/videos", status_code=202)
     def create_video(req: VideoRequest):
-        try:
-            snapshot = jobs.submit(checked_spec(req))
-        except ValueError as e:
-            return JSONResponse({"error": str(e)}, status_code=400)
-        except OverflowError as e:
-            return JSONResponse({"error": str(e)}, status_code=429)
-        except RuntimeError as e:
-            return JSONResponse({"error": str(e)}, status_code=503)
-        return {key: snapshot[key] for key in ("id", "status", "model", "created_at")}
+        # A full queue and a model that cannot take the job are neither the caller's
+        # fault nor a fault worth a traceback.
+        return guarded(
+            "video job", lambda: jobs.submit(checked_spec(req)),
+            lambda snapshot: {key: snapshot[key]
+                              for key in ("id", "status", "model", "created_at")},
+            envelope=json_error, statuses={OverflowError: 429, RuntimeError: 503})
 
     @app.get("/videos/{video_id}")
     def get_video(video_id: str):
         result = jobs.status(video_id)
         if result is None:
-            return JSONResponse({"error": "unknown video"}, status_code=404)
+            return json_error(404, "unknown video")
         return result
 
     @app.get("/videos/{video_id}/content")
     def get_video_content(video_id: str):
         status, path = jobs.content(video_id)
         if status == "not_found":
-            return JSONResponse({"error": "unknown video"}, status_code=404)
+            return json_error(404, "unknown video")
         if status != "completed":
-            return JSONResponse({"error": f"video is {status}"}, status_code=409)
+            return json_error(409, f"video is {status}")
         if not path.is_file():
-            return JSONResponse({"error": "video content missing"}, status_code=404)
-        media = "video/mp4" if path.suffix == ".mp4" else "video/webm"
-        return FileResponse(path, media_type=media)
+            return json_error(404, "video content missing")
+        return video_file(path)
 
     @app.post("/videos/{video_id}/cancel")
     def cancel_video(video_id: str):
         if not jobs.cancel(video_id):
-            return JSONResponse({"error": "video not found or not cancellable"}, status_code=409)
+            return json_error(409, "video not found or not cancellable")
         return {"status": "canceling"}
 

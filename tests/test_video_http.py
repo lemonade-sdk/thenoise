@@ -4,7 +4,10 @@ from __future__ import annotations
 import base64
 import io
 import time
+from pathlib import Path
 from threading import Event
+
+import pytest
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -109,3 +112,87 @@ def test_video_http_cancel_running_and_rejection(tmp_path):
             assert c.post(f"/videos/{ident}/cancel").status_code == 409
     finally:
         jobs.close()
+
+
+class _StubJobs:
+    """The five routes' whole dependency, failing on command."""
+
+    def __init__(self, failure=None):
+        self.failure = failure or ValueError("nothing here")
+
+    def submit(self, spec):
+        raise self.failure
+
+    def render_sync(self, spec):
+        raise self.failure
+
+    def status(self, video_id):
+        return None
+
+    def content(self, video_id):
+        return "not_found", Path("/dev/null")
+
+    def cancel(self, video_id):
+        return False
+
+
+def _client(jobs):
+    app = FastAPI()
+    install_video_routes(app, jobs, "Wan2.2-TI2V-5B")
+    return TestClient(app, raise_server_exceptions=False)
+
+
+@pytest.mark.parametrize(("failure", "status", "reason"), [
+    (ValueError("frames must be a 4n+1 count"), 400, "frames must be a 4n+1 count"),
+    (KeyError("unexpected"), 500, "unexpected"),
+])
+def test_the_sync_video_route_refuses_in_text(failure, status, reason, caplog):
+    """/video returns bytes, so it refuses the way the image endpoints do."""
+    with _client(_StubJobs(failure)) as c:
+        r = c.post("/video", json={"prompt": "fox"})
+    assert r.status_code == status
+    assert r.headers["content-type"].startswith("text/plain")
+    assert reason in r.text
+    assert ("video generation failed" in caplog.text) == (status == 500)
+
+
+@pytest.mark.parametrize(("failure", "status", "reason"), [
+    (ValueError("frames must be a 4n+1 count"), 400, "frames must be a 4n+1 count"),
+    (OverflowError("video queue is full"), 429, "video queue is full"),
+    (RuntimeError("no memory for another video"), 503, "no memory for another video"),
+    (KeyError("unexpected"), 500, "unexpected"),
+])
+def test_the_job_api_refuses_in_json(failure, status, reason, caplog):
+    """The job API answers JSON, its refusals included, and logs only what the caller
+    is not to blame for.
+    """
+    with _client(_StubJobs(failure)) as c:
+        r = c.post("/videos", json={"prompt": "fox"})
+    assert r.status_code == status
+    assert list(r.json()) == ["error"]
+    assert reason in r.json()["error"]
+    assert ("video job failed" in caplog.text) == (status == 500)
+
+
+def test_a_video_job_answer_stays_json():
+    """A snapshot is a JSON document with its own fields, handed out as it is."""
+    class Submitted(_StubJobs):
+        def submit(self, spec):
+            return {"id": "v1", "status": "queued", "model": "Wan2.2-TI2V-5B",
+                    "created_at": 0.0, "extra": "not handed out"}
+
+    with _client(Submitted()) as c:
+        r = c.post("/videos", json={"prompt": "fox"})
+    assert r.status_code == 202
+    assert r.json() == {"id": "v1", "status": "queued", "model": "Wan2.2-TI2V-5B",
+                        "created_at": 0.0}
+
+
+def test_reads_of_an_absent_video_answer_json():
+    with _client(_StubJobs()) as c:
+        for method, path, status in [("get", "/videos/nope", 404),
+                                     ("get", "/videos/nope/content", 404),
+                                     ("post", "/videos/nope/cancel", 409)]:
+            r = getattr(c, method)(path)
+            assert r.status_code == status
+            assert r.json()["error"]

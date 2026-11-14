@@ -23,7 +23,7 @@ from thenoise.utils.wan_weights import wan_dit_key
 from thenoise.vae.wan_video import detect_latent_width, load_wan_video_vae, TEMPORAL_COMPRESSION
 from thenoise.video.spec import ResolvedVideo, VideoSpec
 
-log = logging.getLogger("uvicorn.error")
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -169,7 +169,7 @@ class Wan22Model(VideoModel):
             self.memory.register("dit_low", self.low_dit)
         self.memory.register("text_encoder", self.text_encoder)
         self.memory.register("vae", self.vae)
-        log.info("Wan 2.2 %s loaded (%s)", self.variant.name,
+        logger.info("Wan 2.2 %s loaded (%s)", self.variant.name,
                  "two experts" if self.low_dit is not None else "one transformer")
 
     # ------------------------------------------------------------ latent upscaler

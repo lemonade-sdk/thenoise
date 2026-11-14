@@ -40,7 +40,7 @@ def _serve(args) -> None:
         from .video.service import create_video_service
         video_jobs, video_model = create_video_service(
             runtime,
-            cache_dir=str(Path(args.video_cache_dir).expanduser()),
+            cache_dir=str(Path(args.cache_dir).expanduser()),
         )
 
     from .api import create_app

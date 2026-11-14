@@ -62,7 +62,6 @@ class BailingAttention(nn.Module):
         self.num_heads = config.num_attention_heads
         self.num_kv_heads = config.num_key_value_heads
         self.head_dim = config.head_dim
-        kv_dim = self.num_kv_heads * self.head_dim
         # ``query_key_value``/``dense`` are the checkpoint's own names.
         self.query_key_value = QuantizedLinear(
             config.hidden_size, (self.num_heads + 2 * self.num_kv_heads) * self.head_dim, bias=False

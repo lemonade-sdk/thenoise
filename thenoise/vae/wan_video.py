@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+from functools import partial
 from types import SimpleNamespace
 from typing import Callable, Iterator
 
@@ -624,7 +625,7 @@ def load_wan_video_vae(
         overrides, _ = _vae_release(detect_latent_width(vae_path))
         config = _comfy_vae_config(overrides)
     release_key = _vae_release(config.z_dim)[1]
-    key_map = lambda key: release_key(key, num_res_blocks=config.num_res_blocks)
+    key_map = partial(release_key, num_res_blocks=config.num_res_blocks)
     logger.info("Loading Wan %dch video VAE from %s", config.z_dim, vae_path)
     with torch.device("meta"):
         model = AutoencoderKLWanVideo(config)

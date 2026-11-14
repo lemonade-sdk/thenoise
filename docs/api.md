@@ -379,7 +379,20 @@ the seed or prompt.
 
 ## Error semantics
 
+A route answers a refusal in the format it speaks.
+
+| Endpoints | Refusal body |
+|-----------|--------------|
+| `/text2image`, `/edit`, `/upscale`, `/controlmap`, `/video` | `text/plain`: the reason |
+| `/videos`, `/videos/{id}`, `/videos/{id}/content`, `/videos/{id}/cancel` | `{"error": "<reason>"}` |
+
 | Status | Meaning |
 |--------|---------|
 | `400` | Request asks for a capability the loaded model lacks (e.g. `/edit` without an editing model, `kv_cache` with `ref_method: index`), or an invalid field value |
-| `503` | No model loaded for `/text2image` / `/edit` |
+| `404` | No such video job, or its content is gone |
+| `409` | Video job not in the state the request needs: content before completion, cancel after it settled |
+| `429` | The video queue is full |
+| `500` | Unexpected failure, logged with a traceback |
+| `503` | No model loaded for `/text2image` / `/edit`; a video job the service cannot take, because no video model is loaded or it is shutting down |
+
+A body the schema cannot parse is FastAPI's own `422` JSON report.

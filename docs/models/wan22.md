@@ -23,7 +23,7 @@ or WebM/VP9.
 | Model | Wan 2.2 TI2V-5B, 48-channel video latent |
 | Download | ~23 GB (FP16 DiT, UMT5, VAE combined) |
 | Text encoder | UMT5-XXL, BF16 compute |
-| VAE | Native causal 3D VAE, FP32 compute |
+| VAE | Native causal 3D VAE, BF16 compute |
 | Modes | Text-to-video, image-to-video |
 | Defaults | 1280×704, 33 frames, 24 FPS, 12 steps, CFG 5.0, UniPC, WebM |
 | Samplers | UniPC and Euler; fixed Wan flow shift |
@@ -31,9 +31,8 @@ or WebM/VP9.
 ## Performance (Strix Halo)
 
 Successfully tested end-to-end on Strix Halo (Radeon 8060S, gfx1151,
-ROCm 10.1). At **704×480, 33 frames, 8 UniPC steps**, sampling took **28.8 s**.
-A VAE transient of **24.6 GiB** was observed above the stage baseline; the
-full generation time was not recorded. RTX 5090 T2V and I2V are also tested,
+ROCm 10.1). At **704×480, 33 frames, 8 UniPC steps**, sampling took **28.8 s**;
+the full generation time was not recorded. RTX 5090 T2V and I2V are also tested,
 but no comparative timings are recorded here.
 
 ## Download

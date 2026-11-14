@@ -427,8 +427,6 @@ def test_bake_ratio_ignores_the_rows_a_fused_lora_never_touches():
 
 def test_a_lora_the_layer_cannot_measure_bakes():
     """No step estimate (FP8) and a zero delta both mean "no opinion" -> bake."""
-    from thenoise.utils.lora import apply_lora_to_model
-
     layer = QuantizedLinear(IN_F, OUT_F, bias=False)
     layer.load_quantized(wrapped_fp8_tensor())
     assert layer.apply_lora(LoraFactors(*_tiny_lora_factors(gain=1e-6))) is (
