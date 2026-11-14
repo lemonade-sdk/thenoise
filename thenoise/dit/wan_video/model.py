@@ -247,14 +247,20 @@ class WanNativeDiT(nn.Module):
         self.scale_shift_table = nn.Parameter(torch.empty(1, 2, params.dim))
         self.eval()
 
-    def pin_modulation_precision(self) -> "WanNativeDiT":
-        """Keep the modulation path FP32, whatever the trunk was read at.
+    def apply_precision(self) -> "WanNativeDiT":
+        """Run at one trunk dtype, modulation in FP32.
 
-        Wan's timestep MLP and the shift/scale tables drive every residual branch, and
-        rounding them moves the whole denoising trajectory rather than the last bits of
-        one activation. A quantized weight is left alone: its dequantization already
-        decides the precision it can have.
+        A file can hold one model in two precisions and a Linear split across both
+        cannot run, so the largest weight — a block's FFN matrix — sets the trunk
+        ``dtype`` reports. The timestep MLP and the shift/scale tables drive every
+        residual branch, where rounding moves the whole trajectory rather than the
+        last bits of one activation, so they are FP32 whatever the trunk was read
+        at. A quantized weight already decides its own precision.
         """
+        trunk = max((weight for block in self.blocks for weight in block.parameters()),
+                    key=lambda weight: weight.numel() * weight.element_size())
+        if not isinstance(trunk, QuantizedTensor):
+            self.to(trunk.dtype)  # a no-op per tensor already at the trunk dtype
         islands = [(self, "patch_embedding"), (self, "scale_shift_table"),
                    (self.condition_embedder, "time_linear_1"),
                    (self.condition_embedder, "time_linear_2")]

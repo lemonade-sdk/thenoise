@@ -28,7 +28,8 @@ def load_wan_native_transformer(
 
     The geometry comes from the file, so the caller does not have to know which
     variant it was handed, and neither does the dtype: a plain checkpoint runs at the
-    precision it was exported in, and ``dtype`` overrides that only when asked.
+    precision its weights are written in, a quantized one at what its kernels emit,
+    and ``dtype`` overrides both.
     """
     params = params or detect_params(dit_path)
     quantized = is_quantized_checkpoint(dit_path)
@@ -41,4 +42,4 @@ def load_wan_native_transformer(
         dtype=dtype or (QUANTIZED_COMPUTE_DTYPE if quantized else None),
         key_map=wan_dit_key,
     )
-    return model.pin_modulation_precision().eval()
+    return model.apply_precision().eval()

@@ -1,6 +1,8 @@
 """Comfy-Org Wan transformer checkpoint tests (small tensors)."""
 from __future__ import annotations
 
+import re
+
 import pytest
 import torch
 from safetensors.torch import save_file
@@ -52,7 +54,12 @@ def _raw_key(key: str) -> str:
     return key
 
 
-def _write(root, *, name="wan2.2_ti2v_5B_fp16.safetensors", missing=None, wrong_shape=None):
+_MATMUL_WEIGHTS = re.compile(r"^blocks\.\d+\.(?:self|cross)_attn\.[qkvo]\.weight$"
+                             r"|^blocks\.\d+\.ffn\.[02]\.weight$")
+
+
+def _write(root, *, name="wan2.2_ti2v_5B_fp16.safetensors", missing=None, wrong_shape=None,
+           mixed=False):
     checkpoint = root / "split_files" / "diffusion_models" / name
     checkpoint.parent.mkdir(parents=True, exist_ok=True)
     with torch.random.fork_rng():
@@ -65,7 +72,10 @@ def _write(root, *, name="wan2.2_ti2v_5B_fp16.safetensors", missing=None, wrong_
     for module_name, tensor in source.state_dict().items():
         raw = _raw_key(module_name)
         assert wan_dit_key(raw) == module_name, (module_name, raw, wan_dit_key(raw))
-        state[raw] = tensor.detach().half().contiguous()
+        precision = torch.float16
+        if mixed:
+            precision = torch.float16 if _MATMUL_WEIGHTS.match(raw) else torch.float32
+        state[raw] = tensor.detach().to(precision).contiguous()
     if missing:
         state.pop(missing)
     if wrong_shape:
@@ -180,6 +190,29 @@ def test_a_plain_checkpoint_runs_at_its_own_precision(tmp_path):
     """D9: the file's dtype is the compute dtype unless the caller overrides it."""
     _, path = _write(tmp_path)
     assert load_wan_native_transformer(str(path), "cpu").dtype == torch.float16
+
+
+def test_a_mixed_checkpoint_loads_at_one_trunk_dtype(tmp_path):
+    """A Linear that is Half in its weight and Float in its bias cannot run.
+
+    ``Wan2_2-TI2V-5B-Turbo_fp16.safetensors`` is written like this.
+    """
+    _, path = _write(tmp_path, mixed=True)
+    model = load_wan_native_transformer(str(path), "cpu")
+    assert model.dtype == torch.float16
+    for module in model.modules():
+        weight, bias = getattr(module, "weight", None), getattr(module, "bias", None)
+        if torch.is_tensor(weight) and torch.is_tensor(bias):
+            assert bias.dtype == weight.dtype, module
+    assert model.patch_embedding.weight.dtype == torch.float32
+    assert model.blocks[0].norm2.weight.dtype == torch.float32
+
+    x = torch.randn(1, 48, 1, 4, 4, dtype=torch.float16)
+    context = torch.randn(1, 4, TINY.text_dim, dtype=torch.float16)
+    with torch.no_grad():
+        output = model(x, torch.tensor([500.0]), context).sample
+    assert output.dtype == torch.float16
+    assert torch.isfinite(output).all()
 
 
 def test_the_file_it_is_given_is_the_file_it_reads(tmp_path):
