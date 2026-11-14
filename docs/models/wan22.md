@@ -140,10 +140,13 @@ See the [HTTP API](../api.md#video-generation) for parameters and responses.
 ## T2V-A14B (two experts)
 
 This model uses **two** separately loaded DiTs (high-/low-noise), the **Wan 2.1
-16-channel VAE** (`wan_2.1_vae.safetensors`), and the same FP16 UMT5 encoder as
+16-channel VAE** (`wan_2.1_vae.safetensors` — Wan 2.1 by latent format, not a version
+mismatch: it is the codec Qwen-Image uses for stills), and the same FP16 UMT5 encoder as
 5B. Pass **both expert files explicitly**: `--dit` selects high noise and
 `--dit-low` selects low noise. File names and directories are not inspected to
-infer the expert role. FP16 and ComfyUI FP8-scaled experts are supported.
+infer the expert role. FP16 and ComfyUI FP8-scaled experts are supported. The latent width
+is read off the `--vae` file, and a codec that does not match the transformer is refused at
+load rather than at the first denoising step.
 The native Wan 2.1 VAE uses FP16 compute.
 Both experts are swapped by the normal device memory manager at the sigma
 boundary, which keeps both on the card when they fit; do not run both as

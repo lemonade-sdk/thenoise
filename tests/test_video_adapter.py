@@ -33,9 +33,6 @@ def fake_video(tmp_path, monkeypatch):
         def __init__(self):
             super().__init__()
             self.weight = torch.nn.Parameter(torch.tensor([1.0], dtype=torch.float32))
-            self.config = types.SimpleNamespace(
-                z_dim=48, latents_mean=[0.0] * 48, latents_std=[1.0] * 48,
-            )
             self.cache_clears = 0
 
         @property
@@ -45,12 +42,17 @@ def fake_video(tmp_path, monkeypatch):
         def clear_cache(self):
             self.cache_clears += 1
 
-        def encode(self, x, return_dict=False):
-            calls.append("vae_encode")
-            latent = torch.zeros(x.shape[0], 48, 1, x.shape[-2] // 16, x.shape[-1] // 16)
-            return (types.SimpleNamespace(mode=lambda: latent),)
+        z_dim = 48
+        pixel_channels = 3
+        spatial_compression = 16
+        temporal_compression = 4
 
-        def decode_frames(self, z):
+        def encode_pixels_to_latents(self, pixels):
+            calls.append("vae_encode")
+            return torch.zeros(pixels.shape[0], 48, 1,
+                               pixels.shape[-2] // 16, pixels.shape[-1] // 16)
+
+        def decode_to_pixel_frames(self, z):
             calls.append("vae_decode")
             try:
                 for i in range(z.shape[2]):
@@ -85,8 +87,8 @@ def fake_video(tmp_path, monkeypatch):
         def encode(self, prompt):
             return torch.ones(1, 16, dtype=torch.long), torch.ones(1, 16, dtype=torch.bool)
 
-    monkeypatch.setattr("thenoise.models.wan_video.load_wan_native_video_vae",
-                        lambda _path, _device, *, wan21=False: calls.append("load_vae") or VAE())
+    monkeypatch.setattr("thenoise.models.wan_video.load_wan_video_vae",
+                        lambda _path, _device: calls.append("load_vae") or VAE())
     monkeypatch.setattr("thenoise.models.wan_video.load_wan_native_transformer",
                         lambda _path, _device: calls.append("load_dit") or DiT())
     monkeypatch.setattr("thenoise.models.wan_video.load_wan_text_encoder",

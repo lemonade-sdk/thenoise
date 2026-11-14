@@ -1,6 +1,5 @@
 """The two-expert Wan 2.2 A14B path, and the 2.1 codec it decodes with."""
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -14,9 +13,13 @@ from thenoise.models.wan_video import VARIANTS, Wan22Model, variant_for
 from thenoise.samplers import Step
 from thenoise.runtime import ModelPaths, Runtime, Settings
 from thenoise.utils.wan_weights import wan_vae21_key
+from thenoise.vae.qwen_image import (
+    AutoencoderKLQwenImage, QWEN_IMAGE_LATENTS_MEAN, QWEN_IMAGE_LATENTS_STD,
+    _WAN21_FAMILY_ARCH,
+)
 from thenoise.vae.wan_video import (
-    _comfy_vae_config, _WAN21_LATENTS_MEAN, _WAN21_LATENTS_STD, _wan21_vae_config,
-    WanNativeVideoVAE,
+    _comfy_vae_config, _RELEASES, _vae_release, _wan21_vae_config,
+    AutoencoderKLWanVideo,
 )
 from thenoise.video.spec import VideoSpec
 
@@ -97,11 +100,11 @@ def test_14b_topology_meta_and_vae21_key_mapping():
 
     vae_cfg = _comfy_vae_config(dict(base_dim=8, decoder_base_dim=8, z_dim=16,
                                     in_channels=3, out_channels=3, patch_size=1,
-                                    scale_factor_spatial=8, is_residual=False,
+                                    is_residual=False,
                                     temperal_downsample=[True, True, False],
                                     latents_mean=[0.] * 16, latents_std=[1.] * 16))
     with torch.device("meta"):
-        vae = WanNativeVideoVAE(vae_cfg)
+        vae = AutoencoderKLWanVideo(vae_cfg)
     assert vae.encoder.conv_in.weight.shape[1] == 3
     assert vae.decoder.up_blocks[0].upsampler.resample[1].weight.shape[:2] == (16, 32)
     assert wan_vae21_key("encoder.downsamples.2.time_conv.weight") == (
@@ -137,18 +140,45 @@ def test_a_single_expert_variant_answers_one_segment():
     assert [s.stage for s in spans] == ["dit"]
 
 
-def test_wan21_latent_normalization_is_not_identity():
-    assert len(_WAN21_LATENTS_MEAN) == len(_WAN21_LATENTS_STD) == 16
-    assert _WAN21_LATENTS_MEAN[0] == -0.7571
-    assert _WAN21_LATENTS_STD[0] == 2.8184
-    video = wan_adapter("t2v_14b")
-    video.vae = SimpleNamespace(config=SimpleNamespace(
-        z_dim=16, latents_mean=_WAN21_LATENTS_MEAN, latents_std=_WAN21_LATENTS_STD))
-    z = torch.randn(1, 16, 2, 3, 4)
-    normalized = video._normalize(z)
-    assert not torch.allclose(z, normalized)
-    torch.testing.assert_close(video._denormalize(normalized), z)
+def test_the_16ch_video_codec_is_the_qwen_image_codec_in_3d():
+    """One architecture, two folds: the geometry is `qwen_image`'s rather than restated
+    here, and the latent statistics are the same numbers -- which is why the 14B experts
+    and Qwen-Image agree on what a canonical latent is.
+    """
+    video_cfg = _comfy_vae_config(_wan21_vae_config())
+    assert (video_cfg.base_dim, video_cfg.z_dim, list(video_cfg.dim_mult),
+            video_cfg.num_res_blocks) == (
+        _WAN21_FAMILY_ARCH["base_dim"], _WAN21_FAMILY_ARCH["z_dim"],
+        list(_WAN21_FAMILY_ARCH["dim_mult"]), _WAN21_FAMILY_ARCH["num_res_blocks"])
+    assert video_cfg.latents_mean == QWEN_IMAGE_LATENTS_MEAN
+    assert video_cfg.latents_std == QWEN_IMAGE_LATENTS_STD
 
+    with torch.device("meta"):
+        video = AutoencoderKLWanVideo(video_cfg)
+    image = AutoencoderKLQwenImage(**_WAN21_FAMILY_ARCH)
+    assert video.spatial_compression == image.spatial_compression == 8
+    assert video.pixel_channels == image.pixel_channels == 3
+    # The family signature: Wan 2.1 halves channels on the way up, 2.2 keeps them.
+    upsample = video.decoder.up_blocks[0].upsampler.resample[1]
+    assert upsample.weight.shape[0] == upsample.weight.shape[1] // 2
+
+
+def test_the_16ch_latent_normalisation_is_not_identity():
+    assert len(QWEN_IMAGE_LATENTS_MEAN) == len(QWEN_IMAGE_LATENTS_STD) == 16
+    with torch.device("meta"):
+        vae = AutoencoderKLWanVideo(_comfy_vae_config(_wan21_vae_config() | dict(
+            base_dim=4, decoder_base_dim=4, num_res_blocks=1)))
+    z = torch.randn(1, 16, 2, 3, 4)
+    normalized = vae._normalize(z)
+    assert not torch.allclose(z, normalized)
+    torch.testing.assert_close(vae._denormalize(normalized), z)
+
+
+def test_a_video_codec_of_another_latent_width_is_refused_by_name():
+    assert sorted(_RELEASES) == [16, 48]
+    assert _vae_release(16)[1] is not _vae_release(48)[1]
+    with pytest.raises(ValueError, match=r"32-channel video VAE is no Wan release.*\[16, 48\]"):
+        _vae_release(32)
 
 def test_each_video_codec_declares_its_own_compute_dtype():
     """The 48ch 2.2 codec runs at the 2.2 family's BF16 (see
@@ -164,7 +194,7 @@ def test_wan21_fp16_vae_decodes_float32_latents_and_clears_cache():
         base_dim=4, decoder_base_dim=4, num_res_blocks=1,
     ))
     with torch.inference_mode():
-        vae = WanNativeVideoVAE(cfg).half().eval()
+        vae = AutoencoderKLWanVideo(cfg).half().eval()
         latents = torch.randn(1, 16, 2, 2, 2, dtype=torch.float32)
         first = vae.decode(latents).sample
         second = vae.decode(latents).sample

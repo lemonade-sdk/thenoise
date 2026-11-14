@@ -20,7 +20,7 @@ from thenoise.samplers import Step, sigma_steps
 from thenoise.text_encoders.wan_video import load_wan_text_encoder
 from thenoise.utils.image_tensor import cover_crop
 from thenoise.utils.wan_weights import wan_dit_key
-from thenoise.vae.wan_video import load_wan_native_video_vae
+from thenoise.vae.wan_video import load_wan_video_vae, TEMPORAL_COMPRESSION
 from thenoise.video.spec import ResolvedVideo, VideoSpec
 
 log = logging.getLogger("uvicorn.error")
@@ -44,7 +44,6 @@ class Variant:
     name: str
     prefs: dict
     i2v: bool
-    wan21_vae: bool
     experts: Experts | None
 
 
@@ -56,12 +55,12 @@ VARIANTS: dict[str, Variant] = {variant.name: variant for variant in (
         name="ti2v_5b",
         prefs=dict(width=1280, height=704, frames=33, fps=24, steps=12,
                    guidance_scale=5.0, sampler="unipc"),
-        i2v=True, wan21_vae=False, experts=None),
+        i2v=True, experts=None),
     Variant(
         name="t2v_14b",
         prefs=dict(width=832, height=480, frames=33, fps=16, steps=40,
                    guidance_scale=4.0, sampler="euler"),
-        i2v=False, wan21_vae=True,
+        i2v=False,
         experts=Experts(boundary=0.875, flow_shift=12.0, low_cfg_ratio=3.0 / 4.0)),
 )}
 
@@ -175,6 +174,7 @@ class Wan22Model(VideoModel):
         return dataclasses.replace(
             resolved,
             frame_count=wan_frame_grid(resolved.frame_count,
+                                       compression=TEMPORAL_COMPRESSION,
                                        upward=resolved.explicit_frames),
         )
 
@@ -185,8 +185,12 @@ class Wan22Model(VideoModel):
     def _load(self) -> None:
         if self.dit is not None:
             return
-        vae = load_wan_native_video_vae(self.vae_path, self._load_target(self.vae_path),
-                                        wan21=self.variant.wan21_vae)
+        vae = load_wan_video_vae(self.vae_path, self._load_target(self.vae_path))
+        if vae.z_dim != self.params.in_channels:
+            raise ValueError(
+                f"--vae is a {vae.z_dim}-channel codec, and {self.dit_path} denoises a "
+                f"{self.params.in_channels}-channel latent: these two checkpoints are "
+                "from different Wan releases")
         text_encoder, tokenizer = load_wan_text_encoder(
             self.text_encoder_path, self._load_target(self.text_encoder_path))
         dit = load_wan_native_transformer(self.dit_path, self._load_target(self.dit_path))
@@ -234,15 +238,14 @@ class Wan22Model(VideoModel):
 
     def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
         """One fitted frame, ``[C, H, W]`` in [-1, 1] -> the canonical latent."""
-        video = pixels[None, :, None].to(self.device)
-        latent = self.vae.encode(video, return_dict=False)[0].mode()
-        return self._normalize(latent)
+        return self.vae.encode_pixels_to_latents(pixels[None, :, None].to(self.device))
 
     def init_latents(self, params) -> torch.Tensor:
         """The clip's noise, at the codec's spatial and temporal compression."""
-        spatial = getattr(self.vae.config, "scale_factor_spatial", 16)
-        shape = (1, self.vae.config.z_dim, (params.frames - 1) // 4 + 1,
-                 params.height // spatial, params.width // spatial)
+        shape = (1, self.vae.z_dim,
+                 (params.frames - 1) // self.vae.temporal_compression + 1,
+                 params.height // self.vae.spatial_compression,
+                 params.width // self.vae.spatial_compression)
         rng = torch.Generator(device="cpu").manual_seed(params.seed)
         latents = torch.randn(shape, generator=rng, dtype=torch.float32)
         return latents.to(self.device)
@@ -343,21 +346,6 @@ class Wan22Model(VideoModel):
 
     # ------------------------------------------------------------ codec
     def decode_frames(self, latents: torch.Tensor) -> Iterator[torch.Tensor]:
-        for video in self.vae.decode_frames(self._denormalize(latents)):
+        for video in self.vae.decode_to_pixel_frames(latents):
             for i in range(video.shape[2]):
                 yield video[0, :, i].float()
-
-    def _stats(self, dtype: torch.dtype, device: torch.device):
-        config = self.vae.config
-        shape = (1, config.z_dim, 1, 1, 1)
-        mean = torch.as_tensor(config.latents_mean, dtype=dtype, device=device).view(shape)
-        std = torch.as_tensor(config.latents_std, dtype=dtype, device=device).view(shape)
-        return mean, std
-
-    def _normalize(self, z: torch.Tensor) -> torch.Tensor:
-        mean, std = self._stats(z.dtype, z.device)
-        return (z - mean) / std
-
-    def _denormalize(self, z: torch.Tensor) -> torch.Tensor:
-        mean, std = self._stats(z.dtype, z.device)
-        return z * std + mean

@@ -7,18 +7,20 @@ from __future__ import annotations
 import logging
 from collections import namedtuple
 from types import SimpleNamespace
-from typing import Iterator
+from typing import Callable, Iterator
 
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
 from thenoise.utils.loader import load_dit
+from thenoise.utils.safetensors import MemoryEfficientSafeOpen, unwrap_key
 from thenoise.utils.wan_weights import wan_vae_key, wan_vae21_key
 from thenoise.vae.wan22 import (
     COMPUTE_DTYPE as WAN22_COMPUTE_DTYPE,
-    Wan22AttentionBlock, WAN22_LATENTS_MEAN, WAN22_LATENTS_STD,
+    LATENT_STATS, Wan22AttentionBlock,
 )
+from thenoise.vae.qwen_image import _WAN21_FAMILY_ARCH
 
 logger = logging.getLogger(__name__)
 
@@ -30,15 +32,12 @@ EncoderOutput = namedtuple("EncoderOutput", "latent_dist")
 #: that forced BF16 there, and its released weights ship FP16.
 WAN21_COMPUTE_DTYPE = torch.float16
 
-# Wan 2.1's channelwise latent stats (same latent format as the 14B experts).
-_WAN21_LATENTS_MEAN = (
-    -0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508,
-    0.4134, -0.0715, 0.5517, -0.3632, -0.1922, -0.9497, 0.2503, -0.2921,
-)
-_WAN21_LATENTS_STD = (
-    2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2.6052, 2.0743,
-    3.2687, 2.1526, 2.8652, 1.5579, 1.6382, 1.1253, 2.8251, 1.9160,
-)
+#: Pixel frames per latent frame: both released codecs downsample time twice and
+#: keep the first frame alone, so a clip is ``4n+1`` frames long. Declared rather
+#: than read off a codec, because the frame count of a request is settled before a
+#: codec is loaded. Spatial compression varies between the two codecs, so that one
+#: is a per-codec property instead.
+TEMPORAL_COMPRESSION = 4
 
 
 class _GaussianPosterior:
@@ -358,35 +357,86 @@ def _comfy_vae_config(overrides: dict | None = None) -> SimpleNamespace:
         dim_mult=[1, 2, 4, 4], num_res_blocks=2,
         temperal_downsample=[False, True, True],
         dropout=0.0, is_residual=True, in_channels=12,
-        out_channels=12, patch_size=2, scale_factor_temporal=4,
-        scale_factor_spatial=16, attn_scales=[],
+        out_channels=12, patch_size=2, attn_scales=[],
         compute_dtype=WAN22_COMPUTE_DTYPE,
-        latents_mean=list(WAN22_LATENTS_MEAN), latents_std=list(WAN22_LATENTS_STD),
     )
     if overrides:
         cfg.update(overrides)
+    if ("latents_mean" in cfg) != ("latents_std" in cfg):
+        raise ValueError("override latents_mean and latents_std together")
+    if "latents_mean" not in cfg:
+        mean, std = LATENT_STATS[cfg["z_dim"]]
+        cfg["latents_mean"], cfg["latents_std"] = list(mean), list(std)
     return SimpleNamespace(**cfg)
 
 
 def _wan21_vae_config() -> dict:
-    """Overrides turning the 2.2 config into the Wan 2.1 16ch codec."""
-    return dict(base_dim=96, decoder_base_dim=96, z_dim=16,
+    """The 3D form of :class:`~thenoise.vae.qwen_image.AutoencoderKLQwenImage`.
+
+    Its geometry is that module's and is not restated here: the same weights read in
+    3D are the Wan 2.1 VAE the Wan 2.2 14B experts decode through. What this adds is
+    the third axis and the precision its activations need.
+    """
+    return dict(_WAN21_FAMILY_ARCH,
+                decoder_base_dim=_WAN21_FAMILY_ARCH["base_dim"],
                 in_channels=3, out_channels=3, patch_size=1,
                 temperal_downsample=[False, True, True],
-                scale_factor_spatial=8, is_residual=False,
-                compute_dtype=WAN21_COMPUTE_DTYPE,
-                latents_mean=list(_WAN21_LATENTS_MEAN),
-                latents_std=list(_WAN21_LATENTS_STD))
+                is_residual=False,
+                compute_dtype=WAN21_COMPUTE_DTYPE)
 
 
-class WanNativeVideoVAE(nn.Module):
-    """Independent causal 3D Wan video VAE with compatible encode/decode APIs.
+#: The released video codecs, keyed by latent width -- Wan 2.2's 48ch and Wan 2.1's
+#: 16ch, which is `AutoencoderKLQwenImage`'s codec in 3D. A release is the overrides
+#: that turn the 2.2 config into its own, and the key map its checkpoint layout needs;
+#: the module tree is shared, one switch (`is_residual`) deciding whether the shortcut
+#: and the upsample's channel schedule are the 2.2 pair or the 2.1 pair.
+_WAN21 = _wan21_vae_config()
+_RELEASES: dict[int, tuple[dict, Callable[[str], str]]] = {
+    _comfy_vae_config().z_dim: ({}, wan_vae_key),
+    _WAN21["z_dim"]: (_WAN21, wan_vae21_key),
+}
 
-    The 48ch 2.2 and 16ch 2.1 variants share causal building blocks. The cached decoder
-    consumes latent frames individually, emitting one RGB frame for the first
-    latent, then four for each subsequent latent. Cache state never crosses
-    separate encode/decode calls. Precision is set at checkpoint load time and
-    recorded on the config as ``compute_dtype``.
+
+def _vae_release(z_dim: int) -> tuple[dict, Callable[[str], str]]:
+    try:
+        return _RELEASES[z_dim]
+    except KeyError:
+        raise ValueError(
+            f"a {z_dim}-channel video VAE is no Wan release; this codec serves "
+            f"{sorted(_RELEASES)}") from None
+
+
+def detect_latent_width(vae_path: str) -> int:
+    """The latent width a video VAE file was built for, from its header alone.
+
+    The encoder ends in the moments of the latent, so twice the width. Both the
+    ComfyUI (``head.2``) and diffusers (``conv_out``) spellings are read, with or
+    without the ``vae.`` wrapper, because a release ships both.
+    """
+    with MemoryEfficientSafeOpen(vae_path) as f:
+        header = {k[len("vae."):] if k.startswith("vae.") else unwrap_key(k): v
+                  for k, v in f.header.items() if k != "__metadata__"}
+        for key in ("encoder.head.2.weight", "encoder.conv_out.weight"):
+            meta = header.get(key)
+            if meta is not None:
+                return meta["shape"][0] // 2
+    raise ValueError(f"{vae_path}: no Wan VAE encoder output conv in the header")
+
+
+class AutoencoderKLWanVideo(nn.Module):
+    """Causal 3D Wan video VAE, in either released latent format.
+
+    One module tree serves the 48ch Wan 2.2 and the 16ch Wan 2.1 codec: they differ in
+    widths and in the `is_residual` switch, not in structure. The cached decoder
+    consumes latent frames individually, emitting one RGB frame for the first latent
+    and four for each after it, so a clip never exists all at once. Cache state never
+    crosses separate encode/decode calls. Precision is set at load time and recorded
+    on the config as ``compute_dtype``.
+
+    The 2D fold of each of these codecs is a separate module --
+    :class:`~thenoise.vae.wan22.AutoencoderKLWan22` and
+    :class:`~thenoise.vae.qwen_image.AutoencoderKLQwenImage` -- and this file is never
+    behind an image model's decode.
     """
     def __init__(self, config: SimpleNamespace):
         super().__init__()
@@ -407,8 +457,35 @@ class WanNativeVideoVAE(nn.Module):
             residual=config.is_residual,
         )
         self.clear_cache()
+        # Hoisted so `.to(device)` moves them with the module, and non-persistent
+        # because they are statistics of the latent space, not trained weights. Built
+        # on CPU explicitly: this codec is constructed on meta, where a tensor made
+        # without a device would stay a meta tensor through every `.to()`.
+        shape = (1, config.z_dim, 1, 1, 1)
+        mean = torch.tensor(config.latents_mean, device="cpu").view(shape)
+        self.register_buffer("_latents_mean", mean, persistent=False)
+        self.register_buffer("_latents_inv_std", (1.0 / mean.new_tensor(
+            config.latents_std)).view(shape), persistent=False)
         self.use_tiling = False  # no silent fallback to unverified spatial tiles
         self.use_slicing = False
+
+    @property
+    def z_dim(self) -> int:
+        return self.config.z_dim
+
+    @property
+    def pixel_channels(self) -> int:
+        """A clip is RGB whatever the codec variant; the patching is not channels."""
+        return 3
+
+    @property
+    def spatial_compression(self) -> int:
+        """Pixels per latent cell: patchify x 2 per downsample stage (16, or 8 for 2.1)."""
+        return self.config.patch_size * 2 ** (len(self.config.dim_mult) - 1)
+
+    @property
+    def temporal_compression(self) -> int:
+        return TEMPORAL_COMPRESSION
 
     @property
     def dtype(self) -> torch.dtype:
@@ -434,15 +511,17 @@ class WanNativeVideoVAE(nn.Module):
             hook.pre_forward(self)
 
     def encode(self, x: Tensor, return_dict: bool = True):
-        if x.ndim != 5 or x.shape[1] != 3 or (x.shape[2] - 1) % 4:
-            raise ValueError("Wan VAE expects [B,3,4*n+1,H,W] video")
+        step = self.temporal_compression
+        if x.ndim != 5 or x.shape[1] != self.pixel_channels or (x.shape[2] - 1) % step:
+            raise ValueError(
+                f"Wan VAE expects [B,{self.pixel_channels},{step}*n+1,H,W] video")
         self._begin()
         try:
             x = _patchify(x.to(dtype=self.dtype), self.config.patch_size)
             moments = []
-            for i, start in enumerate(range(0, x.shape[2], 4)):
-                # First frame alone; remaining frames in groups of four.
-                chunk = x[:, :, :1] if i == 0 else x[:, :, 1 + 4 * (i - 1):1 + 4 * i]
+            for i, start in enumerate(range(0, x.shape[2], step)):
+                # First frame alone; remaining frames in groups of `step`.
+                chunk = x[:, :, :1] if i == 0 else x[:, :, 1 + step * (i - 1):1 + step * i]
                 moments.append(self.encoder(chunk, self._enc_feat_map, [0]))
             h = self.quant_conv(torch.cat(moments, dim=2))
             posterior = _GaussianPosterior(h)
@@ -462,20 +541,41 @@ class WanNativeVideoVAE(nn.Module):
         self.clear_cache()
 
     def decode(self, z: Tensor, return_dict: bool = True):
-        out = torch.cat(list(self.decode_frames(z)), dim=2)
+        self._check_latents(z)
+        self._begin()
+        out = torch.cat(list(self._decode_frames(z)), dim=2)
         return DecoderOutput(out) if return_dict else (out,)
 
-    def decode_frames(self, z: Tensor) -> Iterator[Tensor]:
-        """Pixels of each latent frame, handed out as the decoder produces them.
+    def decode_to_pixel_frames(self, z: Tensor) -> Iterator[Tensor]:
+        """Canonical latents -> clamped pixel frames, handed out as they are decoded.
 
         The causal caches make the decoder sequential whatever it is asked to do, so
         yielding costs nothing and keeps a few frames alive instead of the clip: a
         caller that encodes as it goes never allocates ``[3, T, H, W]`` at all.
         """
-        if z.ndim != 5 or z.shape[1] != self.config.z_dim or z.shape[2] < 1:
-            raise ValueError(f"Wan VAE expects [B,{self.config.z_dim},T,H,W] latent video")
+        self._check_latents(z)
         self._begin()
-        return self._decode_frames(z)
+        return self._decode_frames(self._denormalize(z))
+
+    def decode_to_pixels(self, z: Tensor) -> Tensor:
+        """Canonical latents -> the whole clip. Streams; it does not hold it."""
+        return torch.cat(list(self.decode_to_pixel_frames(z)), dim=2)
+
+    def encode_pixels_to_latents(self, pixels: Tensor) -> Tensor:
+        """Pixels in [-1, 1] -> canonical latents."""
+        return self._normalize(self.encode(pixels).latent_dist.mode())
+
+    def _normalize(self, z: Tensor) -> Tensor:
+        mean = self._latents_mean.to(z.device, z.dtype)
+        return (z - mean) * self._latents_inv_std.to(z.device, z.dtype)
+
+    def _denormalize(self, z: Tensor) -> Tensor:
+        mean = self._latents_mean.to(z.device, z.dtype)
+        return z / self._latents_inv_std.to(z.device, z.dtype) + mean
+
+    def _check_latents(self, z: Tensor) -> None:
+        if z.ndim != 5 or z.shape[1] != self.z_dim or z.shape[2] < 1:
+            raise ValueError(f"Wan VAE expects [B,{self.z_dim},T,H,W] latent video")
 
     def _decode_frames(self, z: Tensor) -> Iterator[Tensor]:
         try:
@@ -492,28 +592,31 @@ class WanNativeVideoVAE(nn.Module):
 
 
 
-def load_wan_native_video_vae(
+def load_wan_video_vae(
     vae_path: str,
     device: str | torch.device,
     dtype: torch.dtype | None = None,
     *,
-    wan21: bool = False,
     config: SimpleNamespace | None = None,
-) -> WanNativeVideoVAE:
-    """Load a Wan video VAE from ``vae_path``.
+) -> AutoencoderKLWanVideo:
+    """Load a Wan video VAE from ``vae_path``, its latent width read off the file.
 
-    The file is read with its own dtypes and the module then moved to ``dtype``, so
-    the read never holds a second copy of the codec; ``dtype`` defaults to the
-    codec's own ``compute_dtype``. ``config`` replaces the geometry, which every
-    released file shares.
+    Which release it is -- and so which key map reads it -- comes from the header, not
+    from what the model beside it expects; the caller compares `z_dim` against its own
+    transformer. The file is read with its own dtypes and the module then moved to
+    ``dtype``, so the read never holds a second copy of the codec; ``dtype`` defaults
+    to the codec's own ``compute_dtype``. ``config`` replaces the geometry, which every
+    released file of a format shares.
     """
-    cfg = config or (_comfy_vae_config(_wan21_vae_config()) if wan21 else _comfy_vae_config())
-    key_map = ((lambda key: wan_vae21_key(key, num_res_blocks=cfg.num_res_blocks)) if wan21
-               else (lambda key: wan_vae_key(key, num_res_blocks=cfg.num_res_blocks)))
-    logger.info("Loading Wan %s video VAE from %s", "2.1" if wan21 else "2.2", vae_path)
+    if config is None:
+        overrides, _ = _vae_release(detect_latent_width(vae_path))
+        config = _comfy_vae_config(overrides)
+    release_key = _vae_release(config.z_dim)[1]
+    key_map = lambda key: release_key(key, num_res_blocks=config.num_res_blocks)
+    logger.info("Loading Wan %dch video VAE from %s", config.z_dim, vae_path)
     with torch.device("meta"):
-        model = WanNativeVideoVAE(cfg)
+        model = AutoencoderKLWanVideo(config)
     load_dit(model, vae_path, device=device, dtype=None, key_map=key_map)
-    model.to(dtype=dtype or cfg.compute_dtype)
+    model.to(dtype=dtype or config.compute_dtype)
     model.clear_cache()
     return model.eval()

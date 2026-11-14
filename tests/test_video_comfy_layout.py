@@ -6,7 +6,7 @@ import re
 import torch
 
 from thenoise.utils.wan_weights import wan_dit_key, wan_vae_key
-from thenoise.vae.wan_video import _comfy_vae_config, WanNativeVideoVAE
+from thenoise.vae.wan_video import _comfy_vae_config, AutoencoderKLWanVideo
 
 
 def _original_vae_key(key: str, depth: int = 1) -> str:
@@ -49,7 +49,7 @@ def _original_vae_key(key: str, depth: int = 1) -> str:
 def test_vae_comfy_key_map_full_topology():
     cfg = _comfy_vae_config(dict(base_dim=4, decoder_base_dim=4, num_res_blocks=1))
     with torch.device("meta"):
-        module = WanNativeVideoVAE(cfg)
+        module = AutoencoderKLWanVideo(cfg)
     names = set(module.state_dict())
     raw = {_original_vae_key(k) for k in names}
     mapped = {wan_vae_key(k, num_res_blocks=1) for k in raw}

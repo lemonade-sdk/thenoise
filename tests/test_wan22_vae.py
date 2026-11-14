@@ -19,6 +19,9 @@ import torch.nn.functional as F
 from conftest import write_safetensors
 from thenoise.vae import AutoencoderKLWan22, load_wan22_vae
 import thenoise.vae.fused as fused_module
+from thenoise.vae.qwen_image import (
+    QWEN_IMAGE_LATENTS_MEAN, QWEN_IMAGE_LATENTS_STD,
+)
 from thenoise.vae.wan22 import (
     LATENT_STATS,
     QWEN_IMAGE21_LATENTS_MEAN,
@@ -71,8 +74,13 @@ def test_documented_shape_constants():
     assert len(WAN22_LATENTS_STD) == 48
     assert len(QWEN_IMAGE21_LATENTS_MEAN) == 64
     assert len(QWEN_IMAGE21_LATENTS_STD) == 64
-    # The loader picks the statistics by z_dim, so the two must not collide.
+    assert len(QWEN_IMAGE_LATENTS_MEAN) == 16
+    assert len(QWEN_IMAGE_LATENTS_STD) == 16
+    # The loaders pick statistics by z_dim alone, so no two latent formats may collide
+    # in one table -- and 16 is deliberately the image codec's numbers, because the
+    # Wan 2.1 codec that uses them is the same architecture in 3D.
     assert LATENT_STATS == {
+        16: (QWEN_IMAGE_LATENTS_MEAN, QWEN_IMAGE_LATENTS_STD),
         48: (WAN22_LATENTS_MEAN, WAN22_LATENTS_STD),
         64: (QWEN_IMAGE21_LATENTS_MEAN, QWEN_IMAGE21_LATENTS_STD),
     }

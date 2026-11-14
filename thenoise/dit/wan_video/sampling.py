@@ -14,12 +14,13 @@ def get_sigmas(steps: int, *, shift: float = FLOW_SHIFT) -> list[float]:
             for i in range(steps)] + [0.0]
 
 
-def wan_frame_grid(wanted: float, *, upward: bool) -> int:
+def wan_frame_grid(wanted: float, *, compression: int, upward: bool) -> int:
     if not math.isfinite(wanted) or wanted <= 0:
         raise ValueError("video duration / frame count must be positive and finite")
-    # Wan 2.2 packs (F-1)/4 temporal cells. Explicit frames never shrink;
-    # an approximate duration chooses the nearest valid frame count.
-    cells = (wanted - 1) / 4
+    # A codec packs (F-1)/compression temporal cells, so only `compression*n+1` frames
+    # exist. Explicit frames never shrink; an approximate duration chooses the nearest
+    # valid frame count.
+    cells = (wanted - 1) / compression
     # Duration uses ties-away-from-zero frame rounding.
     n = math.ceil(cells) if upward else math.floor(cells + 0.5)
-    return 4 * max(1, n) + 1
+    return compression * max(1, n) + 1

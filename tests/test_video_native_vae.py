@@ -7,7 +7,7 @@ from safetensors.torch import save_file
 
 from thenoise.vae.wan_video import (
     _AttentionBlock, _CausalConv3D, _comfy_vae_config, _patchify, _unpatchify,
-    WanNativeVideoVAE, load_wan_native_video_vae,
+    AutoencoderKLWanVideo, detect_latent_width, load_wan_video_vae,
 )
 from test_video_comfy_layout import _original_vae_key
 
@@ -18,7 +18,7 @@ TINY = dict(base_dim=4, decoder_base_dim=4, num_res_blocks=1)
 def _vae():
     with torch.random.fork_rng():
         torch.manual_seed(9)
-        return WanNativeVideoVAE(_comfy_vae_config(TINY)).eval()
+        return AutoencoderKLWanVideo(_comfy_vae_config(TINY)).eval()
 
 
 def _write(root, *, missing=False, wrong_shape=False):
@@ -96,10 +96,25 @@ def test_decode_frames_are_the_whole_clip_in_order():
     vae = _vae()
     z = torch.randn(1, 48, 3, 1, 1)
     with torch.no_grad():
-        streamed = torch.cat(list(vae.decode_frames(z)), dim=2)
-        whole = vae.decode(z).sample
+        streamed = torch.cat(list(vae.decode_to_pixel_frames(z)), dim=2)
+        whole = vae.decode_to_pixels(z)
+        # The canonical interface is the old call with the normalisation around it.
+        means = vae.decode(vae._denormalize(z)).sample
     torch.testing.assert_close(streamed, whole, rtol=0, atol=0)
+    torch.testing.assert_close(streamed, means, rtol=0, atol=0)
     assert all(entry is None for entry in vae._feat_map)
+
+
+def test_pixels_to_latents_and_back_reaches_the_same_pixels():
+    """The codec, not the adapter, owns the normalisation both ways."""
+    vae = _vae()
+    video = torch.randn(1, 3, 5, 16, 16)
+    with torch.no_grad():
+        canonical = vae.encode_pixels_to_latents(video)
+        assert canonical.shape == (1, 48, 2, 1, 1)
+        assert not torch.equal(canonical, vae.encode(video).latent_dist.mode())
+        back = vae.decode_to_pixels(canonical)
+    assert back.shape == video.shape
 
 
 def test_a_precision_nobody_measured_this_codec_at_is_refused():
@@ -111,7 +126,7 @@ def test_a_precision_nobody_measured_this_codec_at_is_refused():
 
 def test_comfy_fp16_checkpoint_loads_at_the_compute_dtype(tmp_path):
     path, source = _write(tmp_path)
-    vae = load_wan_native_video_vae(str(path), "cpu", config=_comfy_vae_config(TINY))
+    vae = load_wan_video_vae(str(path), "cpu", config=_comfy_vae_config(TINY))
     assert vae.dtype is vae.compute_dtype is torch.bfloat16
     assert not any(p.is_meta for p in vae.parameters())
     assert torch.equal(vae.encoder.conv_in.weight,
@@ -125,12 +140,25 @@ def test_comfy_fp16_checkpoint_loads_at_the_compute_dtype(tmp_path):
 def test_comfy_checkpoint_rejects_invalid_weights(tmp_path, damage, raises):
     path, _ = _write(tmp_path, missing=damage == "missing", wrong_shape=damage == "shape")
     with pytest.raises(RuntimeError, match=raises):
-        load_wan_native_video_vae(str(path), "cpu", config=_comfy_vae_config(TINY))
+        load_wan_video_vae(str(path), "cpu", config=_comfy_vae_config(TINY))
+
+
+def test_the_release_is_read_off_the_file_not_from_the_model(tmp_path):
+    """Which codec a file is comes from its header, since a request cannot say it."""
+    path, _ = _write(tmp_path)
+    assert detect_latent_width(str(path)) == 48
+
+
+def test_the_compression_properties_are_the_codecs_own():
+    vae = _vae()
+    assert vae.z_dim == 48 and vae.pixel_channels == 3
+    # TINY keeps the released stage count and patch, so so does its compression.
+    assert vae.spatial_compression == 16 and vae.temporal_compression == 4
 
 
 def test_official_comfy_vae_topology_meta():
     with torch.device("meta"):
-        vae = WanNativeVideoVAE(_comfy_vae_config())
+        vae = AutoencoderKLWanVideo(_comfy_vae_config())
     assert vae.config.z_dim == 48
     assert vae.config.base_dim == 160
     assert all(p.is_meta for p in vae.parameters())

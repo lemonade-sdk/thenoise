@@ -28,6 +28,7 @@ from einops import rearrange
 from thenoise.utils.attention import single_head_attention
 from thenoise.utils.safetensors import load_safetensors
 from .fused import image_elems, strip_apply
+from .qwen_image import QWEN_IMAGE_LATENTS_MEAN, QWEN_IMAGE_LATENTS_STD
 
 from thenoise.utils.setup_logging import setup_logging
 
@@ -372,7 +373,8 @@ class Wan22Decoder(nn.Module):
 
 # ---------------------------------------------------------------------------
 # Latent normalisation: latents are stored as ``(mu - mean) / std`` and the
-# inverse is applied before decoding. Keyed by ``z_dim``.
+# inverse is applied before decoding. Keyed by ``z_dim``, because the numbers
+# describe a latent format rather than a medium or a family.
 # ---------------------------------------------------------------------------
 
 # Official Wan 2.2 (48ch), from the release's ``Wan2_2_VAE`` wrapper.
@@ -394,6 +396,10 @@ WAN22_LATENTS_STD = [
     0.3971, 1.0600, 0.3943, 0.5537, 0.5444, 0.4089, 0.7468, 0.7744,
 ]
 
+# Wan 2.1's 16-channel codec. It is not this family -- it predates the activation
+# range that forced BF16 here, and its weights ship FP16 -- but its latent format
+# belongs in the same table, and its numbers are the ones the image path already
+# carries: `AutoencoderKLQwenImage` IS the Wan 2.1 VAE at one frame.
 # Qwen-Image 2.1 (64ch), from the same source ComfyUI ships as its latent format.
 QWEN_IMAGE21_LATENTS_MEAN = [
     0.5126, 0.7721, -0.0631, 1.3506, -0.7855, -2.1025, -0.3458, 1.3722,
@@ -417,8 +423,11 @@ QWEN_IMAGE21_LATENTS_STD = [
     3.8747, 3.7608, 3.5735, 3.1490, 3.7662, 3.6746, 3.4563, 3.8161,
 ]
 
-#: z_dim -> (mean, std).
+#: z_dim -> (mean, std), keyed by the latent format rather than by the medium or the
+# family that ships it. The 16ch entry is the Wan 2.1 codec, which serves the Wan 2.2
+# 14B experts in 3D and Qwen-Image and Ming-Image in 2D.
 LATENT_STATS: dict[int, tuple[list[float], list[float]]] = {
+    16: (QWEN_IMAGE_LATENTS_MEAN, QWEN_IMAGE_LATENTS_STD),
     48: (WAN22_LATENTS_MEAN, WAN22_LATENTS_STD),
     64: (QWEN_IMAGE21_LATENTS_MEAN, QWEN_IMAGE21_LATENTS_STD),
 }
