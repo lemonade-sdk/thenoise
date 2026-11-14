@@ -133,7 +133,8 @@ to request cancellation. I2V uses the same job flow and the same base64
 For LoRAs, supply `--lora-dir ./models/loras` when starting the server, then
 send `"lora_specs": ["style:0.8"]` in either video request. The engine loads
 only supported DiT projections, reports unmatched keys and switches LoRAs
-between requests. The FP8 text-encoder checkpoint is not supported.
+between requests. `GET /lora` lists the names and the roles this model offers.
+The FP8 text-encoder checkpoint is not supported.
 
 See the [HTTP API](../api.md#video-generation) for parameters and responses.
 
@@ -150,9 +151,10 @@ load rather than at the first denoising step.
 The native Wan 2.1 VAE uses FP16 compute.
 Both experts are swapped by the normal device memory manager at the sigma
 boundary, which keeps both on the card when they fit; do not run both as
-resident GPU models on a 32 GiB card. LoRAs are not supported on this variant —
-the engine refuses `lora_specs` rather than merge them into only one of the two
-experts.
+resident GPU models on a 32 GiB card. Each expert is LoRA-able on its own:
+`"lora_specs": {"dit": ["style:0.8"], "dit_low": ["pose"]}`. A bare list is the
+high-noise expert's, so a LoRA meant for the whole clip is sent under both
+roles.
 
 ```bash
 ./thenoise.sh serve \
@@ -172,4 +174,4 @@ Defaults: 832x480, 33 frames, 16 FPS, 40 steps, Euler, CFG 4.0,
 flow shift 12, and high/low boundary 0.875. The single API CFG value
 is the high-noise CFG (4.0 by default); low-noise CFG is 0.75x (3.0 by default).
 **T2V only**: 14B I2V uses a separate 36-channel
-model and CLIP-Vision path; 14B LoRAs are not part of this patch.
+model and CLIP-Vision path, which this engine does not load.

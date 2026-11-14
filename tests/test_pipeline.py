@@ -160,6 +160,18 @@ def test_changing_the_prompt_reencodes_but_keeps_the_cache_shape():
     assert controller.model.calls["denoise_step"] == 4  # sampling re-ran too
 
 
+def test_a_role_keyed_lora_request_names_a_component_the_model_has():
+    """A client may group specs by role for any model; an image model offers one, and
+    asking for another component is refused rather than quietly ignored.
+    """
+    controller = _controller()
+    controller.generate(_request(steps=2, lora_specs={"dit": ["a:1.0"]}))
+    assert controller.model.lora_switches == [["a:1.0"]]
+
+    with pytest.raises(ValueError, match="does not offer"):
+        controller.generate(_request(steps=2, lora_specs={"text_encoder": ["a"]}))
+
+
 def test_changing_lora_specs_invalidates_the_cached_conditioning():
     """Prompt conditioning embeds ``lora_specs`` (text fusion runs on DiT weights)."""
     controller = _controller()

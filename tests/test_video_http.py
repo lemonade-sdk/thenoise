@@ -69,7 +69,7 @@ def test_video_http_t2v_and_i2v_and_content(tmp_path):
             assert sync.status_code == 200
             assert sync.headers["content-type"].startswith("video/mp4")
             assert sync.content.startswith(bytes([0x1a, 69, 0xdf, 0xa3]))
-            assert seen[-1].lora_specs == ["style:0.7"]
+            assert seen[-1].lora_specs == {"dit": ["style:0.7"]}
             assert not list(tmp_path.glob("sync_*"))
             assert c.post("/video", json={"model": "wrong", "prompt": "fox"}).status_code == 400
     finally:

@@ -23,6 +23,7 @@ import torch
 from thenoise.memory import MemoryManager
 from thenoise.models.base import DiffusionModel
 from thenoise.samplers import Step
+from thenoise.utils.lora_roles import check_lora_roles
 from thenoise.video.spec import ResolvedVideo, VideoSpec
 
 
@@ -65,6 +66,9 @@ class VideoModel(DiffusionModel):
     def resolve_video(self, spec: VideoSpec) -> ResolvedVideo:
         """Resolve optional request values, then the size onto this model's grid."""
         resolved = spec.resolve(self.default_prefs)
+        # Answered here rather than at the switch, so `/videos` refuses a role this
+        # model does not have at submit instead of minutes into the job.
+        check_lora_roles(resolved.lora_specs, self.lora_components())
         width, height = self.resolve_size(resolved.width, resolved.height)
         if (width, height) != (resolved.width, resolved.height):
             resolved = dataclasses.replace(resolved, width=width, height=height)

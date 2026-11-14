@@ -50,6 +50,7 @@ from thenoise.models.base import Conditioning, DiffusionModel  # noqa: E402
 from thenoise.models.config import ModelConfig, SamplingParams  # noqa: E402
 from thenoise.samplers import Step  # noqa: E402
 from thenoise.upscale import LatentUpscaler  # noqa: E402
+from thenoise.utils.lora_roles import DEFAULT_LORA_ROLE  # noqa: E402
 from thenoise.vae import AutoencoderKLFlux2  # noqa: E402
 
 
@@ -973,10 +974,10 @@ class StubModel(DiffusionModel):
         h, w = latents.shape[-2:]
         return torch.zeros(3, h * self._VAE_SCALE, w * self._VAE_SCALE)
 
-    def switch_loras(self, lora_specs, dit):
+    def switch_loras(self, lora_specs, module, role=DEFAULT_LORA_ROLE):
         self.calls["switch_loras"] += 1
         self.lora_switches.append(list(lora_specs) if lora_specs else None)
-        return super().switch_loras(lora_specs, dit)
+        return super().switch_loras(lora_specs, module, role)
 
     def _create_upscaler(self) -> LatentUpscaler:
         return StubLatentUpscaler(self.UPSCALE_SCALE)

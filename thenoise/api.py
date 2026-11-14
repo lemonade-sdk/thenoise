@@ -10,6 +10,8 @@ import os
 import base64
 from typing import List, Literal, Optional, Union
 
+from thenoise.utils.lora_roles import LoraSpecs
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.exception_handlers import request_validation_exception_handler
@@ -67,7 +69,9 @@ class _Text2ImageBody(BaseModel):
     upscale_factor: float = 1.0
     upscale_type: str = "refined"
     sampler: Optional[str] = None
-    lora_specs: Optional[List[str]] = None  # ["filename.safetensors:0.8", ...]
+    # ["filename.safetensors:0.8", ...], or by role on a model with more than one
+    # LoRA-able component: {"dit": [...], "dit_low": [...]}.
+    lora_specs: LoraSpecs = None
     pixel_upscaler: Optional[str] = None  # name (no .safetensors) in upscaler_dir
     kv_cache: Optional[bool] = None  # T2I opt-in, compatible edits auto; null = auto
     ref_method: Optional[str] = None  # reference conditioning (edit only; null = auto)
@@ -262,11 +266,14 @@ def create_app(runtime, *, video_jobs=None, video_model: str = "") -> FastAPI:
 
     @app.get("/lora")
     def loras():
-        """List available LoRA names (short, no .safetensors suffix)."""
+        """Available LoRA names (short, no .safetensors suffix), plus the component roles
+        a `lora_specs` request may name for the loaded model.
+        """
         controller = runtime.pipeline
         if controller is None:
             return Response(status_code=503, content="no model is loaded")
-        return {"loras": controller.list_loras()}
+        return {"loras": controller.list_loras(),
+                "roles": sorted(controller.model.lora_components())}
 
     @app.get("/upscalers")
     def upscalers():

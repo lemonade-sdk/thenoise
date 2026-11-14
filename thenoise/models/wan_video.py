@@ -176,6 +176,15 @@ class Wan22Model(VideoModel):
     def _create_upscaler(self):
         raise NotImplementedError(f"{self.name} has no latent upscaler")
 
+    def lora_components(self) -> dict[str, torch.nn.Module]:
+        """Each expert takes its own LoRAs, by the name `Segment.stage` answers for it.
+
+        A variant with one transformer has no `dit_low`, and a component that is not
+        there is not a role a request can name.
+        """
+        return {role: module for role, module in
+                {"dit": self.dit, "dit_low": self.low_dit}.items() if module is not None}
+
     # ------------------------------------------------------------ preferences
     @property
     def default_prefs(self) -> dict[str, Any]:
@@ -207,14 +216,6 @@ class Wan22Model(VideoModel):
     def _clear_weights(self) -> None:
         self.vae = self.text_encoder = self.tokenizer = None
         self.dit = self.low_dit = None
-
-    def switch_loras(self, lora_specs, dit: torch.nn.Module) -> None:
-        # LoRA bookkeeping is one DiT's: `LoRASupport` records a single active spec, so a
-        # second expert would be left out in silence. Role-keyed specs (plan C14) are the
-        # way to lift this.
-        if lora_specs and self.variant.experts is not None:
-            raise ValueError("Wan 2.2 T2V-A14B expert-specific LoRAs are not supported")
-        super().switch_loras(lora_specs, dit)
 
     # ------------------------------------------------------------ kernels
     def encode_prompt(self, args: EncodePromptArgs) -> Conditioning:

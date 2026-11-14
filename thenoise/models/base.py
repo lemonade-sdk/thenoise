@@ -36,6 +36,7 @@ from thenoise.upscale import LatentUpscaler
 if TYPE_CHECKING:  # pragma: no cover - only for annotations
     from PIL import Image
 from thenoise.utils.checkpoint import checkpoint_bytes, detect_checkpoint_prefs
+from thenoise.utils.lora_roles import DEFAULT_LORA_ROLE
 from thenoise.utils.safetensors import unwrap_key
 
 logger = logging.getLogger(__name__)
@@ -375,6 +376,16 @@ class DiffusionModel(LoRASupport, ABC):
     def end_kv_caches(self) -> None:
         """Drop the run's caches. Call in ``finalize_latent``, before the VAE decode."""
         self._kv_caches = None
+
+    # ------------------------------------------------------- LoRA-able components
+    def lora_components(self) -> dict[str, torch.nn.Module]:
+        """This model's LoRA-able components, by the role a request names them with.
+
+        The keys are the roles `switch_loras` accepts and the wire may name, so a model
+        with a second component adds an entry here rather than a second list to keep in
+        step. The name is the one the component is registered for residency under.
+        """
+        return {DEFAULT_LORA_ROLE: self.dit}
 
     # ------------------------------------------------------- latent upscaler
     def get_upscaler(self) -> LatentUpscaler:

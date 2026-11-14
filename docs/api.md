@@ -19,7 +19,7 @@ Start the server with [`serve`](cli.md#serve-a-model-over-http) and TheNoise exp
 |--------|------|-------------|
 | `GET` | `/` | Web UI |
 | `GET` | `/health` | Server status, loaded model and its capabilities (see below) |
-| `GET` | `/lora` | List available LoRA names |
+| `GET` | `/lora` | List available LoRA names, and the roles they can be given to |
 | `GET` | `/upscalers` | List available pixel upscaler names (works even with no model loaded) |
 | `GET` | `/postprocess` | Describe the post-decode knobs, in the order their filters run (works even with no model loaded) |
 | `POST` | `/upscale` | Pixel-upscale an input image (works even with no model loaded) |
@@ -51,7 +51,7 @@ the loaded model's defaults when optional fields are omitted.
 | `duration`, `fps` | number, integer | Duration in seconds and frames/second; explicit `frames` takes priority |
 | `steps`, `guidance_scale`, `seed` | number | Sampling parameters |
 | `sampler` | string | Model-supported sampler (`unipc` or `euler` for Wan) |
-| `lora_specs` | string[] | Optional LoRAs, as `name:weight`, looked up in `--lora-dir` |
+| `lora_specs` | string[] \| object | Optional LoRAs, as `name:weight`, looked up in `--lora-dir`. A model with more than one LoRA-able component also takes them by component: `{"dit": ["a:0.8"], "dit_low": ["b"]}` |
 | `output_format` | string | `mp4` or `webm` (model default when omitted) |
 
 For a synchronous MP4 response:
@@ -92,8 +92,12 @@ HTTP 409 until completion. To stop a queued or running job use
 `POST /videos/{id}/cancel`. The queue returns HTTP 429 when full.
 
 The normal `GET /lora` endpoint also lists LoRAs available to a loaded video
-model. Only LoRA factors matching the transformer's supported layers are
-applied; unsupported targets are logged as unused.
+model, along with the `roles` a `lora_specs` request may name. A bare list goes
+to the model's single transformer; a two-expert model offers `dit` and
+`dit_low`, so each expert can be given its own LoRA, and asking for a role the
+model does not have is refused at submit. Only LoRA factors matching the
+transformer's supported layers are applied; unsupported targets are logged as
+unused.
 
 ## `GET /health`
 
@@ -144,7 +148,7 @@ index_timestep_zero` (see [`/edit`](#post-edit)).
 | `tint` | `float` | `0.0` | White balance across the green–magenta axis: -1.0 greens, 1.0 magentas |
 | `sharpening` | `float` | `0.0` | RCAS sharpening strength, 0.0–1.0 |
 | `film_grain` | `float` | `0.0` | Film grain strength, 0.0–10.0 |
-| `lora_specs` | `string[]` | `null` | LoRA specs, e.g. `["style:0.8"]` |
+| `lora_specs` | `string[]` \| `object` | `null` | LoRA specs, e.g. `["style:0.8"]`, or by component on a two-expert model: `{"dit": ["a"], "dit_low": ["b"]}` |
 
 ### Response
 

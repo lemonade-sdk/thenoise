@@ -260,7 +260,7 @@ def test_sync_video_reuses_resolver_and_cleans_on_failure(tmp_path):
         output = jobs.render_sync(VideoSpec(prompt="fox", frames=9,
                                             lora_specs=["style:0.5"]))
         assert output.read_bytes() == b"complete"
-        assert seen[-1].lora_specs == ["style:0.5"]
+        assert seen[-1].lora_specs == {"dit": ["style:0.5"]}
         output.unlink()
     finally:
         jobs.close()

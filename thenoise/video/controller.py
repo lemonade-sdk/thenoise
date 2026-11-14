@@ -81,7 +81,8 @@ class VideoPipelineController:
             for segment in model.segments(params, model.schedule(params),
                                           spec.guidance_scale):
                 with model.memory.stage(segment.stage, pixels=pixels) as stage:
-                    model.switch_loras(spec.lora_specs, segment.module)
+                    model.switch_loras(spec.lora_specs.get(segment.stage),
+                                     segment.module, segment.stage)
                     model.begin_segment(segment)
                     if x is None:  # once, and inside a stage: preparing may need weights
                         x = model.prepare_latent(latents, cond, params, ref=ref,

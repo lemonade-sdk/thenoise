@@ -4,7 +4,9 @@ from __future__ import annotations
 import math
 import secrets
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
+
+from thenoise.utils.lora_roles import LoraSpecs, lora_specs_by_role
 
 
 @dataclass(frozen=True)
@@ -21,7 +23,9 @@ class ResolvedVideo:
     output_format: str
     image: Optional[bytes]
     sampler: str
-    lora_specs: Optional[list[str]]
+    #: LoRA specs by role, so a model with two LoRA-able components can be asked for a
+    #: different set on each; every model has at least the default role to answer for.
+    lora_specs: Dict[str, List[str]]
     explicit_frames: bool = False
 
     @property
@@ -55,7 +59,7 @@ class VideoSpec:
     output_format: Optional[str] = None
     image: Optional[bytes] = None
     sampler: Optional[str] = None
-    lora_specs: Optional[list[str]] = None
+    lora_specs: LoraSpecs = None
 
     def resolve(self, defaults: Mapping[str, Any]) -> ResolvedVideo:
         """Resolve omitted options from the selected model's preferences."""
@@ -97,6 +101,6 @@ class VideoSpec:
             width=width, height=height, frame_count=frames, fps=fps,
             steps=steps, guidance_scale=guidance_scale, seed=seed,
             output_format=output_format, image=self.image,
-            sampler=sampler, lora_specs=self.lora_specs,
+            sampler=sampler, lora_specs=lora_specs_by_role(self.lora_specs),
             explicit_frames=explicit_frames,
         )

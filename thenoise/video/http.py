@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, ConfigDict
 
+from ..utils.lora_roles import LoraSpecs
 from .jobs import VideoJobs
 from .spec import VideoSpec
 
@@ -34,7 +35,9 @@ class VideoRequest(BaseModel):
     seed: Optional[int] = None
     output_format: Optional[Literal["mp4", "webm"]] = None
     sampler: Optional[str] = None
-    lora_specs: Optional[list[str]] = None
+    # Either the specs for a model's single LoRA-able component, or them by role:
+    # {"dit": [...], "dit_low": [...]} on a two-expert model.
+    lora_specs: LoraSpecs = None
     image: Optional[str] = None  # base64-encoded PNG/JPEG initial frame for I2V
 
     def to_spec(self) -> VideoSpec:

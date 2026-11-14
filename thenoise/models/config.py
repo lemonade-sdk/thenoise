@@ -11,6 +11,8 @@ import torch
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Union
 
+from thenoise.utils.lora_roles import LoraSpecs
+
 from thenoise.postprocess.options import PostprocessOptions, options_from
 from thenoise.utils.options import declared_knobs
 
@@ -76,7 +78,7 @@ class GenerateRequest:
     upscale_factor: float = 1.0
     upscale_type: str = "refined"
     sampler: Optional[str] = None
-    lora_specs: Optional[List[str]] = None
+    lora_specs: LoraSpecs = None
     pixel_upscaler: Optional[str] = None
     image: Optional[Union[Image.Image, List[Image.Image]]] = None
     # KV cache for supported models; T2I defaults off, editing may auto-enable.
