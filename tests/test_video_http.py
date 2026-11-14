@@ -196,3 +196,16 @@ def test_reads_of_an_absent_video_answer_json():
             r = getattr(c, method)(path)
             assert r.status_code == status
             assert r.json()["error"]
+
+
+# NaN and infinity are outside JSON itself, so they cannot be sent to ask.
+@pytest.mark.parametrize(("field", "value"), [("frames", 0), ("width", -1),
+                                             ("guidance_scale", -0.5), ("duration", 0),
+                                             ("lora_specs", 3), ("unknown_option", 1)])
+def test_a_request_the_contract_refuses_is_a_schema_error(field, value):
+    """Bounds, types and unknown fields are answered by the schema on both video routes;
+    the route's own envelope carries only what the model refused.
+    """
+    with _client(_StubJobs()) as c:
+        assert c.post("/videos", json={"prompt": "fox", field: value}).status_code == 422
+        assert c.post("/video", json={"prompt": "fox", field: value}).status_code == 422

@@ -39,11 +39,23 @@ def test_wan_frame_grid_and_duration():
     assert resolve(VideoSpec(prompt="x", duration=11/8, fps=8)).frame_count == 13
 
 
-def test_video_validation_fails_before_job_creation():
-    for bad in (dict(width=-1), dict(fps=0), dict(guidance_scale=float("nan")),
-                dict(output_format="avi")):
-        with pytest.raises(ValueError):
-            VideoSpec(prompt="valid", **bad).resolve(wan_prefs())
+#: Each of these is the contract's own answer, so the spec refuses it before any model,
+#: queue or job exists -- and so does every wire model derived from it.
+REJECTED = ({"width": -1}, {"fps": 0}, {"frames": 0}, {"duration": 0.0},
+            {"guidance_scale": float("nan")}, {"guidance_scale": -0.5},
+            {"guidance_scale": float("inf")}, {"sampler": ""}, {"image": b""},
+            {"seed": -(2**63) - 1}, {"output_format": "avi"})
+
+
+@pytest.mark.parametrize("bad", REJECTED)
+def test_the_spec_refuses_what_it_cannot_honour(bad):
+    with pytest.raises(ValueError):
+        VideoSpec(prompt="valid", **bad)
+
+
+def test_a_prompt_of_only_whitespace_is_no_prompt():
+    with pytest.raises(ValueError, match="prompt must not be empty"):
+        VideoSpec(prompt="   ")
 
 
 def test_cancel_running_job_does_not_kill_worker_or_next_job(tmp_path):

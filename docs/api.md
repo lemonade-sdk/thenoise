@@ -79,7 +79,7 @@ curl -fS http://127.0.0.1:8000/video \
 
 The image is cover-cropped to the requested output size and encoded as first-frame
 conditioning. For a platform-independent Python-based example, see the
-[Wan 2.2 model page](models/wan22.md#image-to-video-i2v). To queue I2V instead,
+[Wan 2.2 model page](models/wan22.md#image-to-video). To queue I2V instead,
 send the same request to `POST /videos` and poll its job ID.
 
 ### Asynchronous jobs
@@ -388,11 +388,11 @@ A route answers a refusal in the format it speaks.
 
 | Status | Meaning |
 |--------|---------|
-| `400` | Request asks for a capability the loaded model lacks (e.g. `/edit` without an editing model, `kv_cache` with `ref_method: index`), or an invalid field value |
+| `400` | A value the loaded model refuses: a capability it lacks (e.g. `/edit` without an editing model, `kv_cache` with `ref_method: index`), a sampler it does not implement, an `image` it cannot decode |
 | `404` | No such video job, or its content is gone |
 | `409` | Video job not in the state the request needs: content before completion, cancel after it settled |
 | `429` | The video queue is full |
 | `500` | Unexpected failure, logged with a traceback |
 | `503` | No model loaded for `/text2image` / `/edit`; a video job the service cannot take, because no video model is loaded or it is shutting down |
 
-A body the schema cannot parse is FastAPI's own `422` JSON report.
+A body the request contract itself refuses — an unknown field, a type it cannot read, a value outside its bounds (`frames: 0`) — is FastAPI's `422` JSON report.

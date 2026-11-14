@@ -5,7 +5,7 @@ import base64
 import binascii
 import io
 import logging
-from typing import Literal, Optional
+from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
@@ -20,26 +20,15 @@ from .spec import VideoSpec
 logger = logging.getLogger(__name__)
 
 
-class VideoRequest(BaseModel):
-    # Unknown fields must NOT be silently discarded (e.g. an unsupported LoRA).
-    model_config = ConfigDict(extra="forbid")
+class VideoRequest(VideoSpec):
+    """The HTTP body: the video spec, plus the two fields only the wire has.
+
+    ``model`` is checked against what the server actually loaded, and ``image`` arrives
+    base64-encoded where the spec wants its bytes.
+    """
+
     model: Optional[str] = None
-    prompt: str
-    negative_prompt: Optional[str] = None
-    width: Optional[int] = None
-    height: Optional[int] = None
-    frames: Optional[int] = None
-    duration: Optional[float] = None
-    fps: Optional[int] = None
-    steps: Optional[int] = None
-    guidance_scale: Optional[float] = None
-    seed: Optional[int] = None
-    output_format: Optional[Literal["mp4", "webm"]] = None
-    sampler: Optional[str] = None
-    # Either the specs for a model's single LoRA-able component, or them by role:
-    # {"dit": [...], "dit_low": [...]} on a two-expert model.
-    lora_specs: LoraSpecs = None
-    image: Optional[str] = None  # base64-encoded PNG/JPEG initial frame for I2V
+    image: Optional[str] = None
 
     def to_spec(self) -> VideoSpec:
         data = self.model_dump(exclude={"model", "image"})
