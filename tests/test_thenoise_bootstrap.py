@@ -12,6 +12,7 @@ import pytest
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "thenoise.sh"
+CUDA_SCRIPT = Path(__file__).resolve().parents[1] / "thenoise_cuda.sh"
 
 FAKE_UV = r"""#!/usr/bin/env python3
 import os
@@ -96,10 +97,13 @@ def sandbox(tmp_path: Path):
     project = tmp_path / "thenoise"
     project.mkdir()
     (project / "thenoise.sh").write_bytes(SCRIPT.read_bytes())
+    (project / "thenoise_cuda.sh").write_bytes(CUDA_SCRIPT.read_bytes())
     package = project / "thenoise"
     package.mkdir()
     (package / "__init__.py").write_text("")
-    (package / "__main__.py").write_text("print('launched')\n")
+    (package / "__main__.py").write_text(
+        "import sys\nprint('launched', *sys.argv[1:])\n"
+    )
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -116,10 +120,11 @@ def sandbox(tmp_path: Path):
         "FAKE_GPU_AVAILABLE": "yes",
     })
 
-    def run(**overrides):
+    def run(*args, **overrides):
+        script = args[0] if args else "thenoise.sh"
         actual_env = {**env, **overrides}
         return subprocess.run(
-            ["bash", str(project / "thenoise.sh"), "--help"],
+            ["bash", str(project / script), "--help"],
             cwd=project,
             env=actual_env,
             text=True,
@@ -143,6 +148,30 @@ def check_run(result):
 
 def lines(log: Path):
     return log.read_text().splitlines()
+
+
+def host_has_amd_gpu() -> bool:
+    """True when the kernel reports a real gfx target, as the bootstrap probes it."""
+    import glob
+    import re
+
+    for props in glob.glob("/sys/class/kfd/kfd/topology/nodes/*/properties"):
+        try:
+            match = re.search(r"^gfx_target_version\s+([1-9]\d*)$",
+                              Path(props).read_text(), re.MULTILINE)
+        except OSError:
+            continue
+        if match:
+            return True
+    return False
+
+
+# The NVIDIA-only scenarios rely on sysfs finding no AMD GPU, which is false on
+# ROCm developer machines regardless of the GFX_ARCH the test passes.
+requires_no_amd_gpu = pytest.mark.skipif(
+    host_has_amd_gpu(),
+    reason="host exposes an AMD KFD gfx target, so auto-detection cannot be NVIDIA-only",
+)
 
 
 def assert_targeted(log: Path, project: Path):
@@ -169,6 +198,7 @@ def test_second_run_does_not_reinstall_torch(sandbox):
     assert "-e" in lines(log)[0]
 
 
+@requires_no_amd_gpu
 def test_fresh_nvidia_uses_cuda_wheels(sandbox):
     project, fake_bin, log, _, run, _ = sandbox
     nvidia_smi = fake_bin / "nvidia-smi"
@@ -328,6 +358,16 @@ def test_explicit_backend_switches_installed_rocm_to_cuda(sandbox):
     add_mock_nvidia(fake_bin)
     wheel_in(make_venv(), "rocm")
     check_run(run(GFX_ARCH="gfx1151", THENOISE_BACKEND="cuda"))
+    assert any("https://download.pytorch.org/whl/cu132" in x for x in lines(log))
+
+
+def test_deprecated_cuda_launcher_forwards_to_generic_script(sandbox):
+    _, fake_bin, log, _, run, _ = sandbox
+    add_mock_nvidia(fake_bin)
+    result = run("thenoise_cuda.sh", GFX_ARCH="gfx1151")
+    check_run(result)
+    assert "thenoise_cuda.sh is deprecated" in result.stderr
+    assert "launched --help" in result.stdout
     assert any("https://download.pytorch.org/whl/cu132" in x for x in lines(log))
 
 
