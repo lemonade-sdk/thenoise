@@ -198,6 +198,20 @@ def stub_wan_components(channels: int = 48):
         def dtype(self):
             return self.weight.dtype
 
+        def encode_pixels_to_latents(self, pixels):
+            """A toy codec, exact about the grid: latent frame 0 is pixel frame 0, every
+            later one is the four it packs, pooled over channels and space.
+            """
+            temporal, spatial = TEMPORAL_COMPRESSION, self.spatial_compression
+            groups = [torch.nn.functional.avg_pool3d(pixels[:, :, :1],
+                                                     kernel_size=(1, spatial, spatial))]
+            groups += [torch.nn.functional.avg_pool3d(
+                pixels[:, :, 1 + temporal * i:1 + temporal * (i + 1)],
+                kernel_size=(temporal, spatial, spatial))
+                for i in range((pixels.shape[2] - 1) // temporal)]
+            return (torch.cat(groups, dim=2).mean(dim=1, keepdim=True)
+                    .repeat(1, channels, 1, 1, 1))
+
     class Text(torch.nn.Module):
         def __init__(self):
             super().__init__()

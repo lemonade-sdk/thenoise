@@ -214,6 +214,8 @@ async function applyModelState() {
   kv.title = hasKvCache ? '' : 'the loaded model has no reference-latent KV cache';
   // The I2V initial frame exists only when the loaded variant can condition on one.
   $('video_i2v_field').classList.toggle('hidden', !video?.i2v);
+  // A last frame needs a reference that carries a mask to name it with.
+  $('video_flf2v_field').classList.toggle('hidden', !video?.flf2v);
 }
 applyModelState();
 

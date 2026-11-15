@@ -46,7 +46,8 @@ class Segment:
 
 
 class VideoModel(DiffusionModel):
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "video": {"t2v": False, "i2v": False}}
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES,
+                    "video": {"t2v": False, "i2v": False, "flf2v": False}}
 
     #: The video preferences every adapter shares. What a release decides for itself —
     #: frame count, frame rate, size, steps — belongs to that release and is absent here;

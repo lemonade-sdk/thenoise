@@ -88,6 +88,17 @@ def test_an_adapter_declines_the_features_it_does_not_implement():
         model.get_upscaler()
 
 
+def test_every_variant_answers_the_video_vocabulary():
+    """A feature a variant lacks is answered `False`, not left out: a client reads the whole
+    group."""
+    assert wan_adapter("ti2v_5b").capability("video") == {
+        "t2v": True, "i2v": True, "flf2v": False}
+    assert wan_adapter("t2v_14b").capability("video") == {
+        "t2v": True, "i2v": False, "flf2v": False}
+    assert wan_adapter("i2v_14b").capability("video") == {
+        "t2v": True, "i2v": True, "flf2v": True}
+
+
 def _stub_config(tmp_path):
     return ModelConfig(dit_paths={"": str(tmp_path / "dit")}, vae_path="vae",
                        text_encoder_path="te", device="cpu", offload_device="cpu")

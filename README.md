@@ -64,16 +64,18 @@ New models are added over time. PRs adding model support are welcome.
 
 ### Video models
 
-| Model | Text-to-video | Image-to-video | Details |
-|---|---|---|---|
-| **Wan 2.2 TI2V-5B** | ✓ | ✓ | [wan22](docs/models/wan22.md#ti2v-5b) |
-| **Wan 2.2 T2V-A14B**, one expert per half of the schedule | ✓ | — | [wan22](docs/models/wan22.md#t2v-a14b-two-experts) |
-| **Wan 2.2 I2V-A14B**, the same experts at 36 input channels | — | ✓ | [wan22](docs/models/wan22.md#i2v-a14b) |
+| Model | Text-to-video | Image-to-video | First/last frame | Details |
+|---|---|---|---|---|
+| **Wan 2.2 TI2V-5B** | ✓ | ✓ | — | [wan22](docs/models/wan22.md#ti2v-5b) |
+| **Wan 2.2 T2V-A14B**, one expert per half of the schedule | ✓ | — | — | [wan22](docs/models/wan22.md#t2v-a14b-two-experts) |
+| **Wan 2.2 I2V-A14B**, the same experts at 36 input channels | — | ✓ | ✓ | [wan22](docs/models/wan22.md#i2v-a14b) |
 
 Every generator answers directly (`POST /text2image`, `POST /edit`, `POST /video`)
 and can also be queued and polled (`POST /jobs/text2image`, `POST /jobs/edit`,
 `POST /jobs/video`); see the [HTTP API](docs/api.md#asynchronous-jobs).
-To animate a still image, follow the [image-to-video example](docs/models/wan22.md#image-to-video).
+To animate a still image, follow the [image-to-video example](docs/models/wan22.md#image-to-video);
+to land it somewhere specific, add a last frame to the same request
+([first-and-last-frame](docs/models/wan22.md#first-and-last-frame-flf2v)).
 
 ## How does it compare to ComfyUI?
 

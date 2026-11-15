@@ -34,6 +34,7 @@ from thenoise.models.wan_video import (
     VARIANTS,
     ClipReference,
     Wan22Model,
+    _given_mask,
     variant_for,
 )
 from thenoise.runtime import ModelPaths, Runtime, Settings
@@ -1322,6 +1323,23 @@ def test_the_concatenating_variant_is_read_from_the_patch_embedding():
     assert i2v.variant.experts.low_cfg_ratio == 1.0
 
 
+def _png(color) -> bytes:
+    """A reference a request can carry: a variant that sizes itself from one reads it."""
+    buffer = io.BytesIO()
+    Image.new("RGB", (64, 64), color).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_a_clip_that_ends_somewhere_needs_the_concatenating_pair():
+    """Only a concatenated reference has a mask to name a last frame with."""
+    with pytest.raises(ValueError, match="no channel for a last one"):
+        wan_adapter().resolve_video(
+            VideoSpec(prompt="x", image=_png("red"), end_image=_png("blue")))
+    assert wan_adapter("i2v_14b").resolve_video(
+        VideoSpec(prompt="x", image=_png("red"),
+                  end_image=_png("blue"))).mode == "flf2v"
+
+
 def test_a_36_channel_transformer_is_refused_the_5b_codec(tmp_path):
     """The pairing is noise + mask + reference, not the transformer's own width."""
     from unittest.mock import patch
@@ -1360,36 +1378,88 @@ def test_the_reference_is_encoded_as_the_clip_it_seeds():
                            width // model.vae.spatial_compression)
 
     model.vae.encode_pixels_to_latents = encode
-    [latent] = model.encode_references([torch.ones(3, 32, 32)], frames=5)
+    [conditioning] = model.encode_references([torch.ones(3, 32, 32)], frames=5)
     clip, = seen
     assert clip.shape == (1, 3, 5, 32, 32)
     assert torch.equal(clip[0, :, 0], torch.ones(3, 32, 32))
     assert torch.count_nonzero(clip[:, :, 1:]) == 0  # mid grey is 0 in [-1, 1]
-    assert latent.shape[1] == model.vae.z_dim
+    assert conditioning.shape[1] == model.vae.z_dim + 4
 
 
-def test_the_reference_channels_are_mask_then_reference():
+def test_a_last_frame_rides_in_the_clip_that_ends_on_it():
+    """The last frame is not encoded apart: the codec is causal over the clip."""
     model = wan_adapter("i2v_14b")
-    latents = torch.zeros(1, 16, 3, 4, 5)
-    reference = torch.arange(1 * 16 * 3 * 4 * 5,
-                             dtype=torch.float32).reshape(1, 16, 3, 4, 5)
-    assert model.prepare_latent(latents, None, None, ref=[reference],
-                                ref_method="concat_channels") is latents
-    channels = model._clip.channels
-    assert channels.shape == (1, 20, 3, 4, 5)
-    mask = channels[:, :4]
-    assert torch.equal(mask[:, :, 0], torch.ones(1, 4, 4, 5))
+    seen = []
+
+    def encode(pixels):
+        seen.append(pixels)
+        _, _, frames, height, width = pixels.shape
+        return torch.zeros(1, model.vae.z_dim, (frames - 1) // 4 + 1,
+                           height // model.vae.spatial_compression,
+                           width // model.vae.spatial_compression)
+
+    model.vae.encode_pixels_to_latents = encode
+    first, last = torch.full((3, 32, 32), -1.0), torch.ones(3, 32, 32)
+    model.encode_references([first, last], frames=9)
+    clip, = seen
+    assert torch.equal(clip[0, :, 0], first)
+    assert torch.equal(clip[0, :, -1], last)
+    assert torch.count_nonzero(clip[:, :, 1:-1]) == 0
+
+
+def test_the_reference_conditioning_is_mask_then_reference():
+    model = wan_adapter("i2v_14b")
+    first, last = torch.full((3, 32, 32), -1.0), torch.ones(3, 32, 32)
+    [conditioning] = model.encode_references([first, last], frames=9)
+    assert conditioning.shape == (1, 20, 3, 4, 4)
+    mask, reference = conditioning[:, :4], conditioning[:, 4:]
+    # All of the first latent frame, one sub-channel of the last.
+    assert torch.equal(mask[:, :, 0], torch.ones(1, 4, 4, 4))
+    assert torch.equal(mask[:, 3, -1], torch.ones(1, 4, 4))
+    assert torch.count_nonzero(mask[:, :3, -1]) == 0
+    assert torch.count_nonzero(mask[:, :, 1:-1]) == 0
+    torch.testing.assert_close(reference[:, :, 0],
+                               torch.full((1, 16, 4, 4), -1.0), rtol=0, atol=0)
+    torch.testing.assert_close(reference[:, :, -1],
+                               torch.full((1, 16, 4, 4), 0.25), rtol=0, atol=0)
+
+
+def test_a_first_frame_alone_marks_nothing_else():
+    model = wan_adapter("i2v_14b")
+    [conditioning] = model.encode_references([torch.ones(3, 32, 32)], frames=9)
+    mask = conditioning[:, :4]
+    assert torch.equal(mask[:, :, 0], torch.ones(1, 4, 4, 4))
     assert torch.count_nonzero(mask[:, :, 1:]) == 0
-    torch.testing.assert_close(channels[:, 4:], reference.to(channels.dtype),
-                               rtol=0, atol=0)
+
+
+def test_the_mask_is_the_one_upstream_flf2v_builds():
+    """Rebuilt from Wan 2.1's `first_last_frame2video.py`, which is where the mask's
+    meaning comes from."""
+    for clip in (5, 9, 81):
+        msk = torch.ones(1, clip, 1, 1)
+        msk[:, 1:-1] = 0
+        msk = torch.concat([torch.repeat_interleave(msk[:, 0:1], repeats=4, dim=1),
+                            msk[:, 1:]], dim=1)
+        upstream = msk.view(1, msk.shape[1] // 4, 4, 1, 1).transpose(1, 2)[0]
+        ours = _given_mask(torch.zeros(1, 16, (clip - 1) // 4 + 1, 1, 1), ends=2)[0]
+        torch.testing.assert_close(ours, upstream, rtol=0, atol=0)
 
 
 def test_a_reference_of_the_wrong_clip_length_is_refused():
     model = wan_adapter("i2v_14b")
-    with pytest.raises(ValueError, match="reference latent is"):
+    with pytest.raises(ValueError, match="reference conditioning is"):
         model.prepare_latent(torch.zeros(1, 16, 3, 4, 5), None, None,
-                             ref=[torch.zeros(1, 16, 1, 4, 5)],
+                             ref=[torch.zeros(1, 20, 1, 4, 5)],
                              ref_method="concat_channels")
+
+
+def test_a_run_with_no_reference_inherits_none():
+    """``prepare_latent`` owns the slot: a dead run's reference cannot condition the next."""
+    model = wan_adapter("i2v_14b")
+    model._clip = ClipReference(channels=torch.zeros(1, 20, 2, 2, 2))
+    latents = torch.ones(1, 16, 2, 2, 2)
+    assert model.prepare_latent(latents, None, None) is latents
+    assert model._clip is None
 
 
 def test_every_forward_pass_carries_the_reference_beside_the_noise(monkeypatch):

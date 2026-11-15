@@ -66,6 +66,11 @@ class Variant:
     #: whose width says the reference is concatenated.
     ref_method: str | None = None
 
+    @property
+    def flf2v(self) -> bool:
+        """Whether this transformer can be told where its clip ends."""
+        return self.ref_method == "concat_channels"
+
 
 #: One entry per released transformer, keyed by the variant name `CHANNELS` gives the
 #: shape `detect_params` reads. `DEFAULT_PREFS` covers what the variants share; these
@@ -101,6 +106,18 @@ def variant_for(params: Wan22Params) -> Variant:
         if CHANNELS[variant.name] == params.in_channels:
             return variant
     raise ValueError(f"no Wan 2.2 policy for a {params.in_channels}-channel transformer")
+
+
+def _given_mask(reference: torch.Tensor, ends: int) -> torch.Tensor:
+    """The 4 channels naming which latent frames of ``reference`` are given. Upstream's
+    layout: both ends given marks all four channels of the first latent frame, and of the
+    last only the sub-channel its final pixel frame lands in."""
+    mask = torch.zeros((1, 4, *reference.shape[2:]), device=reference.device,
+                       dtype=reference.dtype)
+    mask[:, :, 0] = 1.0
+    if ends > 1:
+        mask[:, 3, -1] = 1.0
+    return mask
 
 
 class Wan22Model(VideoModel):
@@ -183,10 +200,11 @@ class Wan22Model(VideoModel):
         super().__init__(config=config)
         self.params: Wan22Params = detect_params(self.dit_path)
         self.variant = variant_for(self.params)
-        # `i2v` is the one capability a variant, rather than the model, decides.
+        # `i2v` and `flf2v` are the capabilities a variant, rather than the model, decides.
         self.CAPABILITIES = {**self.CAPABILITIES,
                              "video": {**self.CAPABILITIES["video"],
-                                       "i2v": self.variant.i2v}}
+                                       "i2v": self.variant.i2v,
+                                       "flf2v": self.variant.flf2v}}
         # Both headers are read before either module is built: the clip's latent is the
         # only thing that crosses between them and the normalization table is keyed by
         # its width, so a mismatched `--vae` is refused here rather than mid-run.
@@ -255,6 +273,10 @@ class Wan22Model(VideoModel):
                 "this Wan 2.2 A14B transformer has no image conditioning: it takes a "
                 f"{self.params.in_channels}-channel latent, so an I2V run needs the "
                 "I2V pair, whose experts take 36")
+        if resolved.end_image is not None and not self.variant.flf2v:
+            raise ValueError(
+                f"{self.variant.name} conditions its first frame at timestep zero, so it "
+                "has no channel for a last one: the I2V pair takes both")
         return dataclasses.replace(
             resolved,
             frame_count=wan_frame_grid(resolved.frame_count,
@@ -309,24 +331,26 @@ class Wan22Model(VideoModel):
         return latents.to(self.device)
 
     def encode_references(self, images, frames=1):
-        """The reference as this transformer wants it: one latent per frame, or one
-        latent for the clip the reference seeds.
-
-        Upstream encodes the frame followed by mid-grey frames, which in this codec's
-        [-1, 1] range is zeros; the mask is built from the latent grid later, since
-        that is where its temporal groups live.
-        """
+        """One latent per frame, or the 20 channels a concatenated reference contributes.
+        Upstream's clip is the frames given and mid-grey (zeros here) everywhere else, and
+        only here is it known how many frames were given."""
         if self.pref("ref_method") != "concat_channels":
             return super().encode_references(images, frames)
-        frame, = images
-        clip = frame.new_zeros((frames, *frame.shape))
-        clip[0] = frame
-        return [self.vae.encode_pixels_to_latents(
-            clip.permute(1, 0, 2, 3)[None].to(self.device))]
+        first, *rest = images
+        clip = first.new_zeros((frames, *first.shape))
+        clip[0] = first
+        if rest:
+            last, = rest
+            clip[-1] = last
+        reference = self.vae.encode_pixels_to_latents(
+            clip.permute(1, 0, 2, 3)[None].to(self.device))
+        return [torch.cat([_given_mask(reference, ends=1 + len(rest)), reference], dim=1)]
 
     def prepare_latent(self, latents, cond, params, ref=None, ref_method="index"):
         """Seed the clip with the reference, however this variant takes one."""
         if not ref:
+            # A run that died mid-schedule would otherwise condition the next clip.
+            self._clip = None
             return latents
         if ref_method == "concat_channels":
             return self._concat_reference(latents, ref[0])
@@ -354,23 +378,15 @@ class Wan22Model(VideoModel):
         return latents
 
     def _concat_reference(self, latents, reference):
-        """The fixed 20 channels every step is concatenated with: a mask, then the
-        reference clip.
-
-        Their order and polarity are upstream's, not a free choice: the mask is the
-        inverse of the sampler's, so a latent frame that is *given* carries 1, and its
-        single channel is repeated across four. The noise is left alone; the reference
-        conditions the run through these channels rather than by replacing frames.
-        """
-        if reference.shape != latents.shape:
+        """The 20 channels every step concatenates with, as ``encode_references`` cut them.
+        The noise is left alone: these condition the run rather than replacing frames."""
+        want = (latents.shape[0], self.params.in_channels - latents.shape[1],
+                *latents.shape[2:])
+        if tuple(reference.shape) != want:
             raise ValueError(
-                f"I2V reference latent is {tuple(reference.shape)} for noise of "
-                f"{tuple(latents.shape)}")
-        given = torch.zeros((1, 1) + latents.shape[2:], device=latents.device,
-                            dtype=self.dit.dtype)
-        given[:, :, :1] = 1.0
-        self._clip = ClipReference(channels=torch.cat(
-            [given.repeat(1, 4, 1, 1, 1), reference.to(self.dit.dtype)], dim=1))
+                f"{self.variant.name} reference conditioning is {tuple(reference.shape)} "
+                f"for a clip latent of {tuple(latents.shape)}")
+        self._clip = ClipReference(channels=reference.to(self.dit.dtype))
         return latents
 
     def finalize_latent(self, latents, params):

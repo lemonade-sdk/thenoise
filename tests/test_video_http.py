@@ -52,9 +52,9 @@ def _client(pipeline, queue):
     return TestClient(app)
 
 
-def _controller(render):
+def _controller(render, variant: str = "ti2v_5b"):
     class Controller:
-        resolve = property(lambda self: wan_adapter().resolve_video)
+        resolve = property(lambda self: wan_adapter(variant).resolve_video)
 
         def render(self, spec, token, progress, output):
             render(spec, token, progress, output)
@@ -120,6 +120,59 @@ def test_video_t2v_and_i2v_and_content(tmp_path):
             assert seen[-1].lora_specs == {"dit": ["style:0.7"]}
             assert not list(tmp_path.glob("sync_*"))
             assert c.post("/video", json={"model": "wrong", "prompt": "fox"}).status_code == 400
+    finally:
+        queue.close()
+
+
+def _b64_png(color) -> str:
+    """One flat colour, as the wire carries it: base64 of PNG bytes."""
+    buffer = io.BytesIO()
+    Image.new("RGB", (40, 30), color=color).save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def test_a_clip_that_ends_on_a_frame_of_its_own(tmp_path):
+    """The I2V pair takes a last frame and answers `flf2v`."""
+    seen = []
+
+    def fake_render(spec, token, progress, path):
+        seen.append(spec)
+        path.write_bytes(b"\x1aE\xdf\xa3" + b"video")
+
+    queue = JobQueue(tmp_path)
+    try:
+        with _client(_controller(fake_render, "i2v_14b"), queue) as c:
+            first, last = _b64_png("red"), _b64_png("blue")
+            r = c.post("/jobs/video", json={"prompt": "a fox turns into a cat",
+                                            "width": 480, "height": 320, "frames": 9,
+                                            "image": first, "end_image": last})
+            assert r.status_code == 202
+            ident = r.json()["id"]
+            until(lambda: c.get(f"/jobs/{ident}").json()["status"] == "completed")
+            assert seen[-1].mode == "flf2v"
+            assert seen[-1].image == base64.b64decode(first)
+            assert seen[-1].end_image == base64.b64decode(last)
+            assert c.get(f"/jobs/{ident}").json()["resolved"]["mode"] == "flf2v"
+
+            # Refused at submit: a last frame alone, and one that is not an image.
+            alone = c.post("/jobs/video", json={"prompt": "fox", "end_image": last})
+            assert alone.status_code == 400 and "end_image needs image" in alone.json()["error"]
+            broken = c.post("/jobs/video", json={"prompt": "fox", "image": first,
+                                                 "end_image": "not base64!?"})
+            assert broken.status_code == 400 and "end_image" in broken.json()["error"]
+    finally:
+        queue.close()
+
+
+def test_a_variant_without_a_reference_mask_refuses_a_last_frame(tmp_path):
+    queue = JobQueue(tmp_path)
+    try:
+        with _client(_controller(lambda *a: None), queue) as c:
+            r = c.post("/jobs/video", json={"prompt": "fox", "width": 480, "height": 320,
+                                            "frames": 9, "image": _b64_png("red"),
+                                            "end_image": _b64_png("blue")})
+            assert r.status_code == 400
+            assert "no channel for a last one" in r.json()["error"]
     finally:
         queue.close()
 

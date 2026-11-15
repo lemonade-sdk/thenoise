@@ -5,7 +5,7 @@ different models rather than two sizes of one.
 
 | | TI2V-5B | T2V-A14B |
 |---|---|---|
-| Modes | text-to-video, image-to-video | text-to-video, or image-to-video with the I2V pair |
+| Modes | text-to-video, image-to-video | text-to-video, or image-to-video with the I2V pair, which also takes a last frame |
 | Transformer | one checkpoint (`--dit`) | two experts: `--dit` high noise, `--dit-low` low noise |
 | Latent and codec | 48 channels, Wan 2.2 causal 3D VAE, BF16 compute | 16 channels, Wan 2.1 causal 3D VAE, FP16 compute; the I2V pair's transformer takes 36, the extra 20 being mask and reference |
 | Text encoder | UMT5-XXL, FP16 file, BF16 compute | the same file |
@@ -177,7 +177,9 @@ sent under both roles. `GET /lora` lists the roles this model offers.
 The image-to-video A14B pair is the T2V trunk with a wider door: 36 channels, the 20
 extra being a mask and the reference clip concatenated onto the noise at every step.
 Two experts, Euler, the same LoRA roles, and no CLIP vision tower anywhere in it. Its
-release numbers are its own — see [what to send](#what-to-send).
+release numbers are its own — see [what to send](#what-to-send). Send it two images and
+the same door takes a clip that ends as well as starts — see
+[first-and-last-frame](#first-and-last-frame-flf2v).
 
 ### Download
 
@@ -214,6 +216,28 @@ Omit `width` and `height` and the reference decides the clip's size, as it does 
 image edit: its aspect ratio at the 832×480 this variant defaults to. The 5B path
 conditions differently — its first frame is denoised at timestep zero instead of being
 concatenated — but asks for the same request.
+
+### First-and-last-frame (FLF2V)
+
+The same two experts and no third download: send `end_image` beside `image` and the clip is
+pinned at both ends, the model inventing the change between them. Wan 2.2 has no FLF2V
+release and needs none — a concatenated reference carries a mask naming which of its frames
+are given, so lighting its far end as well as its near one is a request, not a checkpoint.
+
+```bash
+curl -s localhost:8000/video -H 'content-type: application/json' --data-binary @- \
+  -o fox_flf2v.mp4 <<'JSON'
+{"model": "wan22", "prompt": "the fox looks up, the snow thickens and the camera pulls back",
+ "image": "<base64 PNG of the first frame>", "end_image": "<base64 PNG of the last frame>"}
+JSON
+```
+
+Both frames are cover-cropped to the clip's canvas, the first deciding its size when the
+request names none, so write the prompt as the change from one to the other. The endpoints
+are conditioning rather than a paste — the clip ends where the run landed, not on your file
+byte for byte — and asking I2V weights for a frame they were never trained to mark costs
+some certainty in the middle. ComfyUI drives this same conditioning on these files, at 81
+frames by default.
 
 ## What to send
 

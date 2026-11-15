@@ -1,46 +1,55 @@
-/* video.js — the layout Generate shows for a video model: T2V / I2V through
+/* video.js — the layout Generate shows for a video model: T2V, I2V and FLF2V through
    POST /jobs/video and the shared job read. Plain global script, loaded AFTER helpers.js. */
 
-let vInputB64 = null;     // base64 (no prefix) of the I2V initial frame
-let vInputDataUrl = null; // the same frame, for the thumbnail
 let vOutUrl = null;       // object URL of the current result
 let vOutMeta = null;      // request + server-resolved settings of the current result
 
 const videoJob = { id: null }; // in flight, for the Cancel button to name
 const VIDEO_PROGRESS = { root: 'v_progress', label: 'v_progress_label', bar: 'v_bar' };
 const VIDEO_POLL = { first: 2500, ceiling: 8000 }; // a clip renders in minutes
+const VIDEO_MODES = {t2v: 'text-to-video', i2v: 'image-to-video',
+                     flf2v: 'first and last frame'};
 
-/* ---------- I2V initial frame ---------- */
+/* ---------- the frames a clip is pinned by ---------- */
 
-async function loadVideoFrame(file) {
+// One entry per request field: what is loaded is what gets sent.
+const vFrames = {
+  image: {b64: null, dataUrl: null, name: null, box: 'video_refs',
+          hint: 'video_dz_hint', label: 'video_dz_name', alt: 'initial frame',
+          title: 'initial frame (image-to-video)'},
+  end_image: {b64: null, dataUrl: null, name: null, box: 'video_end_refs',
+              hint: 'video_end_dz_hint', label: 'video_end_dz_name', alt: 'last frame',
+              title: 'last frame (first and last frame)'},
+};
+
+function renderVideoFrame(field) {
+  const frame = vFrames[field];
+  const box = $(frame.box);
+  box.innerHTML = '';
+  $(frame.hint).style.display = frame.b64 ? 'none' : '';
+  const nameEl = $(frame.label);
+  nameEl.textContent = frame.name || '';
+  nameEl.style.display = frame.name ? 'block' : 'none';
+  if (!frame.b64) return;
+  addThumb(box, {src: frame.dataUrl, alt: frame.alt, cls: 'first',
+                 title: frame.title, onRemove: () => removeVideoFrame(field)});
+}
+
+async function loadVideoFrame(field, file) {
   const image = await readImageFile(file);
   if (!image) return;
-  vInputDataUrl = image.dataUrl;
-  vInputB64 = image.b64;
-  renderVideoRef(file.name);
+  Object.assign(vFrames[field], {dataUrl: image.dataUrl, b64: image.b64, name: file.name});
+  renderVideoFrame(field);
   resetVideoResult();
 }
 
-function removeVideoFrame() {
-  vInputDataUrl = null;
-  vInputB64 = null;
-  renderVideoRef('');
+function removeVideoFrame(field) {
+  // A last frame with nothing to start from is not a request, so this takes it along.
+  for (const key of field === 'image' ? ['image', 'end_image'] : [field]) {
+    Object.assign(vFrames[key], {dataUrl: null, b64: null, name: null});
+    renderVideoFrame(key);
+  }
   resetVideoResult();
-}
-
-function renderVideoRef(name) {
-  const box = $('video_refs');
-  box.innerHTML = '';
-  const hasFrame = !!vInputB64;
-  $('video_dz_hint').style.display = hasFrame ? 'none' : '';
-  const nameEl = $('video_dz_name');
-  nameEl.textContent = name || '';
-  nameEl.style.display = name ? 'block' : 'none';
-  if (!hasFrame) return;
-  addThumb(box, {
-    src: vInputDataUrl, alt: 'initial frame', cls: 'first',
-    title: 'initial frame (image-to-video)', onRemove: removeVideoFrame,
-  });
 }
 
 function resetVideoResult() {
@@ -50,7 +59,9 @@ function resetVideoResult() {
   hideResult('v_video', 'vplaceholder');
 }
 
-bindDropzone('video_dropzone', 'video_file', files => loadVideoFrame(files[0]));
+bindDropzone('video_dropzone', 'video_file', files => loadVideoFrame('image', files[0]));
+bindDropzone('video_end_dropzone', 'video_end_file',
+             files => loadVideoFrame('end_image', files[0]));
 bindSwap('video_swap', 'video_width', 'video_height');
 
 /* ---------- request ---------- */
@@ -70,7 +81,8 @@ function collectVideoSettings() {
   if (output_format) body.output_format = output_format;
   const lora_specs = parseLora($('video_lora_specs').value);
   if (lora_specs) body.lora_specs = lora_specs;
-  if (vInputB64) body.image = vInputB64;
+  if (vFrames.image.b64) body.image = vFrames.image.b64;
+  if (vFrames.end_image.b64) body.end_image = vFrames.end_image.b64;
   return body;
 }
 
@@ -121,8 +133,8 @@ $('video_generate').addEventListener('click', () => {
     onArtifact: async (blob, status) => {
       if (vOutUrl) URL.revokeObjectURL(vOutUrl);
       vOutUrl = URL.createObjectURL(blob);
-      // `resolved` has the grid-snapped size and the seed drawn; the frame is dropped.
-      const { image, ...sent } = body;
+      // `resolved` has the grid-snapped size and the seed drawn; the frames are dropped.
+      const { image, end_image, ...sent } = body;
       vOutMeta = { ...sent, model: status.model, ...status.resolved };
       showVideoResult(vOutUrl);
       vHist.add(vOutUrl, vOutMeta);
@@ -151,7 +163,7 @@ function renderVideoInfo() {
   const m = vOutMeta || {};
   const rows = [];
   if (m.model) rows.push(['Model', m.model, '']);
-  if (m.mode) rows.push([FIELD_LABELS.mode, m.mode === 'i2v' ? 'image-to-video' : 'text-to-video', '']);
+  if (m.mode) rows.push([FIELD_LABELS.mode, VIDEO_MODES[m.mode] || m.mode, '']);
   if (m.prompt) rows.push([FIELD_LABELS.prompt, m.prompt, 'prompt']);
   if (m.negative_prompt) rows.push([FIELD_LABELS.negative_prompt, m.negative_prompt, 'prompt']);
   for (const key of ['width', 'height', 'frame_count', 'fps', 'steps', 'guidance_scale',

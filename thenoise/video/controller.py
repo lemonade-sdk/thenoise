@@ -67,13 +67,13 @@ class VideoPipelineController:
 
             ref: Optional[list[torch.Tensor]] = None
             if spec.image is not None:
-                image = load_image(io.BytesIO(spec.image))
+                images = [load_image(io.BytesIO(data))
+                          for data in (spec.image, spec.end_image) if data is not None]
                 with model.memory.stage("vae", pixels=pixels) as stage:
                     ref = stage.run(
                         lambda: model.encode_references(
                             [pil_to_pixels(f, model.pixel_channels)
-                             for f in model.fit_references([image],
-                                                           (spec.width, spec.height))],
+                             for f in model.fit_references(images, (spec.width, spec.height))],
                             frames=spec.frame_count))
                 token.check()
 

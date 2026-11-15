@@ -337,6 +337,16 @@
     <div class="ref-thumbs" id="video_refs"></div>
   </div>
 
+  <div class="field hidden" id="video_flf2v_field">
+    <label class="label" for="video_end_file">Last frame <span class="hint">the clip moves from the initial frame to this one</span></label>
+    <div class="dropzone" id="video_end_dropzone">
+      <input type="file" id="video_end_file" accept="image/png,image/jpeg" hidden>
+      <div class="dz-hint" id="video_end_dz_hint">Drag &amp; drop an image here or <span class="kbd">click to browse</span></div>
+      <div class="dz-name" id="video_end_dz_name" style="display:none"></div>
+    </div>
+    <div class="ref-thumbs" id="video_end_refs"></div>
+  </div>
+
   <div class="field">
     <label class="label" for="video_prompt">Prompt</label>
     <textarea id="video_prompt" placeholder="Describe the video…"></textarea>
