@@ -199,6 +199,8 @@ async function applyModelState() {
 
   mediumView = hasModel && video ? 'video' : 'generate';
   if (MODEL_VIEWS.includes(shownView)) showView(mediumView);
+  // A video server installs no edit routes at all, so the tab would only open a refusal.
+  $('edit_tab').classList.toggle('hidden', mediumView === 'video');
 
   $('no_model').classList.toggle('hidden', !noModel);
   $('edit_no_model').classList.toggle('hidden', !noModel);
