@@ -74,8 +74,8 @@ class VideoModel(DiffusionModel):
                 spec.width, spec.height, load_image(io.BytesIO(spec.image)))
             spec = spec.model_copy(update={"width": width, "height": height})
         resolved = spec.resolve(self.default_prefs)
-        # Answered here rather than at the switch, so `/videos` refuses a role this
-        # model does not have at submit instead of minutes into the job.
+        # Answered here rather than at the switch, so a request naming a role this
+        # model does not have is refused when it is resolved, not minutes into the job.
         check_lora_roles(resolved.lora_specs, self.lora_components())
         width, height = self.resolve_size(resolved.width, resolved.height)
         if (width, height) != (resolved.width, resolved.height):

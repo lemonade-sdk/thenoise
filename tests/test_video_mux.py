@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from thenoise.video.container import encode_video
-from thenoise.video.jobs import Cancellation, VideoCancelled
+from thenoise.jobs import Cancellation, JobCancelled
 from thenoise.video.spec import VideoSpec
 from conftest import wan_prefs
 
@@ -83,7 +83,7 @@ def test_encoder_cancel_removes_partial_file_and_preserves_existing_output(tmp_p
     def stop_after_one(stage, step, count):
         cancel.cancel()
 
-    with pytest.raises(VideoCancelled):
+    with pytest.raises(JobCancelled):
         encode_video(frames, clip, cancel, target, stop_after_one)
     assert target.read_bytes() == b"old-completed-clip"
     assert not (tmp_path / "clip.mp4.part").exists()

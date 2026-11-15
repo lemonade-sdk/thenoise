@@ -12,7 +12,7 @@ Two orthogonal knobs, one primitive each:
   load time.
 
 The mode is set at exactly five boundaries, one per public entry point:
-``PipelineController.generate`` / ``.edit``, ``VideoPipelineController.render``,
+``PipelineController.produce``, ``VideoPipelineController.render``,
 ``PixelUpscaleController.upscale``, ``ControlMapController.run`` and
 ``Runtime.load``. Anything else runs inside one of them
 and inherits the mode — including the pipeline cache, whose inference tensors are written

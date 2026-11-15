@@ -118,7 +118,7 @@ def _parse(argv):
 def test_serve_builds_settings_and_loads_model(monkeypatch, fake_runtime):
     monkeypatch.setattr(
         "thenoise.api.create_app",
-        lambda runtime, *, video_jobs=None, video_model="": object(),
+        lambda runtime, *, jobs=None: object(),
     )
     monkeypatch.setattr("uvicorn.run", lambda app, host, port: None)
     args = _parse(
@@ -157,7 +157,7 @@ def test_serve_builds_settings_and_loads_model(monkeypatch, fake_runtime):
 def test_serve_without_model_does_not_load(monkeypatch, fake_runtime):
     monkeypatch.setattr(
         "thenoise.api.create_app",
-        lambda runtime, *, video_jobs=None, video_model="": object(),
+        lambda runtime, *, jobs=None: object(),
     )
     monkeypatch.setattr("uvicorn.run", lambda app, host, port: None)
     _serve(_parse(["serve"]))

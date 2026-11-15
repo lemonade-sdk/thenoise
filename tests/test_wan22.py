@@ -68,7 +68,7 @@ from thenoise.vae.wan_video import (
     load_wan_video_vae,
 )
 from thenoise.video.controller import VideoPipelineController
-from thenoise.video.jobs import Cancellation, VideoCancelled
+from thenoise.jobs import Cancellation, JobCancelled
 from thenoise.video.spec import VideoSpec
 
 # ----------------------------------------------------------------- Comfy-Org checkpoint key layout
@@ -892,7 +892,7 @@ def test_cancel_sampling_recovers_for_next_job(fake_video, tmp_path):
         if stage == "sampling" and step == 1:
             token.cancel()
 
-    with pytest.raises(VideoCancelled):
+    with pytest.raises(JobCancelled):
         controller.render(_spec(video), token, cancel_at_one, tmp_path / "clip.mp4")
     controller.render(_spec(video), Cancellation(), lambda *_: None, tmp_path / "clip.mp4")
     assert calls.count("load_dit") == 1  # a cancelled job leaves the components usable
@@ -1019,7 +1019,7 @@ def test_each_expert_takes_its_own_loras(tmp_path):
 
 @pytest.mark.usefixtures("stub_wan_component_loaders")
 def test_a_role_the_model_does_not_offer_is_refused_at_resolve():
-    """/videos answers a bad role at submit, and the two-expert model offers both.
+    """A bad LoRA role is refused when a request is resolved, not after it is queued.
 
     A bare list is the single component's, which is every request written before roles.
     """

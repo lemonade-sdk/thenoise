@@ -1,23 +1,17 @@
-"""Asynchronous video job routes."""
+"""Video routes: the clip served directly, and the video submit of the job API."""
 from __future__ import annotations
 
 import base64
 import binascii
 import io
-import logging
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import FastAPI
-from fastapi.responses import FileResponse
-from starlette.background import BackgroundTask
-from pydantic import BaseModel, ConfigDict
 
-from ..api_errors import error, guarded, json_error
-from ..utils.lora_roles import LoraSpecs
-from .jobs import VideoJobs
+from ..api_errors import error, guarded
+from ..jobs import JobPlan, JobQueue
+from ..jobs_http import content_response, submit_job
 from .spec import VideoSpec
-
-logger = logging.getLogger(__name__)
 
 
 class VideoRequest(VideoSpec):
@@ -52,57 +46,21 @@ class VideoRequest(VideoSpec):
         return VideoSpec(**data)
 
 
-def install_video_routes(app: FastAPI, jobs: VideoJobs, model_name: str) -> None:
-    def checked_spec(req: VideoRequest) -> VideoSpec:
+def install_video_routes(app: FastAPI, queue: JobQueue, planner: Callable[[VideoSpec], JobPlan],
+                         model_name: str) -> None:
+    def checked_plan(req: VideoRequest) -> JobPlan:
         if req.model and req.model != model_name:
             raise ValueError(f"model {req.model!r} is not loaded")
-        return req.to_spec()
-
-    def video_file(path):
-        media = "video/mp4" if path.suffix == ".mp4" else "video/webm"
-        # The file exists to be handed out once, so it goes with the response.
-        return FileResponse(path, media_type=media,
-                            background=BackgroundTask(path.unlink, missing_ok=True))
+        return planner(req.to_spec())
 
     @app.post("/video")
     def generate_video(req: VideoRequest):
         """Return the generated video directly, using the same renderer as video jobs."""
-        return guarded("video generation",
-                       lambda: jobs.render_sync(checked_spec(req)), video_file,
-                       envelope=error)
+        return guarded("video generation", lambda: queue.render_sync(checked_plan(req)),
+                       content_response, envelope=error)
 
-    # Everything past here is the job API, which answers JSON -- refusals included.
-    @app.post("/videos", status_code=202)
-    def create_video(req: VideoRequest):
-        # A full queue and a model that cannot take the job are neither the caller's
-        # fault nor a fault worth a traceback.
-        return guarded(
-            "video job", lambda: jobs.submit(checked_spec(req)),
-            lambda snapshot: {key: snapshot[key]
-                              for key in ("id", "status", "model", "created_at")},
-            envelope=json_error, statuses={OverflowError: 429, RuntimeError: 503})
-
-    @app.get("/videos/{video_id}")
-    def get_video(video_id: str):
-        result = jobs.status(video_id)
-        if result is None:
-            return json_error(404, "unknown video")
-        return result
-
-    @app.get("/videos/{video_id}/content")
-    def get_video_content(video_id: str):
-        status, path = jobs.content(video_id)
-        if status == "not_found":
-            return json_error(404, "unknown video")
-        if status != "completed":
-            return json_error(409, f"video is {status}")
-        if not path.is_file():
-            return json_error(404, "video content missing")
-        return video_file(path)
-
-    @app.post("/videos/{video_id}/cancel")
-    def cancel_video(video_id: str):
-        if not jobs.cancel(video_id):
-            return json_error(409, "video not found or not cancellable")
-        return {"status": "canceling"}
-
+    # The job API answers JSON -- refusals included -- and its reads are the shared
+    # `/jobs/{id}` family, not video's own.
+    @app.post("/jobs/video", status_code=202)
+    def create_video_job(req: VideoRequest):
+        return submit_job(queue, "video job", lambda: checked_plan(req))

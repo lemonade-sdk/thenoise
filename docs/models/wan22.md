@@ -13,7 +13,7 @@ different models rather than two sizes of one.
 | Defaults | 1280×704, 33 frames, 24 FPS, 12 steps, CFG 5.0, UniPC, WebM, flow shift 5 | 832×480, 33 frames, 16 FPS, 40 steps, Euler, CFG 4.0, flow shift 12, high/low boundary 0.875 (the I2V pair: shift 5, boundary 0.900, CFG 3.5 on both halves) |
 
 Both answer the same video request over the same [HTTP API](../api.md#video-generation):
-`POST /video` generates and returns the clip, `POST /videos` queues a job. Output is
+`POST /video` generates and returns the clip, `POST /jobs/video` queues a job. Output is
 MP4/H.264 or WebM/VP9 on the **`4n+1`** temporal grid, with no fixed maximum frame count.
 
 > Commands below assume a dev checkout (`./thenoise.sh`, `.venv/bin/python`).
@@ -98,7 +98,7 @@ print(json.dumps({
 PYTHON
 ```
 
-For an asynchronous I2V job, send the same body to `POST /videos` — see
+For an asynchronous I2V job, send the same body to `POST /jobs/video` — see
 [Video jobs](#video-jobs).
 
 ### Performance (Strix Halo)
@@ -236,14 +236,16 @@ Each half takes its own LoRA file, named for the mode of the pair it belongs to.
 Both variants queue the same way:
 
 ```bash
-curl -sS http://127.0.0.1:8000/videos -H 'content-type: application/json' \
+curl -sS http://127.0.0.1:8000/jobs/video -H 'content-type: application/json' \
   -d '{"prompt":"A fox walking through snow","frames":33,"steps":8}'
 ```
 
-The response contains a video ID. Poll `/videos/{id}`, whose `progress` reports `stage`,
-`step` and `of`, and fetch `/videos/{id}/content` once the status is `completed`. Send
-`POST /videos/{id}/cancel` to request cancellation. I2V uses the same flow and the same
-base64 `image` field.
+The response contains the job ID. Poll `/jobs/{id}`, whose `progress` reports `stage`,
+`step` and `of`, and fetch `/jobs/{id}/content` once the status is `completed`. Send
+`POST /jobs/{id}/cancel` to request cancellation. I2V uses the same flow and the same
+base64 `image` field. The whole lifecycle is described in
+[Asynchronous jobs](../api.md#asynchronous-jobs), which is also what a queued image
+goes through.
 
 For LoRAs, supply `--lora-dir ./models/loras` when starting the server, then
 send `"lora_specs": ["style:0.8"]` in either video request — the same conventions as

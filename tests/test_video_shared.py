@@ -11,7 +11,7 @@ from thenoise.models.wan_video import VARIANTS, Wan22Model
 from thenoise.vae.wan22 import WAN22_LATENTS_MEAN, WAN22_LATENTS_STD
 from thenoise.vae.wan_video import _comfy_vae_config
 from thenoise.video.controller import VideoPipelineController
-from thenoise.video.jobs import Cancellation
+from thenoise.jobs import Cancellation
 from thenoise.video.spec import VideoSpec
 
 

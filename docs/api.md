@@ -28,17 +28,78 @@ Start the server with [`serve`](cli.md#serve-a-model-over-http) and TheNoise exp
 | `POST` | `/text2image` | Generate an image |
 | `POST` | `/edit` | Edit an image from an instruction (image + prompt → edited image); requires an editing-capable model |
 | `POST` | `/video` | Generate a video synchronously, returning MP4 or WebM bytes |
-| `POST` | `/videos` | Queue an asynchronous video generation (202) |
-| `GET` | `/videos/{id}` | Get job status and progress |
-| `GET` | `/videos/{id}/content` | Download a completed video |
-| `POST` | `/videos/{id}/cancel` | Cancel a queued/running video |
+| `POST` | `/jobs/text2image` | Queue a generation (202) |
+| `POST` | `/jobs/edit` | Queue an edit (202) |
+| `POST` | `/jobs/video` | Queue a video generation (202) |
+| `GET` | `/jobs/{id}` | Job status, progress, and what the request resolved to |
+| `GET` | `/jobs/{id}/content` | Download a finished job's image or clip |
+| `POST` | `/jobs/{id}/cancel` | Cancel a queued or running job |
+
+## Asynchronous jobs
+
+Each generator has a queued twin: the body you would send to `/text2image`, `/edit` or
+`/video`, sent to `/jobs/text2image`, `/jobs/edit` or `/jobs/video` instead. The request
+is answered straight away with **HTTP 202** and the job that now owns it:
+
+```json
+{"id": "job_2f9c4a7d…", "kind": "image", "status": "queued", "model": "krea2",
+ "created_at": "2026-01-08T09:12:44.019236+00:00"}
+```
+
+`kind` is the medium the job produces (`image` or `video`) and `status` runs
+`queued → running → completed`, or ends `failed` — with `error` saying why — or
+`canceled`. `GET /jobs/{id}` adds the two things worth polling for:
+
+```json
+{"id": "job_2f9c4a7d…", "kind": "image", "status": "running", "model": "krea2",
+ "created_at": "…", "started_at": "…",
+ "progress": {"stage": "sampling", "step": 6, "of": 8},
+ "resolved": {"mode": "t2i", "width": 1024, "height": 1024, "steps": 8, "sigmas": null,
+              "guidance_scale": 1.0, "sampler": "euler", "seed": 7412,
+              "upscale_factor": 1.0, "upscale_type": "refined", "pixel_upscaler": null,
+              "kv_cache": false, "ref_method": null, "lora_specs": {}}}
+```
+
+`resolved` is the request as this model will actually run it: every default filled in,
+and the seed already drawn, so a request that left `seed` out is still reproducible from
+its own job. Working it out costs nothing, so it happens **at submit** — which is also
+where a request this model cannot serve is answered with **400**, rather than after it
+has waited behind somebody else's generation.
+
+`progress.stage` runs `loading`, then `conditioning`, `sampling` (counting `step` of
+`of`), `decoding` and `postprocessing` for an image — with `upscaling` between sampling
+and decode when the request refines — and `loading`, `sampling`, `decoding`, `encoding`
+for a video. A finished job's stage is its terminal status.
+
+Once the status is `completed`, `GET /jobs/{id}/content` answers with the PNG or the
+MP4/WebM bytes whose `mime_type` the status names. A finished artifact is **handed out
+once**: serving it deletes it, as does the queue making room for a newer job and the
+server exiting. Fetch it again and the answer is **404**; fetch it before completion and
+the answer is **409**. While they wait, outputs live under `<cache-dir>/jobs`.
+
+`POST /jobs/{id}/cancel` drops a queued job there and asks a running one to stop at its
+next step: the record stays `running` until the engine acknowledges it, then becomes
+`canceled`. Four requests may wait behind the one being rendered (**429** when the queue
+is full), and the thirty-two most recent finished jobs are kept, oldest dropped first.
+
+Only generation and editing are queueable — `/upscale` and `/controlmap` answer directly,
+neither taking long enough to be worth polling for. `out`, the synchronous endpoints'
+`png`-or-`json` switch, is refused with **400** by a submit: a job's bytes already have
+an address of their own.
+
+```bash
+id=$(curl -sS localhost:8000/jobs/text2image -H 'content-type: application/json' \
+       -d '{"prompt":"a fox walking in the snow","steps":8}' | jq -r .id)
+curl -sS localhost:8000/jobs/$id | jq -r .status      # queued, running, completed
+curl -sS localhost:8000/jobs/$id/content -o fox.png
+```
 
 ## Video generation
 
-When a video model is loaded, TheNoise serves the model through either the
-synchronous `POST /video` endpoint (video bytes directly), or the asynchronous
-job endpoints (`POST /videos` + polling). Both accept the same JSON body and use
-the loaded model's defaults when optional fields are omitted.
+When a video model is loaded, TheNoise serves it through either the synchronous
+`POST /video` endpoint (video bytes directly), or `POST /jobs/video`, which queues the
+same body — see [Asynchronous jobs](#asynchronous-jobs). Both use the loaded model's
+defaults when optional fields are omitted.
 
 | Field | Type | Description |
 |---|---|---|
@@ -80,17 +141,8 @@ curl -fS http://127.0.0.1:8000/video \
 
 The image is cover-cropped to the requested output size and encoded as first-frame
 conditioning. For a platform-independent Python-based example, see the
-[Wan 2.2 model page](models/wan22.md#image-to-video). To queue I2V instead,
-send the same request to `POST /videos` and poll its job ID.
-
-### Asynchronous jobs
-
-For asynchronous generation, send the same body to `/videos`. A successful
-request returns HTTP 202 with `id`, `status`, `model` and `created_at`. Poll
-`GET /videos/{id}`: the `progress` object reports `stage`, `step` and `of`.
-Once `status` becomes `completed`, download `/videos/{id}/content`. This returns
-HTTP 409 until completion. To stop a queued or running job use
-`POST /videos/{id}/cancel`. The queue returns HTTP 429 when full.
+[Wan 2.2 model page](models/wan22.md#image-to-video). To queue I2V instead, send the
+same request to `POST /jobs/video`.
 
 The normal `GET /lora` endpoint also lists LoRAs available to a loaded video
 model, along with the `roles` a `lora_specs` request may name. A bare list goes
@@ -156,6 +208,9 @@ index_timestep_zero` (see [`/edit`](#post-edit)).
 Returns a PNG image directly (`Content-Type: image/png`).
 
 If no model is loaded, `/text2image` returns **HTTP 503**.
+
+The same body sent to `/jobs/text2image` is queued instead of rendered: see
+[Asynchronous jobs](#asynchronous-jobs).
 
 ### Example
 
@@ -223,6 +278,8 @@ curl -s localhost:8000/edit \
   -d '{"image":"<base64 png>","prompt":"a fox wearing a red scarf","steps":4,"sampler":"euler"}' \
   --output /tmp/fox_edited.png
 ```
+
+`/jobs/edit` queues the same body.
 
 ## `POST /upscale`
 
@@ -385,15 +442,15 @@ A route answers a refusal in the format it speaks.
 | Endpoints | Refusal body |
 |-----------|--------------|
 | `/text2image`, `/edit`, `/upscale`, `/controlmap`, `/video` | `text/plain`: the reason |
-| `/videos`, `/videos/{id}`, `/videos/{id}/content`, `/videos/{id}/cancel` | `{"error": "<reason>"}` |
+| `/jobs/*` | `{"error": "<reason>"}` |
 
 | Status | Meaning |
 |--------|---------|
-| `400` | A value the loaded model refuses: a capability it lacks (e.g. `/edit` without an editing model, `kv_cache` with `ref_method: index`), a sampler it does not implement, an `image` it cannot decode |
-| `404` | No such video job, or its content is gone |
-| `409` | Video job not in the state the request needs: content before completion, cancel after it settled |
-| `429` | The video queue is full |
+| `400` | A value the loaded model refuses: a capability it lacks (e.g. `/edit` without an editing model, `kv_cache` with `ref_method: index`), a sampler it does not implement, an `image` it cannot decode. A job's `400` arrives at submit, never in its status |
+| `404` | No such job, or its content has already been handed out |
+| `409` | A job is not in the state the request needs: content before completion, cancel after it settled |
+| `429` | The job queue is full |
 | `500` | Unexpected failure, logged with a traceback |
-| `503` | No model loaded for `/text2image` / `/edit`; a video job the service cannot take, because no video model is loaded or it is shutting down |
+| `503` | No model loaded for `/text2image` / `/edit`, or a job the queue cannot take because nothing is loaded or the server is shutting down |
 
 A body the request contract itself refuses — an unknown field, a type it cannot read, a value outside its bounds (`frames: 0`) — is FastAPI's `422` JSON report.

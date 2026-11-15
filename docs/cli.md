@@ -46,7 +46,7 @@ Then open <http://localhost:8000/> for the web UI. Full endpoint reference:
 | `--port` | `8000` | Bind port |
 | `--upscaler-dir` | — | Directory containing pixel upscaler `.safetensors` files (e.g. Real-ESRGAN); selected per-request via `pixel_upscaler` |
 | `--controlmap-dir` | — | Directory of control-map checkpoints; each subdirectory's `config.json` declares the kind it implements |
-| `--cache-dir` | `~/.cache/thenoise` | Where generated files are kept; completed video clips land in `<cache-dir>/videos` |
+| `--cache-dir` | `~/.cache/thenoise` | Where generated files are kept; queued jobs' images and clips land in `<cache-dir>/jobs` |
 
 ## Generate a single image
 

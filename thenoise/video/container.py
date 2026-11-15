@@ -9,7 +9,7 @@ import os
 from pathlib import Path
 from typing import Iterable
 
-from .jobs import Cancellation
+from thenoise.jobs import Cancellation
 from .spec import ResolvedVideo
 
 
