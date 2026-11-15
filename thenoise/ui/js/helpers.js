@@ -613,12 +613,37 @@ async function errorMessage(res) {
   }
 }
 
-// Every pane's fetch: a refused connection means the engine is not running, not merely slow.
-async function fetchOrGone(url, init) {
+// A browser waits forever on a connection that is accepted but never answered, and a
+// stopped server is often exactly that: the page then counts seconds on a request that
+// will never return. Routes that owe an immediate answer pass this as their patience;
+// /upscale and the extractors hold one open for a whole render and pass none.
+const PATIENCE = 10000;
+
+// One fetch for every request the panes make: a connection the server refused means the
+// engine is not running, not merely slow, and that difference is worth saying out loud.
+async function fetchOrGone(url, init, patience = 0) {
+  const ctl = patience ? new AbortController() : null;
+  const deadline = ctl && setTimeout(() => ctl.abort(), patience);
   try {
-    return await fetch(url, init);
+    // The deadline covers only the wait for an answer: once the headers are in, a large
+    // artifact may take as long as it likes coming down.
+    return await fetch(url, { ...init, signal: ctl ? ctl.signal : undefined });
   } catch (e) {
     throw new Error('the server is not answering — is it still running?', { cause: e });
+  } finally {
+    if (deadline) clearTimeout(deadline);
+  }
+}
+
+// /health reads four attributes and a job's status the queue's own lock, so both are
+// answered while the engine renders: a failed read whose /health also fails is a server
+// that has gone, and there is nothing left to wait for.
+async function serverGone() {
+  try {
+    await fetchOrGone('/health', undefined, PATIENCE);
+    return false;
+  } catch (e) {
+    return true;
   }
 }
 
@@ -638,7 +663,7 @@ async function postJSONData(url, body) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
-  });
+  }, PATIENCE);
   if (!res.ok) throw new Error(await errorMessage(res));
   return await res.json();
 }
@@ -646,7 +671,7 @@ async function postJSONData(url, body) {
 /* ---------- queued jobs: submit, watch, fetch ----------
    Reads are chained rather than timed, so a slow answer delays the next one instead of
    stacking requests behind it. */
-const JOB_POLL = { first: 800, ceiling: 2500, growth: 1.5, retries: 2 };
+const JOB_POLL = { first: 800, ceiling: 2500, growth: 1.5, retries: 3 };
 
 // Stage names are their own labels except this one.
 const JOB_STAGE_LABELS = { postprocessing: 'post-processing' };
@@ -663,13 +688,14 @@ async function waitVisible() {
 
 // Null when the server no longer knows the id: a restarted server dropped its queue.
 async function fetchJob(id) {
-  const res = await fetchOrGone('/jobs/' + id);
+  const res = await fetchOrGone('/jobs/' + id, undefined, PATIENCE);
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(await errorMessage(res));
   return await res.json();
 }
 
-// `first` is the wait before the first read; later waits grow to `ceiling`.
+// `first` is the wait before the first read, later ones grow to `ceiling`; a failed read
+// is forgiven up to `retries` times, but only for as long as /health keeps answering.
 async function pollJob(id, onProgress, { first = JOB_POLL.first,
                                          ceiling = JOB_POLL.ceiling } = {}) {
   let delay = first;
@@ -682,7 +708,8 @@ async function pollJob(id, onProgress, { first = JOB_POLL.first,
     try {
       status = await fetchJob(id);
     } catch (e) {
-      // A status read is answered even mid-render, so silence twice means the server is gone.
+      // One look at /health settles it: gone means there is nothing left to wait for.
+      if (await serverGone()) throw e;
       if (++misses >= JOB_POLL.retries) throw e;
       continue;
     }
@@ -747,7 +774,7 @@ async function runQueuedJob({ job, submit, body, btn, cancelBtn, overlay,
       if (status.status === 'canceled') return { state: 'error', text: 'canceled' };
       if (status.status !== 'completed') throw new Error(status.error || status.status);
       // Serving an artifact unlinks it: this read is the only one there will be.
-      const res = await fetchOrGone('/jobs/' + job.id + '/content');
+      const res = await fetchOrGone('/jobs/' + job.id + '/content', undefined, PATIENCE);
       if (!res.ok) throw new Error('downloading the result failed: ' + await errorMessage(res));
       await onArtifact(await res.blob(), status);
       return { state: 'done', text: elapsed() };
