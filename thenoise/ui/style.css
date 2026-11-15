@@ -1075,6 +1075,27 @@ body.rgba_out .stage img {
   border-radius: 0 6px 0 0;
 }
 
+/* ---------- initial / last frame pair ---------- */
+.frame-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: .4rem .6rem;
+}
+
+.frame-fields > .field {
+  display: grid;
+  grid-row: span 3;
+  grid-template-rows: subgrid;
+}
+
+.frame-fields:has(> .field.hidden) > .field:not(.hidden) {
+  grid-column: 1 / -1;
+}
+
+.frame-fields:not(:has(> .field:not(.hidden))) {
+  display: none;
+}
+
 /* ---------- upscale single / result panels ---------- */
 .stage .single, .stage .result {
   position: relative;
@@ -1176,6 +1197,10 @@ body.rgba_out .stage img {
   }
   .dropzone {
     min-height: 120px;
+  }
+
+  .frame-fields {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   /* larger range thumbs for fingers */
