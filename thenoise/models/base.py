@@ -97,7 +97,7 @@ class DiffusionModel(LoRASupport, ABC):
     # image and video, so ``/health`` needs no per-medium table and ``capability()`` is
     # one lookup. Adapters override only the entries they differ on, merging as above.
     # Reported verbatim by ``/health`` so the UI can gate its controls.
-    CAPABILITIES: ClassVar[Dict[str, bool]] = {
+    CAPABILITIES: ClassVar[Dict[str, Any]] = {
         # Reference-latent editing: image + instruction -> edited image. Requires
         # overriding ``encode_reference``/``pack_reference_latent``.
         "edit": False,
@@ -107,11 +107,7 @@ class DiffusionModel(LoRASupport, ABC):
         # A latent upscaler, i.e. ``_create_upscaler``. True because it is an abstract
         # method every model with one implements; a model without one says False.
         "upscale": True,
-        # Anything at all temporal, i.e. a 5D latent and a video request surface.
-        "video": False,
-        # Text -> video, and image -> video.
-        "t2v": False,
-        "i2v": False,
+        "video": None,
     }
 
     # The run's caches: created by ``start_kv_caches``, dropped by ``end_kv_caches``.
@@ -200,8 +196,8 @@ class DiffusionModel(LoRASupport, ABC):
         return value
 
     # ------------------------------------------------------------ capabilities
-    def capability(self, name: str) -> bool:
-        """True when this adapter implements capability ``name`` (see ``CAPABILITIES``).
+    def capability(self, name: str) -> Any:
+        """Value for capability ``name`` (see ``CAPABILITIES``).
 
         Raises ``KeyError`` on an unlisted name.
         """

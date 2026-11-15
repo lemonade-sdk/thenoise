@@ -49,7 +49,7 @@ is answered straight away with **HTTP 202** and the job that now owns it:
 
 `kind` is the medium the job produces (`image` or `video`) and `status` runs
 `queued → running → completed`, or ends `failed` — with `error` saying why — or
-`canceled`. `GET /jobs/{id}` adds the two things worth polling for:
+`canceled`. `GET /jobs/{id}` adds progress and the resolved request:
 
 ```json
 {"id": "job_2f9c4a7d…", "kind": "image", "status": "running", "model": "krea2",
@@ -63,9 +63,8 @@ is answered straight away with **HTTP 202** and the job that now owns it:
 
 `resolved` is the request as this model will actually run it: every default filled in,
 and the seed already drawn, so a request that left `seed` out is still reproducible from
-its own job. Working it out costs nothing, so it happens **at submit** — which is also
-where a request this model cannot serve is answered with **400**, rather than after it
-has waited behind somebody else's generation.
+its own job. It is worked out at submit, which is also where a request this model cannot
+serve is answered with **400**.
 
 `progress.stage` runs `loading`, then `conditioning`, `sampling` (counting `step` of
 `of`), `decoding` and `postprocessing` for an image — with `upscaling` between sampling
@@ -83,17 +82,14 @@ next step: the record stays `running` until the engine acknowledges it, then bec
 `canceled`. Four requests may wait behind the one being rendered (**429** when the queue
 is full), and the thirty-two most recent finished jobs are kept, oldest dropped first.
 
-`GET /jobs` lists what the queue remembers — each entry exactly the record `GET /jobs/{id}`
-gives, oldest first — so a job whose id was not kept is still retrievable and still
-cancellable. Nothing ages out on a clock: the list shrinks when a new submit needs room
-and when the server exits, and a restart empties it along with the files under
-`<cache-dir>/jobs`. A record outlives its bytes, so a fetched job keeps answering
-`completed` while its content route answers 404.
+`GET /jobs` lists the jobs the queue still holds, oldest first, each entry exactly the
+record `GET /jobs/{id}` gives. It shrinks when a submit needs room and when the server
+exits; a restart empties it and the files under `<cache-dir>/jobs` with it. A record
+outlives its bytes: a fetched job stays `completed` while its content answers 404.
 
-Only generation and editing are queueable — `/upscale` and `/controlmap` answer directly,
-neither taking long enough to be worth polling for. `out`, the synchronous endpoints'
-`png`-or-`json` switch, is refused with **400** by a submit: a job's bytes already have
-an address of their own.
+Only generation and editing are queueable: `/upscale` and `/controlmap` have no queued
+twin. `out`, the synchronous endpoints' `png`-or-`json` switch, is refused with **400**
+by a submit.
 
 ```bash
 id=$(curl -sS localhost:8000/jobs/text2image -H 'content-type: application/json' \
@@ -164,17 +160,24 @@ unused.
 
 ```json
 {"status": "ok", "models": ["qwen_image"],
- "capabilities": {"edit": true, "kv_cache": true, "upscale": true,
-               "video": false, "t2v": false, "i2v": false}}
+  "capabilities": {"edit": true, "kv_cache": true, "upscale": true, "video": null}}
+```
+
+With a video model:
+
+```json
+{"status": "ok", "models": ["wan22"],
+  "capabilities": {"edit": false, "kv_cache": false, "upscale": false,
+                   "video": {"t2v": true, "i2v": true}}}
 ```
 
 `models` is empty until a DiT is loaded, and `capabilities` is the loaded
 adapter's `CAPABILITIES` dict verbatim (`{}` with no model) - the web UI uses it
 to gate the Edit tab and the KV-cache control, and a request asking for a
 capability the model lacks is rejected with HTTP 400 rather than silently
-ignored. One vocabulary serves both mediums, so a video model answers the same
-keys with `video`/`t2v`/`i2v` true and `upscale` false, and `i2v` follows the
-released variant rather than the model name.
+ignored. A medium's own capabilities are nested under the medium's name, and a
+model of another medium answers that key with `null`. `i2v` follows the loaded
+variant rather than the model name.
 
 ## `POST /text2image`
 

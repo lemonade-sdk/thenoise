@@ -46,7 +46,7 @@ class Segment:
 
 
 class VideoModel(DiffusionModel):
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "video": True}
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "video": {"t2v": False, "i2v": False}}
 
     #: The video preferences every adapter shares. What a release decides for itself —
     #: frame count, frame rate, size, steps — belongs to that release and is absent here;
@@ -69,7 +69,7 @@ class VideoModel(DiffusionModel):
         """Resolve optional request values, then the size onto this model's grid."""
         # A reference answers the size when the request named none, as it does for a
         # still edit; `resolve_size` below rounds the answer onto the grid.
-        if spec.image is not None and self.capability("i2v"):
+        if spec.image is not None and self.capability("video")["i2v"]:
             width, height = self.size_from_reference(
                 spec.width, spec.height, load_image(io.BytesIO(spec.image)))
             spec = spec.model_copy(update={"width": width, "height": height})

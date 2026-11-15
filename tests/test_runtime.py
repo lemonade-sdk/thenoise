@@ -96,6 +96,27 @@ def test_model_capabilities_are_reported_verbatim(catalog):
     assert runtime.model_capabilities()["edit"] is True
 
 
+def test_a_video_model_reports_inside_its_own_group(monkeypatch, catalog):
+    """A medium's features are nested under the medium, which is what keeps a growing
+    video vocabulary off the top level."""
+    class FakeVideo(StubVideo):
+        name = "video-test"
+        CAPABILITIES = {**StubVideo.CAPABILITIES,
+                        "video": {"t2v": True, "i2v": False}}
+
+        @staticmethod
+        def detect(_checkpoint):
+            return True
+
+    catalog()
+    monkeypatch.setattr(model_catalog, "resolve", lambda _path: FakeVideo)
+    runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
+    runtime.load(ModelPaths("dit", "vae", "te"))
+    caps = runtime.model_capabilities()
+    assert caps["video"] == {"t2v": True, "i2v": False}
+    assert "t2v" not in caps
+
+
 def _counting_model(events: list):
     """A catalog entry that records its own construction and collection."""
 

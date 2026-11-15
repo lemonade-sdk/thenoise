@@ -1119,8 +1119,8 @@ def test_one_adapter_claims_every_transformer(tmp_path):
 
 def test_the_model_name_is_one_machine_string():
     assert Wan22Model.name == "wan22"
-    assert wan_adapter("ti2v_5b").CAPABILITIES["i2v"] is True
-    assert wan_adapter("t2v_14b").CAPABILITIES["i2v"] is False
+    assert wan_adapter("ti2v_5b").CAPABILITIES["video"]["i2v"] is True
+    assert wan_adapter("t2v_14b").CAPABILITIES["video"]["i2v"] is False
 
 
 def test_a_two_expert_transformer_demands_its_second_file(tmp_path):
@@ -1314,7 +1314,7 @@ def test_the_concatenating_variant_is_read_from_the_patch_embedding():
     """One tensor separates the two A14B releases, and it is the one a variant is."""
     i2v = wan_adapter("i2v_14b")
     assert i2v.variant is VARIANTS["i2v_14b"]
-    assert i2v.CAPABILITIES["i2v"] is True
+    assert i2v.CAPABILITIES["video"]["i2v"] is True
     assert i2v.pref("ref_method") == "concat_channels"
     # The pair's own release schedule: later handover, half the T2V shift.
     assert i2v.variant.experts.boundary == 0.900 > A14B.experts.boundary

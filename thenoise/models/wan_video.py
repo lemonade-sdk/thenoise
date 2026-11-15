@@ -115,7 +115,8 @@ class Wan22Model(VideoModel):
 
     name = "wan22"
     # A clip is made bigger by being generated bigger, not by upscaling a latent.
-    CAPABILITIES = {**VideoModel.CAPABILITIES, "t2v": True, "upscale": False}
+    CAPABILITIES = {**VideoModel.CAPABILITIES, "upscale": False,
+                    "video": {**VideoModel.CAPABILITIES["video"], "t2v": True}}
     # The answer for the variants that say nothing: the conditioned I2V frame is
     # denoised at timestep zero, which is what the edit contract calls
     # `index_timestep_zero`.
@@ -183,7 +184,9 @@ class Wan22Model(VideoModel):
         self.params: Wan22Params = detect_params(self.dit_path)
         self.variant = variant_for(self.params)
         # `i2v` is the one capability a variant, rather than the model, decides.
-        self.CAPABILITIES = {**self.CAPABILITIES, "i2v": self.variant.i2v}
+        self.CAPABILITIES = {**self.CAPABILITIES,
+                             "video": {**self.CAPABILITIES["video"],
+                                       "i2v": self.variant.i2v}}
         # Both headers are read before either module is built: the clip's latent is the
         # only thing that crosses between them and the normalization table is keyed by
         # its width, so a mismatched `--vae` is refused here rather than mid-run.

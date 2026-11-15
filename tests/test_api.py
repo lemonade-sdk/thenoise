@@ -122,14 +122,16 @@ def _rgba_png_b64(size=(2, 2)) -> str:
 def test_health_reports_the_loaded_model():
     runtime = _runtime()
     runtime._model = type("M", (), {
-        "CAPABILITIES": {"edit": True, "kv_cache": True},
+        "CAPABILITIES": {"edit": True, "kv_cache": True, "upscale": True, "video": None},
         "pixel_channels": 4,
     })()
     res = _endpoint(create_app(runtime), "/health")()
 
     assert res["models"] == ["fake"]
-    # The UI gates Edit, the KV cache and transparent output on these.
-    assert res["capabilities"] == {"edit": True, "kv_cache": True}
+    # The UI gates Edit, the KV cache and transparent output on these, and an image model
+    # answers the video group null rather than leaving the key out.
+    assert res["capabilities"] == {"edit": True, "kv_cache": True, "upscale": True,
+                                   "video": None}
     assert res["pixel_channels"] == 4
 
 

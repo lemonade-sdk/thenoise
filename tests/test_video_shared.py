@@ -27,7 +27,8 @@ def test_video_base_is_usable_without_wan(tmp_path):
     """A future adapter reuses resolution, arbitrary components and teardown."""
     class AnotherVideo(StubVideo):
         name = "other-video"
-        CAPABILITIES = {**VideoModel.CAPABILITIES, "t2v": True}
+        CAPABILITIES = {**VideoModel.CAPABILITIES,
+                        "video": {**VideoModel.CAPABILITIES["video"], "t2v": True}}
         DEFAULT_PREFS = {**VideoModel.DEFAULT_PREFS,
                          "width": 640, "height": 384, "frames": 17, "fps": 25,
                          "steps": 8, "guidance_scale": 1.0,
@@ -76,13 +77,12 @@ def test_every_released_variant_answers_every_request_preference():
 
 
 def test_an_adapter_declines_the_features_it_does_not_implement():
-    """One capability vocabulary, so `/health` needs no per-medium table — and the
-    vocabulary is answered per model: `upscale` False is Wan's own declaration, not
-    something the video medium answers for it, because `_create_upscaler` is abstract
-    and a model has to say what it built.
+    """The vocabulary is answered per model: `upscale` False is Wan's own declaration,
+    not something the video medium answers for it, because `_create_upscaler` is
+    abstract and a model has to say what it built.
     """
     model = wan_adapter()
-    assert model.capability("video") and model.capability("t2v")
+    assert model.capability("video")["t2v"]
     assert not model.capability("upscale") and not model.capability("edit")
     with pytest.raises(NotImplementedError, match="no latent upscaler"):
         model.get_upscaler()
