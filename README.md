@@ -70,8 +70,9 @@ New models are added over time. PRs adding model support are welcome.
 | **Wan 2.2 T2V-A14B**, one expert per half of the schedule | ✓ | — | [wan22](docs/models/wan22.md#t2v-a14b-two-experts) |
 | **Wan 2.2 I2V-A14B**, the same experts at 36 input channels | — | ✓ | [wan22](docs/models/wan22.md#i2v-a14b) |
 
-Video requests are supported synchronously (`POST /video`) and through the
-job API (`POST /videos`); see the [HTTP API](docs/api.md#video-generation).
+Every generator answers directly (`POST /text2image`, `POST /edit`, `POST /video`)
+and can also be queued and polled (`POST /jobs/text2image`, `POST /jobs/edit`,
+`POST /jobs/video`); see the [HTTP API](docs/api.md#asynchronous-jobs).
 To animate a still image, follow the [image-to-video example](docs/models/wan22.md#image-to-video).
 
 ## How does it compare to ComfyUI?

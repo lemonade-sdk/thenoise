@@ -17,11 +17,11 @@ import torch
 from tqdm import tqdm
 
 from thenoise.inference import inference
+from thenoise.jobs import Cancellation, stepping
 from thenoise.models.config import EncodePromptArgs, VideoSamplingParams
 from thenoise.samplers import create_sampler
 from thenoise.utils.image_tensor import load_image, pil_to_pixels, pixels_to_pil
 from thenoise.video.container import encode_video
-from thenoise.video.jobs import Cancellation
 from thenoise.video.spec import ResolvedVideo, VideoSpec
 
 logger = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ class VideoPipelineController:
         """
         return create_sampler(params.sampler, self.model).sample(
             x, list(segment.steps), cond, segment.guidance_scale, params.seed,
-            step_callback=_stepping(token, progress, done, total))
+            step_callback=stepping(token, progress, "sampling", done, total))
 
     def _mux(self, latents, spec: ResolvedVideo, token: Cancellation,
              progress, output: Path) -> None:
@@ -134,20 +134,6 @@ class VideoPipelineController:
 
         progress("encoding", 0, total)
         encode_video(frames(), spec, token, output, progress)
-
-
-def _stepping(token: Cancellation, progress, done: int, total: int):
-    """The sampler's per-step hook: one progress tick, one cancellation check.
-
-    ``done`` is the steps already taken by earlier segments, so the job sees one clock
-    however many spans the schedule was cut into.
-    """
-    def step(x, i, _total):
-        progress("sampling", done + i, total)
-        token.check()
-        return x
-
-    return step
 
 
 __all__ = ["VideoPipelineController"]

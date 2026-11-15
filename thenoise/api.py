@@ -1,5 +1,6 @@
-"""Focused HTTP API: one endpoint per image job, synchronous, lock-serialized.
-Requests carry model-agnostic fields only; per-model defaults live on the model class.
+"""Focused HTTP API: one endpoint per image job, lock-serialized and synchronous,
+plus the queued form of the two generators. Requests carry model-agnostic fields only;
+per-model defaults live on the model class.
 """
 from __future__ import annotations
 
@@ -28,6 +29,8 @@ from thenoise.controlmap.options import (
     ControlMapOptions,
     SoftedgeOptions,
 )
+from thenoise.jobs import JobPlan, JobQueue
+from thenoise.jobs_http import install_job_routes, submit_job
 from thenoise.postprocess.options import (
     POSTPROCESS_NAMES,
     PostprocessOptions,
@@ -188,31 +191,86 @@ def _is_options_problem(error: dict) -> bool:
     return not where or where[0] in OPTIONS_BY_KIND or where[0] in POSTPROCESS_NAMES
 
 
-def create_app(runtime, *, video_jobs=None, video_model: str = "") -> FastAPI:
+def png_bytes(image) -> bytes:
+    """The PNG a controller's image is, with the provenance the controller attached."""
+    content = io.BytesIO()
+    image.save(content, format="PNG", pnginfo=pnginfo_of(image))
+    return content.getvalue()
+
+
+def image_response(image, out: str):
+    """PNG bytes, or the same bytes base64-wrapped, with the image's own metadata."""
+    content = png_bytes(image)
+    if out == "json":
+        return {"b64_json": base64.b64encode(content).decode("ascii")}
+    return Response(content=content, media_type="image/png")
+
+
+def install_image_job_routes(app: FastAPI, jobs: JobQueue, runtime) -> None:
+    """Queue an image, from the same body the synchronous endpoint answers.
+
+    An async caller is a synchronous one that chose to poll, so only ``out`` has no
+    meaning here: a job's content route hands out PNG bytes at its own address and
+    cannot hand out anything else.
+    """
+
+    def render(payload, token, progress, target) -> None:
+        """The one request path that writes an image to disk: a job's bytes are fetched
+        later, by a different request, so they have to outlive the one that made them. A
+        synchronous request keeps its bytes in memory and answers with them.
+        """
+        request, resolved = payload
+        image = runtime.run(lambda pipeline: pipeline.produce(
+            request, resolved, token=token, progress=progress))
+        target.write_bytes(png_bytes(image))
+
+    def plan(req: Union[Text2ImageRequest, EditRequest]) -> JobPlan:
+        """Resolve first: what a request means costs nothing to learn, and a request
+        this model cannot serve should be refused before it waits behind another.
+        """
+        controller = runtime.pipeline
+        if controller is None:
+            raise RuntimeError("no model is loaded")
+        if req.out != "png":
+            raise ValueError("out=json is synchronous only: a job's content is PNG bytes")
+        is_edit = isinstance(req, EditRequest)
+        request = req.to_edit_request() if is_edit else req.to_request()
+        request, resolved = controller.resolve(request, is_edit=is_edit)
+        return JobPlan(kind="image", model=runtime.model_name,
+                       payload=(request, resolved), public=resolved.public(),
+                       suffix=".png", render=render)
+
+    @app.post("/jobs/text2image", status_code=202)
+    def queue_generation(req: Text2ImageRequest):
+        return submit_job(jobs, "image job", lambda: plan(req))
+
+    @app.post("/jobs/edit", status_code=202)
+    def queue_edit(req: EditRequest):
+        return submit_job(jobs, "image job", lambda: plan(req))
+
+
+def create_app(runtime, *, jobs: Optional[JobQueue] = None) -> FastAPI:
     from contextlib import asynccontextmanager
     from asyncio import to_thread
 
     @asynccontextmanager
-    async def video_lifespan(_app: FastAPI):
+    async def job_lifespan(_app: FastAPI):
         try:
             yield
         finally:
-            await to_thread(video_jobs.close)
+            await to_thread(jobs.close)
 
     app = FastAPI(title="thenoise", version=__version__,
-                  lifespan=video_lifespan if video_jobs is not None else None)
+                  lifespan=job_lifespan if jobs is not None else None)
 
-    if video_jobs is not None:
-        from thenoise.video.http import install_video_routes
-        install_video_routes(app, video_jobs, video_model)
-
-    def image_response(image, out: str):
-        """PNG bytes, or the same bytes base64-wrapped, with the image's own metadata."""
-        content = io.BytesIO()
-        image.save(content, format="PNG", pnginfo=pnginfo_of(image))
-        if out == "json":
-            return {"b64_json": base64.b64encode(content.getvalue()).decode("ascii")}
-        return Response(content=content.getvalue(), media_type="image/png")
+    if jobs is not None:
+        install_job_routes(app, jobs)
+        if runtime.video:
+            from thenoise.video.http import install_video_routes
+            from thenoise.video.service import video_planner
+            install_video_routes(app, jobs, video_planner(runtime), runtime.model_name)
+        else:
+            install_image_job_routes(app, jobs, runtime)
 
     def image_job(failure: str, action, out: str):
         """Run one image-producing request, answering with the image or the failure."""

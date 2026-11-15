@@ -11,6 +11,10 @@ Each stage is cached (single-entry, on-device tensors). Keys are built from
 downstream automatically. On the edit path a ``reference`` stage sits upstream of
 ``prompt``, keyed by image content hash, so re-editing the same image with a
 different prompt never re-encodes it.
+
+``resolve`` says what a request means for the loaded model and ``produce`` runs it.
+``generate`` and ``edit`` are the two together; the job API uses them apart, because
+what a request means is cheap to learn and running it is not.
 """
 from __future__ import annotations
 
@@ -25,6 +29,7 @@ import torch
 from PIL import Image
 
 from thenoise.inference import inference, inference_lock
+from thenoise.jobs import UNCANCELLABLE, Cancellation, Progress, idle, stepping
 from thenoise.models.base import DiffusionModel, Conditioning
 from thenoise.models.config import EncodePromptArgs, GenerateRequest, SamplingParams
 from thenoise.samplers import Step, create_sampler, sigma_steps
@@ -48,11 +53,13 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class _ResolvedRequest:
+class ResolvedImage:
     """Resolved pipeline values shared by ``generate`` and ``edit``.
 
     Produced by ``_resolve_pipeline`` so cache keys and the finalize tail use
-    the same concrete (post-default) values in both paths.
+    the same concrete (post-default) values in both paths. Because none of it
+    needs a weight on the device, a queued request is resolved — and so refused
+    or echoed — before it is accepted.
     """
 
     width: int
@@ -72,7 +79,32 @@ class _ResolvedRequest:
     seed: int
     pixel_upscaler: Optional[str]
     kv_cache: bool
+    # Reference conditioning method for editing; meaningless when it is not an edit.
     ref_method: str
+    is_edit: bool
+    #: LoRA specs by role, so a component the model does not have is refused here.
+    lora_specs: Mapping[str, list[str]]
+
+    @property
+    def mode(self) -> str:
+        return "edit" if self.is_edit else "t2i"
+
+    def public(self) -> dict:
+        """The request as this model will actually run it.
+
+        The prompt and the reference images are deliberately absent: the first is
+        the caller's own text and the second do not belong in a status document.
+        """
+        return {
+            "mode": self.mode, "width": self.width, "height": self.height,
+            "steps": self.steps, "sigmas": list(self.sigmas) if self.sigmas else None,
+            "guidance_scale": self.guidance_scale, "sampler": self.effective_sampler,
+            "seed": self.seed, "upscale_factor": self.factor,
+            "upscale_type": self.upscale_type, "pixel_upscaler": self.pixel_upscaler,
+            "kv_cache": self.kv_cache,
+            "ref_method": self.ref_method if self.is_edit else None,
+            "lora_specs": dict(self.lora_specs),
+        }
 
 
 def _normalize_sigmas(
@@ -230,9 +262,8 @@ class PipelineController:
     # ------------------------------------------------------------ pipeline
     def generate(self, request: GenerateRequest) -> Image.Image:
         """Text-to-image pipeline. Returns a single PIL image."""
-        r = self._resolve_pipeline(request, is_edit=False)
-        with inference():
-            return self._finalize(self._run(request, r), request, r)
+        request, r = self.resolve(request, is_edit=False)
+        return self.produce(request, r)
 
     def edit(self, request: GenerateRequest) -> Image.Image:
         """Reference-latent instruction editing. Returns a single PIL image.
@@ -242,7 +273,21 @@ class PipelineController:
         (``encode_prompt(..., image=...)``) so encoders can consume the image as
         vision tokens in addition to the reference latent.
         """
+        request, r = self.resolve(request, is_edit=True)
+        return self.produce(request, r)
+
+    def resolve(self, request: GenerateRequest, *, is_edit: bool
+                ) -> tuple[GenerateRequest, ResolvedImage]:
+        """Refuse what this model cannot serve, then fill in every default.
+
+        None of it needs a weight on the device, which is what lets a queued request be
+        checked before it is accepted rather than after it has waited behind another.
+        An edit that left its size unset takes it from the first reference, so the
+        request that comes back is not always the one that arrived.
+        """
         model = self.model
+        if not is_edit:
+            return request, self._resolve_pipeline(request, is_edit=False)
         if not model.capability("edit"):
             raise ValueError(f"model '{model.name}' does not support image editing")
         images = self._edit_images(request)
@@ -253,14 +298,27 @@ class PipelineController:
         width, height = model.size_from_reference(request.width, request.height,
                                                  images[0])
         local = replace(request, width=width, height=height)
+        return local, self._resolve_pipeline(local, is_edit=True)
 
-        r = self._resolve_pipeline(local, is_edit=True)
-        ref_key = self._cache_key_reference(images, (r.width, r.height))
+    def produce(self, request: GenerateRequest, r: ResolvedImage, *,
+                token: Cancellation = UNCANCELLABLE,
+                progress: Progress = idle) -> Image.Image:
+        """An already-resolved request -> the finished image.
+
+        The half ``generate`` and ``edit`` hand to a job queue, which has resolved the
+        request already and runs this later. ``token`` and ``progress`` are how a job
+        under way reports itself; a synchronous caller has nobody to report to.
+        """
+        images = self._edit_images(request) if r.is_edit else []
+        ref_key = (self._cache_key_reference(images, (r.width, r.height))
+                   if images else None)
         with inference():
-            return self._finalize(
-                self._run(local, r, ref_key=ref_key, ref_method=r.ref_method),
-                local, r, source=images[0],
-            )
+            pixels = self._run(request, r, ref_key=ref_key,
+                               ref_method=r.ref_method if r.is_edit else None,
+                               token=token, progress=progress)
+            progress("postprocessing")
+            return self._finalize(pixels, request, r,
+                                  source=images[0] if images else None)
 
     def _edit_images(self, request: GenerateRequest) -> list[Image.Image]:
         """Normalize ``request.image`` (single OR list) to a list ([] if none)."""
@@ -274,27 +332,25 @@ class PipelineController:
     def _run(
         self,
         request: GenerateRequest,
-        r: _ResolvedRequest,
+        r: ResolvedImage,
         *,
         ref_key: Optional[Tuple] = None,
         ref_method: Optional[str] = None,
+        token: Cancellation = UNCANCELLABLE,
+        progress: Progress = idle,
     ) -> torch.Tensor:
         """Locked, cache-checked stage pipeline -> decoded pixels ``[C,H,W]``.
 
         Runs reference -> prompt -> sampling -> decode. ``ref_key``/``ref_method``
         are only set in the edit path; their presence selects the reference stage
         and image-aware prompt conditioning.
+
+        Each stage boundary is a progress tick and a cancellation point, so a job can
+        still be stopped between stages when its solver never got a step in.
         """
         model = self.model
         is_edit = ref_key is not None
-
-        if r.kv_cache and not model.capability("kv_cache"):
-            raise ValueError(f"model '{model.name}' does not support the reference-latent KV cache")
-
-        # Roles are components of this model, so a request naming one it does not have
-        # is refused here rather than silently dropping the LoRAs at the switch.
-        loras = lora_specs_by_role(request.lora_specs)
-        check_lora_roles(loras, model.lora_components())
+        loras = r.lora_specs
 
         prompt_key = self._cache_key_prompt(
             request.prompt, request.negative_prompt, r.guidance_scale,
@@ -308,6 +364,8 @@ class PipelineController:
 
         with self._lock:
             memory = model.memory
+            progress("conditioning")
+            token.check()
 
             # Stage 0: reference (image) latent — deterministic per image (edit).
             ref_latents: Optional[list[torch.Tensor]] = None
@@ -344,9 +402,11 @@ class PipelineController:
                 guidance_scale=r.guidance_scale, sampler=r.effective_sampler,
                 kv_cache=r.kv_cache,
             )
+            token.check()
 
             # Stage 2: sampling — the dit block. The DiT is resident here, so
             # LoRA switching (which may requantize) and text fusion run in it too.
+            progress("sampling", 0, r.steps)
             if self._cache.sampling_hit(sampling_key):
                 latents = self._cache.sampling_get()
             else:
@@ -358,7 +418,7 @@ class PipelineController:
                         self._cache.prompt_store(prompt_key, cond)
                     latents = s.run(
                         self._denoise, cond, params, ref_latents, ref_method or "index",
-                        sigmas=r.sigmas,
+                        sigmas=r.sigmas, token=token, progress=progress,
                     )
                 self._cache.sampling_store(sampling_key, latents)
 
@@ -369,9 +429,12 @@ class PipelineController:
                 if r.refined:
                     # the upscaler builds its weights here and may round-trip the VAE;
                     # nothing moves once a stage has started, so both are held
+                    progress("upscaling")
                     with memory.stage("dit", "vae",
                                       pixels=r.target_width * r.target_height) as s:
                         latents = s.run(self._upscale_and_refine, latents, cond, params)
+                    token.check()
+                progress("decoding")
                 with memory.stage("vae",
                                   pixels=r.target_width * r.target_height) as s:
                     pixels = s.run(model.decode, latents)  # fp32 GPU [C,H,W]
@@ -386,6 +449,8 @@ class PipelineController:
         ref_latents: Optional[list[torch.Tensor]] = None,
         ref_method: str = "index",
         sigmas: Optional[Tuple[float, ...]] = None,
+        token: Cancellation = UNCANCELLABLE,
+        progress: Progress = idle,
     ) -> torch.Tensor:
         """Shared denoising pipeline over the model's ``schedule``.
 
@@ -407,17 +472,21 @@ class PipelineController:
             schedule = sigma_steps(sigmas, model.device, model.dtype)
         else:
             schedule = model.schedule(params)
-        x = solver.sample(x, schedule, cond, params.guidance_scale, params.seed)
+        x = solver.sample(x, schedule, cond, params.guidance_scale, params.seed,
+                          step_callback=stepping(token, progress))
         return model.finalize_latent(x, params)
 
     # ------------------------------------------------------------- resolution
     def _resolve_pipeline(
         self, request: GenerateRequest, *, is_edit: bool
-    ) -> _ResolvedRequest:
+    ) -> ResolvedImage:
         """Resolve request defaults into concrete pipeline values.
 
         Shared by ``generate`` and ``edit`` so both use identical resolution
-        (cache keys must use the actual resolved values).
+        (cache keys must use the actual resolved values). Everything the loaded model
+        refuses for reasons it can see without running — a capability it lacks, a LoRA
+        role it has no component for — is refused here too, so a queued request fails
+        at submit.
         """
         model = self.model
         # Precedence: explicit request > checkpoint marker > model default.
@@ -454,7 +523,17 @@ class PipelineController:
                 and model.capability("kv_cache")
             )
         else:
+            if request.kv_cache and not model.capability("kv_cache"):
+                raise ValueError(
+                    f"model '{model.name}' does not support the "
+                    "reference-latent KV cache"
+                )
             kv_cache = request.kv_cache
+
+        # Roles are components of this model, so a request naming one it does not have
+        # is refused here rather than silently dropping the LoRAs at the switch.
+        loras = lora_specs_by_role(request.lora_specs)
+        check_lora_roles(loras, model.lora_components())
 
         pixel_upscaler = request.pixel_upscaler
         if pixel_upscaler and self._pixel_upscalers.upscaler_dir:
@@ -494,20 +573,20 @@ class PipelineController:
         if seed is None or seed == -1:
             seed = random.randint(0, 2**32 - 1)
 
-        return _ResolvedRequest(
+        return ResolvedImage(
             width=width, height=height, steps=steps, sigmas=sigmas,
             guidance_scale=guidance_scale,
             factor=factor, upscale_type=upscale_type, target_width=target_width,
             target_height=target_height, refined=refined, pixel_scale=pixel_scale,
             effective_sampler=effective_sampler, seed=seed, pixel_upscaler=pixel_upscaler,
-            kv_cache=kv_cache, ref_method=ref_method,
+            kv_cache=kv_cache, ref_method=ref_method, is_edit=is_edit, lora_specs=loras,
         )
 
     def _finalize(
         self,
         pixels: torch.Tensor,
         request: GenerateRequest,
-        r: _ResolvedRequest,
+        r: ResolvedImage,
         *,
         source: Optional[Image.Image] = None,
     ) -> Image.Image:
@@ -551,7 +630,7 @@ class PipelineController:
             upscale_type=r.upscale_type,
             sampler=r.effective_sampler,
             postprocess=postprocess,
-            lora_specs=flat_lora_specs(lora_specs_by_role(request.lora_specs)) or None,
+            lora_specs=flat_lora_specs(r.lora_specs) or None,
             pixel_upscaler=r.pixel_upscaler,
             sigmas=list(r.sigmas) if r.sigmas else None,
             ref_method=r.ref_method,
@@ -707,4 +786,4 @@ class PipelineController:
         )
 
 
-__all__ = ["PipelineController"]
+__all__ = ["PipelineController", "ResolvedImage"]

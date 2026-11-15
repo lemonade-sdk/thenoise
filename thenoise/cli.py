@@ -116,8 +116,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_upscaler_args(serve)
     _add_controlmap_args(serve)
     serve.add_argument("--cache-dir", default="~/.cache/thenoise", metavar="DIR",
-                       help="directory for generated files; completed video clips land "
-                            "in <cache-dir>/videos")
+                       help="directory for generated files; a queued job's image or "
+                            "clip lands in <cache-dir>/jobs")
     serve.add_argument("--host", default="127.0.0.1",
                        help="bind host (default: 127.0.0.1)")
     serve.add_argument("--port", type=int, default=8000,
