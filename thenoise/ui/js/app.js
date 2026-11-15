@@ -39,19 +39,11 @@ $('height').addEventListener('input', () => updateFinalRes(''));
 
 let editRefs = []; // {dataUrl, b64, dims:{w,h}, name}
 
-const EDIT_DEFAULT_SIZE = 1024; // largest side when no width/height given
-
+// A size left out is the model's to choose, and only it knows how: named sizes are all we state.
 function editTargetDims() {
-  if (!editRefs.length) return null;
-  const { w: iw, h: ih } = editRefs[0].dims;
   const ew = parseInt($('edit_width').value, 10);
   const eh = parseInt($('edit_height').value, 10);
-  if (ew && eh) return { w: ew, h: eh };
-  if (ew) return { w: ew, h: ih };
-  if (eh) return { w: iw, h: eh };
-  // No width/height: resize the first reference to 1024, aspect preserved.
-  if (iw >= ih) return { w: EDIT_DEFAULT_SIZE, h: Math.round(ih * EDIT_DEFAULT_SIZE / iw) };
-  return { w: Math.round(iw * EDIT_DEFAULT_SIZE / ih), h: EDIT_DEFAULT_SIZE };
+  return ew && eh ? { w: ew, h: eh } : null;
 }
 
 function updateEditFinalRes() {
@@ -160,9 +152,8 @@ loadPostprocess();
 updateUpscaleMax('');
 updateUpscaleMax('edit_');
 
-/* ---------- Generate is the medium this server renders ----------
-   The checkpoint loaded at startup decides it; the other medium's routes are never
-   installed, so that screen gets neither button nor notice. */
+/* ---------- Generate is the medium this server renders ---------- */
+// The checkpoint loaded at startup decides it; the other medium's routes are never installed.
 // Upscale and Control Maps need no model, so whoever is on one when /health answers stays.
 const MODEL_VIEWS = ['generate', 'video', 'edit'];
 
@@ -188,7 +179,7 @@ async function applyModelState() {
   let caps = {};
   let rgba = false; // true when the loaded model's VAE emits an alpha channel
   try {
-    const res = await fetch('/health');
+    const res = await fetchOrGone('/health', undefined, PATIENCE);
     if (res.ok) {
       const data = await res.json();
       models = data.models || [];
@@ -259,29 +250,21 @@ let uInputDims = null;     // {w, h} of the input
 let uOutUrl = null;        // object URL of the upscaled result
 let uOutMeta = null;       // upscale metadata
 
-function loadUpscaleFile(file) {
-  if (!file || !file.type.startsWith('image/')) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    const dataUrl = reader.result;
-    const img = new Image();
-    img.onload = () => {
-      uInputB64 = dataUrl.split(',')[1];
-      uInputDims = { w: img.naturalWidth, h: img.naturalHeight };
-      updateUpscaleTabFactor();
-      if (uOutUrl) { URL.revokeObjectURL(uOutUrl); uOutUrl = null; }
-      uOutMeta = null;
-      setStageActions($('udownload'), $('uinfo_btn'), false);
-      showInputPreview(dataUrl, file, {
-        singleImg: 'usingle_img', single: 'usingle', result: 'uresult',
-        placeholder: 'uplaceholder', dzName: 'dz_name', dzHint: 'dz_hint',
-      });
-      $('upscale').disabled = false;
-      applyUpscalerDefaults();
-    };
-    img.src = dataUrl;
-  };
-  reader.readAsDataURL(file);
+async function loadUpscaleFile(file) {
+  const image = await readImageFile(file);
+  if (!image) return;
+  uInputB64 = image.b64;
+  uInputDims = image.dims;
+  updateUpscaleTabFactor();
+  if (uOutUrl) { URL.revokeObjectURL(uOutUrl); uOutUrl = null; }
+  uOutMeta = null;
+  setStageActions($('udownload'), $('uinfo_btn'), false);
+  showInputPreview(image.dataUrl, file, {
+    singleImg: 'usingle_img', single: 'usingle', result: 'uresult',
+    placeholder: 'uplaceholder', dzName: 'dz_name', dzHint: 'dz_hint',
+  });
+  $('upscale').disabled = false;
+  applyUpscalerDefaults();
 }
 
 bindDropzone('dropzone', 'file', files => loadUpscaleFile(files[0]));
@@ -359,23 +342,13 @@ let eOutUrl = null;      // object URL of the edited result
 let eOutMeta = null;     // edit metadata
 
 function addEditRefs(files) {
-  [...files].filter(f => f.type.startsWith('image/')).forEach(file => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result;
-      const img = new Image();
-      img.onload = () => {
-        editRefs.push({
-          dataUrl, b64: dataUrl.split(',')[1],
-          dims: { w: img.naturalWidth, h: img.naturalHeight }, name: file.name,
-        });
-        renderEditRefs();
-        resetEditResult();
-        updateEditFinalRes();
-      };
-      img.src = dataUrl;
-    };
-    reader.readAsDataURL(file);
+  [...files].forEach(async file => {
+    const image = await readImageFile(file);
+    if (!image) return;
+    editRefs.push({ ...image, name: file.name });
+    renderEditRefs();
+    resetEditResult();
+    updateEditFinalRes();
   });
 }
 
@@ -383,32 +356,22 @@ function renderEditRefs() {
   const box = $('edit_refs');
   box.innerHTML = '';
   editRefs.forEach((r, i) => {
-    const div = document.createElement('div');
-    div.className = 'ref-thumb' + (i === 0 ? ' first' : '');
-    div.title = r.name + (i === 0 ? ' (sets output size)' : '');
-    const img = document.createElement('img');
-    img.className = 'thumb-img';
-    img.src = r.dataUrl;
-    img.alt = 'reference ' + (i + 1);
-    div.appendChild(img);
-    const rm = document.createElement('button');
-    rm.className = 'ref-remove';
-    rm.textContent = '\u00d7';
-    rm.title = 'Remove';
-    rm.addEventListener('click', () => {
-      editRefs.splice(i, 1);
-      renderEditRefs();
-      resetEditResult();
-      updateEditFinalRes();
+    const div = addThumb(box, {
+      src: r.dataUrl, alt: 'reference ' + (i + 1), cls: i === 0 ? 'first' : '',
+      title: r.name + (i === 0 ? ' (sets output size)' : ''),
+      onRemove: () => {
+        editRefs.splice(i, 1);
+        renderEditRefs();
+        resetEditResult();
+        updateEditFinalRes();
+      },
     });
-    div.appendChild(rm);
     if (i === 0) {
       const badge = document.createElement('span');
       badge.className = 'first-badge';
       badge.textContent = '1st';
       div.appendChild(badge);
     }
-    box.appendChild(div);
   });
 }
 
@@ -418,8 +381,7 @@ function resetEditResult() {
   eOutUrl = null;
   eOutMeta = null;
   setStageActions($('edownload'), $('einfo_btn'), false);
-  $('e_img').style.display = 'none';
-  $('eplaceholder').style.display = 'block';
+  hideResult('e_img', 'eplaceholder');
   $('edit_btn').disabled = editRefs.length === 0;
 }
 

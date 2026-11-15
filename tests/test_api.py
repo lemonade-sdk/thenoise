@@ -197,10 +197,7 @@ def test_ui_assets_are_shipped_and_served(client):
 
 
 def test_ui_scripts_only_look_up_ids_the_page_has():
-    """An id the markup stopped having takes the rest of that script's bindings with it.
-
-    Prefix-addressed controls only have to answer to one pane, so they match by suffix.
-    """
+    """An id the markup stopped having takes the rest of that script's bindings with it."""
     with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
         ids = set(re.findall(r'\bid="([^"]+)"', f.read()))
     assert ids
@@ -220,7 +217,7 @@ def test_ui_scripts_only_look_up_ids_the_page_has():
                 f"{name} looks up a {suffix!r} control no pane's markup has"
             )
             checked += 1
-        # Descriptors hand elements to the shared runners, so the lookup happens elsewhere.
+        # Ids held by a descriptor are looked up elsewhere, so they match here.
         patterns = [
             r"root: '([A-Za-z0-9_]+)', label: '([A-Za-z0-9_]+)', bar: '([A-Za-z0-9_]+)'",
             r"timerEl: '([A-Za-z0-9_]+)',\s*\n\s*timerTextEl: '([A-Za-z0-9_]+)'",
@@ -236,9 +233,7 @@ def test_ui_scripts_only_look_up_ids_the_page_has():
 
 
 def test_ui_every_named_view_exists():
-    """A view that a tab or the medium logic names but nobody serves is a blank screen,
-    and no browser complains about one.
-    """
+    """A view that a tab or the medium logic names but nobody serves is a blank screen."""
     with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
         html = f.read()
     with open(os.path.join(_UI_DIR, "js", "app.js"), encoding="utf-8") as f:

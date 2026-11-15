@@ -3,6 +3,9 @@
 
 const $ = id => document.getElementById(id);
 
+// Reads that owe an instant answer pass this; /upscale and /controlmap hold one open for a render.
+const PATIENCE = 10000;
+
 /* ---------- persisted preferences (light/dark, sidebar left/right) ---------- */
 function initToggle({ key, btnId, initial, current, apply, next }) {
   apply(initial());
@@ -211,8 +214,7 @@ async function loadPostprocess() {
   refreshPostprocessNotes();
 }
 
-/* ---------- LoRA specs ----------
-   One text area, one format for every pane: a "role: spec" line keys a LoRA to a component. */
+/* ---------- LoRA specs ---------- */
 let loras = [];
 let loraRoles = []; // the loaded model's LoRA-able component names
 
@@ -452,6 +454,8 @@ const FIELD_LABELS = {
   guidance_scale: 'CFG scale', seed: 'Seed', upscale: 'Upscale',
   upscale_factor: 'Upscale factor', upscale_type: 'Upscale type',
   sampler: 'Sampler', lora_specs: 'LoRA',
+  mode: 'Mode', frame_count: 'Frames', fps: 'FPS', duration: 'Duration',
+  flow_shift: 'Flow shift', output_format: 'Output',
 };
 
 function addRow(grid, label, value, cls) {
@@ -559,6 +563,30 @@ function showResult(imgId, placeholderId, url) {
   $(placeholderId).style.display = 'none';
 }
 
+function hideResult(imgId, placeholderId) {
+  $(imgId).style.display = 'none';
+  $(placeholderId).style.display = 'block';
+}
+
+// A dropped image as every pane wants it: data URL, bare base64, size; null if it is not one.
+function readImageFile(file) {
+  return new Promise(done => {
+    if (!file || !file.type.startsWith('image/')) { done(null); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      const img = new Image();
+      img.onload = () => done({
+        dataUrl, b64: dataUrl.split(',')[1],
+        dims: { w: img.naturalWidth, h: img.naturalHeight },
+      });
+      img.onerror = () => done(null);
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 // Show a freshly loaded input image in a single/result split stage.
 function showInputPreview(dataUrl, file, ids) {
   $(ids.singleImg).src = dataUrl;
@@ -568,6 +596,25 @@ function showInputPreview(dataUrl, file, ids) {
   $(ids.dzName).textContent = file.name;
   $(ids.dzName).style.display = 'block';
   $(ids.dzHint).style.display = 'none';
+}
+
+function addThumb(box, { src, alt, title, cls, onRemove }) {
+  const div = document.createElement('div');
+  div.className = 'ref-thumb' + (cls ? ' ' + cls : '');
+  div.title = title;
+  const img = document.createElement('img');
+  img.className = 'thumb-img';
+  img.src = src;
+  img.alt = alt;
+  div.appendChild(img);
+  const rm = document.createElement('button');
+  rm.className = 'ref-remove';
+  rm.textContent = '\u00d7';
+  rm.title = 'Remove';
+  rm.addEventListener('click', onRemove);
+  div.appendChild(rm);
+  box.appendChild(div);
+  return div;
 }
 
 // Swap a split stage from its input preview to its result image.
@@ -595,7 +642,7 @@ function fillSelect(sel, names, label) {
 
 async function fetchJSON(url) {
   try {
-    const res = await fetch(url);
+    const res = await fetchOrGone(url, undefined, PATIENCE);
     if (res.ok) return await res.json();
   } catch (e) { /* fall through to null */ }
   return null;
@@ -613,20 +660,12 @@ async function errorMessage(res) {
   }
 }
 
-// A browser waits forever on a connection that is accepted but never answered, and a
-// stopped server is often exactly that: the page then counts seconds on a request that
-// will never return. Routes that owe an immediate answer pass this as their patience;
-// /upscale and the extractors hold one open for a whole render and pass none.
-const PATIENCE = 10000;
-
-// One fetch for every request the panes make: a connection the server refused means the
-// engine is not running, not merely slow, and that difference is worth saying out loud.
+// Every pane's fetch: a connection the server refused means it is not running, not merely slow.
 async function fetchOrGone(url, init, patience = 0) {
   const ctl = patience ? new AbortController() : null;
   const deadline = ctl && setTimeout(() => ctl.abort(), patience);
   try {
-    // The deadline covers only the wait for an answer: once the headers are in, a large
-    // artifact may take as long as it likes coming down.
+    // The wait for an answer only: a downloaded artifact may still take its time.
     return await fetch(url, { ...init, signal: ctl ? ctl.signal : undefined });
   } catch (e) {
     throw new Error('the server is not answering — is it still running?', { cause: e });
@@ -635,9 +674,7 @@ async function fetchOrGone(url, init, patience = 0) {
   }
 }
 
-// /health reads four attributes and a job's status the queue's own lock, so both are
-// answered while the engine renders: a failed read whose /health also fails is a server
-// that has gone, and there is nothing left to wait for.
+// /health is answered even mid-render, so a failed read whose /health also fails is a gone server.
 async function serverGone() {
   try {
     await fetchOrGone('/health', undefined, PATIENCE);
@@ -657,7 +694,6 @@ async function postJSON(url, body) {
   return await res.blob();
 }
 
-// postJSON for the routes that answer with an object (job submission) rather than bytes.
 async function postJSONData(url, body) {
   const res = await fetchOrGone(url, {
     method: 'POST',
@@ -668,9 +704,7 @@ async function postJSONData(url, body) {
   return await res.json();
 }
 
-/* ---------- queued jobs: submit, watch, fetch ----------
-   Reads are chained rather than timed, so a slow answer delays the next one instead of
-   stacking requests behind it. */
+/* ---------- queued jobs: submit, watch, fetch ---------- */
 const JOB_POLL = { first: 800, ceiling: 2500, growth: 1.5, retries: 3 };
 
 // Stage names are their own labels except this one.
@@ -694,8 +728,7 @@ async function fetchJob(id) {
   return await res.json();
 }
 
-// `first` is the wait before the first read, later ones grow to `ceiling`; a failed read
-// is forgiven up to `retries` times, but only for as long as /health keeps answering.
+// Reads start at `first`, grow to `ceiling`, and forgive `retries` failures while /health answers.
 async function pollJob(id, onProgress, { first = JOB_POLL.first,
                                          ceiling = JOB_POLL.ceiling } = {}) {
   let delay = first;
@@ -741,7 +774,6 @@ function clearProgress(els) {
   $(els.bar).style.width = '0';
 }
 
-// The shape every request shares: button disabled, stage covered, timer counting.
 async function withBusy({ btn, overlay, timerEl, timerTextEl }, work) {
   const set = (state, text) => setTimer(timerEl, timerTextEl, state, text);
   btn.disabled = true;
@@ -762,7 +794,7 @@ async function withBusy({ btn, overlay, timerEl, timerTextEl }, work) {
   }
 }
 
-// One queued request end to end; `job` is the caller's box, so Cancel knows what to name.
+// `job` is the caller's box, so its Cancel button knows what to name.
 async function runQueuedJob({ job, submit, body, btn, cancelBtn, overlay,
                               timerEl, timerTextEl, progress, poll, onArtifact }) {
   try {
@@ -815,6 +847,19 @@ function validateDims(prefix) {
   return true;
 }
 
+// An empty box is the model's default, so it leaves the body rather than going out as 0 or NaN.
+function addNumbers(body, prefix, ints, floats) {
+  for (const f of ints) {
+    const v = $(prefix + f).value;
+    if (v !== '') body[f] = parseInt(v, 10);
+  }
+  for (const f of floats) {
+    const v = $(prefix + f).value;
+    if (v !== '') body[f] = parseFloat(v);
+  }
+  return body;
+}
+
 function collectSettings(prefix, extra) {
   const body = {
     prompt: $(prefix + 'prompt').value,
@@ -825,12 +870,7 @@ function collectSettings(prefix, extra) {
     ...collectPostprocess(prefix),
     lora_specs: parseLora($(prefix + 'lora_specs').value),
   };
-  for (const f of ['width', 'height', 'steps', 'seed']) {
-    const v = $(prefix + f).value;
-    if (v !== '') body[f] = parseInt(v, 10);
-  }
-  const g = $(prefix + 'guidance_scale').value;
-  if (g !== '') body.guidance_scale = parseFloat(g);
+  addNumbers(body, prefix, ['width', 'height', 'steps', 'seed'], ['guidance_scale']);
   const samplerVal = $(prefix + 'sampler').value;
   if (samplerVal) body.sampler = samplerVal;
   Object.assign(body, extra);

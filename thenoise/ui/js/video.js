@@ -12,21 +12,13 @@ const VIDEO_POLL = { first: 2500, ceiling: 8000 }; // a clip renders in minutes
 
 /* ---------- I2V initial frame ---------- */
 
-function loadVideoFrame(file) {
-  if (!file || !file.type.startsWith('image/')) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    const dataUrl = reader.result;
-    const img = new Image();
-    img.onload = () => {
-      vInputDataUrl = dataUrl;
-      vInputB64 = dataUrl.split(',')[1];
-      renderVideoRef(file.name);
-      resetVideoResult();
-    };
-    img.src = dataUrl;
-  };
-  reader.readAsDataURL(file);
+async function loadVideoFrame(file) {
+  const image = await readImageFile(file);
+  if (!image) return;
+  vInputDataUrl = image.dataUrl;
+  vInputB64 = image.b64;
+  renderVideoRef(file.name);
+  resetVideoResult();
 }
 
 function removeVideoFrame() {
@@ -45,29 +37,17 @@ function renderVideoRef(name) {
   nameEl.textContent = name || '';
   nameEl.style.display = name ? 'block' : 'none';
   if (!hasFrame) return;
-  const div = document.createElement('div');
-  div.className = 'ref-thumb first';
-  div.title = 'initial frame (image-to-video)';
-  const img = document.createElement('img');
-  img.className = 'thumb-img';
-  img.src = vInputDataUrl;
-  img.alt = 'initial frame';
-  div.appendChild(img);
-  const rm = document.createElement('button');
-  rm.className = 'ref-remove';
-  rm.textContent = '\u00d7';
-  rm.title = 'Remove';
-  rm.addEventListener('click', removeVideoFrame);
-  div.appendChild(rm);
-  box.appendChild(div);
+  addThumb(box, {
+    src: vInputDataUrl, alt: 'initial frame', cls: 'first',
+    title: 'initial frame (image-to-video)', onRemove: removeVideoFrame,
+  });
 }
 
 function resetVideoResult() {
   // Do NOT revoke vOutUrl: it may still be referenced by an entry in history.
   vOutMeta = null;
   setStageActions($('vdownload'), $('vinfo_btn'), false);
-  $('v_video').style.display = 'none';
-  $('vplaceholder').style.display = 'block';
+  hideResult('v_video', 'vplaceholder');
 }
 
 bindDropzone('video_dropzone', 'video_file', files => loadVideoFrame(files[0]));
@@ -82,14 +62,8 @@ function collectVideoSettings() {
     prompt: $('video_prompt').value,
     negative_prompt: $('video_negative_prompt').value,
   };
-  for (const f of ['width', 'height', 'frames', 'fps', 'steps', 'seed']) {
-    const v = $('video_' + f).value;
-    if (v !== '') body[f] = parseInt(v, 10);
-  }
-  for (const f of ['duration', 'guidance_scale', 'flow_shift']) {
-    const v = $('video_' + f).value;
-    if (v !== '') body[f] = parseFloat(v);
-  }
+  addNumbers(body, 'video_', ['width', 'height', 'frames', 'fps', 'steps', 'seed'],
+                              ['duration', 'guidance_scale', 'flow_shift']);
   const sampler = $('video_sampler').value;
   if (sampler) body.sampler = sampler;
   const output_format = $('video_output_format').value;
@@ -161,12 +135,9 @@ $('vcancel').addEventListener('click', () => cancelJob(videoJob, $('vcancel')));
 /* ---------- result ---------- */
 
 function showVideoResult(url) {
-  const v = $('v_video');
-  v.src = url;
-  v.style.display = 'block';
-  $('vplaceholder').style.display = 'none';
+  showResult('v_video', 'vplaceholder', url);
   setStageActions($('vdownload'), $('vinfo_btn'), true);
-  v.play().catch(() => {}); // browsers block autoplay with sound; this is a nudge
+  $('v_video').play().catch(() => {}); // browsers block autoplay with sound; this is a nudge
 }
 
 $('vdownload').addEventListener('click', () => {
@@ -180,18 +151,14 @@ function renderVideoInfo() {
   const m = vOutMeta || {};
   const rows = [];
   if (m.model) rows.push(['Model', m.model, '']);
-  if (m.mode) rows.push(['Mode', m.mode === 'i2v' ? 'image-to-video' : 'text-to-video', '']);
-  if (m.prompt) rows.push(['Prompt', m.prompt, 'prompt']);
-  if (m.negative_prompt) rows.push(['Negative prompt', m.negative_prompt, 'prompt']);
-  for (const [key, label] of [
-    ['width', 'Width'], ['height', 'Height'], ['frame_count', 'Frames'],
-    ['fps', 'FPS'], ['steps', 'Steps'], ['guidance_scale', 'Guidance'],
-    ['flow_shift', 'Flow shift'], ['seed', 'Seed'], ['sampler', 'Sampler'],
-    ['output_format', 'Output'],
-  ]) {
-    if (m[key] != null && m[key] !== '') rows.push([label, m[key], '']);
+  if (m.mode) rows.push([FIELD_LABELS.mode, m.mode === 'i2v' ? 'image-to-video' : 'text-to-video', '']);
+  if (m.prompt) rows.push([FIELD_LABELS.prompt, m.prompt, 'prompt']);
+  if (m.negative_prompt) rows.push([FIELD_LABELS.negative_prompt, m.negative_prompt, 'prompt']);
+  for (const key of ['width', 'height', 'frame_count', 'fps', 'steps', 'guidance_scale',
+                     'flow_shift', 'seed', 'sampler', 'output_format']) {
+    if (m[key] != null && m[key] !== '') rows.push([FIELD_LABELS[key], m[key], '']);
   }
-  if (m.duration != null) rows.push(['Duration', Number(m.duration).toFixed(2) + ' s', '']);
+  if (m.duration != null) rows.push([FIELD_LABELS.duration, Number(m.duration).toFixed(2) + ' s', '']);
   const lora = m.lora_specs;
   const hasLora = Array.isArray(lora) ? lora.length : (lora ? Object.keys(lora).length : 0);
   if (hasLora) rows.push(['LoRA', formatLora(lora), 'prompt']);
