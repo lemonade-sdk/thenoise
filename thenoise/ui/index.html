@@ -12,7 +12,7 @@
 
 <div class="tabs">
   <img class="logo" src="static/logo.png" alt="TheNoise" title="TheNoise">
-  <button class="tab ctrl active" data-tab="generate">Generate</button>
+  <button class="tab ctrl active" id="generate_tab">Generate</button>
   <button class="tab ctrl" data-tab="edit">Edit</button>
   <button class="tab ctrl" data-tab="upscale">Upscale</button>
   <button class="tab ctrl" data-tab="controlmap">Control Maps</button>
@@ -33,7 +33,7 @@
 <div class="views">
 <div class="view" id="view-generate">
 <div class="no-model hidden" id="no_model">
-  <div class="no-model-title">Generate is not available</div>
+  <div class="no-model-title">Image generation is not available</div>
   <div class="no-model-sub">No model loaded. Start the server with
     <span class="kbd">--dit</span>, <span class="kbd">--vae</span> and
     <span class="kbd">--text-encoder</span> to enable it.</div>
@@ -142,11 +142,17 @@
     <img id="image" alt="generated" style="display:none">
     <div class="actions">
       <button class="dl ctrl" id="download" disabled title="Download PNG">&#8595; Download</button>
+      <button class="dl ctrl" id="gencancel" disabled title="Cancel the running job">&#10005; Cancel</button>
       <button class="info ctrl" id="info_btn" disabled title="Image info" aria-label="Image info">&#9432;</button>
     </div>
     <div class="overlay hidden" id="overlay">
       <div class="spinner"></div>
     </div>
+  </div>
+
+  <div class="job-progress hidden" id="genprogress">
+    <span class="job-progress-label" id="genprogress_label"></span>
+    <div class="job-track"><div class="job-bar" id="genbar"></div></div>
   </div>
 
   <div class="timer" id="timer"><span class="dot"></span><span id="timer_text">idle</span></div>
@@ -299,9 +305,15 @@
     <img id="e_img" alt="edited" style="display:none">
     <div class="actions">
       <button class="dl ctrl" id="edownload" disabled title="Download PNG">&#8595; Download</button>
+      <button class="dl ctrl" id="editcancel" disabled title="Cancel the running job">&#10005; Cancel</button>
       <button class="info ctrl" id="einfo_btn" disabled title="Edit info" aria-label="Edit info">&#9432;</button>
     </div>
     <div class="overlay hidden" id="eoverlay"><div class="spinner"></div></div>
+  </div>
+
+  <div class="job-progress hidden" id="editprogress">
+    <span class="job-progress-label" id="editprogress_label"></span>
+    <div class="job-track"><div class="job-bar" id="editbar"></div></div>
   </div>
 
   <div class="timer" id="etimer"><span class="dot"></span><span id="etimer_text">idle</span></div>
@@ -312,6 +324,139 @@
   </div>
 </main>
 </div><!-- /view-edit -->
+
+<div class="view hidden" id="view-video">
+<aside class="sidebar">
+  <div class="field" id="video_i2v_field">
+    <label class="label" for="video_file">Initial frame <span class="hint">image-to-video, optional</span></label>
+    <div class="dropzone" id="video_dropzone">
+      <input type="file" id="video_file" accept="image/png,image/jpeg" hidden>
+      <div class="dz-hint" id="video_dz_hint">Drag &amp; drop an image here or <span class="kbd">click to browse</span></div>
+      <div class="dz-name" id="video_dz_name" style="display:none"></div>
+    </div>
+    <div class="ref-thumbs" id="video_refs"></div>
+  </div>
+
+  <div class="field">
+    <label class="label" for="video_prompt">Prompt</label>
+    <textarea id="video_prompt" placeholder="Describe the video…"></textarea>
+  </div>
+
+  <div class="field">
+    <label class="label" for="video_negative_prompt">Negative prompt <span class="hint">optional</span></label>
+    <textarea id="video_negative_prompt"></textarea>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="swap-row">
+    <div class="field">
+      <label class="label" for="video_width">Width</label>
+      <input type="number" id="video_width" placeholder="auto" min="1">
+      <span class="hint">rounded down to the model's grid</span>
+    </div>
+    <button class="swap ctrl" id="video_swap" title="Swap width and height"
+      aria-label="Swap width and height">&#8646;</button>
+    <div class="field">
+      <label class="label" for="video_height">Height</label>
+      <input type="number" id="video_height" placeholder="auto" min="1">
+      <span class="hint">rounded down to the model's grid</span>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="field">
+      <label class="label" for="video_duration">Duration <span class="hint">seconds</span></label>
+      <input type="number" id="video_duration" placeholder="auto" min="0" step="0.5">
+    </div>
+    <div class="field">
+      <label class="label" for="video_frames">Frames <span class="hint">overrides duration</span></label>
+      <input type="number" id="video_frames" placeholder="auto" min="1">
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="field">
+      <label class="label" for="video_fps">FPS</label>
+      <input type="number" id="video_fps" placeholder="auto" min="1">
+    </div>
+    <div class="field">
+      <label class="label" for="video_steps">Steps</label>
+      <input type="number" id="video_steps" placeholder="auto" min="1">
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="field">
+      <label class="label" for="video_guidance_scale">Guidance</label>
+      <input type="number" id="video_guidance_scale" step="0.1" placeholder="auto" min="0">
+    </div>
+    <div class="field">
+      <label class="label" for="video_flow_shift">Flow shift <span class="hint">noise schedule</span></label>
+      <input type="number" id="video_flow_shift" placeholder="auto" min="0" step="any">
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="field">
+      <label class="label" for="video_seed">Seed</label>
+      <input type="number" id="video_seed" placeholder="random" min="0">
+    </div>
+    <div class="field">
+      <label class="label" for="video_sampler">Sampler</label>
+      <select id="video_sampler">
+        <option value="">auto</option>
+        <option value="unipc">unipc</option>
+        <option value="euler">euler</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="field">
+    <label class="label" for="video_output_format">Output</label>
+    <select id="video_output_format">
+      <option value="">auto</option>
+      <option value="webm">webm</option>
+      <option value="mp4">mp4</option>
+    </select>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="field lora-field">
+    <label class="label" for="video_lora_specs">LoRA specs <span class="hint">type to autocomplete</span></label>
+    <textarea id="video_lora_specs" rows="2" placeholder="e.g. style:0.8, one per line"></textarea>
+    <div class="lora-ac" id="video_lora_ac"></div>
+  </div>
+
+  <button class="btn" id="video_generate">Generate video</button>
+</aside>
+
+<main class="main">
+  <div class="stage" id="vstage">
+    <div class="placeholder" id="vplaceholder">Enter a prompt and click <span class="kbd">Generate video</span></div>
+    <video id="v_video" controls playsinline style="display:none"></video>
+    <div class="actions">
+      <button class="dl ctrl" id="vdownload" disabled title="Download video">&#8595; Download</button>
+      <button class="dl ctrl" id="vcancel" disabled title="Cancel the running job">&#10005; Cancel</button>
+      <button class="info ctrl" id="vinfo_btn" disabled title="Video info" aria-label="Video info">&#9432;</button>
+    </div>
+    <div class="overlay hidden" id="voverlay"><div class="spinner"></div></div>
+  </div>
+
+  <div class="job-progress hidden" id="v_progress">
+    <span class="job-progress-label" id="v_progress_label"></span>
+    <div class="job-track"><div class="job-bar" id="v_bar"></div></div>
+  </div>
+
+  <div class="timer" id="vtimer"><span class="dot"></span><span id="vtimer_text">idle</span></div>
+
+  <div class="history hidden" id="vhistory">
+    <div class="history-head label">History</div>
+    <div class="history-items" id="vhistory_items"></div>
+  </div>
+</main>
+</div><!-- /view-video -->
 
 <div class="view hidden" id="view-upscale">
 <div class="no-model hidden" id="no_upscaler">
@@ -432,5 +577,6 @@
 <script src="static/js/helpers.js"></script>
 <script src="static/js/app.js"></script>
 <script src="static/js/controlmap.js"></script>
+<script src="static/js/video.js"></script>
 </body>
 </html>
