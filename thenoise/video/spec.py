@@ -57,6 +57,10 @@ class ResolvedVideo:
         }
 
 
+#: The containers the muxer writes.
+OUTPUT_FORMATS = ("mp4", "webm")
+
+
 class VideoSpec(BaseModel):
     """What a video request asks for, before any model has been consulted.
 
@@ -121,7 +125,7 @@ class VideoSpec(BaseModel):
             raise ValueError("flow_shift must be finite and positive")
         if not sampler:
             raise ValueError("sampler must not be empty")
-        if output_format not in ("mp4", "webm"):
+        if output_format not in OUTPUT_FORMATS:
             raise ValueError("output_format must be mp4 or webm")
         frames = (self.frames if self.frames is not None else
                   max(1, math.floor(self.duration * fps + 0.5))

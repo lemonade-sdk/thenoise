@@ -1,5 +1,5 @@
-"""CLI subcommands: serve, generate, edit, upscale, controlmap — the first three take
-model paths, the last two are model-free. No config file: everything is a flag.
+"""CLI subcommands: serve, generate, edit, video, upscale, controlmap — the first four
+take model paths, the last two are model-free. No config file: everything is a flag.
 """
 from __future__ import annotations
 
@@ -20,6 +20,13 @@ def _add_model_paths(p: argparse.ArgumentParser, required: bool = True) -> None:
     p.add_argument("--lora-dir", default="", metavar="PATH",
                    help="directory containing LoRA .safetensors files "
                         "(subdirectories allowed)")
+
+
+def _add_dit_low(p: argparse.ArgumentParser) -> None:
+    """The second expert of a two-expert model, where ``--dit`` is the first."""
+    p.add_argument("--dit-low", default="", metavar="PATH",
+                   help="low-noise DiT checkpoint of a two-expert model "
+                        "(--dit selects the high-noise expert)")
 
 
 def _add_upscaler_args(p: argparse.ArgumentParser) -> None:
@@ -102,6 +109,44 @@ def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png
                    help="inference device; ROCm aliases cuda -> hip (default: cuda)")
 
 
+def _add_video_args(p: argparse.ArgumentParser) -> None:
+    """The clip knobs. Nothing defaults but the output path and the device: what a
+    release ships is the model's to answer for."""
+    p.add_argument("--prompt", required=True)
+    p.add_argument("--negative-prompt")
+    p.add_argument("--width", type=int)
+    p.add_argument("--height", type=int)
+    p.add_argument("--frames", type=int,
+                   help="frames to render, rounded onto the model's temporal grid")
+    p.add_argument("--duration", type=float, metavar="SECONDS",
+                   help="clip length, an alternative to --frames")
+    p.add_argument("--fps", type=int)
+    p.add_argument("--steps", type=int)
+    p.add_argument("--guidance-scale", type=float)
+    p.add_argument("--flow-shift", type=float,
+                   help="schedule shift; a distilled LoRA wants the one it ships with")
+    p.add_argument("--sampler", metavar="NAME",
+                   help="denoising solver (default: the model's)")
+    p.add_argument("--seed", type=int)
+    p.add_argument("--output-format", choices=["mp4", "webm"],
+                   help="container; --out's extension is taken when this is left out")
+    p.add_argument("--image", metavar="PATH",
+                   help="PNG or JPEG the clip starts on")
+    p.add_argument("--end-image", metavar="PATH",
+                   help="PNG or JPEG the clip ends on, for a model that can be told "
+                        "where a clip ends; needs --image")
+    p.add_argument("--lora", action="append", default=[], metavar="FILE[:WEIGHT]",
+                   help="LoRA for the primary transformer (repeatable)")
+    p.add_argument("--lora-low", dest="lora_low", action="append", default=[],
+                   metavar="FILE[:WEIGHT]",
+                   help="LoRA for the low-noise expert of a --dit-low model; a LoRA "
+                        "for the whole clip goes to both")
+    p.add_argument("--out", default="out.mp4",
+                   help="output clip path (default: out.mp4)")
+    p.add_argument("--device", default="cuda",
+                   help="inference device; ROCm aliases cuda -> hip (default: cuda)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="thenoise")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -110,9 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
     # and only the pixel-upscale tab is usable.
     serve = sub.add_parser("serve", help="run the FastAPI HTTP server")
     _add_model_paths(serve, required=False)
-    serve.add_argument("--dit-low", default="", metavar="PATH",
-                       help="Wan 2.2 T2V-A14B low-noise DiT checkpoint "
-                            "(--dit selects the high-noise expert)")
+    _add_dit_low(serve)
     _add_upscaler_args(serve)
     _add_controlmap_args(serve)
     serve.add_argument("--cache-dir", default="~/.cache/thenoise", metavar="DIR",
@@ -143,6 +186,11 @@ def build_parser() -> argparse.ArgumentParser:
                       help="input image(s) to edit; repeatable for multiple "
                            "reference images (first sets the output size)")
 
+    # video
+    video = sub.add_parser("video", help="run one generation and save a clip")
+    _add_model_paths(video)
+    _add_dit_low(video)
+    _add_video_args(video)
 
     # upscale
     up = sub.add_parser("upscale", help="pixel-upscale an image (no model needed)")

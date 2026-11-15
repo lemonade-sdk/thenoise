@@ -12,11 +12,12 @@ DiT checkpoint.
 |---|---|---|
 | `generate` | Generate one image from a text prompt | yes |
 | `edit` | Edit an image from an instruction (image + prompt → edited image) | editing-capable model |
+| `video` | Generate one clip (text, or an image to start from) | video model |
 | `upscale` | Pixel-upscale an existing image | no (upscaler only) |
 | `controlmap` | Extract a control map (canny / depth / pose) from an image | no |
 | `serve` | Serve a model over HTTP: JSON API + web UI at <http://localhost:8000/> | yes (lazily) |
 
-## Shared flags (`serve`, `generate`, `edit`)
+## Shared flags (`serve`, `generate`, `edit`, `video`)
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
@@ -41,7 +42,7 @@ Then open <http://localhost:8000/> for the web UI. Full endpoint reference:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--dit-low` | — | Wan 2.2 T2V-A14B low-noise DiT checkpoint; `--dit` then selects the high-noise expert |
+| `--dit-low` | — | Low-noise DiT of a two-expert model, e.g. Wan 2.2 A14B; `--dit` then selects the high-noise expert |
 | `--host` | `127.0.0.1` | Bind host |
 | `--port` | `8000` | Bind port |
 | `--upscaler-dir` | — | Directory containing pixel upscaler `.safetensors` files (e.g. Real-ESRGAN); selected per-request via `pixel_upscaler` |
@@ -110,6 +111,49 @@ Requires an editing-capable model and shares all generation flags with `generate
 |------|----------|---------|-------------|
 | `--image` | yes | — | Input image(s) to edit; repeatable for multiple reference images (first sets the output size) |
 | `--out` | no | `out_edit.png` | Output file path |
+
+## Generate a single clip
+
+Renders one clip and writes it to `--out`. Needs a video model — the ones
+supported today are in the [video models](../README.md#video-models) list — and a
+two-expert variant takes `--dit-low` beside `--dit`.
+
+```bash
+./thenoise.sh video \
+  --dit ./models/wan22/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors \
+  --vae ./models/wan22/split_files/vae/wan2.2_vae.safetensors \
+  --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors \
+  --prompt "a fox walking through snow" --frames 33 --steps 8 \
+  --out /tmp/fox.mp4
+```
+
+Unlike `generate`, no flag of this one has a default: what each release ships is
+the variant's to say, so a flag you leave out stays unset. The run logs the size,
+frame count, frame rate, solver and seed it settled on before the first step, and
+bars the stages as it goes.
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--prompt` | yes | — | Text prompt |
+| `--negative-prompt` | no | model default | Negative prompt (not sent at all at CFG ≤ 1.0) |
+| `--width` / `--height` | no | model default | Clip size, as the model rounds it; with `--image` and neither given, the image's aspect ratio decides |
+| `--frames` | no | model default | Frames, rounded onto the model's temporal grid |
+| `--duration` | no | — | Clip length in seconds, an alternative to `--frames` |
+| `--fps` | no | model default | Frame rate, both of the clip and of the container |
+| `--steps` | no | model default | Denoising steps |
+| `--guidance-scale` | no | model default | CFG; on a two-expert model, of the high-noise half |
+| `--flow-shift` | no | model default | Schedule shift; a distilled LoRA wants the one it ships with |
+| `--sampler` | no | model default | Denoising solver, of the ones the loaded model supports |
+| `--seed` | no | random | Random seed |
+| `--image` | no | — | PNG or JPEG the clip starts on |
+| `--end-image` | no | — | PNG or JPEG the clip ends on; needs `--image`, and a model that can be told where a clip ends ([FLF2V](models/wan22.md#first-and-last-frame-flf2v)) |
+| `--lora` | no | — | LoRA for the primary transformer; repeatable, `file:weight` |
+| `--lora-low` | no | — | LoRA for the low-noise expert of a `--dit-low` model; a LoRA meant for the whole clip goes to both flags |
+| `--output-format` | no | model default | `mp4` or `webm`; `--out`'s extension answers when this is left out |
+| `--out` | no | `out.mp4` | Output clip path; with no extension, the container the clip was written in |
+
+Waiting for a clip is the difference from the job API: queue the same render with
+`POST /jobs/video` instead — see [HTTP API](api.md#video-generation).
 
 ## Upscale a single image
 
