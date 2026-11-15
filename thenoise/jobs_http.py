@@ -41,7 +41,11 @@ def submit_job(queue: JobQueue, failure: str, plan: Callable[[], JobPlan]):
 
 
 def install_job_routes(app: FastAPI, queue: JobQueue) -> None:
-    """Every medium's reader: status, content, cancel."""
+    """Every medium's reader: the list, status, content, cancel."""
+
+    @app.get("/jobs")
+    def list_jobs():
+        return {"jobs": queue.listing()}
 
     @app.get("/jobs/{job_id}")
     def get_job(job_id: str):

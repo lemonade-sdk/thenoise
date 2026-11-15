@@ -213,6 +213,15 @@ class JobQueue:
                 self._jobs.pop(key)
                 job.target.unlink(missing_ok=True)
 
+    def listing(self) -> list[dict]:
+        """Every job the queue still remembers, oldest first.
+
+        The history window is what makes a stray submission retrievable, so this is the
+        route that finds an id you did not keep.
+        """
+        with self._lock:
+            return [job.snapshot() for job in self._jobs.values()]
+
     def status(self, job_id: str) -> Optional[dict]:
         with self._lock:
             job = self._jobs.get(job_id)

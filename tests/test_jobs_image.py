@@ -131,6 +131,23 @@ def test_a_job_reports_the_steps_it_is_taking_and_can_be_stopped(tmp_path):
         jobs.close()
 
 
+def test_the_list_names_what_the_queue_holds(tmp_path):
+    runtime, jobs = _runtime(), JobQueue(tmp_path / "jobs")
+    try:
+        with _client(runtime, jobs) as c:
+            ids = [c.post("/jobs/text2image",
+                          json={"prompt": f"a fox {i}", "steps": 2}).json()["id"]
+                   for i in range(2)]
+            listed = c.get("/jobs").json()["jobs"]
+            assert [job["id"] for job in listed] == ids
+            assert all(job["kind"] == "image" and job["model"] == "stub"
+                       for job in listed)
+            until(lambda: all(job["status"] == "completed"
+                              for job in c.get("/jobs").json()["jobs"]))
+    finally:
+        jobs.close()
+
+
 def test_a_request_the_model_cannot_serve_is_refused_before_it_is_queued(tmp_path):
     runtime, jobs = _runtime(), JobQueue(tmp_path / "jobs")
     try:

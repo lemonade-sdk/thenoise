@@ -160,6 +160,32 @@ def test_progress_is_the_renderers_stage_and_count(tmp_path):
         queue.close()
 
 
+def test_the_listing_finds_a_job_whose_id_was_not_kept(tmp_path):
+    entered = threading.Event()
+    release = threading.Event()
+
+    def render(payload, token, progress, path):
+        entered.set()
+        release.wait(2)
+        path.write_bytes(b"BYTES")
+
+    queue = JobQueue(tmp_path)
+    try:
+        first = queue.submit(plan(render=render, seed=1))["id"]
+        assert entered.wait(2)
+        second = queue.submit(plan(seed=2))["id"]
+
+        listed = queue.listing()
+        assert [job["id"] for job in listed] == [first, second]
+        assert [job["status"] for job in listed] == ["running", "queued"]
+        assert listed[0]["progress"]["stage"] == "loading"
+
+        release.set()
+        wait_until(lambda: all(job["status"] == "completed" for job in queue.listing()))
+    finally:
+        queue.close()
+
+
 def test_bounded_queue_and_pruning(tmp_path):
     entered = threading.Event()
     release = threading.Event()

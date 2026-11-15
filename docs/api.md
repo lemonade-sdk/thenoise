@@ -31,6 +31,7 @@ Start the server with [`serve`](cli.md#serve-a-model-over-http) and TheNoise exp
 | `POST` | `/jobs/text2image` | Queue a generation (202) |
 | `POST` | `/jobs/edit` | Queue an edit (202) |
 | `POST` | `/jobs/video` | Queue a video generation (202) |
+| `GET` | `/jobs` | List the jobs the queue still remembers |
 | `GET` | `/jobs/{id}` | Job status, progress, and what the request resolved to |
 | `GET` | `/jobs/{id}/content` | Download a finished job's image or clip |
 | `POST` | `/jobs/{id}/cancel` | Cancel a queued or running job |
@@ -81,6 +82,13 @@ the answer is **409**. While they wait, outputs live under `<cache-dir>/jobs`.
 next step: the record stays `running` until the engine acknowledges it, then becomes
 `canceled`. Four requests may wait behind the one being rendered (**429** when the queue
 is full), and the thirty-two most recent finished jobs are kept, oldest dropped first.
+
+`GET /jobs` lists what the queue remembers — each entry exactly the record `GET /jobs/{id}`
+gives, oldest first — so a job whose id was not kept is still retrievable and still
+cancellable. Nothing ages out on a clock: the list shrinks when a new submit needs room
+and when the server exits, and a restart empties it along with the files under
+`<cache-dir>/jobs`. A record outlives its bytes, so a fetched job keeps answering
+`completed` while its content route answers 404.
 
 Only generation and editing are queueable — `/upscale` and `/controlmap` answer directly,
 neither taking long enough to be worth polling for. `out`, the synchronous endpoints'
