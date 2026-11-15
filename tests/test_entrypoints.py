@@ -13,9 +13,11 @@ from thenoise.cli import build_parser
 from thenoise.generate import run_edit, run_generate
 from thenoise.controlmap.manager import ControlMapManager
 from thenoise.controlmap_cli import run_controlmap
+from thenoise.jobs import Uncancellable
 from thenoise.runtime import ModelPaths, Settings
 from thenoise.upscale_cli import run_upscale
 from thenoise.utils.paths import ensure_png_extension
+from thenoise.video_cli import run_video
 
 
 class _FakeImage:
@@ -70,7 +72,34 @@ class _FakeControlMap:
         return image
 
 
+class _FakeVideo:
+    """A video controller with fixed model defaults, keeping the render it was handed."""
+
+    DEFAULTS = {"negative_prompt": "", "width": 480, "height": 272, "frames": 33,
+                "fps": 16, "steps": 40, "guidance_scale": 4.0, "flow_shift": 12.0,
+                "sampler": "euler", "output_format": "mp4"}
+
+    def __init__(self):
+        self.spec = None
+        self.rendered = None
+
+    def resolve(self, spec):
+        self.spec = spec
+        return spec.resolve(self.DEFAULTS)
+
+    def render(self, spec, token, progress, output):
+        progress("sampling", 0, 2)
+        progress("sampling", 2, 2)
+        progress("decoding", 2, 2)
+        progress("encoding", 2, 2)
+        output.write_bytes(b"mp4")
+        self.rendered = {"spec": spec, "token": token, "output": output}
+
+
 class _FakeRuntime:
+    #: What a loaded model answers for ``Runtime.video``; the clip tests flip it.
+    video_on_load = False
+
     def __init__(self, settings):
         self.settings = settings
         self.loaded = None
@@ -84,6 +113,9 @@ class _FakeRuntime:
 
     def load(self, paths):
         self.loaded = paths
+        if self.video_on_load:
+            self.video = True
+            self.pipeline = _FakeVideo()
 
     def run(self, action):
         """As the real one, minus the rebuild the tests here are not about."""
@@ -277,6 +309,101 @@ def test_edit_wires_images_into_the_request(fake_runtime, tmp_path):
     assert rt.loaded == ModelPaths(dit_path="d", vae_path="v", text_encoder_path="t")
 
 
+# ------------------------------------------------------------------- video
+
+
+VIDEO_PATHS = ["--dit", "high", "--vae", "v", "--text-encoder", "t"]
+
+
+@pytest.fixture
+def video_runtime(fake_runtime, monkeypatch):
+    """A fake runtime whose loaded model makes clips."""
+    monkeypatch.setattr(_FakeRuntime, "video_on_load", True)
+    return fake_runtime
+
+
+def test_video_wires_paths_frames_and_lora_roles(video_runtime, tmp_path):
+    first, last = tmp_path / "first.png", tmp_path / "last.png"
+    first.write_bytes(b"first bytes")
+    last.write_bytes(b"last bytes")
+    run_video(_parse([
+        "video", *VIDEO_PATHS, "--dit-low", "low", "--lora-dir", "loras",
+        "--device", "hip",
+        "--prompt", "a fox turns into a cat", "--negative-prompt", "blur",
+        "--width", "704", "--height", "480", "--frames", "9", "--fps", "24",
+        "--steps", "8", "--guidance-scale", "3.5", "--flow-shift", "5",
+        "--sampler", "unipc", "--seed", "7",
+        "--image", str(first), "--end-image", str(last),
+        "--lora", "high_lora:0.8", "--lora-low", "low_lora",
+        "--out", str(tmp_path / "fox"),
+    ]))
+    rt = video_runtime[0]
+    assert rt.settings.device == "hip"
+    assert rt.loaded == ModelPaths(dit_path="high", vae_path="v",
+                                   text_encoder_path="t", lora_dir="loras",
+                                   dit_low_path="low")
+
+    spec = rt.pipeline.spec
+    assert (spec.image, spec.end_image) == (b"first bytes", b"last bytes")
+    assert spec.lora_specs == {"dit": ["high_lora:0.8"], "dit_low": ["low_lora"]}
+    assert (spec.frames, spec.fps, spec.steps, spec.sampler, spec.seed) == (
+        9, 24, 8, "unipc", 7)
+    assert (spec.width, spec.height, spec.flow_shift) == (704, 480, 5.0)
+
+    rendered = rt.pipeline.rendered
+    assert rendered["spec"].mode == "flf2v"
+    assert rendered["spec"].frame_count == 9
+    assert isinstance(rendered["token"], Uncancellable)
+    # A bare `--out` takes the container the run settled on.
+    assert rendered["output"] == tmp_path / "fox.mp4"
+    assert rendered["output"].read_bytes() == b"mp4"
+
+
+def test_video_takes_its_container_from_the_name_it_was_given(video_runtime, tmp_path):
+    run_video(_parse(["video", *VIDEO_PATHS, "--prompt", "x",
+                      "--out", str(tmp_path / "fox.webm")]))
+    pipeline = video_runtime[0].pipeline
+    assert pipeline.spec.output_format == "webm"
+    assert pipeline.rendered["output"].suffix == ".webm"
+
+
+def test_video_refuses_a_name_promising_another_container(video_runtime, tmp_path):
+    with pytest.raises(SystemExit, match=r"ends in \.mp4 but this clip is webm"):
+        run_video(_parse(["video", *VIDEO_PATHS, "--prompt", "x",
+                          "--output-format", "webm",
+                          "--out", str(tmp_path / "fox.mp4")]))
+
+
+def test_video_refuses_a_model_that_renders_stills(fake_runtime):
+    with pytest.raises(SystemExit, match="renders stills"):
+        run_video(_parse(["video", *VIDEO_PATHS, "--prompt", "x"]))
+
+
+def test_video_refuses_a_last_frame_with_no_first_one(video_runtime):
+    """Checked off the flags, so finding it out costs no model load."""
+    with pytest.raises(SystemExit, match=r"--end-image needs --image"):
+        run_video(_parse(["video", *VIDEO_PATHS, "--prompt", "x",
+                          "--end-image", "last.png"]))
+    assert video_runtime == []
+
+
+def test_video_reports_what_the_loaded_variant_refuses(video_runtime, monkeypatch):
+    """A request the variant cannot serve is one line, not a trace."""
+
+    def refuse(self, spec):
+        raise ValueError("this variant has no channel for a last one")
+
+    monkeypatch.setattr(_FakeVideo, "resolve", refuse)
+    with pytest.raises(SystemExit, match="no channel for a last one"):
+        run_video(_parse(["video", *VIDEO_PATHS, "--prompt", "x"]))
+
+
+def test_video_names_the_flag_of_a_frame_it_cannot_read(video_runtime):
+    with pytest.raises(SystemExit, match=r"--image.*nowhere\.png"):
+        run_video(_parse(["video", *VIDEO_PATHS, "--prompt", "x",
+                          "--image", "nowhere.png"]))
+
+
 # ---------------------------------------------------------------- upscale
 
 
@@ -383,6 +510,7 @@ def test_main_dispatches_to_the_correct_handler(monkeypatch):
     calls = []
     monkeypatch.setattr("thenoise.generate.run_generate", lambda args: calls.append("generate"))
     monkeypatch.setattr("thenoise.generate.run_edit", lambda args: calls.append("edit"))
+    monkeypatch.setattr("thenoise.video_cli.run_video", lambda args: calls.append("video"))
     monkeypatch.setattr("thenoise.upscale_cli.run_upscale", lambda args: calls.append("upscale"))
     monkeypatch.setattr(
         "thenoise.controlmap_cli.run_controlmap", lambda args: calls.append("controlmap")
@@ -391,7 +519,8 @@ def test_main_dispatches_to_the_correct_handler(monkeypatch):
 
     main(["generate", "--dit", "d", "--vae", "v", "--text-encoder", "t", "--prompt", "x"])
     main(["edit", "--dit", "d", "--vae", "v", "--text-encoder", "t", "--prompt", "x", "--image", "i.png"])
+    main(["video", "--dit", "d", "--vae", "v", "--text-encoder", "t", "--prompt", "x"])
     main(["upscale", "--pixel-upscaler", "u.safetensors", "--input", "i.png"])
     main(["controlmap", "--input", "i.png", "--type", "canny"])
     main(["serve"])
-    assert calls == ["generate", "edit", "upscale", "controlmap", "serve"]
+    assert calls == ["generate", "edit", "video", "upscale", "controlmap", "serve"]

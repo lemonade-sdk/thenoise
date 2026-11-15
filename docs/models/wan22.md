@@ -5,16 +5,18 @@ different models rather than two sizes of one.
 
 | | TI2V-5B | T2V-A14B |
 |---|---|---|
-| Modes | text-to-video, image-to-video | text-to-video, or image-to-video with the I2V pair |
+| Modes | text-to-video, image-to-video | text-to-video, or image-to-video with the I2V pair, which also takes a last frame |
 | Transformer | one checkpoint (`--dit`) | two experts: `--dit` high noise, `--dit-low` low noise |
 | Latent and codec | 48 channels, Wan 2.2 causal 3D VAE, BF16 compute | 16 channels, Wan 2.1 causal 3D VAE, FP16 compute; the I2V pair's transformer takes 36, the extra 20 being mask and reference |
 | Text encoder | UMT5-XXL, FP16 file, BF16 compute | the same file |
 | Samplers | UniPC or Euler | UniPC or Euler |
 | Defaults | 1280×704, 33 frames, 24 FPS, 12 steps, CFG 5.0, UniPC, WebM, flow shift 5 | 832×480, 33 frames, 16 FPS, 40 steps, Euler, CFG 4.0, flow shift 12, high/low boundary 0.875 (the I2V pair: shift 5, boundary 0.900, CFG 3.5 on both halves) |
 
-Both answer the same video request over the same [HTTP API](../api.md#video-generation):
-`POST /video` generates and returns the clip, `POST /jobs/video` queues a job. Output is
-MP4/H.264 or WebM/VP9 on the **`4n+1`** temporal grid, with no fixed maximum frame count.
+Both answer the same video request, from the command line with
+[`video`](../cli.md#generate-a-single-clip) or over the
+[HTTP API](../api.md#video-generation), where `POST /video` returns the clip and
+`POST /jobs/video` queues a job. Output is MP4/H.264 or WebM/VP9 on the **`4n+1`**
+temporal grid, with no fixed maximum frame count.
 
 > Commands below assume a dev checkout (`./thenoise.sh`, `.venv/bin/python`).
 > On a [portable bundle](../setup.md) use `./bin/thenoise` and
@@ -23,8 +25,8 @@ MP4/H.264 or WebM/VP9 on the **`4n+1`** temporal grid, with no fixed maximum fra
 ## TI2V-5B
 
 Native text-to-video and image-to-video from the Comfy-Org Wan 2.2 5B checkpoint.
-The two modes are the same model and the same request: `image` selects one, `prompt`
-describes what happens after the first frame.
+The two modes are the same model and the same request: `--image` selects one,
+`prompt` describes what happens after the first frame.
 
 ### Download
 
@@ -57,49 +59,42 @@ Start the server using the ROCm-configured launcher (which sets
 
 ### Text-to-video
 
+One clip, no server: `video` loads the same three files, renders, and writes the
+file `--out` names. Every other flag is optional — what the release ships as its
+defaults is in the table above.
+
 ```bash
-curl -fS http://127.0.0.1:8000/video -H 'content-type: application/json' \
-  -d '{"prompt":"A fox walking through snow","frames":33,"width":704,
-       "height":480,"steps":8,"sampler":"unipc","output_format":"mp4"}' \
-  -o fox.mp4
+./thenoise.sh video \
+  --dit ./models/wan22/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors \
+  --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors \
+  --vae ./models/wan22/split_files/vae/wan2.2_vae.safetensors \
+  --prompt "A fox walking through snow" \
+  --width 704 --height 480 --frames 33 --steps 8 --sampler unipc \
+  --out fox.mp4
 ```
 
 ### Image-to-video
 
-Supply the first frame as a **PNG or JPEG** in the `image` request field. The value
-must be base64 of the image file bytes (not a `data:image/...;base64,` URL and not a
-filesystem path). TheNoise cover-crops the input to the requested video dimensions,
-encodes it with the video VAE and conditions the first frame of the generated clip on
-that image.
-
-With `reference.png` in the current directory, generate an MP4 synchronously. The
-bundled Python builds the JSON payload, so no additional `jq` or platform-specific
-`base64` command is needed:
+`--image` names a PNG or JPEG the clip starts on, and the prompt says what happens
+after it. With `--width`/`--height` left out the image's own aspect ratio decides
+the clip's shape.
 
 ```bash
-.venv/bin/python - <<'PYTHON' | curl -fS http://127.0.0.1:8000/video \
-  -H 'content-type: application/json' --data-binary @- -o fox_i2v.mp4
-import base64
-import json
-from pathlib import Path
-
-image = base64.b64encode(Path("reference.png").read_bytes()).decode("ascii")
-print(json.dumps({
-    "prompt": "The fox starts walking forward while the camera tracks it",
-    "image": image,
-    "width": 704,
-    "height": 480,
-    "frames": 33,
-    "fps": 24,
-    "steps": 8,
-    "sampler": "unipc",
-    "output_format": "mp4",
-}))
-PYTHON
+./thenoise.sh video \
+  --dit ./models/wan22/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors \
+  --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors \
+  --vae ./models/wan22/split_files/vae/wan2.2_vae.safetensors \
+  --image reference.png \
+  --prompt "The fox starts walking forward while the camera tracks it" \
+  --width 704 --height 480 --frames 33 --fps 24 --steps 8 --sampler unipc \
+  --out fox_i2v.mp4
 ```
 
-For an asynchronous I2V job, send the same body to `POST /jobs/video` — see
-[Video jobs](#video-jobs).
+TheNoise cover-crops the frame to the clip's canvas, encodes it with the video VAE
+and conditions the clip's first frame on it. Over HTTP that frame goes in the
+`image` field as base64 of the file bytes — not a `data:image/...;base64,` URL and
+not a path — see [HTTP API](../api.md#image-to-video-i2v), and
+[Video jobs](#video-jobs) to queue a render instead of waiting for it.
 
 ### Performance (Strix Halo)
 
@@ -125,7 +120,7 @@ which keeps both on the card when they fit; do not run both as resident GPU mode
 32 GiB card. The single `guidance_scale` a request carries is the high-noise CFG (4.0 by
 default); low-noise CFG is 0.75× that (3.0 by default).
 
-An `image` in the request is refused by these two files: image-to-video is
+`--image` is refused by these two files: image-to-video is
 [its own pair of experts](#i2v-a14b).
 
 ### Download
@@ -154,16 +149,32 @@ models/wan22/split_files/
   --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors \
   --vae ./models/wan22/split_files/vae/wan_2.1_vae.safetensors \
   --port 8000
+```
 
-curl -fS http://127.0.0.1:8000/video -H 'content-type: application/json' \
-  -d '{"prompt":"A fox walking through snow","width":704,"height":480,
-       "frames":33,"steps":12,"sampler":"euler","output_format":"mp4"}' \
-  -o fox_14b.mp4
+Or one clip, with both experts passed the same way:
+
+```bash
+./thenoise.sh video \
+  --dit ./models/wan22/split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp16.safetensors \
+  --dit-low ./models/wan22/split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp16.safetensors \
+  --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors \
+  --vae ./models/wan22/split_files/vae/wan_2.1_vae.safetensors \
+  --prompt "A fox walking through snow" \
+  --width 704 --height 480 --frames 33 --steps 12 \
+  --out fox_14b.mp4
 ```
 
 ### One LoRA per expert
 
-Each expert is LoRA-able on its own:
+Each expert is LoRA-able on its own — `--lora` for the one `--dit` names,
+`--lora-low` for the one `--dit-low` names, both against a `--lora-dir`:
+
+```bash
+  --lora wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise:1.0 \
+  --lora-low wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise:1.0
+```
+
+Over HTTP the same two go by role:
 
 ```json
 {"lora_specs": {"dit": ["style:0.8"], "dit_low": ["pose"]}}
@@ -177,7 +188,9 @@ sent under both roles. `GET /lora` lists the roles this model offers.
 The image-to-video A14B pair is the T2V trunk with a wider door: 36 channels, the 20
 extra being a mask and the reference clip concatenated onto the noise at every step.
 Two experts, Euler, the same LoRA roles, and no CLIP vision tower anywhere in it. Its
-release numbers are its own — see [what to send](#what-to-send).
+release numbers are its own — see [what to send](#what-to-send). Send it two images and
+the same door takes a clip that ends as well as starts — see
+[first-and-last-frame](#first-and-last-frame-flf2v).
 
 ### Download
 
@@ -204,16 +217,45 @@ models/wan22/split_files/
 ```
 
 ```bash
-curl -s localhost:8000/video -H 'content-type: application/json' --data-binary @- \
-  -o fox_i2v.mp4 <<'JSON'
-{"model": "wan22", "prompt": "a fox in the snow", "image": "<base64 PNG>"}
-JSON
+./thenoise.sh video \
+  --dit ./models/wan22/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors \
+  --dit-low ./models/wan22/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors \
+  --vae ./models/wan22/split_files/vae/wan_2.1_vae.safetensors \
+  --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors \
+  --image reference.png --prompt "a fox in the snow" \
+  --out fox_i2v.mp4
 ```
 
-Omit `width` and `height` and the reference decides the clip's size, as it does for an
-image edit: its aspect ratio at the 832×480 this variant defaults to. The 5B path
+Omit `--width` and `--height` and the reference decides the clip's size, as it does for
+an image edit: its aspect ratio at the 832×480 this variant defaults to. The 5B path
 conditions differently — its first frame is denoised at timestep zero instead of being
 concatenated — but asks for the same request.
+
+### First-and-last-frame (FLF2V)
+
+The same two experts and no third download: pass `--end-image` beside `--image` and the
+clip is pinned at both ends, the model inventing the change between them. Wan 2.2 has no
+FLF2V release and needs none — a concatenated reference carries a mask naming which of
+its frames are given, so lighting its far end as well as its near one is a request, not a
+checkpoint.
+
+```bash
+./thenoise.sh video \
+  --dit ./models/wan22/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors \
+  --dit-low ./models/wan22/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors \
+  --vae ./models/wan22/split_files/vae/wan_2.1_vae.safetensors \
+  --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors \
+  --image first.png --end-image last.png \
+  --prompt "the fox looks up, the snow thickens and the camera pulls back" \
+  --out fox_flf2v.mp4
+```
+
+Both frames are cover-cropped to the clip's canvas, the first deciding its size when the
+request names none, so write the prompt as the change from one to the other. The endpoints
+are conditioning rather than a paste — the clip ends where the run landed, not on your file
+byte for byte — and asking I2V weights for a frame they were never trained to mark costs
+some certainty in the middle. ComfyUI drives this same conditioning on these files, at 81
+frames by default.
 
 ## What to send
 

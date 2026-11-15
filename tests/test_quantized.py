@@ -11,6 +11,7 @@ import torch
 from comfy_kitchen.tensor import QuantizedTensor
 
 from conftest import (
+    StubModel,
     TinyDiT,
     bf16_tensors,
     comfy_quant,
@@ -156,7 +157,7 @@ def test_quantized_linear_bake_lora_requantizes_in_place(layout):
 
 def _modes(result) -> dict:
     """``{module path: LoraMode}`` for everything the LoRA touched."""
-    return {path: undo.mode for path, undo in result["targets"].items()}
+    return {path: undo.mode for path, undo in result.items()}
 
 
 @pytest.mark.parametrize(
@@ -185,10 +186,10 @@ def test_apply_lora_bakes_quantized_and_undo_reloads_from_disk(kwargs, tmp_path)
     orig_scale = model.q.weight.params.scale.clone()
     assert torch.equal(orig_scale, tensors[f"{prefix}q.weight_scale"])
 
-    result = apply_lora_to_model(model, [int8_lora_state_dict()], dit_path=path)
+    result = apply_lora_to_model(model, [int8_lora_state_dict()])
     assert _modes(result) == {"q": LoraMode.BAKED_QUANTIZED}
-    assert result["targets"]["q"].raw_key == f"{prefix}q.weight"
-    assert result["dit_path"] == path
+    assert result["q"].raw_key == f"{prefix}q.weight"
+    assert result["q"].checkpoint == path
     assert not torch.equal(model.q.weight._qdata, orig_q)
 
     undo_lora_on_model(model, result)
@@ -196,18 +197,38 @@ def test_apply_lora_bakes_quantized_and_undo_reloads_from_disk(kwargs, tmp_path)
     assert torch.equal(model.q.weight.params.scale, orig_scale)
 
 
-def test_apply_lora_undo_without_dit_path_raises(tmp_path):
+def test_a_second_component_is_undone_from_the_file_it_came_from(tmp_path):
+    """Undo reloads a layer from the file it was loaded from, not the model's primary
+    one. Both experts carry every key name, so the wrong file restores without a sound."""
+    high_path, _ = int8_checkpoint(tmp_path / "high.safetensors")
+    low_path, _ = int8_checkpoint(tmp_path / "low.safetensors")
+    write_safetensors(tmp_path / "style.safetensors", int8_lora_state_dict("q"))
+
+    high, low_dit = TinyDiT(), TinyDiT()
+    load_dit(high, high_path, device="cpu", dtype=torch.bfloat16)
+    load_dit(low_dit, low_path, device="cpu", dtype=torch.bfloat16)
+    assert not torch.equal(low_dit.q.weight._qdata, high.q.weight._qdata)
+    originals = low_dit.q.weight._qdata.clone()
+
+    adapter = StubModel(lora_dir=str(tmp_path))
+    adapter.dit_path = high_path  # the adapter's own checkpoint is the other expert
+
+    adapter.switch_loras(["style.safetensors:1.0"], low_dit, "dit_low")
+    assert not torch.equal(low_dit.q.weight._qdata, originals)
+
+    adapter.switch_loras(None, low_dit, "dit_low")
+    assert torch.equal(low_dit.q.weight._qdata, originals)
+
+
+def test_undoing_a_bake_of_a_layer_with_no_checkpoint_raises():
+    """A quantized layer with no file behind it has nothing to reload, and undo says so."""
     from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
 
-    # Restore keys are captured at load time, but undo has no file to read them
-    # from -> a hard error rather than a silently half-restored model.
-    path, _ = int8_checkpoint(tmp_path / "int8.safetensors")
-    model = TinyDiT()
-    load_dit(model, path, device="cpu", dtype=torch.bfloat16)
-
+    model = TinyDiT(quantized=True)
     result = apply_lora_to_model(model, [int8_lora_state_dict()])
-    assert result["targets"]["q"].raw_key == "q.weight"
-    with pytest.raises(RuntimeError, match="dit_path"):
+    assert _modes(result) == {"q": LoraMode.BAKED_QUANTIZED}
+    assert result["q"].checkpoint is None
+    with pytest.raises(RuntimeError, match="no originals to reload"):
         undo_lora_on_model(model, result)
 
 
@@ -344,14 +365,14 @@ def test_apply_lora_applies_a_sub_step_delta_at_runtime():
     result = apply_lora_to_model(model, [sd])
 
     assert _modes(result) == {"q": LoraMode.RUNTIME}
-    assert result["targets"]["q"].raw_key is None  # nothing baked -> nothing to reload
+    assert result["q"].raw_key is None  # nothing baked -> nothing to reload
     assert torch.equal(model.q.weight._qdata, stored)
 
     delta = sd["q.lora_up.weight"].float() @ sd["q.lora_down.weight"].float()
     branch = model.q._lora_branch(x)
     assert _rel_err(branch, x.float() @ delta.t()) < 0.05
 
-    # No ``dit_path`` was recorded (or needed): undo works from memory alone.
+    # Nothing was baked: undo works from memory alone.
     undo_lora_on_model(model, result)
     assert model.q._lora_down is None
     assert torch.equal(model.q(x), base)

@@ -31,6 +31,8 @@ class ResolvedVideo:
     seed: int
     output_format: str
     image: bytes | None
+    #: The clip's last frame, which only a concatenating reference has anywhere to put.
+    end_image: bytes | None
     sampler: str
     #: LoRA specs by role, so a model with two LoRA-able components can be asked for a
     #: different set on each; every model has at least the default role to answer for.
@@ -39,7 +41,9 @@ class ResolvedVideo:
 
     @property
     def mode(self) -> str:
-        return "i2v" if self.image is not None else "t2v"
+        if self.image is None:
+            return "t2v"
+        return "flf2v" if self.end_image is not None else "i2v"
 
     def public(self) -> dict:
         return {
@@ -51,6 +55,10 @@ class ResolvedVideo:
             "sampler": self.sampler,
             "lora_specs": self.lora_specs,
         }
+
+
+#: The containers the muxer writes.
+OUTPUT_FORMATS = ("mp4", "webm")
 
 
 class VideoSpec(BaseModel):
@@ -74,6 +82,7 @@ class VideoSpec(BaseModel):
     seed: int | None = None
     output_format: Literal["mp4", "webm"] | None = None
     image: Annotated[bytes, Field(min_length=1)] | None = None
+    end_image: Annotated[bytes, Field(min_length=1)] | None = None
     sampler: Annotated[str, Field(min_length=1)] | None = None
     lora_specs: LoraSpecs = None
 
@@ -102,6 +111,8 @@ class VideoSpec(BaseModel):
             return defaults[key] if value is None else value
 
         negative_prompt = pref("negative_prompt")
+        if self.end_image is not None and self.image is None:
+            raise ValueError("end_image needs image: a clip cannot end before it starts")
         width, height = pref("width"), pref("height")
         fps, steps = pref("fps"), pref("steps")
         guidance_scale, flow_shift = pref("guidance_scale"), pref("flow_shift")
@@ -114,7 +125,7 @@ class VideoSpec(BaseModel):
             raise ValueError("flow_shift must be finite and positive")
         if not sampler:
             raise ValueError("sampler must not be empty")
-        if output_format not in ("mp4", "webm"):
+        if output_format not in OUTPUT_FORMATS:
             raise ValueError("output_format must be mp4 or webm")
         frames = (self.frames if self.frames is not None else
                   max(1, math.floor(self.duration * fps + 0.5))
@@ -127,7 +138,7 @@ class VideoSpec(BaseModel):
             width=width, height=height, frame_count=frames, fps=fps,
             steps=steps, guidance_scale=guidance_scale, flow_shift=flow_shift,
             seed=seed,
-            output_format=output_format, image=self.image,
+            output_format=output_format, image=self.image, end_image=self.end_image,
             sampler=sampler, lora_specs=lora_specs_by_role(self.lora_specs),
             explicit_frames=self.frames is not None,
         )

@@ -551,7 +551,7 @@ def test_bf16_apply_then_undo_restores_weights_bit_exactly():
     original = {k: v.clone() for k, v in model.state_dict().items()}
 
     result = apply_lora_to_model(model, [_int_lora("proj")], [1.0])
-    assert result["targets"]["proj"].mode is LoraMode.BAKED
+    assert result["proj"].mode is LoraMode.BAKED
     assert not torch.equal(model.proj.weight, original["proj.weight"])
 
     undo_lora_on_model(model, result)
@@ -583,7 +583,7 @@ def test_apply_reports_and_skips_unused_keys(caplog):
     sd["nowhere.at.all.lora_B.weight"] = torch.ones(6, 2)
 
     result = apply_lora_to_model(model, [sd], [1.0])
-    assert set(result["targets"]) == {"proj"}
+    assert set(result) == {"proj"}
     assert "unused keys" in caplog.text
 
 
@@ -620,7 +620,7 @@ def test_a_declared_fusion_lands_a_split_lora_on_the_fused_weight():
     result = apply_lora_to_model(
         model, [_peft_gate_up_lora()], [1.0], fusions=FUSE_GATE_UP
     )
-    assert set(result["targets"]) == {"blocks.0.img_mlp.gate_up"}
+    assert set(result) == {"blocks.0.img_mlp.gate_up"}
     expected = torch.cat([2 * torch.ones(6, 4), 8 * torch.ones(6, 4)], dim=0)
     assert torch.equal(model.blocks[0].img_mlp.gate_up.weight, original + expected)
 
@@ -638,7 +638,7 @@ def test_an_undeclared_fusion_is_not_applied(caplog):
     original = model.blocks[0].img_mlp.gate_up.weight.clone()
 
     result = apply_lora_to_model(model, [_peft_gate_up_lora()], [1.0])
-    assert result["targets"] == {}
+    assert result == {}
     assert torch.equal(model.blocks[0].img_mlp.gate_up.weight, original)
     assert "unused keys" in caplog.text
 
@@ -671,7 +671,7 @@ def test_a_lora_naming_the_fused_projection_lands_on_it(caplog):
 
     result = apply_lora_to_model(model, [lora], [1.0], fusions={"qkv": ("q", "k", "v")})
 
-    assert set(result["targets"]) == {"layers.0.proj.qkv"}
+    assert set(result) == {"layers.0.proj.qkv"}
     assert torch.equal(
         model.layers[0].proj["qkv"].weight, original + 2 * torch.ones(12, 4)
     )
@@ -701,7 +701,7 @@ def test_switch_loras_uses_the_model_fusion_spec(tmp_path):
 
 def test_apply_with_no_loras_returns_an_empty_result():
     result = apply_lora_to_model(_TinyNet(), [], [])
-    assert result["targets"] == {}
+    assert result == {}
     # Undoing it is a no-op rather than an error.
     undo_lora_on_model(_TinyNet(), result)
 

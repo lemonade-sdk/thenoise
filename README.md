@@ -64,16 +64,12 @@ New models are added over time. PRs adding model support are welcome.
 
 ### Video models
 
-| Model | Text-to-video | Image-to-video | Details |
-|---|---|---|---|
-| **Wan 2.2 TI2V-5B** | ✓ | ✓ | [wan22](docs/models/wan22.md#ti2v-5b) |
-| **Wan 2.2 T2V-A14B**, one expert per half of the schedule | ✓ | — | [wan22](docs/models/wan22.md#t2v-a14b-two-experts) |
-| **Wan 2.2 I2V-A14B**, the same experts at 36 input channels | — | ✓ | [wan22](docs/models/wan22.md#i2v-a14b) |
+| Model | Text-to-video | Image-to-video | First/last frame | Details |
+|---|---|---|---|---|
+| **Wan 2.2 TI2V-5B** | ✓ | ✓ | — | [wan22](docs/models/wan22.md#ti2v-5b) |
+| **Wan 2.2 T2V-A14B**, one expert per half of the schedule | ✓ | — | — | [wan22](docs/models/wan22.md#t2v-a14b-two-experts) |
+| **Wan 2.2 I2V-A14B**, the same experts at 36 input channels | — | ✓ | ✓ | [wan22](docs/models/wan22.md#i2v-a14b) |
 
-Every generator answers directly (`POST /text2image`, `POST /edit`, `POST /video`)
-and can also be queued and polled (`POST /jobs/text2image`, `POST /jobs/edit`,
-`POST /jobs/video`); see the [HTTP API](docs/api.md#asynchronous-jobs).
-To animate a still image, follow the [image-to-video example](docs/models/wan22.md#image-to-video).
 
 ## How does it compare to ComfyUI?
 
@@ -165,7 +161,7 @@ uv pip install -e ".[scripts]"
 
 | If you want to… | Use |
 |---|---|
-| generate an image from the command line | the [CLI](docs/cli.md) - `generate`, `edit`, `upscale`, `controlmap` |
+| generate an image or a clip from the command line | the [CLI](docs/cli.md) - `generate`, `edit`, `video`, `upscale`, `controlmap` |
 | work through a browser | the web UI at `http://localhost:8000/` when running `serve` |
 | call it from other software | the [HTTP API](docs/api.md) - `/text2image`, `/edit`, `/upscale`, `/controlmap` |
 | manage it as a service | the [Docker / Compose](docs/docker.md) image - start, stop, swap models |
@@ -176,7 +172,7 @@ uv pip install -e ".[scripts]"
 | | |
 |---|---|
 | [**Setup**](docs/setup.md) | from a released build to your first image |
-| [**CLI reference**](docs/cli.md) | all `generate` / `edit` / `serve` / `upscale` flags, upscaling, LoRAs |
+| [**CLI reference**](docs/cli.md) | all `generate` / `edit` / `video` / `serve` / `upscale` flags, upscaling, LoRAs |
 | [**HTTP API**](docs/api.md) | endpoints, request/response reference, curl and Python examples |
 | [**Docker / Compose**](docs/docker.md) | running the ROCm container, model + cache volumes, swapping models |
 | [**Development & Contribution**](docs/development.md) | building from source, tests, portable builds, adding models |

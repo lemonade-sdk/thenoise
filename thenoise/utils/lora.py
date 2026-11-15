@@ -18,7 +18,6 @@ from typing import (
     Optional,
     Sequence,
     Tuple,
-    TypedDict,
 )
 
 import torch
@@ -319,25 +318,18 @@ def _lora_targets(model: torch.nn.Module):
 class _Undo(NamedTuple):
     mode: LoraMode
     factors: Optional[LoraFactors] = None   # BAKED: the delta is recomputed to undo it
-    raw_key: Optional[str] = None           # BAKED_QUANTIZED: raw checkpoint key
+    checkpoint: Optional[str] = None        # BAKED_QUANTIZED: the file to reload from
+    raw_key: Optional[str] = None           # BAKED_QUANTIZED: and the key to reload
 
 
-class LoRAApplyResult(TypedDict):
-    """Undo state for ``apply_lora_to_model``: one ``_Undo`` per touched target.
-
-    The rank-reduced factors of the BAKED targets are kept (recomputing their delta
-    on undo is cheaper than caching full-sized ones).
-    """
-
-    dit_path: Optional[str]
-    targets: Dict[str, _Undo]
+#: One record per touched target, keyed by module path: what a LoRA undo takes back.
+LoRAApplyResult = Dict[str, _Undo]
 
 
 def apply_lora_to_model(
     model: torch.nn.Module,
     lora_sds: List[Dict[str, torch.Tensor]],
     multipliers: Optional[List[float]] = None,
-    dit_path: Optional[str] = None,
     key_map: Optional[Callable[[str], str]] = None,
     fusions: Optional[Mapping[str, Sequence[str]]] = None,
 ) -> LoRAApplyResult:
@@ -345,8 +337,10 @@ def apply_lora_to_model(
 
     All the LoRAs hitting one target are folded into a single ``LoraFactors``, so a
     layer is handed one LoRA and answers with the ``LoraMode`` it used. ``key_map``
-    and ``fusions`` are the model's own naming corrections and ``dit_path`` the
-    checkpoint baked quantized layers reload their originals from.
+    and ``fusions`` are the model's own naming corrections.
+
+    A baked quantized layer reloads its originals from the checkpoint ``load_dit``
+    recorded on it, not from one the caller names: components share their key names.
     """
     base_model = _unwrap_compiled(model)
     lora_sds = [_normalize_lora_sd(sd, key_map, fusions) for sd in lora_sds]
@@ -356,6 +350,7 @@ def apply_lora_to_model(
 
     lora_keys = [set(sd.keys()) for sd in lora_sds]
     restore_map = getattr(base_model, "_quantized_restore_map", {})
+    restore_path = getattr(base_model, "_quantized_restore_path", None)
     targets: Dict[str, _Undo] = {}
 
     with inference():
@@ -365,10 +360,12 @@ def apply_lora_to_model(
                 continue
             factors = _fold(pairs)
             mode = module.apply_lora(factors)
+            baked = mode is LoraMode.BAKED_QUANTIZED
             targets[path] = _Undo(
                 mode,
                 factors if mode is LoraMode.BAKED else None,
-                restore_map.get(path) if mode is LoraMode.BAKED_QUANTIZED else None,
+                restore_path if baked else None,
+                restore_map.get(path) if baked else None,
             )
 
     for i, unused in enumerate(lora_keys):
@@ -388,24 +385,22 @@ def apply_lora_to_model(
                 ", ".join(runtime),
             )
 
-    return {"dit_path": dit_path, "targets": targets}
+    return targets
 
 
 def undo_lora_on_model(
     model: torch.nn.Module,
-    result: LoRAApplyResult,
+    targets: LoRAApplyResult,
 ) -> None:
     """Undo a previous ``apply_lora_to_model`` (in-place).
 
-    Baked BF16 weights get their recomputed delta subtracted, baked quantized
-    layers are reloaded from the checkpoint, runtime branches are dropped.
+    Baked BF16 weights get their recomputed delta subtracted, baked quantized layers are
+    reloaded from their own checkpoint, runtime branches are dropped.
     """
-    targets = result["targets"]
     if not targets:
         return
 
     logger.debug("Undoing LoRA on model (%d target(s))", len(targets))
-    dit_path = result["dit_path"]
     base_model = _unwrap_compiled(model)
 
     with inference():
@@ -414,7 +409,7 @@ def undo_lora_on_model(
             if undo.mode is LoraMode.RUNTIME:
                 module.clear_runtime_lora()
             elif undo.mode is LoraMode.BAKED_QUANTIZED:
-                module.undo_lora(dit_path, undo.raw_key)
+                module.undo_lora(undo.checkpoint, undo.raw_key)
             elif undo.factors is not None:
                 param = base_model.get_parameter(f"{path}.weight")
                 param.data.sub_(undo.factors.delta(param.device, param.dtype))

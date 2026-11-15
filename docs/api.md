@@ -110,6 +110,7 @@ defaults when optional fields are omitted.
 | `prompt` | string | Required text prompt |
 | `model` | string | Optional loaded model name, checked if provided |
 | `image` | string | Optional base64-encoded PNG/JPEG first frame (I2V; omit for T2V) |
+| `end_image` | string | Optional base64-encoded PNG/JPEG last frame (FLF2V; needs `image`, and a model whose reference is concatenated — Wan 2.2 I2V-A14B) |
 | `negative_prompt` | string | Optional negative text prompt |
 | `width`, `height` | integer | Video dimensions (Wan rounds down to multiples of 32) |
 | `frames` | integer | Desired frame count (Wan uses a `4n+1` grid) |
@@ -148,6 +149,27 @@ conditioning. For a platform-independent Python-based example, see the
 [Wan 2.2 model page](models/wan22.md#image-to-video). To queue I2V instead, send the
 same request to `POST /jobs/video`.
 
+### First-and-last-frame video (FLF2V)
+
+Add an `end_image` — same encoding, same rules — and the clip is pinned at both ends:
+it starts on `image`, ends on `end_image`, and the prompt describes the change between
+them. Both frames are cover-cropped to the output size; the first one decides it when
+`width`/`height` are omitted.
+
+```bash
+FIRST="$(base64 -w 0 first.png)"
+LAST="$(base64 -w 0 last.png)"
+curl -fS http://127.0.0.1:8000/video \
+  -H 'content-type: application/json' \
+  --data-binary "{\"prompt\":\"the fox looks up and the snow thickens\",\"image\":\"$FIRST\",\"end_image\":\"$LAST\",\"width\":704,\"height\":480,\"frames\":33,\"steps\":8,\"output_format\":\"mp4\"}" \
+  -o fox_flf2v.mp4
+```
+
+Which model can do this is `video.flf2v` in [GET /health](#get-health); a request that
+asks a variant without it is refused with HTTP 400. On Wan 2.2 that is the I2V-A14B pair
+alone, and no extra weights are involved — see
+[First-and-last-frame](models/wan22.md#first-and-last-frame-flf2v).
+
 The normal `GET /lora` endpoint also lists LoRAs available to a loaded video
 model, along with the `roles` a `lora_specs` request may name. A bare list goes
 to the model's single transformer; a two-expert model offers `dit` and
@@ -168,7 +190,7 @@ With a video model:
 ```json
 {"status": "ok", "models": ["wan22"],
   "capabilities": {"edit": false, "kv_cache": false, "upscale": false,
-                   "video": {"t2v": true, "i2v": true}}}
+                   "video": {"t2v": true, "i2v": true, "flf2v": true}}}
 ```
 
 `models` is empty until a DiT is loaded, and `capabilities` is the loaded
@@ -177,7 +199,8 @@ to gate the Edit tab, the KV-cache control and which layout the Generate tab
 shows, and a request asking for a capability the model lacks is rejected
 with HTTP 400 rather than silently ignored. A medium's own capabilities are
 nested under the medium's name, and a model of another medium answers that key
-with `null`. `i2v` follows the loaded variant rather than the model name.
+with `null`. `i2v` and `flf2v` follow the loaded variant rather than the model
+name.
 
 ## `POST /text2image`
 

@@ -123,6 +123,53 @@ def test_cli_edit_requires_an_image(parse):
         parse(["edit", *PATHS, "--prompt", "x"])
 
 
+# --------------------------------------------------------------------- video
+
+
+def test_cli_video_parses(parse):
+    args = parse([
+        "video", *PATHS, "--dit-low", "low.safetensors",
+        "--prompt", "a fox turns into a cat", "--negative-prompt", "blur",
+        "--width", "704", "--height", "480", "--frames", "33", "--fps", "24",
+        "--steps", "8", "--guidance-scale", "3.5", "--flow-shift", "5",
+        "--sampler", "unipc", "--seed", "7", "--output-format", "webm",
+        "--image", "first.png", "--end-image", "last.png",
+        "--lora", "style:0.8", "--lora-low", "pose",
+        "--out", "/tmp/fox.webm", "--device", "hip",
+    ])
+    assert args.command == "video"
+    assert (args.dit, args.dit_low, args.device) == (
+        "d.safetensors", "low.safetensors", "hip")
+    assert (args.width, args.height, args.frames, args.fps, args.steps) == (
+        704, 480, 33, 24, 8)
+    assert (args.guidance_scale, args.flow_shift, args.seed) == (3.5, 5.0, 7)
+    assert (args.sampler, args.output_format, args.out) == (
+        "unipc", "webm", "/tmp/fox.webm")
+    assert (args.image, args.end_image) == ("first.png", "last.png")
+    assert (args.lora, args.lora_low) == (["style:0.8"], ["pose"])
+    assert args.negative_prompt == "blur"
+
+
+def test_cli_video_leaves_every_knob_to_the_model(parse):
+    """An unset flag stays unset rather than arriving as a default of ours."""
+    args = parse(["video", *PATHS, "--prompt", "a fox"])
+    for name in ("negative_prompt", "width", "height", "frames", "duration", "fps",
+                 "steps", "guidance_scale", "flow_shift", "sampler", "seed",
+                 "output_format", "image", "end_image"):
+        assert getattr(args, name) is None, name
+    assert (args.out, args.dit_low, args.lora, args.lora_low) == ("out.mp4", "", [], [])
+
+
+def test_cli_video_requires_a_prompt_and_takes_no_image_edit_flags(parse):
+    with pytest.raises(SystemExit):
+        parse(["video", *PATHS])
+    # A clip has no latent refine or pixel upscaler: those are the still commands'.
+    with pytest.raises(SystemExit):
+        parse(["video", *PATHS, "--prompt", "x", "--upscale"])
+    with pytest.raises(SystemExit):
+        parse(["video", *PATHS, "--prompt", "x", "--pixel-upscaler", "u.safetensors"])
+
+
 # -------------------------------------------------------------------- upscale
 
 

@@ -107,7 +107,6 @@ class LoRASupport:
 
                 result = apply_lora_to_model(
                     module, lora_sds, multipliers,
-                    dit_path=self.dit_path,
                     key_map=self._lora_key_map,
                     fusions=self.lora_fusions,
                 )
