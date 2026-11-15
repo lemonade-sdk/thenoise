@@ -39,19 +39,11 @@ $('height').addEventListener('input', () => updateFinalRes(''));
 
 let editRefs = []; // {dataUrl, b64, dims:{w,h}, name}
 
-const EDIT_DEFAULT_SIZE = 1024; // largest side when no width/height given
-
+// A size left out is the model's to choose, and only it knows how: named sizes are all we state.
 function editTargetDims() {
-  if (!editRefs.length) return null;
-  const { w: iw, h: ih } = editRefs[0].dims;
   const ew = parseInt($('edit_width').value, 10);
   const eh = parseInt($('edit_height').value, 10);
-  if (ew && eh) return { w: ew, h: eh };
-  if (ew) return { w: ew, h: ih };
-  if (eh) return { w: iw, h: eh };
-  // No width/height: resize the first reference to 1024, aspect preserved.
-  if (iw >= ih) return { w: EDIT_DEFAULT_SIZE, h: Math.round(ih * EDIT_DEFAULT_SIZE / iw) };
-  return { w: Math.round(iw * EDIT_DEFAULT_SIZE / ih), h: EDIT_DEFAULT_SIZE };
+  return ew && eh ? { w: ew, h: eh } : null;
 }
 
 function updateEditFinalRes() {
@@ -109,13 +101,6 @@ bindSwap('eswap', 'edit_width', 'edit_height', updateEditFinalRes);
 $('download').addEventListener('click', () =>
   download(currentUrl, `thenoise_${seedName(currentMeta, 'x')}.png`));
 
-let loras = [];
-
-async function loadLoras() {
-  const data = await fetchJSON('/lora');
-  loras = data ? (data.loras || []).sort() : [];
-}
-
 let upscalerScales = {};  // name -> detected native scale (2/4)
 
 async function loadUpscalers() {
@@ -152,91 +137,6 @@ async function loadUpscalers() {
   updateUpscaleMax('edit_');
 }
 
-function initLora(prefix) {
-  const specs = () => $(prefix + 'lora_specs');
-  const ac = () => $(prefix + 'lora_ac');
-
-  function openAc() { ac().classList.add('open'); }
-  function closeAc() { ac().classList.remove('open'); ac().innerHTML = ''; }
-
-  function tokenAtCursor(ta) {
-    const s = ta.selectionStart;
-    const before = ta.value.slice(0, s);
-    const nl = before.lastIndexOf('\n');
-    const lineStart = nl === -1 ? 0 : nl + 1;
-    const sp = before.lastIndexOf(' ');
-    const tokenStart = sp > lineStart ? sp + 1 : lineStart;
-    return { token: ta.value.slice(tokenStart, s).trim(), tokenStart };
-  }
-
-  function insertLora(name, tokenStart) {
-    const s = specs().selectionStart;
-    specs().value = specs().value.slice(0, tokenStart) + name + specs().value.slice(s);
-    const pos = tokenStart + name.length;
-    specs().setSelectionRange(pos, pos);
-    specs().focus();
-  }
-
-  function renderAc(items, tokenStart) {
-    ac().innerHTML = '';
-    if (!items.length) {
-      const d = document.createElement('div');
-      d.className = 'empty';
-      d.textContent = 'No matching LoRAs';
-      ac().appendChild(d);
-      openAc();
-      return;
-    }
-    items.forEach(name => {
-      const d = document.createElement('div');
-      d.className = 'item';
-      d.dataset.name = name;
-      d.dataset.tokenStart = tokenStart;
-      d.textContent = name;
-      ac().appendChild(d);
-    });
-    openAc();
-  }
-
-  specs().addEventListener('input', () => {
-    const { token, tokenStart } = tokenAtCursor(specs());
-    if (token.length < 2) { closeAc(); return; }
-    const q = token.toLowerCase();
-    renderAc(loras.filter(n => n.toLowerCase().includes(q)), tokenStart);
-  });
-
-  ac().addEventListener('mousedown', e => {
-    const item = e.target.closest('.item');
-    if (!item) return;
-    e.preventDefault();
-    insertLora(item.dataset.name, parseInt(item.dataset.tokenStart, 10));
-    closeAc();
-  });
-
-  specs().addEventListener('keydown', e => {
-    if (!ac().classList.contains('open')) return;
-    if (e.key === 'Escape') { closeAc(); return; }
-    const items = ac().querySelectorAll('.item');
-    if (!items.length) return;
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      let idx = -1;
-      items.forEach((it, i) => { if (it.classList.contains('sel')) idx = i; });
-      idx = e.key === 'ArrowDown'
-        ? (idx + 1) % items.length
-        : (idx === -1 ? items.length - 1 : (idx - 1 + items.length) % items.length);
-      items.forEach((it, i) => it.classList.toggle('sel', i === idx));
-    } else if (e.key === 'Enter' || e.key === 'Tab') {
-      const sel = ac().querySelector('.item.sel');
-      if (sel) {
-        e.preventDefault();
-        insertLora(sel.dataset.name, parseInt(sel.dataset.tokenStart, 10));
-        closeAc();
-      }
-    }
-  });
-}
-
 initLora('');
 initLora('edit_');
 
@@ -247,38 +147,64 @@ document.addEventListener('click', e => {
   }
 });
 
-loadLoras();
 loadUpscalers();
 loadPostprocess();
 updateUpscaleMax('');
 updateUpscaleMax('edit_');
 
-// Gate the UI on what the loaded model actually is: hide the tabs with no model,
-// and disable the controls whose capability the model lacks. The pipeline rejects a
-// request that asks for a capability the model does not implement, so offering it
-// would only turn a configuration mistake into a failed generation.
+/* ---------- Generate is the medium this server renders ---------- */
+// The checkpoint loaded at startup decides it; the other medium's routes are never installed.
+// Upscale and Control Maps need no model, so whoever is on one when /health answers stays.
+const MODEL_VIEWS = ['generate', 'video', 'edit'];
+
+let mediumView = 'generate';   // what the loaded model serves
+let shownView = 'generate';
+
+function showView(view) {
+  shownView = view;
+  document.querySelectorAll('.view')
+    .forEach(v => v.classList.toggle('hidden', v.id !== 'view-' + view));
+  document.querySelectorAll('.tab[data-tab]')
+    .forEach(x => x.classList.toggle('active', x.dataset.tab === view));
+  $('generate_tab').classList.toggle('active', view === mediumView);
+}
+
+$('generate_tab').addEventListener('click', () => showView(mediumView));
+document.querySelectorAll('.tab[data-tab]').forEach(t =>
+  t.addEventListener('click', () => showView(t.dataset.tab)));
+
+// Gate the UI on the loaded model's capabilities, which the pipeline enforces too.
 async function applyModelState() {
-  let hasModel = true;
-  let caps = null; // null = unknown (network error): assume a model that can do it all
+  let models = null; // null = /health unreachable: assume a model that can do it all
+  let caps = {};
   let rgba = false; // true when the loaded model's VAE emits an alpha channel
   try {
-    const res = await fetch('/health');
+    const res = await fetchOrGone('/health', undefined, PATIENCE);
     if (res.ok) {
       const data = await res.json();
-      hasModel = (data.models || []).length > 0;
+      models = data.models || [];
       caps = data.capabilities || {};
       rgba = (data.pixel_channels || 3) > 3;
     }
   } catch (e) { /* assume a model is present on network errors */ }
-  const capable = (name) => caps === null || !!caps[name];
+  const hasModel = models !== null && models.length > 0;
+  const noModel = models !== null && !hasModel;
+  const capable = (name) => models === null || !!caps[name];
+  // Nested under the medium's name, and null on a model of the other one.
+  const video = caps.video || null;
 
   // An RGBA model can return transparent pixels; without something behind them
   // they would read as black (or as the panel colour) rather than as transparency.
   document.body.classList.toggle('rgba_out', rgba);
 
-  $('no_model').classList.toggle('hidden', hasModel);
-  $('edit_no_model').classList.toggle('hidden', hasModel);
-  // Edit is usable only when a model is loaded AND it supports editing.
+  mediumView = hasModel && video ? 'video' : 'generate';
+  if (MODEL_VIEWS.includes(shownView)) showView(mediumView);
+  // A video server installs no edit routes at all, so the tab would only open a refusal.
+  $('edit_tab').classList.toggle('hidden', mediumView === 'video');
+
+  $('no_model').classList.toggle('hidden', !noModel);
+  $('edit_no_model').classList.toggle('hidden', !noModel);
+  // Edit is usable only when an image model is loaded AND it supports editing.
   $('edit_no_support').classList.toggle('hidden', !hasModel || capable('edit'));
   // KV cache: off the menu (literally) when the model never wired the cache in.
   const kv = $('edit_kv_cache');
@@ -286,18 +212,28 @@ async function applyModelState() {
   kv.disabled = !hasKvCache;
   if (!hasKvCache) kv.value = '';
   kv.title = hasKvCache ? '' : 'the loaded model has no reference-latent KV cache';
+  // The I2V initial frame exists only when the loaded variant can condition on one.
+  $('video_i2v_field').classList.toggle('hidden', !video?.i2v);
 }
 applyModelState();
 
+// Each screen keeps the job it has in flight, for its Cancel button to name.
+const genJob = { id: null };
+const GEN_PROGRESS = { root: 'genprogress', label: 'genprogress_label', bar: 'genbar' };
+
 $('generate').addEventListener('click', () => {
   if (!validateDims('')) return;
-  runWithBusy({
+  runQueuedJob({
+    job: genJob,
+    submit: '/jobs/text2image',
+    body: collectSettings(''),
     btn: $('generate'),
+    cancelBtn: $('gencancel'),
     overlay: $('overlay'),
     timerEl: 'timer',
     timerTextEl: 'timer_text',
-    request: () => postJSON('/text2image', collectSettings('')),
-    onSuccess: async (blob) => {
+    progress: GEN_PROGRESS,
+    onArtifact: async (blob) => {
       currentUrl = URL.createObjectURL(blob);
       setStageActions($('download'), $('info_btn'), true);
       showResult('image', 'placeholder', currentUrl);
@@ -309,39 +245,28 @@ $('generate').addEventListener('click', () => {
   });
 });
 
-document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', () => {
-  document.querySelectorAll('.view').forEach(v => v.classList.toggle('hidden', v.id !== 'view-' + t.dataset.tab));
-  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
-}));
+$('gencancel').addEventListener('click', () => cancelJob(genJob, $('gencancel')));
 
 let uInputB64 = null;      // base64 (no prefix) sent to /upscale
 let uInputDims = null;     // {w, h} of the input
 let uOutUrl = null;        // object URL of the upscaled result
 let uOutMeta = null;       // upscale metadata
 
-function loadUpscaleFile(file) {
-  if (!file || !file.type.startsWith('image/')) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    const dataUrl = reader.result;
-    const img = new Image();
-    img.onload = () => {
-      uInputB64 = dataUrl.split(',')[1];
-      uInputDims = { w: img.naturalWidth, h: img.naturalHeight };
-      updateUpscaleTabFactor();
-      if (uOutUrl) { URL.revokeObjectURL(uOutUrl); uOutUrl = null; }
-      uOutMeta = null;
-      setStageActions($('udownload'), $('uinfo_btn'), false);
-      showInputPreview(dataUrl, file, {
-        singleImg: 'usingle_img', single: 'usingle', result: 'uresult',
-        placeholder: 'uplaceholder', dzName: 'dz_name', dzHint: 'dz_hint',
-      });
-      $('upscale').disabled = false;
-      applyUpscalerDefaults();
-    };
-    img.src = dataUrl;
-  };
-  reader.readAsDataURL(file);
+async function loadUpscaleFile(file) {
+  const image = await readImageFile(file);
+  if (!image) return;
+  uInputB64 = image.b64;
+  uInputDims = image.dims;
+  updateUpscaleTabFactor();
+  if (uOutUrl) { URL.revokeObjectURL(uOutUrl); uOutUrl = null; }
+  uOutMeta = null;
+  setStageActions($('udownload'), $('uinfo_btn'), false);
+  showInputPreview(image.dataUrl, file, {
+    singleImg: 'usingle_img', single: 'usingle', result: 'uresult',
+    placeholder: 'uplaceholder', dzName: 'dz_name', dzHint: 'dz_hint',
+  });
+  $('upscale').disabled = false;
+  applyUpscalerDefaults();
 }
 
 bindDropzone('dropzone', 'file', files => loadUpscaleFile(files[0]));
@@ -419,23 +344,13 @@ let eOutUrl = null;      // object URL of the edited result
 let eOutMeta = null;     // edit metadata
 
 function addEditRefs(files) {
-  [...files].filter(f => f.type.startsWith('image/')).forEach(file => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result;
-      const img = new Image();
-      img.onload = () => {
-        editRefs.push({
-          dataUrl, b64: dataUrl.split(',')[1],
-          dims: { w: img.naturalWidth, h: img.naturalHeight }, name: file.name,
-        });
-        renderEditRefs();
-        resetEditResult();
-        updateEditFinalRes();
-      };
-      img.src = dataUrl;
-    };
-    reader.readAsDataURL(file);
+  [...files].forEach(async file => {
+    const image = await readImageFile(file);
+    if (!image) return;
+    editRefs.push({ ...image, name: file.name });
+    renderEditRefs();
+    resetEditResult();
+    updateEditFinalRes();
   });
 }
 
@@ -443,32 +358,22 @@ function renderEditRefs() {
   const box = $('edit_refs');
   box.innerHTML = '';
   editRefs.forEach((r, i) => {
-    const div = document.createElement('div');
-    div.className = 'ref-thumb' + (i === 0 ? ' first' : '');
-    div.title = r.name + (i === 0 ? ' (sets output size)' : '');
-    const img = document.createElement('img');
-    img.className = 'thumb-img';
-    img.src = r.dataUrl;
-    img.alt = 'reference ' + (i + 1);
-    div.appendChild(img);
-    const rm = document.createElement('button');
-    rm.className = 'ref-remove';
-    rm.textContent = '\u00d7';
-    rm.title = 'Remove';
-    rm.addEventListener('click', () => {
-      editRefs.splice(i, 1);
-      renderEditRefs();
-      resetEditResult();
-      updateEditFinalRes();
+    const div = addThumb(box, {
+      src: r.dataUrl, alt: 'reference ' + (i + 1), cls: i === 0 ? 'first' : '',
+      title: r.name + (i === 0 ? ' (sets output size)' : ''),
+      onRemove: () => {
+        editRefs.splice(i, 1);
+        renderEditRefs();
+        resetEditResult();
+        updateEditFinalRes();
+      },
     });
-    div.appendChild(rm);
     if (i === 0) {
       const badge = document.createElement('span');
       badge.className = 'first-badge';
       badge.textContent = '1st';
       div.appendChild(badge);
     }
-    box.appendChild(div);
   });
 }
 
@@ -478,8 +383,7 @@ function resetEditResult() {
   eOutUrl = null;
   eOutMeta = null;
   setStageActions($('edownload'), $('einfo_btn'), false);
-  $('e_img').style.display = 'none';
-  $('eplaceholder').style.display = 'block';
+  hideResult('e_img', 'eplaceholder');
   $('edit_btn').disabled = editRefs.length === 0;
 }
 
@@ -523,17 +427,24 @@ function editExtras() {
   return extra;
 }
 
+const editJob = { id: null };
+const EDIT_PROGRESS = { root: 'editprogress', label: 'editprogress_label', bar: 'editbar' };
+
 $('edit_btn').addEventListener('click', () => {
   if (editRefs.length === 0) return;
   if (!validateDims('edit_')) return;
 
-  runWithBusy({
+  runQueuedJob({
+    job: editJob,
+    submit: '/jobs/edit',
+    body: collectSettings('edit_', editExtras()),
     btn: $('edit_btn'),
+    cancelBtn: $('editcancel'),
     overlay: $('eoverlay'),
     timerEl: 'etimer',
     timerTextEl: 'etimer_text',
-    request: () => postJSON('/edit', collectSettings('edit_', editExtras())),
-    onSuccess: async (blob) => {
+    progress: EDIT_PROGRESS,
+    onArtifact: async (blob) => {
       // Don't revoke the previous eOutUrl: it is kept as an entry in history.
       eOutUrl = URL.createObjectURL(blob);
       showResult('e_img', 'eplaceholder', eOutUrl);
@@ -544,6 +455,8 @@ $('edit_btn').addEventListener('click', () => {
     },
   });
 });
+
+$('editcancel').addEventListener('click', () => cancelJob(editJob, $('editcancel')));
 
 $('edownload').addEventListener('click', () =>
   download(eOutUrl, `thenoise_edit_${seedName(eOutMeta, 'x')}.png`));

@@ -276,10 +276,7 @@ class JobQueue:
             def progress(stage: str, step: int = 0, of: int = 0) -> None:
                 job.token.check()
                 with self._lock:
-                    changed = job.stage != stage
                     job.stage, job.step, job.of = stage, step, of
-                if changed:
-                    logger.info("%s job %s: %s", job.kind, job.id, stage)
 
             try:
                 job.token.check()

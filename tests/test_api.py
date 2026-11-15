@@ -196,6 +196,58 @@ def test_ui_assets_are_shipped_and_served(client):
     assert "fonts.googleapis.com" not in html
 
 
+def test_ui_scripts_only_look_up_ids_the_page_has():
+    """An id the markup stopped having takes the rest of that script's bindings with it."""
+    with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
+        ids = set(re.findall(r'\bid="([^"]+)"', f.read()))
+    assert ids
+
+    js_dir = os.path.join(_UI_DIR, "js")
+    checked = 0
+    for name in sorted(os.listdir(js_dir)):
+        if not name.endswith(".js"):
+            continue
+        with open(os.path.join(js_dir, name), encoding="utf-8") as f:
+            script = f.read()
+        for ref in re.findall(r"\$\('([A-Za-z0-9_]+)'\)", script):
+            assert ref in ids, f"{name} looks up #{ref}, which index.html does not have"
+            checked += 1
+        for suffix in re.findall(r"\$\((?:prefix|p) \+ '([A-Za-z0-9_]+)'\)", script):
+            assert any(i.endswith(suffix) for i in ids), (
+                f"{name} looks up a {suffix!r} control no pane's markup has"
+            )
+            checked += 1
+        # Ids held by a descriptor are looked up elsewhere, so they match here.
+        patterns = [
+            r"root: '([A-Za-z0-9_]+)', label: '([A-Za-z0-9_]+)', bar: '([A-Za-z0-9_]+)'",
+            r"timerEl: '([A-Za-z0-9_]+)',\s*\n\s*timerTextEl: '([A-Za-z0-9_]+)'",
+        ]
+        for pattern in patterns:
+            for refs in re.findall(pattern, script):
+                for ref in refs:
+                    assert ref in ids, (
+                        f"{name} names #{ref} in a descriptor, which index.html does not have"
+                    )
+                    checked += 1
+    assert checked > 50, f"barely any lookup checked ({checked}): the patterns drifted"
+
+
+def test_ui_every_named_view_exists():
+    """A view that a tab or the medium logic names but nobody serves is a blank screen."""
+    with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
+        html = f.read()
+    with open(os.path.join(_UI_DIR, "js", "app.js"), encoding="utf-8") as f:
+        app = f.read()
+
+    views = set(re.findall(r'id="view-([^"]+)"', html))
+    assert views
+    named = set(re.findall(r'data-tab="([^"]+)"', html))
+    medium = re.findall(r"MODEL_VIEWS = \[([^\]]*)\]", app)
+    assert medium, "app.js no longer lists the views a model decides"
+    named |= {v.strip().strip("'\"") for v in medium[0].split(",")}
+    assert named <= views, f"nobody serves {sorted(named - views)}"
+
+
 # ------------------------------------------------------------------- /upscalers
 
 

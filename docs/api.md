@@ -173,11 +173,11 @@ With a video model:
 
 `models` is empty until a DiT is loaded, and `capabilities` is the loaded
 adapter's `CAPABILITIES` dict verbatim (`{}` with no model) - the web UI uses it
-to gate the Edit tab and the KV-cache control, and a request asking for a
-capability the model lacks is rejected with HTTP 400 rather than silently
-ignored. A medium's own capabilities are nested under the medium's name, and a
-model of another medium answers that key with `null`. `i2v` follows the loaded
-variant rather than the model name.
+to gate the Edit tab, the KV-cache control and which layout the Generate tab
+shows, and a request asking for a capability the model lacks is rejected
+with HTTP 400 rather than silently ignored. A medium's own capabilities are
+nested under the medium's name, and a model of another medium answers that key
+with `null`. `i2v` follows the loaded variant rather than the model name.
 
 ## `POST /text2image`
 

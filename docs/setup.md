@@ -119,8 +119,9 @@ CLI runs:
   --host 127.0.0.1 --port 8000
 ```
 
-Then open <http://localhost:8000/> - Generate, Edit (editing-capable models) and
-Upscale tabs, driven by whatever model is loaded.
+Then open <http://localhost:8000/> - the Generate tab shows the layout for
+whatever the loaded model makes, image or video, and Edit appears for
+editing-capable models. Upscale and Control Maps need no diffusion model.
 
 ## What next
 

@@ -3,6 +3,9 @@
 
 const $ = id => document.getElementById(id);
 
+// Reads that owe an instant answer pass this; /upscale and /controlmap hold one open for a render.
+const PATIENCE = 10000;
+
 /* ---------- persisted preferences (light/dark, sidebar left/right) ---------- */
 function initToggle({ key, btnId, initial, current, apply, next }) {
   apply(initial());
@@ -211,6 +214,134 @@ async function loadPostprocess() {
   refreshPostprocessNotes();
 }
 
+/* ---------- LoRA specs ---------- */
+let loras = [];
+let loraRoles = []; // the loaded model's LoRA-able component names
+
+const LORA_PLACEHOLDER = 'one per line, e.g. style:0.8\ndit_low: style:0.8 (low expert)';
+
+async function loadLoras() {
+  const data = await fetchJSON('/lora');
+  loras = data ? (data.loras || []).sort() : [];
+  loraRoles = data ? (data.roles || []) : [];
+}
+
+const lorasLoaded = loadLoras();
+
+// A "role: spec" line targets that component; any other line is a spec for the default role.
+function parseLora(value) {
+  const lines = value.trim() ? value.split('\n').map(l => l.trim()).filter(Boolean) : [];
+  if (!lines.length) return null;
+  if (loraRoles.length <= 1) return lines;
+  const byRole = {};
+  for (const line of lines) {
+    const named = line.match(/^([a-z_]+):\s*(.+)$/);
+    const role = named && loraRoles.includes(named[1]) ? named[1] : null;
+    (byRole[role || 'dit'] = byRole[role || 'dit'] || []).push(role ? named[2] : line);
+  }
+  const roles = Object.keys(byRole);
+  return roles.length === 1 && roles[0] === 'dit' ? byRole.dit : byRole;
+}
+
+function formatLora(specs) {
+  if (Array.isArray(specs)) return specs.join(', ');
+  if (specs && typeof specs === 'object') {
+    return Object.entries(specs)
+      .map(([role, list]) => list.join(', ') + (role === 'dit' ? '' : `  [${role}]`))
+      .join('\n');
+  }
+  return String(specs);
+}
+
+function initLora(prefix) {
+  const specs = () => $(prefix + 'lora_specs');
+  const ac = () => $(prefix + 'lora_ac');
+
+  lorasLoaded.then(() => {
+    if (loraRoles.length > 1) specs().placeholder = LORA_PLACEHOLDER;
+  });
+
+  function openAc() { ac().classList.add('open'); }
+  function closeAc() { ac().classList.remove('open'); ac().innerHTML = ''; }
+
+  function tokenAtCursor(ta) {
+    const s = ta.selectionStart;
+    const before = ta.value.slice(0, s);
+    const nl = before.lastIndexOf('\n');
+    const lineStart = nl === -1 ? 0 : nl + 1;
+    const sp = before.lastIndexOf(' ');
+    const tokenStart = sp > lineStart ? sp + 1 : lineStart;
+    return { token: ta.value.slice(tokenStart, s).trim(), tokenStart };
+  }
+
+  function insertLora(name, tokenStart) {
+    const s = specs().selectionStart;
+    specs().value = specs().value.slice(0, tokenStart) + name + specs().value.slice(s);
+    const pos = tokenStart + name.length;
+    specs().setSelectionRange(pos, pos);
+    specs().focus();
+  }
+
+  function renderAc(items, tokenStart) {
+    ac().innerHTML = '';
+    if (!items.length) {
+      const d = document.createElement('div');
+      d.className = 'empty';
+      d.textContent = 'No matching LoRAs';
+      ac().appendChild(d);
+      openAc();
+      return;
+    }
+    items.forEach(name => {
+      const d = document.createElement('div');
+      d.className = 'item';
+      d.dataset.name = name;
+      d.dataset.tokenStart = tokenStart;
+      d.textContent = name;
+      ac().appendChild(d);
+    });
+    openAc();
+  }
+
+  specs().addEventListener('input', () => {
+    const { token, tokenStart } = tokenAtCursor(specs());
+    if (token.length < 2) { closeAc(); return; }
+    const q = token.toLowerCase();
+    renderAc(loras.filter(n => n.toLowerCase().includes(q)), tokenStart);
+  });
+
+  ac().addEventListener('mousedown', e => {
+    const item = e.target.closest('.item');
+    if (!item) return;
+    e.preventDefault();
+    insertLora(item.dataset.name, parseInt(item.dataset.tokenStart, 10));
+    closeAc();
+  });
+
+  specs().addEventListener('keydown', e => {
+    if (!ac().classList.contains('open')) return;
+    if (e.key === 'Escape') { closeAc(); return; }
+    const items = ac().querySelectorAll('.item');
+    if (!items.length) return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      let idx = -1;
+      items.forEach((it, i) => { if (it.classList.contains('sel')) idx = i; });
+      idx = e.key === 'ArrowDown'
+        ? (idx + 1) % items.length
+        : (idx === -1 ? items.length - 1 : (idx - 1 + items.length) % items.length);
+      items.forEach((it, i) => it.classList.toggle('sel', i === idx));
+    } else if (e.key === 'Enter' || e.key === 'Tab') {
+      const sel = ac().querySelector('.item.sel');
+      if (sel) {
+        e.preventDefault();
+        insertLora(sel.dataset.name, parseInt(sel.dataset.tokenStart, 10));
+        closeAc();
+      }
+    }
+  });
+}
+
 /* ---------- collapsible sidebar sections ----------
 
 Sections sharing a ``data-pref`` open and close together, and remember it: both
@@ -323,6 +454,8 @@ const FIELD_LABELS = {
   guidance_scale: 'CFG scale', seed: 'Seed', upscale: 'Upscale',
   upscale_factor: 'Upscale factor', upscale_type: 'Upscale type',
   sampler: 'Sampler', lora_specs: 'LoRA',
+  mode: 'Mode', frame_count: 'Frames', fps: 'FPS', duration: 'Duration',
+  flow_shift: 'Flow shift', output_format: 'Output',
 };
 
 function addRow(grid, label, value, cls) {
@@ -358,11 +491,11 @@ function renderInfo(meta) {
   if ('upscale_type' in meta) rows.push(['Upscale type', meta.upscale_type, '']);
   if ('pixel_upscaler' in meta && meta.pixel_upscaler) rows.push(['Pixel upscaler', meta.pixel_upscaler, '']);
   rows.push(...postprocessInfoRows(meta));
-  if ('lora_specs' in meta && meta.lora_specs) rows.push([FIELD_LABELS.lora_specs, meta.lora_specs, '']);
+  if ('lora_specs' in meta && meta.lora_specs) rows.push([FIELD_LABELS.lora_specs, formatLora(meta.lora_specs), '']);
   renderInfoRows(rows);
 }
 
-function makeHistory({ containerId, rootId, alt, onSelect }) {
+function makeHistory({ containerId, rootId, alt, onSelect, video: isVideo = false }) {
   const items = []; // newest first, capped at 10: {url, meta, time}
   function select(i) {
     const item = items[i];
@@ -385,11 +518,18 @@ function makeHistory({ containerId, rootId, alt, onSelect }) {
     items.forEach((item, i) => {
       const div = document.createElement('div');
       div.className = 'hist-item' + (i === 0 ? ' current' : '');
-      const img = document.createElement('img');
-      img.className = 'thumb-img';
-      img.src = item.url;
-      img.alt = alt + ' ' + (i + 1);
-      div.appendChild(img);
+      const el = document.createElement(isVideo ? 'video' : 'img');
+      el.className = 'thumb-img';
+      if (isVideo) {
+        // A first frame is a thumbnail: metadata only, muted, never autoplaying.
+        el.muted = true;
+        el.playsInline = true;
+        el.preload = 'metadata';
+      } else {
+        el.alt = alt + ' ' + (i + 1);
+      }
+      el.src = item.url;
+      div.appendChild(el);
       const seed = document.createElement('span');
       seed.className = 'hist-seed';
       seed.textContent = item.meta && item.meta.seed != null ? item.meta.seed : '';
@@ -423,6 +563,30 @@ function showResult(imgId, placeholderId, url) {
   $(placeholderId).style.display = 'none';
 }
 
+function hideResult(imgId, placeholderId) {
+  $(imgId).style.display = 'none';
+  $(placeholderId).style.display = 'block';
+}
+
+// A dropped image as every pane wants it: data URL, bare base64, size; null if it is not one.
+function readImageFile(file) {
+  return new Promise(done => {
+    if (!file || !file.type.startsWith('image/')) { done(null); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      const img = new Image();
+      img.onload = () => done({
+        dataUrl, b64: dataUrl.split(',')[1],
+        dims: { w: img.naturalWidth, h: img.naturalHeight },
+      });
+      img.onerror = () => done(null);
+      img.src = dataUrl;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 // Show a freshly loaded input image in a single/result split stage.
 function showInputPreview(dataUrl, file, ids) {
   $(ids.singleImg).src = dataUrl;
@@ -432,6 +596,25 @@ function showInputPreview(dataUrl, file, ids) {
   $(ids.dzName).textContent = file.name;
   $(ids.dzName).style.display = 'block';
   $(ids.dzHint).style.display = 'none';
+}
+
+function addThumb(box, { src, alt, title, cls, onRemove }) {
+  const div = document.createElement('div');
+  div.className = 'ref-thumb' + (cls ? ' ' + cls : '');
+  div.title = title;
+  const img = document.createElement('img');
+  img.className = 'thumb-img';
+  img.src = src;
+  img.alt = alt;
+  div.appendChild(img);
+  const rm = document.createElement('button');
+  rm.className = 'ref-remove';
+  rm.textContent = '\u00d7';
+  rm.title = 'Remove';
+  rm.addEventListener('click', onRemove);
+  div.appendChild(rm);
+  box.appendChild(div);
+  return div;
 }
 
 // Swap a split stage from its input preview to its result image.
@@ -459,41 +642,196 @@ function fillSelect(sel, names, label) {
 
 async function fetchJSON(url) {
   try {
-    const res = await fetch(url);
+    const res = await fetchOrGone(url, undefined, PATIENCE);
     if (res.ok) return await res.json();
   } catch (e) { /* fall through to null */ }
   return null;
 }
 
+// A refusal's reason: `error` from the job routes, FastAPI's `detail`, plain text otherwise.
+async function errorMessage(res) {
+  const text = await res.text().catch(() => '');
+  if (!text) return res.statusText || `HTTP ${res.status}`;
+  try {
+    const refused = JSON.parse(text);
+    return refused.error || refused.detail || text;
+  } catch (e) {
+    return text;
+  }
+}
+
+// Every pane's fetch: a connection the server refused means it is not running, not merely slow.
+async function fetchOrGone(url, init, patience = 0) {
+  const ctl = patience ? new AbortController() : null;
+  const deadline = ctl && setTimeout(() => ctl.abort(), patience);
+  try {
+    // The wait for an answer only: a downloaded artifact may still take its time.
+    return await fetch(url, { ...init, signal: ctl ? ctl.signal : undefined });
+  } catch (e) {
+    throw new Error('the server is not answering — is it still running?', { cause: e });
+  } finally {
+    if (deadline) clearTimeout(deadline);
+  }
+}
+
+// /health is answered even mid-render, so a failed read whose /health also fails is a gone server.
+async function serverGone() {
+  try {
+    await fetchOrGone('/health', undefined, PATIENCE);
+    return false;
+  } catch (e) {
+    return true;
+  }
+}
+
 async function postJSON(url, body) {
-  const res = await fetch(url, {
+  const res = await fetchOrGone(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(await res.text() || res.statusText);
+  if (!res.ok) throw new Error(await errorMessage(res));
   return await res.blob();
 }
 
-async function runWithBusy({ btn, overlay, timerEl, timerTextEl, request, onSuccess }) {
+async function postJSONData(url, body) {
+  const res = await fetchOrGone(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }, PATIENCE);
+  if (!res.ok) throw new Error(await errorMessage(res));
+  return await res.json();
+}
+
+/* ---------- queued jobs: submit, watch, fetch ---------- */
+const JOB_POLL = { first: 800, ceiling: 2500, growth: 1.5, retries: 3 };
+
+// Stage names are their own labels except this one.
+const JOB_STAGE_LABELS = { postprocessing: 'post-processing' };
+
+const sleep = (ms) => new Promise(done => setTimeout(done, ms));
+
+// A hidden tab is watched by nobody, and browsers throttle its timers anyway.
+async function waitVisible() {
+  while (document.hidden) {
+    await new Promise(done =>
+      document.addEventListener('visibilitychange', done, { once: true }));
+  }
+}
+
+// Null when the server no longer knows the id: a restarted server dropped its queue.
+async function fetchJob(id) {
+  const res = await fetchOrGone('/jobs/' + id, undefined, PATIENCE);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(await errorMessage(res));
+  return await res.json();
+}
+
+// Reads start at `first`, grow to `ceiling`, and forgive `retries` failures while /health answers.
+async function pollJob(id, onProgress, { first = JOB_POLL.first,
+                                         ceiling = JOB_POLL.ceiling } = {}) {
+  let delay = first;
+  let misses = 0;
+  for (;;) {
+    await waitVisible();
+    await sleep(delay);
+    delay = Math.min(delay * JOB_POLL.growth, ceiling);
+    let status;
+    try {
+      status = await fetchJob(id);
+    } catch (e) {
+      // One look at /health settles it: gone means there is nothing left to wait for.
+      if (await serverGone()) throw e;
+      if (++misses >= JOB_POLL.retries) throw e;
+      continue;
+    }
+    if (status === null) throw new Error('the server no longer knows this job');
+    misses = 0;
+    onProgress(status.progress || {});
+    if (status.status !== 'queued' && status.status !== 'running') return status;
+  }
+}
+
+// els: {root, label, bar} — the ids of one pane's progress block.
+function setProgress(els, p) {
+  $(els.root).classList.remove('hidden');
+  const stage = JOB_STAGE_LABELS[p.stage] || p.stage || 'waiting';
+  const bar = $(els.bar);
+  if (p.of > 0) {
+    $(els.label).textContent = `${stage} ${p.step}/${p.of}`;
+    bar.classList.remove('indeterminate');
+    bar.style.width = (100 * p.step / p.of).toFixed(1) + '%';
+  } else {
+    $(els.label).textContent = stage;
+    bar.classList.add('indeterminate');
+  }
+}
+
+function clearProgress(els) {
+  $(els.root).classList.add('hidden');
+  $(els.bar).classList.remove('indeterminate');
+  $(els.bar).style.width = '0';
+}
+
+async function withBusy({ btn, overlay, timerEl, timerTextEl }, work) {
   const set = (state, text) => setTimer(timerEl, timerTextEl, state, text);
   btn.disabled = true;
   overlay.classList.remove('hidden');
   const start = Date.now();
   const elapsed = () => ((Date.now() - start) / 1000).toFixed(1) + 's';
   set('running', '0.0s');
-  const timer = setInterval(() => set('running', elapsed()), 100);
+  const clock = setInterval(() => set('running', elapsed()), 100);
   try {
-    const result = await request();
-    await onSuccess(result);
-    set('done', elapsed());
+    const end = await work(elapsed);
+    set(end.state, end.text);
   } catch (e) {
     set('error', 'error: ' + e.message);
   } finally {
-    clearInterval(timer);
+    clearInterval(clock);
     overlay.classList.add('hidden');
     btn.disabled = false;
   }
+}
+
+// `job` is the caller's box, so its Cancel button knows what to name.
+async function runQueuedJob({ job, submit, body, btn, cancelBtn, overlay,
+                              timerEl, timerTextEl, progress, poll, onArtifact }) {
+  try {
+    await withBusy({ btn, overlay, timerEl, timerTextEl }, async (elapsed) => {
+      job.id = (await postJSONData(submit, body)).id;
+      cancelBtn.disabled = false;
+      setProgress(progress, { stage: 'queued' });
+      const status = await pollJob(job.id, (p) => setProgress(progress, p), poll);
+      if (status.status === 'canceled') return { state: 'error', text: 'canceled' };
+      if (status.status !== 'completed') throw new Error(status.error || status.status);
+      // Serving an artifact unlinks it: this read is the only one there will be.
+      const res = await fetchOrGone('/jobs/' + job.id + '/content', undefined, PATIENCE);
+      if (!res.ok) throw new Error('downloading the result failed: ' + await errorMessage(res));
+      await onArtifact(await res.blob(), status);
+      return { state: 'done', text: elapsed() };
+    });
+  } finally {
+    job.id = null;
+    cancelBtn.disabled = true;
+    clearProgress(progress);
+  }
+}
+
+// The poll reports the cancellation: the record stays running until a step boundary.
+async function cancelJob(job, btn) {
+  if (!job.id) return;
+  btn.disabled = true;
+  try {
+    await postJSONData('/jobs/' + job.id + '/cancel');
+  } catch (e) { /* it may have settled between the click and this request */ }
+}
+
+async function runWithBusy({ btn, overlay, timerEl, timerTextEl, request, onSuccess }) {
+  await withBusy({ btn, overlay, timerEl, timerTextEl }, async (elapsed) => {
+    await onSuccess(await request());
+    return { state: 'done', text: elapsed() };
+  });
 }
 
 function validateDims(prefix) {
@@ -509,6 +847,19 @@ function validateDims(prefix) {
   return true;
 }
 
+// An empty box is the model's default, so it leaves the body rather than going out as 0 or NaN.
+function addNumbers(body, prefix, ints, floats) {
+  for (const f of ints) {
+    const v = $(prefix + f).value;
+    if (v !== '') body[f] = parseInt(v, 10);
+  }
+  for (const f of floats) {
+    const v = $(prefix + f).value;
+    if (v !== '') body[f] = parseFloat(v);
+  }
+  return body;
+}
+
 function collectSettings(prefix, extra) {
   const body = {
     prompt: $(prefix + 'prompt').value,
@@ -519,12 +870,7 @@ function collectSettings(prefix, extra) {
     ...collectPostprocess(prefix),
     lora_specs: parseLora($(prefix + 'lora_specs').value),
   };
-  for (const f of ['width', 'height', 'steps', 'seed']) {
-    const v = $(prefix + f).value;
-    if (v !== '') body[f] = parseInt(v, 10);
-  }
-  const g = $(prefix + 'guidance_scale').value;
-  if (g !== '') body.guidance_scale = parseFloat(g);
+  addNumbers(body, prefix, ['width', 'height', 'steps', 'seed'], ['guidance_scale']);
   const samplerVal = $(prefix + 'sampler').value;
   if (samplerVal) body.sampler = samplerVal;
   Object.assign(body, extra);
@@ -534,12 +880,6 @@ function collectSettings(prefix, extra) {
 function parseTriState(value) {
   if (value === '' || value == null) return null;
   return value === 'true';
-}
-
-function parseLora(value) {
-  return value.trim()
-    ? value.split('\n').map(l => l.trim()).filter(Boolean)
-    : null;
 }
 
 function bindSwap(swapId, wId, hId, after) {

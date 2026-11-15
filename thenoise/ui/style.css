@@ -578,13 +578,17 @@ input[type=range]::-webkit-slider-thumb {
   overflow: hidden;
 }
 
-/* covers the generated image plus the upscale single/result images */
-.stage img {
+.stage img,
+.stage video {
   max-width: 100%;
   max-height: 100%;
   border-radius: 8px;
   object-fit: contain;
   display: block;
+}
+
+.stage video {
+  background: #000;
 }
 
 /* RGBA models (see /health's pixel_channels): checkerboard behind the output so
@@ -680,6 +684,46 @@ body.rgba_out .stage img {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* ---------- queued job progress ---------- */
+.job-progress {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: .35rem;
+}
+
+.job-progress-label {
+  font-size: .78rem;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: .02em;
+}
+
+.job-track {
+  height: 4px;
+  border-radius: 4px;
+  background: var(--input);
+  overflow: hidden;
+}
+
+.job-bar {
+  height: 100%;
+  width: 0;
+  border-radius: 4px;
+  background: var(--accent);
+  transition: width .4s ease;
+}
+
+.job-bar.indeterminate {
+  width: 35%;
+  animation: jobslide 1.3s ease-in-out infinite;
+}
+
+@keyframes jobslide {
+  from { margin-left: -35%; }
+  to { margin-left: 100%; }
 }
 
 /* ---------- timer ---------- */
