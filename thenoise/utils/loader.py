@@ -243,8 +243,10 @@ def load_dit(
         # The quantization profile is baked into the weights and scales at export;
         # the ``comfy_quant`` markers reconstruct the ``QuantizedTensor`` layout.
         load_quantized_state_dict(model, sd, dtype=dtype)
-        # Raw checkpoint key per quantized layer, for a later LoRA undo.
+        # Raw checkpoint key per quantized layer, and the file to read it back from: a
+        # LoRA undo reads the component's own, since two experts share every key name.
         model._quantized_restore_map = build_quantized_restore_map(path, key_map)
+        model._quantized_restore_path = path
         logger.info("Loaded quantized checkpoint from %s", path)
     else:
         if dtype is not None:

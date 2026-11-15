@@ -157,14 +157,14 @@ class QuantizedLinear(nn.Module):
         self._lora_down = None
         self._lora_up = None
 
-    def undo_lora(self, dit_path: Optional[str], raw_key: Optional[str]) -> None:
+    def undo_lora(self, checkpoint: Optional[str], raw_key: Optional[str]) -> None:
         """Undo a baked LoRA by reloading this layer's originals from the checkpoint."""
-        if not dit_path or not raw_key:
+        if not checkpoint or not raw_key:
             raise RuntimeError(
-                "cannot undo a baked quantized LoRA: no dit_path and raw checkpoint "
-                "key were recorded at apply time"
+                "cannot undo a baked quantized LoRA: this layer was not loaded from a"
+                " checkpoint, so it has no originals to reload"
             )
-        restore_quantized_layer(self, dit_path, raw_key)
+        restore_quantized_layer(self, checkpoint, raw_key)
 
     def _set_quantized(self, qt: QuantizedTensor) -> None:
         """Overwrite the quantized ``weight`` buffer in place (preserving identity)."""
