@@ -73,6 +73,7 @@ defaults is in the table above.
   --out fox.mp4
 ```
 
+
 ### Image-to-video
 
 `--image` names the image the clip starts on, and the prompt says what happens
@@ -96,12 +97,14 @@ and conditions the clip's first frame on it. Over HTTP that frame goes in the
 not a path — see [HTTP API](../api.md#image-to-video-i2v), and
 [Video jobs](#video-jobs) to queue a render instead of waiting for it.
 
-### Performance (Strix Halo)
+## Examples
 
-Successfully tested end-to-end on Strix Halo (Radeon 8060S, gfx1151,
-ROCm 10.1). At **704×480, 33 frames, 8 UniPC steps**, sampling took **28.8 s**;
-the full generation time was not recorded. RTX 5090 T2V and I2V are also tested,
-but no comparative timings are recorded here.
+*Generated:*
+
+[T2V](https://github.com/user-attachments/assets/961dcaf3-4bcc-4c40-93e9-1a6c548dfc64)
+
+[I2V](https://github.com/user-attachments/assets/3dd84d51-af65-478c-a7c5-1f1805cc1cea)
+
 
 ## T2V-A14B (two experts)
 
@@ -163,6 +166,14 @@ Or one clip, with both experts passed the same way:
   --width 704 --height 480 --frames 33 --steps 12 \
   --out fox_14b.mp4
 ```
+
+## Examples
+
+*Generated:*
+
+[Example 1](https://github.com/user-attachments/assets/74b234b5-3d80-418c-9165-b750eb7338f9)
+
+[Example 2](https://github.com/user-attachments/assets/ba732be9-b729-479e-86a0-e537f5a82918)
 
 ### One LoRA per expert
 
@@ -256,6 +267,14 @@ are conditioning rather than a paste — the clip ends where the run landed, not
 byte for byte — and asking I2V weights for a frame they were never trained to mark costs
 some certainty in the middle. ComfyUI drives this same conditioning on these files, at 81
 frames by default.
+
+## Examples
+
+*Generated:*
+
+[Example 1 - P2V](https://github.com/user-attachments/assets/b8d1968e-c275-4a13-89f6-721d4eb40e70)
+
+[Example 2 - D2V](https://github.com/user-attachments/assets/431bfb0c-6aae-4eed-bf04-783340c6a517)
 
 ## What to send
 
