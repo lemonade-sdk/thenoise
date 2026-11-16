@@ -173,7 +173,7 @@ class WanNativeBlock(nn.Module):
         self.ffn_out = QuantizedLinear(params.ffn_dim, params.dim)
         self.scale_shift_table = nn.Parameter(torch.empty(1, 6, params.dim))
 
-    @torch.compile(fullgraph=False)
+    @torch.compile(fullgraph=True)
     def forward(self, x: Tensor, context: Tensor, temb: Tensor, rope: Tensor) -> Tensor:
         # I2V supplies [B, N, 6, D]; T2V supplies [B, 6, D].
         if temb.ndim == 4:
@@ -284,7 +284,7 @@ class WanNativeDiT(nn.Module):
         """
         return self.condition_embedder.fuse_text(context)
 
-    #@torch.compile(fullgraph=False)
+    @torch.compile(fullgraph=True)
     def head(self, x: Tensor, temb: Tensor) -> Tensor:
         # I2V carries a per-token timestep, so its modulation is [B, N, D].
         if temb.ndim == 3:
