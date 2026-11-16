@@ -117,6 +117,7 @@ echo "[cuda] Verifying standalone bundle (GPU not required)"
   "$PY" - <<'PY'
 import importlib.metadata as metadata
 import pathlib
+import av
 import torch
 import thenoise
 import huggingface_hub
@@ -125,6 +126,7 @@ assert 'site-packages' in str(pathlib.Path(thenoise.__file__).resolve())
 print('thenoise:', metadata.version('thenoise'))
 print('torch:', torch.__version__, 'CUDA:', torch.version.cuda)
 print('huggingface-hub:', huggingface_hub.__version__)
+print('av:', av.__version__)
 PY
   "$ROOT/bin/thenoise" --help >/dev/null
   "$PY" "$ROOT/scripts/download.py" --model anima --dry-run >/dev/null

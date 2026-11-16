@@ -198,6 +198,8 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $Py -c "import thenoise; print('thenoise import OK')"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& $Py -c "import av; print('av', av.__version__)"
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 & $Py -m thenoise --help 2>$null
 say "=== Bundle size ==="
 $Size = (Get-ChildItem $Root -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum

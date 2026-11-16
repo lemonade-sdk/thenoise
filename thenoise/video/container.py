@@ -9,18 +9,15 @@ import os
 from pathlib import Path
 from typing import Iterable
 
+import av
+import numpy as np
+
 from thenoise.jobs import Cancellation
 from .spec import ResolvedVideo
 
 
 def encode_video(frames: Iterable, spec: ResolvedVideo, token: Cancellation, out: Path,
                  progress) -> None:
-    try:
-        import av
-        import numpy as np
-    except ImportError as e:
-        raise RuntimeError("video encoding requires PyAV") from e
-
     codec = "libx264" if spec.output_format == "mp4" else "libvpx-vp9"
     tmp = out.with_name(out.name + ".part")
     frame_count = 0

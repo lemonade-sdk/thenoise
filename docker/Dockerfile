@@ -59,7 +59,7 @@ RUN for d in /opt/thenoise/lib/python3.*/site-packages/_rocm_sdk_*/lib \
         { [ -d "$d" ] && echo "$d"; } || true; \
     done > /etc/ld.so.conf.d/thenoise.conf \
  && ldconfig \
- && python3 -c "import torch, torchvision, fastapi, thenoise; print('torch', torch.__version__)"
+ && python3 -c "import torch, torchvision, fastapi, thenoise, av; print('torch', torch.__version__); print('av', av.__version__)"
 
 # MIOpen, Triton, Inductor and the Hub each cache under $HOME or /tmp, which in
 # a container means the writable layer a new container starts without. Pointed

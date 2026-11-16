@@ -1,7 +1,6 @@
 """Cancellation and atomic file publishing in the video encoder, with fake AV."""
 from __future__ import annotations
 
-import sys
 import types
 from pathlib import Path
 
@@ -47,7 +46,7 @@ def fake_av(monkeypatch):
     fake = types.ModuleType("av")
     fake.open = lambda path, mode, format: Container(path)
     fake.VideoFrame = types.SimpleNamespace(from_ndarray=lambda data, format: data)
-    monkeypatch.setitem(sys.modules, "av", fake)
+    monkeypatch.setattr("thenoise.video.container.av", fake)
 
 
 def spec():

@@ -257,6 +257,7 @@ verify_env
 "$PY" -c "import torchvision; print('torchvision', torchvision.__version__)"
 "$PY" -c "import thenoise; print('thenoise import OK')"
 "$PY" -c "import huggingface_hub; print('huggingface_hub', huggingface_hub.__version__)"
+"$PY" -c "import av; print('av', av.__version__)"
 "$PY" "$ROOT/scripts/download.py" --model anima --dry-run | head -n1
 "$PY" -m thenoise --help >/dev/null 2>&1 || true
 bash -n "$ROOT/bin/thenoise"
