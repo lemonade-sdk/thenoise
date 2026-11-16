@@ -605,6 +605,28 @@ def test_full_precision_fp8_export_keeps_its_activation_scale_unused(disabler):
     assert model.q.input_scale is None
 
 
+@pytest.mark.parametrize("suffix", [".scale_input", ".input_scale"])
+def test_load_quantized_state_dict_ignores_a_placeholder_activation_scale(suffix):
+    """An exporter that calibrated nothing writes exactly 1.0, which records no
+    scale; the layer keeps its weight and runs with BF16 activations."""
+    model = TinyDiT()
+    load_quantized_state_dict(
+        model,
+        int8_tensors(
+            weight_dtype=torch.float8_e4m3fn,
+            extra={f"q{suffix}": torch.tensor(1.0)},
+        ),
+    )
+
+    assert model.q._quantized is True
+    assert model.q.input_scale is None
+
+
+def test_load_quantized_state_dict_tolerates_an_orphan_placeholder_input_scale():
+    sd = int8_tensors(extra={"plain.scale_input": torch.tensor(1.0)})
+    load_quantized_state_dict(TinyDiT(), sd)
+
+
 def test_load_quantized_state_dict_refuses_an_input_scale_on_an_int8_weight():
     sd = int8_tensors(extra={"q.scale_input": torch.tensor(0.5)})
     with pytest.raises(RuntimeError, match="FP8 input scale on non-FP8 weight"):

@@ -116,6 +116,11 @@ def _is_input_scale_valid(scale: torch.Tensor) -> bool:
     return flat.numel() == 1 and bool(torch.isfinite(flat).all()) and bool((flat > 0).all())
 
 
+def _is_input_scale_placeholder(scale: torch.Tensor) -> bool:
+    flat = scale.detach().to(torch.float32).reshape(-1)
+    return flat.numel() == 1 and flat.item() == 1.0
+
+
 def _activation_scale(
     scale: Optional[torch.Tensor], marker: dict, full_precision_mm: bool
 ) -> Optional[torch.Tensor]:
@@ -380,7 +385,8 @@ def load_quantized_state_dict(
                 raise RuntimeError(f"duplicate weight scale for {stem!r}")
             scales[stem] = tensor
         elif (stem := _strip_suffix(key, _INPUT_SCALE_SUFFIXES)) is not None:
-            input_scales[stem] = tensor
+            if not _is_input_scale_placeholder(tensor):
+                input_scales[stem] = tensor
         elif key.endswith(_COMFY_QUANT_SUFFIX):
             markers[key[: -len(_COMFY_QUANT_SUFFIX)]] = _parse_comfy_quant(tensor)
         elif _is_scaled_fp8_marker(key):
