@@ -362,10 +362,7 @@ def load_t5_tokenizer(t5_tokenizer_path: Optional[str] = None):
     """Load the T5 tokenizer used for LLM-adapter target tokens."""
     if t5_tokenizer_path is not None:
         return T5TokenizerFast.from_pretrained(t5_tokenizer_path, local_files_only=True)
-    return T5TokenizerFast(
-        vocab_file=os.path.join(T5_TOKENIZER_CONFIG_DIR, "spiece.model"),
-        tokenizer_file=os.path.join(T5_TOKENIZER_CONFIG_DIR, "tokenizer.json"),
-    )
+    return T5TokenizerFast(tokenizer_file=os.path.join(T5_TOKENIZER_CONFIG_DIR, "tokenizer.json"))
 
 
 # --------------------------------------------------------------------------- key maps
