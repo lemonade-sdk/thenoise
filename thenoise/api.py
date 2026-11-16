@@ -36,6 +36,7 @@ from thenoise.postprocess.options import (
     PostprocessOptions,
     flat_options,
 )
+from thenoise.samplers import SAMPLERS
 from thenoise.utils.image_tensor import load_image
 from thenoise.utils.options import options_schema, wire_fields
 from thenoise.utils.png import pnginfo_of
@@ -311,7 +312,7 @@ def create_app(runtime, *, jobs: Optional[JobQueue] = None) -> FastAPI:
             "status": "ok",
             "models": runtime.available(),
             "capabilities": runtime.model_capabilities(),
-            # 4 when the loaded model's VAE is RGBA, so the UI can show transparency.
+            "samplers": sorted(SAMPLERS),
             "pixel_channels": runtime.model_pixel_channels(),
         }
 

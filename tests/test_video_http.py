@@ -19,7 +19,7 @@ from thenoise.jobs import JobQueue
 from thenoise.jobs_http import install_job_routes
 from thenoise.video.http import install_video_routes
 from thenoise.video.service import video_planner
-from conftest import wan_adapter
+from conftest import video_pipeline
 
 MODEL = "Wan2.2-TI2V-5B"
 
@@ -54,7 +54,8 @@ def _client(pipeline, queue):
 
 def _controller(render, variant: str = "ti2v_5b"):
     class Controller:
-        resolve = property(lambda self: wan_adapter(variant).resolve_video)
+        # The real resolve, so what the pipeline refuses is what the route answers 400.
+        resolve = property(lambda self: video_pipeline(variant).resolve)
 
         def render(self, spec, token, progress, output):
             render(spec, token, progress, output)
@@ -172,7 +173,7 @@ def test_a_variant_without_a_reference_mask_refuses_a_last_frame(tmp_path):
                                             "frames": 9, "image": _b64_png("red"),
                                             "end_image": _b64_png("blue")})
             assert r.status_code == 400
-            assert "no channel for a last one" in r.json()["error"]
+            assert "does not support flf2v" in r.json()["error"]
     finally:
         queue.close()
 
@@ -231,7 +232,7 @@ def test_the_sync_video_route_refuses_in_text(tmp_path, failure, status, reason,
 def test_a_video_job_answer_stays_json(tmp_path):
     """A snapshot is a JSON document with its own fields, handed out as it is."""
     class Controller:
-        resolve = property(lambda self: wan_adapter().resolve_video)
+        resolve = property(lambda self: video_pipeline().resolve)
 
         def render(self, spec, token, progress, output):
             output.write_bytes(b"clip")

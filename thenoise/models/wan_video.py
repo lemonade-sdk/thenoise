@@ -10,9 +10,9 @@ from typing import Any, Iterator
 
 import torch
 
+from thenoise.dit.wan_video import sampling as wan_sampling
 from thenoise.dit.wan_video.checkpoint import load_wan_native_transformer
 from thenoise.dit.wan_video.model import CHANNELS, Wan22Params, detect_params
-from thenoise.dit.wan_video.sampling import get_sigmas, wan_frame_grid
 from thenoise.models.base import Conditioning
 from thenoise.models.config import EncodePromptArgs
 from thenoise.models.video_base import Segment, VideoModel
@@ -264,24 +264,13 @@ class Wan22Model(VideoModel):
         return size
 
     def resolve_video(self, spec: VideoSpec) -> ResolvedVideo:
-        """Apply this variant's defaults and geometric restrictions."""
+        """This variant's defaults and sizes, and the frame count the codec can pack."""
         resolved = super().resolve_video(spec)
-        if resolved.sampler not in ("euler", "unipc"):
-            raise ValueError("Wan 2.2 supports only euler or unipc samplers")
-        if resolved.image is not None and not self.variant.i2v:
-            raise ValueError(
-                "this Wan 2.2 A14B transformer has no image conditioning: it takes a "
-                f"{self.params.in_channels}-channel latent, so an I2V run needs the "
-                "I2V pair, whose experts take 36")
-        if resolved.end_image is not None and not self.variant.flf2v:
-            raise ValueError(
-                f"{self.variant.name} conditions its first frame at timestep zero, so it "
-                "has no channel for a last one: the I2V pair takes both")
         return dataclasses.replace(
             resolved,
-            frame_count=wan_frame_grid(resolved.frame_count,
-                                       compression=TEMPORAL_COMPRESSION,
-                                       upward=resolved.explicit_frames),
+            frame_count=wan_sampling.wan_frame_grid(
+                resolved.frame_count, compression=TEMPORAL_COMPRESSION,
+                upward=resolved.explicit_frames),
         )
 
     def default_edit_size(self, width: int, height: int) -> tuple[int, int]:
@@ -413,8 +402,12 @@ class Wan22Model(VideoModel):
         return latents
 
     def schedule(self, params) -> list[Step]:
-        return sigma_steps(get_sigmas(params.steps, shift=params.flow_shift),
+        return sigma_steps(wan_sampling.get_sigmas(params.steps, shift=params.flow_shift),
                            self.device, torch.float32)
+
+    def percent_to_sigma(self, percent: float) -> float:
+        """Percent -> sigma under this variant's flow shift."""
+        return wan_sampling.percent_to_sigma(percent, shift=self.pref("flow_shift"))
 
     def segments(self, params, schedule, guidance_scale) -> list[Segment]:
         """The two halves of the sigma range, one expert each.

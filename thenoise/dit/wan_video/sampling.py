@@ -11,6 +11,16 @@ def get_sigmas(steps: int, *, shift: float) -> list[float]:
             for i in range(steps)] + [0.0]
 
 
+def percent_to_sigma(percent: float, *, shift: float) -> float:
+    """The sigma a ``percent`` of the way down the axis ``get_sigmas`` walks.
+
+    The shift divides by ``t``, so the far end of the axis is answered here.
+    """
+    if percent >= 1.0:
+        return 0.0
+    return generalized_time_shift(1 - percent, math.log(shift), 1.0)
+
+
 def wan_frame_grid(wanted: float, *, compression: int, upward: bool) -> int:
     if not math.isfinite(wanted) or wanted <= 0:
         raise ValueError("video duration / frame count must be positive and finite")

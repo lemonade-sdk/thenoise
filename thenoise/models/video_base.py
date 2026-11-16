@@ -25,7 +25,6 @@ from thenoise.memory import MemoryManager
 from thenoise.models.base import DiffusionModel
 from thenoise.samplers import Step
 from thenoise.utils.image_tensor import load_image
-from thenoise.utils.lora_roles import check_lora_roles
 from thenoise.video.spec import ResolvedVideo, VideoSpec
 
 
@@ -75,9 +74,6 @@ class VideoModel(DiffusionModel):
                 spec.width, spec.height, load_image(io.BytesIO(spec.image)))
             spec = spec.model_copy(update={"width": width, "height": height})
         resolved = spec.resolve(self.default_prefs)
-        # Answered here rather than at the switch, so a request naming a role this
-        # model does not have is refused when it is resolved, not minutes into the job.
-        check_lora_roles(resolved.lora_specs, self.lora_components())
         width, height = self.resolve_size(resolved.width, resolved.height)
         if (width, height) != (resolved.width, resolved.height):
             resolved = dataclasses.replace(resolved, width=width, height=height)

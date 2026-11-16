@@ -24,6 +24,21 @@ def _check_dim(name: str, value) -> None:
         sys.exit(1)
 
 
+def _check_sampler(name) -> None:
+    """Refuse a solver this build has none of, before a load that takes minutes.
+
+    An unset flag is the model's to answer for.
+    """
+    if name is None:
+        return
+    from .samplers import check_sampler
+    try:
+        check_sampler(name)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _build_runtime(args):
     """Load the model and split a one-shot --pixel-upscaler into dir+name."""
     from .runtime import Settings, ModelPaths, Runtime
@@ -56,6 +71,7 @@ def _build_runtime(args):
 def run_generate(args) -> None:
     _check_dim("width", args.width)
     _check_dim("height", args.height)
+    _check_sampler(args.sampler)
 
     from .models.config import GenerateRequest
     runtime, pixel_upscaler = _build_runtime(args)
@@ -90,6 +106,7 @@ def run_edit(args) -> None:
     """One-shot instruction-based edit: load the model, edit one image, save a PNG."""
     _check_dim("width", args.width)
     _check_dim("height", args.height)
+    _check_sampler(args.sampler)
 
     from .models.config import GenerateRequest
     runtime, pixel_upscaler = _build_runtime(args)

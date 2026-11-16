@@ -13,7 +13,8 @@ from pathlib import Path
 import pytest
 import sentencepiece as spm
 import torch
-from conftest import stub_wan_components, wan_adapter, write_wan_dit, write_wan_vae
+from conftest import (stub_wan_components, video_pipeline, wan_adapter, write_wan_dit,
+                      write_wan_vae)
 from PIL import Image
 from safetensors.torch import save_file
 
@@ -25,7 +26,7 @@ from thenoise.dit.wan_video.model import (
     WanNativeRoPE,
     detect_params,
 )
-from thenoise.dit.wan_video.sampling import get_sigmas
+from thenoise.dit.wan_video.sampling import get_sigmas, percent_to_sigma
 from thenoise.errors import ModelReloadNeeded
 from thenoise.models import resolve
 from thenoise.models.base import Conditioning, DiffusionModel
@@ -694,8 +695,23 @@ def test_the_flow_shifts_are_the_ones_the_releases_ship():
     assert sigmas[0] == 1.0 and sigmas[-1] == 0.0
     assert all(a > b for a, b in zip(sigmas, sigmas[1:]))
     assert wan_adapter().resolve_video(VideoSpec(prompt="x", frames=10)).frame_count == 13
-    with pytest.raises(ValueError, match="supports only"):
-        wan_adapter().resolve_video(VideoSpec(prompt="x", sampler="unknown"))
+
+
+def test_a_solver_the_build_has_none_of_is_refused_with_every_alternative():
+    with pytest.raises(ValueError, match="unknown sampler: 'dpmpp' .*(er_sde.*euler)"):
+        video_pipeline().resolve(VideoSpec(prompt="x", sampler="dpmpp"))
+
+
+def test_er_sdes_nudge_follows_the_shift_the_variant_ships():
+    """ER-SDE replaces the grid's ``sigma_0 == 1`` with the model's own answer just below
+    it, which under a flow shift is not the base map's ``1 - percent``.
+    """
+    model = wan_adapter()
+    shift = model.pref("flow_shift")
+    assert model.percent_to_sigma(1e-4) == percent_to_sigma(1e-4, shift=shift) > 1 - 1e-4
+    # A nudge onto the grid still leaves the step the run takes second below it.
+    assert get_sigmas(8, shift=shift)[1] < model.percent_to_sigma(1e-4) < 1.0
+    assert model.percent_to_sigma(0.0) == 1.0 and model.percent_to_sigma(1.0) == 0.0
 
 
 @pytest.mark.parametrize("shape", [(1, 8, 4, 6), (1, 48, 3, 4, 6)])
@@ -1058,7 +1074,7 @@ def test_a_role_the_model_does_not_offer_is_refused_at_resolve():
 
     single = wan_adapter()
     with pytest.raises(ValueError, match="does not offer"):
-        single.resolve_video(VideoSpec(prompt="fox", lora_specs={"dit_low": ["style"]}))
+        video_pipeline().resolve(VideoSpec(prompt="fox", lora_specs={"dit_low": ["style"]}))
     assert single.resolve_video(
         VideoSpec(prompt="fox", lora_specs=["style"])).lora_specs == {"dit": ["style"]}
     both = wan_adapter("t2v_14b")
@@ -1334,8 +1350,8 @@ def test_wan21_fp16_vae_decodes_float32_latents_and_clears_cache():
 
 def test_the_t2v_pair_has_no_image_conditioning():
     assert A14B.i2v is False and VARIANTS["ti2v_5b"].i2v is True
-    with pytest.raises(ValueError, match="no image conditioning"):
-        wan_adapter("t2v_14b").resolve_video(VideoSpec(prompt="x", image=b"image"))
+    with pytest.raises(ValueError, match="does not support i2v"):
+        video_pipeline("t2v_14b").resolve(VideoSpec(prompt="x", image=b"image"))
 
 
 # ------------------------------------------------ I2V-A14B (a concatenated reference)
@@ -1362,8 +1378,8 @@ def _png(color) -> bytes:
 
 def test_a_clip_that_ends_somewhere_needs_the_concatenating_pair():
     """Only a concatenated reference has a mask to name a last frame with."""
-    with pytest.raises(ValueError, match="no channel for a last one"):
-        wan_adapter().resolve_video(
+    with pytest.raises(ValueError, match="does not support flf2v"):
+        video_pipeline().resolve(
             VideoSpec(prompt="x", image=_png("red"), end_image=_png("blue")))
     assert wan_adapter("i2v_14b").resolve_video(
         VideoSpec(prompt="x", image=_png("red"),

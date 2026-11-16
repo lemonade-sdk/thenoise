@@ -75,7 +75,7 @@ Then open <http://localhost:8000/> for the web UI. Full endpoint reference:
 | `--upscale-type` | no | `refined` | `refined` or `no-refiner` |
 | `--upscale` | no | off | 2× latent upscale with refine denoise (legacy alias for `--upscale-type refined --upscale-factor 2`) |
 | `--upscale-factor` | no | `1.0` | Upscale factor (> 0.0; max depends on the pixel upscaler scale, see [Upscaling](#upscaling)) |
-| `--sampler` | no | model default | Solver: `euler` or `er_sde` |
+| `--sampler` | no | model default | Solver: `er_sde`, `euler` or `unipc` |
 | `--qwen-vae-enhance` | no | off | Nyquist notch post-filter (removes 2px grid artifacts) |
 | `--saturation` | no | `0.0` | Colour saturation around neutral: -1.0 greyscales, 1.0 doubles (-1.0–1.0) |
 | `--vibrance` | no | `0.0` | Saturation that lifts washed-out pixels and leaves vivid ones alone (-1.0–1.0) |
@@ -143,7 +143,7 @@ bars the stages as it goes.
 | `--steps` | no | model default | Denoising steps |
 | `--guidance-scale` | no | model default | CFG; on a two-expert model, of the high-noise half |
 | `--flow-shift` | no | model default | Schedule shift; a distilled LoRA wants the one it ships with |
-| `--sampler` | no | model default | Denoising solver, of the ones the loaded model supports |
+| `--sampler` | no | model default | Denoising solver: `er_sde`, `euler` or `unipc` |
 | `--seed` | no | random | Random seed |
 | `--image` | no | — | image the clip starts on |
 | `--end-image` | no | — | image the clip ends on; needs `--image`, and a model that can be told where a clip ends ([FLF2V](models/wan22.md#first-and-last-frame-flf2v)) |

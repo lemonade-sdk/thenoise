@@ -84,6 +84,14 @@ def run_video(args) -> None:
         raise SystemExit("video: --end-image needs --image"
                          ": a clip cannot end before it starts")
 
+    # Needs no model to check, and a load costs minutes.
+    if args.sampler is not None:
+        from .samplers import check_sampler
+        try:
+            check_sampler(args.sampler)
+        except ValueError as e:
+            raise SystemExit(f"video: {e}") from e
+
     try:
         spec = VideoSpec(
             prompt=args.prompt,

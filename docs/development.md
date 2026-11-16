@@ -15,7 +15,7 @@ thenoise/                  the package
                            zimage and ming_image; krea2, qwen_image, qwen_image21,
                            anima, flux2, flux3, mage_flow, moss_image)
   vae/                     VAE loaders (Qwen-Image, Flux, Flux.2, Wan 2.2, Mage)
-  samplers/                denoising solvers (euler, er_sde)
+  samplers/                denoising solvers (`SAMPLERS` is the list `/health` reports)
   upscale/                 latent + pixel upscalers
   controlmap/              control-map extractors (canny, lineart, softedge, depth, pose)
   postprocess/             grain, sharpening, Qwen-VAE enhance

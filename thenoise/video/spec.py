@@ -17,6 +17,13 @@ _Positive = Annotated[int, Field(gt=0)]
 _PositiveFinite = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 
 
+def mode_of(image: bytes | None, end_image: bytes | None) -> str:
+    """``t2v``, ``i2v`` or ``flf2v``, from the reference frames a request carries."""
+    if image is None:
+        return "t2v"
+    return "flf2v" if end_image is not None else "i2v"
+
+
 @dataclass(frozen=True)
 class ResolvedVideo:
     prompt: str
@@ -41,9 +48,7 @@ class ResolvedVideo:
 
     @property
     def mode(self) -> str:
-        if self.image is None:
-            return "t2v"
-        return "flf2v" if self.end_image is not None else "i2v"
+        return mode_of(self.image, self.end_image)
 
     def public(self) -> dict:
         return {
@@ -92,6 +97,10 @@ class VideoSpec(BaseModel):
         if not value.strip():
             raise ValueError("prompt must not be empty")
         return value
+
+    @property
+    def mode(self) -> str:
+        return mode_of(self.image, self.end_image)
 
     @field_validator("seed")
     @classmethod

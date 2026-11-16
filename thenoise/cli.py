@@ -90,7 +90,7 @@ def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png
                    help="'refined' (default): latent 2x + refiner, plus pixel "
                         "upscaler above factor 2; 'no-refiner': pixel upscaler "
                         "only (no latent 2x)")
-    p.add_argument("--sampler", choices=["euler", "er_sde", "unipc"], default=None,
+    p.add_argument("--sampler", metavar="NAME",
                    help="denoising solver (default: auto)")
     p.add_argument("--kv-cache", dest="kv_cache", action="store_true",
                    help="reuse step-invariant K/V during denoising (T2I opt-in; "

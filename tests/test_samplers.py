@@ -10,7 +10,7 @@ import torch
 
 from conftest import StubModel
 from thenoise.samplers import sigma_steps
-from thenoise.samplers import SAMPLERS, Step, create_sampler
+from thenoise.samplers import SAMPLERS, Step, check_sampler, create_sampler
 from thenoise.samplers.er_sde import ErSdeSampler
 from thenoise.samplers.euler import EulerSampler
 
@@ -52,6 +52,23 @@ def test_create_sampler_binds_the_registered_class_or_rejects_the_name():
     # The message names the valid choices: it is the only hint a user gets.
     with pytest.raises(ValueError, match="unknown sampler: 'midpoint'.*(er_sde|euler)"):
         create_sampler("midpoint", model)
+
+
+def test_check_sampler_is_the_vocabulary_the_front_ends_read():
+    """One place decides whether a name exists, and `create_sampler` refuses in the same
+    words.
+    """
+    for name in SAMPLERS:
+        check_sampler(name)
+
+    with pytest.raises(ValueError, match="unknown sampler: 'dpmpp'") as refused:
+        check_sampler("dpmpp")
+    with pytest.raises(ValueError) as created:
+        create_sampler("dpmpp", _VelocityModel())
+    assert str(created.value) == str(refused.value)
+    # A name is a name, not a prefix or a casing of one.
+    with pytest.raises(ValueError):
+        check_sampler("Euler")
 
 
 @pytest.mark.parametrize("name", sorted(SAMPLERS))
