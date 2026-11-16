@@ -1,11 +1,12 @@
 """The video pipeline controller — what ``PipelineController`` is to an image model.
 
-Owns the inference-mode boundary, the single-entry cache over the two encode stages,
-which component is resident for which span and the headroom each stage asks for,
-progress and cancellation, LoRA switching, the streamed decode and the container. The
-adapter keeps the kernels — encode, seed, schedule, one denoise step, the codec's
-frames — and knows nothing about jobs or how long a stage may take, which is also what
-lets ``Runtime.run`` rebuild an adapter that reports itself unfit.
+Owns the inference-mode boundary, what a request may ask of the loaded model, the
+single-entry cache over the two encode stages, which component is resident for which
+span and the headroom each stage asks for, progress and cancellation, LoRA switching,
+the streamed decode and the container. The adapter keeps the kernels — encode, seed,
+schedule, one denoise step, the codec's frames — and knows nothing about jobs or how
+long a stage may take, which is also what lets ``Runtime.run`` rebuild an adapter that
+reports itself unfit.
 """
 from __future__ import annotations
 
@@ -21,8 +22,9 @@ from tqdm import tqdm
 from thenoise.inference import inference
 from thenoise.jobs import Cancellation, stepping
 from thenoise.models.config import EncodePromptArgs, VideoSamplingParams
-from thenoise.samplers import create_sampler
+from thenoise.samplers import check_sampler, create_sampler
 from thenoise.utils.image_tensor import load_image, pil_to_pixels, pixels_to_pil
+from thenoise.utils.lora_roles import check_lora_roles
 from thenoise.utils.pipeline_cache import PipelineCache, content_digest
 from thenoise.video.container import encode_video
 from thenoise.video.spec import ResolvedVideo, VideoSpec
@@ -43,8 +45,16 @@ class VideoPipelineController:
         return self.model.list_loras()
 
     def resolve(self, spec: VideoSpec) -> ResolvedVideo:
-        """A request with this model's defaults and geometry applied."""
-        return self.model.resolve_video(spec)
+        """Refuse what this model cannot serve, then apply its defaults and geometry."""
+        model = self.model
+        mode = spec.mode
+        if not model.capability("video")[mode]:
+            raise ValueError(f"model '{model.name}' does not support {mode}")
+        resolved = model.resolve_video(spec)
+        # After the merge: a preference can name a solver or a role too.
+        check_sampler(resolved.sampler)
+        check_lora_roles(resolved.lora_specs, model.lora_components())
+        return resolved
 
     # ---------------------------------------------------------- pipeline cache
     def _cache_key_prompt(self, spec: ResolvedVideo,

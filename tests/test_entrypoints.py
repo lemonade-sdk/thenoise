@@ -297,6 +297,19 @@ def test_generate_rejects_out_of_range_dimensions(capsys, name, value):
     assert f"error: {name} must be between 1 and 4096" in capsys.readouterr().err
 
 
+def test_generate_refuses_an_unknown_sampler_before_anything_loads(capsys, fake_runtime):
+    """A solver name needs no model to check, so it is refused before one is built."""
+    argv = ["generate", "--dit", "d", "--vae", "v", "--text-encoder", "t", "--prompt", "x"]
+    with pytest.raises(SystemExit):
+        run_generate(_parse([*argv, "--sampler", "dpmpp"]))
+    err = capsys.readouterr().err
+    assert "error: unknown sampler: 'dpmpp' (choose" in err
+    assert fake_runtime == []  # no Runtime was even built
+
+    run_generate(_parse([*argv, "--sampler", "er_sde"]))
+    assert len(fake_runtime) == 1
+
+
 # ---------------------------------------------------------------- edit
 
 
@@ -336,6 +349,13 @@ def video_runtime(fake_runtime, monkeypatch):
     """A fake runtime whose loaded model makes clips."""
     monkeypatch.setattr(_FakeRuntime, "video_on_load", True)
     return fake_runtime
+
+
+def test_video_refuses_an_unknown_sampler_before_anything_loads(video_runtime, tmp_path):
+    with pytest.raises(SystemExit, match="unknown sampler: 'dpmpp'"):
+        run_video(_parse(["video", *VIDEO_PATHS, "--prompt", "fox",
+                          "--sampler", "dpmpp", "--out", str(tmp_path / "fox")]))
+    assert video_runtime == []  # no Runtime was even built
 
 
 def test_video_wires_paths_frames_and_lora_roles(video_runtime, tmp_path):

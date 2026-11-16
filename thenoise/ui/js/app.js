@@ -173,10 +173,22 @@ $('generate_tab').addEventListener('click', () => showView(mediumView));
 document.querySelectorAll('.tab[data-tab]').forEach(t =>
   t.addEventListener('click', () => showView(t.dataset.tab)));
 
+// Solver names are /health's to give, so a menu here holds no list of its own.
+function fillSamplers(names) {
+  if (!names || !names.length) return; // unreachable server: only `auto` is offered
+  for (const id of ['sampler', 'edit_sampler', 'video_sampler']) {
+    const sel = $(id);
+    const keep = sel.value;
+    fillSelect(sel, ['', ...names], name => name || 'auto');
+    sel.value = keep === '' || names.includes(keep) ? keep : '';
+  }
+}
+
 // Gate the UI on the loaded model's capabilities, which the pipeline enforces too.
 async function applyModelState() {
   let models = null; // null = /health unreachable: assume a model that can do it all
   let caps = {};
+  let samplers = null;
   let rgba = false; // true when the loaded model's VAE emits an alpha channel
   try {
     const res = await fetchOrGone('/health', undefined, PATIENCE);
@@ -184,6 +196,7 @@ async function applyModelState() {
       const data = await res.json();
       models = data.models || [];
       caps = data.capabilities || {};
+      samplers = data.samplers || null;
       rgba = (data.pixel_channels || 3) > 3;
     }
   } catch (e) { /* assume a model is present on network errors */ }
@@ -216,6 +229,7 @@ async function applyModelState() {
   $('video_i2v_field').classList.toggle('hidden', !video?.i2v);
   // A last frame needs a reference that carries a mask to name it with.
   $('video_flf2v_field').classList.toggle('hidden', !video?.flf2v);
+  fillSamplers(samplers);
 }
 applyModelState();
 

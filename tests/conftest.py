@@ -262,6 +262,15 @@ def wan_adapter(variant: str = "ti2v_5b"):
             return Wan22Model(config=config)
 
 
+def video_pipeline(variant: str = "ti2v_5b"):
+    """The controller a video request is put to: the refusal of what the variant cannot
+    serve, then the adapter's defaults and geometry.
+    """
+    from thenoise.video.controller import VideoPipelineController
+
+    return VideoPipelineController(wan_adapter(variant))
+
+
 def wan_prefs(variant: str = "ti2v_5b") -> dict:
     """The complete request defaults the given Wan variant resolves against."""
     from thenoise.models.wan_video import VARIANTS, Wan22Model

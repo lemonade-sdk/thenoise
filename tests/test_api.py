@@ -24,6 +24,7 @@ from thenoise.api import (
 from thenoise.controlmap.options import OPTIONS_BY_KIND
 from thenoise.postprocess import POSTPROCESS_NAMES, PostprocessOptions
 from thenoise.runtime import Runtime, Settings
+from thenoise.samplers import SAMPLERS
 
 
 class FakePipeline:
@@ -132,6 +133,8 @@ def test_health_reports_the_loaded_model():
     # answers the video group null rather than leaving the key out.
     assert res["capabilities"] == {"edit": True, "kv_cache": True, "upscale": True,
                                    "video": None}
+    # Every solver this build has, whichever model is loaded.
+    assert res["samplers"] == sorted(SAMPLERS)
     assert res["pixel_channels"] == 4
 
 
@@ -139,6 +142,7 @@ def test_health_with_nothing_loaded():
     res = _endpoint(create_app(_empty_runtime()), "/health")()
     assert res["models"] == []
     assert res["capabilities"] == {}
+    assert res["samplers"] == sorted(SAMPLERS)  # a solver needs no weights
     assert res["pixel_channels"] == 3  # nothing loaded -> nothing can be transparent
 
 
@@ -230,6 +234,17 @@ def test_ui_scripts_only_look_up_ids_the_page_has():
                     )
                     checked += 1
     assert checked > 50, f"barely any lookup checked ({checked}): the patterns drifted"
+
+
+@pytest.mark.parametrize("menu", ["sampler", "edit_sampler", "video_sampler"])
+def test_ui_asks_the_server_which_samplers_exist(menu):
+    """A sampler menu holds no solver name of its own beyond `auto`: the list is the
+    server's to hand out.
+    """
+    with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
+        block = re.search(rf'<select id="{menu}">(.*?)</select>', f.read(), re.S)[1]
+    assert block.count("<option") == 1, block
+    assert '<option value="">auto</option>' in block
 
 
 def test_ui_every_named_view_exists():

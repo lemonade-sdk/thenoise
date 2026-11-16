@@ -31,7 +31,7 @@ from thenoise.inference import inference, inference_lock
 from thenoise.jobs import UNCANCELLABLE, Cancellation, Progress, idle, stepping
 from thenoise.models.base import DiffusionModel, Conditioning
 from thenoise.models.config import EncodePromptArgs, GenerateRequest, SamplingParams
-from thenoise.samplers import Step, create_sampler, sigma_steps
+from thenoise.samplers import Step, check_sampler, create_sampler, sigma_steps
 from thenoise.samplers.euler import EulerSampler
 from thenoise.upscale.pixel import PixelUpscalerManager
 from thenoise.utils.pipeline_cache import PipelineCache, content_digest
@@ -481,9 +481,9 @@ class PipelineController:
 
         Shared by ``generate`` and ``edit`` so both use identical resolution
         (cache keys must use the actual resolved values). Everything the loaded model
-        refuses for reasons it can see without running — a capability it lacks, a LoRA
-        role it has no component for — is refused here too, so a queued request fails
-        at submit.
+        refuses for reasons it can see without running — a capability it lacks, a solver
+        it has none of, a LoRA role it has no component for — is refused here too, so a
+        queued request fails at submit.
         """
         model = self.model
         # Precedence: explicit request > checkpoint marker > model default.
@@ -493,6 +493,8 @@ class PipelineController:
         guidance_scale = model.pref("guidance_scale", request.guidance_scale)
         effective_sampler = model.pref("sampler", request.sampler)
         ref_method = model.pref("ref_method", request.ref_method)
+        # After the merge: a preference can name the solver too.
+        check_sampler(effective_sampler)
 
         sigmas = _normalize_sigmas(model.pref("sigmas", request.sigmas))
         if sigmas is not None:

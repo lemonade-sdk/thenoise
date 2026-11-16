@@ -21,14 +21,18 @@ SAMPLERS: Dict[str, Type[Sampler]] = {
 }
 
 
-def create_sampler(name: str, model) -> Sampler:
-    """Instantiate the named sampler bound to ``model``."""
-    cls = SAMPLERS.get(name)
-    if cls is None:
+def check_sampler(name: str) -> None:
+    """Refuse a name no solver in this registry answers to, naming the ones there are."""
+    if name not in SAMPLERS:
         raise ValueError(
             f"unknown sampler: {name!r} (choose {', '.join(sorted(SAMPLERS))})"
         )
-    return cls(model)
+
+
+def create_sampler(name: str, model) -> Sampler:
+    """Instantiate the named sampler bound to ``model``."""
+    check_sampler(name)
+    return SAMPLERS[name](model)
 
 
 def sigma_steps(grid, device, dtype) -> list[Step]:
@@ -41,4 +45,5 @@ def sigma_steps(grid, device, dtype) -> list[Step]:
     return [Step(t=ts[i], delta=ts[i] - ts[i + 1]) for i in range(len(grid) - 1)]
 
 
-__all__ = ["SAMPLERS", "Sampler", "Step", "create_sampler", "sigma_steps"]
+__all__ = ["SAMPLERS", "Sampler", "Step", "check_sampler", "create_sampler",
+           "sigma_steps"]

@@ -117,7 +117,7 @@ defaults when optional fields are omitted.
 | `duration`, `fps` | number, integer | Duration in seconds and frames/second; explicit `frames` takes priority |
 | `steps`, `guidance_scale`, `seed` | number | Sampling parameters |
 | `flow_shift` | number | Noise schedule shift. Defaults to the model's release value |
-| `sampler` | string | Model-supported sampler (`unipc` or `euler` for Wan) |
+| `sampler` | string | model default | Denoising solver — one of `GET /health`'s `samplers` |
 | `lora_specs` | string[] \| object | Optional LoRAs, as `name:weight`, looked up in `--lora-dir`. A model with more than one LoRA-able component also takes them by component: `{"dit": ["a:0.8"], "dit_low": ["b"]}` |
 | `output_format` | string | `mp4` or `webm` (model default when omitted) |
 
@@ -182,6 +182,7 @@ unused.
 
 ```json
 {"status": "ok", "models": ["qwen_image"],
+  "samplers": ["er_sde", "euler", "unipc"],
   "capabilities": {"edit": true, "kv_cache": true, "upscale": true, "video": null}}
 ```
 
@@ -189,6 +190,7 @@ With a video model:
 
 ```json
 {"status": "ok", "models": ["wan22"],
+  "samplers": ["er_sde", "euler", "unipc"],
   "capabilities": {"edit": false, "kv_cache": false, "upscale": false,
                    "video": {"t2v": true, "i2v": true, "flf2v": true}}}
 ```
@@ -226,7 +228,7 @@ index_timestep_zero` (see [`/edit`](#post-edit)).
 | `upscale_factor` | `float` | `1.0` | Upscale factor (max depends on the pixel upscaler scale) |
 | `upscale_type` | `string` | `refined` | `refined` (latent 2x + refiner) or `no-refiner` (pixel upscaler only) |
 | `pixel_upscaler` | `string` | `null` | Pixel upscaler name (no `.safetensors` suffix) from `--upscaler-dir` |
-| `sampler` | `string` | model default | Denoising solver: `euler` or `er_sde` |
+| `sampler` | `string` | model default | Denoising solver — one of `GET /health`'s `samplers` |
 | `kv_cache` | `boolean` | auto | Reuse step-invariant K/V across denoising steps. T2I defaults off (opt-in); compatible edits auto-enable based on `ref_method`. Explicit `true` requires model support |
 | `qwen_vae_enhance` | `bool` | `false` | Nyquist notch post-filter (removes 2px grid artifacts) |
 | `saturation` | `float` | `0.0` | Colour saturation around neutral `0.0`: -1.0 greyscales, 1.0 doubles |
