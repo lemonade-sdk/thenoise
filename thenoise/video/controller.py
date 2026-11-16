@@ -60,7 +60,7 @@ class VideoPipelineController:
                 frames=spec.frame_count, flow_shift=spec.flow_shift,
             )
             with model.memory.stage("text_encoder", pixels=pixels) as stage:
-                cond = stage.run(model.encode_prompt, EncodePromptArgs(
+                cond_raw = stage.run(model.encode_prompt, EncodePromptArgs(
                     prompt=spec.prompt, negative_prompt=spec.negative_prompt,
                     guidance_scale=spec.guidance_scale))
             token.check()
@@ -86,6 +86,7 @@ class VideoPipelineController:
                     model.switch_loras(spec.lora_specs.get(segment.stage),
                                      segment.module, segment.stage)
                     model.begin_segment(segment)
+                    cond = model.fuse_text(cond_raw)
                     if x is None:  # once, and inside a stage: preparing may need weights
                         x = model.prepare_latent(latents, cond, params, ref=ref,
                                                  ref_method=model.pref("ref_method"))
@@ -93,7 +94,7 @@ class VideoPipelineController:
                                   token, progress, done, spec.steps)
                 done += len(segment.steps)
             x = model.finalize_latent(x, params)
-            del cond, latents, ref
+            del cond_raw, latents, ref
 
             with model.memory.stage("vae", pixels=pixels) as stage:
                 stage.run(self._mux, x, spec, token, progress, output)
