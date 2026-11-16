@@ -12,6 +12,7 @@ from torch.nn import functional as F
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import attention
+from thenoise.utils.dynamo import mark_token_axis
 from thenoise.utils.positions import grid_positions
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.safetensors import MemoryEfficientSafeOpen, unwrap_key
@@ -286,6 +287,9 @@ class WanNativeDiT(nn.Module):
         temb, modulation, ctx = self.condition_embedder(timestep, encoder_hidden_states)
         if timestep.ndim == 2 and timestep.shape != (b, x.shape[1]):
             raise ValueError("I2V token timesteps must match patchified latent tokens")
+        mark_token_axis(x, ctx, rope)
+        if modulation.ndim == 4:
+            mark_token_axis(modulation)
         for block in self.blocks:
             x = block(x, ctx, modulation, rope)
         if temb.ndim == 3:
