@@ -284,7 +284,6 @@ class WanNativeDiT(nn.Module):
         """
         return self.condition_embedder.fuse_text(context)
 
-    @torch.compile(fullgraph=True)
     def head(self, x: Tensor, temb: Tensor) -> Tensor:
         # I2V carries a per-token timestep, so its modulation is [B, N, D].
         if temb.ndim == 3:
@@ -317,9 +316,6 @@ class WanNativeDiT(nn.Module):
             mark_token_axis(modulation)
         for block in self.blocks:
             x = block(x, encoder_hidden_states, modulation, rope)
-        mark_token_axis(x)
-        if temb.ndim == 3:
-            mark_token_axis(temb)
         x = self.head(x, temb)
         x = x.reshape(b, t // pt, h // ph, w // pw, pt, ph, pw, -1)
         x = x.permute(0, 7, 1, 4, 2, 5, 3, 6).flatten(6, 7).flatten(4, 5).flatten(2, 3)
