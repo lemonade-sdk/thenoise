@@ -35,8 +35,8 @@ class VideoRequest(VideoSpec):
 
 
 def _frame(field: str, encoded: str) -> bytes:
-    """One base64 image from the wire, checked before a multi-minute job is accepted; PIL's
-    dimension check happens before the image is fully decompressed."""
+    """One base64 image from the wire, checked before a multi-minute job is accepted;
+    PIL's dimension check happens before the image is fully decompressed."""
     try:
         data = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError) as e:
@@ -46,11 +46,9 @@ def _frame(field: str, encoded: str) -> bytes:
     from PIL import Image
     try:
         with Image.open(io.BytesIO(data)) as img:
-            if img.format not in ("PNG", "JPEG"):
-                raise ValueError(f"{field} must be PNG or JPEG")
             img.verify()
     except (OSError, Image.DecompressionBombError) as e:
-        raise ValueError(f"{field} must be a valid PNG/JPEG") from e
+        raise ValueError(f"{field} must be a valid image") from e
     return data
 
 

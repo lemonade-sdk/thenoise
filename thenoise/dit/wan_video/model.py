@@ -12,6 +12,7 @@ from torch.nn import functional as F
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import attention
+from thenoise.utils.dynamo import mark_token_axis
 from thenoise.utils.positions import grid_positions
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.safetensors import MemoryEfficientSafeOpen, unwrap_key
@@ -172,7 +173,7 @@ class WanNativeBlock(nn.Module):
         self.ffn_out = QuantizedLinear(params.ffn_dim, params.dim)
         self.scale_shift_table = nn.Parameter(torch.empty(1, 6, params.dim))
 
-    @torch.compile(fullgraph=False)
+    @torch.compile(fullgraph=True)
     def forward(self, x: Tensor, context: Tensor, temb: Tensor, rope: Tensor) -> Tensor:
         # I2V supplies [B, N, 6, D]; T2V supplies [B, 6, D].
         if temb.ndim == 4:
@@ -190,7 +191,11 @@ class WanNativeBlock(nn.Module):
 
 
 class WanNativeCondition(nn.Module):
-    """Timestep and text conditioning; the timestep path stays in FP32 (see below)."""
+    """Timestep conditioning; the timestep path stays in FP32 (see below).
+
+    The text branch is not in ``forward``: it depends on nothing but the prompt, so the
+    adapter runs it once per request as ``WanNativeDiT.fuse_text``.
+    """
 
     def __init__(self, params: Wan22Params):
         super().__init__()
@@ -201,15 +206,18 @@ class WanNativeCondition(nn.Module):
         self.text_linear_1 = QuantizedLinear(params.text_dim, params.dim)
         self.text_linear_2 = QuantizedLinear(params.dim, params.dim)
 
-    def forward(self, timestep: Tensor, context: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    def fuse_text(self, context: Tensor) -> Tensor:
+        """Prompt features -> the ``[B, L, dim]`` context the blocks attend to."""
+        return self.text_linear_2(F.gelu(self.text_linear_1(context),
+                                         approximate="tanh"))
+
+    def forward(self, timestep: Tensor, dtype: torch.dtype) -> tuple[Tensor, Tensor]:
         # The adapter hands over a timestep already in Wan's [0, 1000] range.
         ts = timestep_embedding(timestep, self.freq_dim, time_factor=1.0)
         ts = ts.to(dtype=self.time_linear_1.weight.dtype)
-        temb = self.time_linear_2(F.silu(self.time_linear_1(ts))).to(dtype=context.dtype)
+        temb = self.time_linear_2(F.silu(self.time_linear_1(ts))).to(dtype=dtype)
         mod = self.time_proj(F.silu(temb))
-        mod = mod.unflatten(-1, (6, -1))
-        ctx = self.text_linear_2(F.gelu(self.text_linear_1(context), approximate="tanh"))
-        return temb, mod, ctx
+        return temb, mod.unflatten(-1, (6, -1))
 
 
 class WanNativeDiT(nn.Module):
@@ -268,6 +276,23 @@ class WanNativeDiT(nn.Module):
         # No cross-step caching: Wan denoising changes every latent token.
         return nullcontext()
 
+    def fuse_text(self, context: Tensor) -> Tensor:
+        """Raw prompt features -> what ``forward`` takes as ``encoder_hidden_states``.
+
+        Once per request, with these weights resident: the trunk never projects the
+        prompt itself.
+        """
+        return self.condition_embedder.fuse_text(context)
+
+    def head(self, x: Tensor, temb: Tensor) -> Tensor:
+        # I2V carries a per-token timestep, so its modulation is [B, N, D].
+        if temb.ndim == 3:
+            shift, scale = (self.scale_shift_table.unsqueeze(0) + temb.unsqueeze(2)).unbind(2)
+        else:
+            shift, scale = (self.scale_shift_table + temb.unsqueeze(1)).chunk(2, dim=1)
+        x = (self.norm_out(x.float()) * (1 + scale) + shift).to(x.dtype)
+        return self.proj_out(x)
+
     def forward(
         self,
         hidden_states: Tensor,
@@ -283,17 +308,15 @@ class WanNativeDiT(nn.Module):
         rope = self.rope(hidden_states)
         x = self.patch_embedding(hidden_states.float()).to(hidden_states.dtype)
         x = x.flatten(2).transpose(1, 2).contiguous()
-        temb, modulation, ctx = self.condition_embedder(timestep, encoder_hidden_states)
+        temb, modulation = self.condition_embedder(timestep, x.dtype)
         if timestep.ndim == 2 and timestep.shape != (b, x.shape[1]):
             raise ValueError("I2V token timesteps must match patchified latent tokens")
+        mark_token_axis(x, encoder_hidden_states, rope)
+        if modulation.ndim == 4:
+            mark_token_axis(modulation)
         for block in self.blocks:
-            x = block(x, ctx, modulation, rope)
-        if temb.ndim == 3:
-            shift, scale = (self.scale_shift_table.unsqueeze(0) + temb.unsqueeze(2)).unbind(2)
-        else:
-            shift, scale = (self.scale_shift_table + temb.unsqueeze(1)).chunk(2, dim=1)
-        x = (self.norm_out(x.float()) * (1 + scale) + shift).to(x.dtype)
-        x = self.proj_out(x)
+            x = block(x, encoder_hidden_states, modulation, rope)
+        x = self.head(x, temb)
         x = x.reshape(b, t // pt, h // ph, w // pw, pt, ph, pw, -1)
         x = x.permute(0, 7, 1, 4, 2, 5, 3, 6).flatten(6, 7).flatten(4, 5).flatten(2, 3)
         return x

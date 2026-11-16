@@ -278,7 +278,7 @@ def test_comfy_checkpoint_dtype_and_forward(tmp_path):
     assert model.patch_embedding.weight.dtype == torch.float32
     assert torch.equal(model.proj_out.weight, raw["head.head.weight"].float())
     x = torch.randn(1, 48, 3, 4, 6)
-    ctx = torch.randn(1, 5, DIT.text_dim)
+    ctx = model.fuse_text(torch.randn(1, 5, DIT.text_dim))
     with torch.no_grad():
         a = model(x, torch.tensor([500.0]), ctx)
         b = model(x, torch.full((1, 18), 500.0), ctx)
@@ -296,7 +296,7 @@ def test_bf16_comfy_precision_exceptions(tmp_path):
     assert model.condition_embedder.time_linear_1.weight.dtype == torch.float32
     assert model.blocks[0].scale_shift_table.dtype == torch.float32
     x = torch.randn(1, 48, 1, 4, 4, dtype=torch.bfloat16)
-    context = torch.randn(1, 4, DIT.text_dim, dtype=torch.bfloat16)
+    context = model.fuse_text(torch.randn(1, 4, DIT.text_dim, dtype=torch.bfloat16))
     with torch.no_grad():
         output = model(x, torch.tensor([500.0]), context)
     assert output.dtype == torch.bfloat16
@@ -312,7 +312,7 @@ def test_fp16_compute_dtype_preserves_fp32_patch_embedding(tmp_path):
     assert model.dtype == torch.float16
 
     x = torch.randn(1, 48, 1, 4, 4, dtype=torch.float32).to(model.dtype)
-    context = torch.randn(1, 4, DIT.text_dim, dtype=torch.float32).to(model.dtype)
+    context = model.fuse_text(torch.randn(1, 4, DIT.text_dim).to(model.dtype))
     with torch.no_grad():
         output = model(x, torch.full((1, 4), 500.0), context)
     assert output.dtype == torch.float16
@@ -342,7 +342,7 @@ def test_a_mixed_checkpoint_loads_at_one_trunk_dtype(tmp_path):
     assert model.blocks[0].norm2.weight.dtype == torch.float32
 
     x = torch.randn(1, 48, 1, 4, 4, dtype=torch.float16)
-    context = torch.randn(1, 4, DIT.text_dim, dtype=torch.float16)
+    context = model.fuse_text(torch.randn(1, 4, DIT.text_dim, dtype=torch.float16))
     with torch.no_grad():
         output = model(x, torch.tensor([500.0]), context)
     assert output.dtype == torch.float16
@@ -805,6 +805,10 @@ def fake_video(tmp_path, monkeypatch):
             calls.append("dit")
             return torch.zeros_like(x)
 
+        def fuse_text(self, context):
+            calls.append("fuse_text")
+            return context
+
     class Text(torch.nn.Module):
         def __init__(self):
             super().__init__()
@@ -864,6 +868,32 @@ def test_native_t2v_i2v_t2v_reuses_models(fake_video, tmp_path):
     assert video.dit.dtype is torch.float16
     assert video.text_encoder.weight.dtype is torch.bfloat16
     assert out.read_bytes() == b"video"
+
+
+def test_a_reused_reference_latent_still_conditions_the_run(fake_video, tmp_path):
+    """A cached reference is read, not consumed."""
+    video, controller, calls = fake_video
+    image = io.BytesIO()
+    Image.new("RGB", (64, 64), "red").save(image, format="PNG")
+    spec = _spec(video, image=image.getvalue())
+    out = tmp_path / "out.mp4"
+
+    controller.render(spec, Cancellation(), lambda *_: None, out)
+    encoded, forwards = calls.count("vae_encode"), calls.count("dit")
+    controller.render(spec, Cancellation(), lambda *_: None, out)
+
+    assert calls.count("vae_encode") == encoded
+    assert calls.count("dit") == 2 * forwards
+
+
+def test_the_prompt_is_projected_once_per_segment(fake_video, tmp_path):
+    """The text projection is expert weights, so a segment does it once for itself."""
+    video, controller, calls = fake_video
+    spec = _spec(video)
+    controller.render(spec, Cancellation(), lambda *_: None, tmp_path / "clip.mp4")
+    branches = 2 if spec.guidance_scale > 1 else 1
+    assert calls.count("dit") == branches * spec.steps
+    assert calls.count("fuse_text") == branches   # one per guidance branch, not per step
 
 
 def test_unload_releases_weights_and_allows_reloading(fake_video, tmp_path):

@@ -130,18 +130,6 @@ def dit():
     return _tiny_dit()
 
 
-@pytest.fixture(autouse=True)
-def _blocks_run_eagerly(monkeypatch):
-    """Call the blocks un-compiled: a ``fullgraph=True`` block raises rather than
-    falling back when dynamo is off, which ``conftest`` disables suite-wide."""
-    from thenoise.dit.fibo2.models import Block, PerceiverLayer
-
-    for cls in (Block, PerceiverLayer):
-        monkeypatch.setattr(
-            cls, "forward", cls.forward._torchdynamo_orig_callable, raising=False
-        )
-
-
 def _run(dit, x, ctx, refs=(), timestep=0.7, dtype=torch.bfloat16, kv=None):
     """One forward over the layout ``x``/``refs`` imply, positions and gist included."""
     positions = sequence_positions(

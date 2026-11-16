@@ -7,6 +7,7 @@ Import the plain helpers directly (``from conftest import FakeHandle``); use the
 from __future__ import annotations
 
 import json
+import os
 from collections import Counter
 from pathlib import Path
 from typing import Optional
@@ -19,12 +20,11 @@ import torch
 # deterministic reduction order.
 torch.set_num_threads(1)
 
-# Tests exercise model math, not Inductor. ``Flux2.forward`` wraps every block in
-# ``torch.compile(fullgraph=True)``, so the first forward in a process would pay
-# the whole compile cost (~7s) to assert a shape and ``isfinite``. Disabling
-# dynamo here (rather than via TORCH_COMPILE_DISABLE) cannot be silently unset by
-# the environment and does not depend on this file being imported before torch.
-torch._dynamo.config.disable = True
+# Tests exercise model math, not Inductor. The variable is read where ``torch.compile``
+# is applied, so it makes the decorator a no-op; ``torch._dynamo.config.disable`` leaves
+# the wrapper on, and a ``fullgraph`` block that traced nothing raises rather than
+# running eager. Set here rather than inherited, before thenoise is imported.
+os.environ["TORCHDYNAMO_DISABLE"] = "1"
 
 import pytest  # noqa: E402
 

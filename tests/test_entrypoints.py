@@ -8,7 +8,7 @@ import logging
 import pytest
 from PIL import Image
 
-from thenoise.__main__ import _serve, main
+from thenoise.__main__ import _QuietReads, _serve, main
 from thenoise.cli import build_parser
 from thenoise.generate import run_edit, run_generate
 from thenoise.controlmap.manager import ControlMapManager
@@ -145,6 +145,22 @@ def _parse(argv):
 
 
 # ---------------------------------------------------------------- serve
+
+
+def test_successful_job_reads_are_the_only_lines_dropped():
+    def access_line(method, path, status):
+        record = logging.LogRecord(
+            "uvicorn.access", logging.INFO, __file__, 1,
+            '%s - "%s %s HTTP/%s" %d',
+            ("127.0.0.1:52000", method, path, "1.1", status), None)
+        return not _QuietReads().filter(record)
+
+    assert access_line("GET", "/jobs/3f9a", 200)
+    assert access_line("GET", "/jobs", 200)
+    assert access_line("GET", "/jobs/3f9a/content", 200)
+    assert not access_line("GET", "/jobs/3f9a", 404)
+    assert not access_line("POST", "/jobs/video", 202)
+    assert not access_line("GET", "/health", 200)
 
 
 def test_serve_builds_settings_and_loads_model(monkeypatch, fake_runtime):

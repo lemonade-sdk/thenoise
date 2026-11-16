@@ -111,7 +111,7 @@ Text2ImageRequest = create_model(
 
 
 class UpscaleRequest(BaseModel):
-    image_b64: str  # base64-encoded input image bytes (PNG/JPEG)
+    image_b64: str  # base64-encoded input image
     upscale_factor: float = 0.0  # desired final factor; 0.0 = detected native scale
     pixel_upscaler: str  # name (no .safetensors) in upscaler_dir
     out: Literal["png", "json"] = "png"

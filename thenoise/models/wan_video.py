@@ -312,6 +312,18 @@ class Wan22Model(VideoModel):
         features = self.text_encoder(ids.to(self.device), mask.to(self.device))
         return features.to(dtype=self.dit.dtype)
 
+    def fuse_text(self, cond: Conditioning) -> Conditioning:
+        """UMT5 features -> the cross-attention context, once per segment.
+
+        The projection belongs to the expert, so the controller calls it after
+        ``switch_loras`` with that expert resident, and every step of the segment reuses
+        the answer instead of paying for the same GEMMs again.
+        """
+        module = self._segment.module
+        return Conditioning(cond=module.fuse_text(cond.cond.to(module.dtype)),
+                            null=(None if cond.null is None
+                                  else module.fuse_text(cond.null.to(module.dtype))))
+
     def fit_references(self, images, target):
         """I2V's initial frame fills the canvas the clip is sampled on."""
         return [cover_crop(image, target[0], target[1]) for image in images]

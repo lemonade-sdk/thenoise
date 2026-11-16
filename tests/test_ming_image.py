@@ -13,7 +13,6 @@ import torch
 from accelerate import init_empty_weights
 
 from conftest import comfy_quant, write_safetensors
-from thenoise.dit.lumina.models import LuminaTransformerBlock
 from thenoise.dit.ming_image.models import MING_IMAGE_DIT_CONFIG, MingImageTransformer2DModel
 from thenoise.dit.ming_image.sampling import (
     dynamic_mu,
@@ -47,17 +46,6 @@ DIM = TINY_CONFIG["dim"]
 # The projections the released int8 export keeps in BF16 (measured from its header):
 # everything the attention and the feed-forward are not.
 _NOT_QUANTIZED_IN_THE_FILE = ("cap_embedder.", "x_embedder.", "final_layer.", "t_embedder.")
-
-
-@pytest.fixture(autouse=True)
-def _blocks_run_eagerly(monkeypatch):
-    """Call the transformer blocks un-compiled (see ``tests/test_lumina.py``)."""
-    monkeypatch.setattr(
-        LuminaTransformerBlock,
-        "forward",
-        LuminaTransformerBlock.forward._torchdynamo_orig_callable,
-        raising=False,
-    )
 
 
 def _tiny_dit(dtype: torch.dtype = torch.float32) -> MingImageTransformer2DModel:

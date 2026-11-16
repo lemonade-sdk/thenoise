@@ -29,7 +29,9 @@ One case per ``(block, scenario, weights, token count)``:
   block sees (the default 4096, 9216, 16384 are 64x64, 96x96 and 128x128). What a
   token is worth in pixels depends on the model's VAE and patch size, so the ladder
   is in tokens only. Entries should be perfect squares, or ``grid_side`` snaps them
-  to the nearest one (with a warning).
+  to the nearest one (with a warning). A video block reads the same count as a whole
+  clip and snaps it to ``21 x side x side`` instead, since its grid has a temporal
+  axis: 5 seconds at the codec's temporal compression, square in space.
 
 Inputs are built the way the owning model builds them — the same RoPE builders,
 position ids, key-padding masks, modulation rows, 256-token padding and KV
@@ -1200,6 +1202,99 @@ def h3_image_refiner(ctx: Ctx, tokens: int, scenario: str) -> Case:
     flops = gemm_flops((gemm_params(blk), ctx.txt))
     flops += attn_flops(params.num_heads, params.head_dim, ((ctx.txt, ctx.txt),))
     return Case(run, flops, ctx.txt, detail=f"txt={ctx.txt}")
+
+
+# ------------------------------------------------------------------ video blocks
+#: The geometry the Wan 2.2 checkpoints' headers report: the two 14B experts share it,
+#: and TI2V-5B is the narrower sibling. ``freq_dim``/``text_dim`` reach no block, but
+#: they belong to the same header, so they ride along rather than being invented twice.
+WAN_14B = {"in_channels": 16, "out_channels": 16, "dim": 5120, "num_layers": 40,
+           "ffn_dim": 13824, "freq_dim": 256, "text_dim": 4096, "patch_size": (1, 2, 2)}
+WAN_5B = {**WAN_14B, "in_channels": 48, "out_channels": 48, "dim": 3072,
+          "num_layers": 30, "ffn_dim": 14336}
+WAN_FRAMES = 21             # a 5-second Wan clip: 81 frames at 16 fps over the codec's
+                            # temporal packing. How a rung is split across the three axes
+                            # costs nothing — the FLOPs follow the token count — it only
+                            # has to be the grid a block really attends over.
+
+
+def _wan_case(ctx: Ctx, tokens: int, role: str, geometry: dict, token_temb: bool) -> Case:
+    """One Wan 2.2 block over a video token stream, self-attention plus cross-attention."""
+    from thenoise.dit.wan_video.model import Wan22Params, WanNativeBlock
+    from thenoise.utils.dynamo import mark_token_axis
+    from thenoise.utils.positions import grid_positions
+
+    params = Wan22Params(**geometry)
+    name = f"wan22/{role}"
+    heads, head_dim = params.heads, params.head_dim
+    frames = WAN_FRAMES
+    side = int(round(math.sqrt(max(tokens, frames) / frames)))
+    if frames * side * side != tokens:
+        print(f"  (snapping {tokens} video tokens to {frames}x{side}x{side})",
+              file=sys.stderr)
+    n = frames * side * side
+    txt = ctx.txt
+
+    blk = new_block(ctx, name, WanNativeBlock, params)
+    # The table a checkpoint fills, which the class leaves empty.
+    nn.init.normal_(blk.scale_shift_table, std=0.02)
+    # ``WanNativeDiT.apply_precision`` keeps the norms and the modulation table in fp32
+    # while the trunk stays at the checkpoint's dtype, and the block feeds them
+    # ``x.float()``; ``new_block`` cast the whole block to the compute dtype.
+    for norm in (blk.norm1, blk.norm2, blk.norm3):
+        norm.float()
+    blk.scale_shift_table.data = blk.scale_shift_table.data.float()
+    seed_inputs(name, "plain", n)
+
+    x = randn(ctx, 1, n, params.dim)
+    context = randn(ctx, 1, txt, params.dim)
+    # WanNativeRoPE's own axes — the head split three ways over the (t, h, w) grid — and
+    # stored without a dtype as the model stores it, so the table stays fp32.
+    hw = 2 * (head_dim // 6)
+    rope = rope_cache(ctx, [head_dim - 2 * hw, hw, hw], 10000.0).store(
+        "bench", grid_positions([frames, side, side], device=ctx.tdev).reshape(1, -1, 3))
+    # The modulation the block is handed rather than the timestep: T2V runs one row for
+    # the batch, I2V one row per token.
+    temb = randn(ctx, 1, n, 6, params.dim) if token_temb else randn(ctx, 1, 6, params.dim)
+
+    def run():
+        mark_token_axis(x, context, rope)
+        if temb.ndim == 4:
+            mark_token_axis(temb)
+        return blk(x, context, temb, rope)
+
+    # Cross-attention feeds its K and V the prompt alone; every other projection the
+    # whole clip.
+    prompt = gemm_params(blk.attn2.to_k) + gemm_params(blk.attn2.to_v)
+    flops = gemm_flops((gemm_params(blk) - prompt, n), (prompt, txt))
+    flops += attn_flops(heads, head_dim, ((n, n), (n, txt)))
+    return Case(run, flops, n, detail=f"{params.dim}w {frames}x{side}x{side} txt={txt}")
+
+
+@fixture("wan22", "block")
+def wan22_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """Wan 2.2's 14B block: the trunk both experts run, over a 5-second clip.
+
+    Self-attention over the clip, cross-attention over the prompt, and the batch's one
+    AdaLN row.
+    """
+    return _wan_case(ctx, tokens, "block", WAN_14B, token_temb=False)
+
+
+@fixture("wan22", "block_i2v")
+def wan22_block_i2v(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """The same 14B block with an I2V modulation: a row per token instead of per batch.
+
+    Six copies of the token stream reach every layer, in fp32, next to the activations
+    themselves.
+    """
+    return _wan_case(ctx, tokens, "block_i2v", WAN_14B, token_temb=True)
+
+
+@fixture("wan22", "block_5b")
+def wan22_block_5b(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """TI2V-5B's block: the same recipe at 24 heads and 14336-wide FFN."""
+    return _wan_case(ctx, tokens, "block_5b", WAN_5B, token_temb=False)
 
 
 # ------------------------------------------------------------------ measurement

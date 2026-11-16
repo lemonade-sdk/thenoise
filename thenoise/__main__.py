@@ -1,8 +1,15 @@
 """Entrypoint: parse CLI, load a single model, then serve via uvicorn."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from .cli import build_parser
+
+
+class _QuietReads(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        line = record.getMessage()
+        return not ('"GET /jobs' in line and '" 200' in line)
 
 
 def _serve(args) -> None:
@@ -50,6 +57,7 @@ def _serve(args) -> None:
     else:
         print(f"thenoise serving WITHOUT a model on {settings.device} "
               f"(only upscaling and control-map extraction are available)")
+    logging.getLogger("uvicorn.access").addFilter(_QuietReads())
     uvicorn.run(app, host=settings.host, port=settings.port)
 
 
