@@ -132,3 +132,23 @@ def test_a_model_with_two_segments_gets_one_progress_clock(tmp_path, monkeypatch
 
     assert [e for e in events if e[0] == "sampling"] == [("sampling", i, 4) for i in range(1, 5)]
     assert staged == ["text_encoder", "dit", "dit_low", "vae"]
+
+
+def test_shared_controller_cleans_video_state_on_failure(tmp_path, monkeypatch):
+    """Request-owned AV references must be cleared even when a stage fails."""
+    model = StubVideo(config=ModelConfig(
+        dit_paths={"": str(tmp_path / "dit")}, vae_path="vae", text_encoder_path="te",
+        device="cpu", offload_device="cpu"))
+    cleared = []
+    model.clear_video_state = lambda: cleared.append(True)
+    controller = VideoPipelineController(model)
+
+    def fail(*_args):
+        raise RuntimeError("injected failure")
+
+    monkeypatch.setattr(controller, "_render", fail)
+    spec = model.resolve_video(VideoSpec(prompt="fox"))
+    with pytest.raises(RuntimeError, match="injected failure"):
+        controller.render(spec, Cancellation(), lambda *_: None,
+                          tmp_path / "failed.webm")
+    assert cleared == [True]

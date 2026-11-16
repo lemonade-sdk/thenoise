@@ -22,7 +22,7 @@ def test_detection_matrix(model, keyset):
     assert model.detect(header_of(keys)) is (model is owner)
 
 
-@pytest.mark.parametrize("keyset", ["zimage", "unknown"])
+@pytest.mark.parametrize("keyset", ["zimage", "ltx23", "ltx25", "unknown"])
 def test_resolve(keyset, tmp_path):
     """``resolve()`` opens the file, iterates the catalog and returns the claimant."""
     owner, keys = MODEL_KEYSETS[keyset]

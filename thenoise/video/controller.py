@@ -87,6 +87,13 @@ class VideoPipelineController:
     # ------------------------------------------------------------ render
     def render(self, spec: ResolvedVideo, token: Cancellation,
                progress: Callable[[str, int, int], None], output: Path) -> None:
+        try:
+            self._render(spec, token, progress, output)
+        finally:
+            self.model.clear_video_state()
+
+    def _render(self, spec: ResolvedVideo, token: Cancellation,
+                progress: Callable[[str, int, int], None], output: Path) -> None:
         """Encode -> denoise -> decode into ``output``, checking ``token`` throughout.
 
         The clip latent is not cached: nothing downstream of sampling exists for video.
@@ -103,6 +110,7 @@ class VideoPipelineController:
                 height=spec.height, width=spec.width, steps=spec.steps, seed=spec.seed,
                 guidance_scale=spec.guidance_scale, sampler=spec.sampler,
                 frames=spec.frame_count, flow_shift=spec.flow_shift,
+                fps=spec.fps,
             )
             images = self._reference_images(spec)
             ref_key = (self._cache_key_reference(images, spec) if images else None)
@@ -133,29 +141,74 @@ class VideoPipelineController:
             x = None
             cond = None
             done = 0
-            for segment in model.segments(params, model.schedule(params),
-                                          spec.guidance_scale):
+
+            segments = model.segments(
+                params, model.schedule(params), spec.guidance_scale
+            )
+            total_steps = sum(len(segment.steps) for segment in segments)
+            previous = None
+
+            for segment in segments:
+                # LTX requires an upscaling/re-noising transition between
+                # its two sampling phases. Other models use the default no-op.
+                if previous is not None:
+                    x = model.transition_segment(
+                        x, previous, segment, params, token
+                    )
+                    token.check()
+
                 def prepare(segment=segment):
                     nonlocal x, cond
-                    model.switch_loras(spec.lora_specs.get(segment.stage),
-                                       segment.module, segment.stage)
+                    model.switch_loras(
+                        spec.lora_specs.get(segment.stage),
+                        segment.module,
+                        segment.stage,
+                    )
                     model.begin_segment(segment)
                     cond = model.fuse_text(cond_raw)
-                    # once, and inside a stage: preparing may need weights
-                    if x is None:
-                        x = model.prepare_latent(latents, cond, params, ref=ref,
-                                                 ref_method=model.pref("ref_method"))
 
-                x = stages.run(lambda: self._denoise(x, segment, cond, params, token,
-                                                     progress, done, spec.steps),
-                               resident=(segment.stage,), pixels=pixels, prepare=prepare)
+                    # Preparation must happen while the stage is resident.
+                    if x is None:
+                        x = model.prepare_latent(
+                            latents, cond, params, ref=ref,
+                            ref_method=model.pref("ref_method"),
+                        )
+
+                x = stages.run(
+                    lambda: self._denoise(
+                        x, segment, cond, params, token,
+                        progress, done, total_steps,
+                    ),
+                    resident=(segment.stage,),
+                    pixels=pixels,
+                    prepare=prepare,
+                )
+
                 done += len(segment.steps)
+                previous = segment
+
             x = model.finalize_latent(x, params)
             del cond_raw, latents, ref
 
-            stages.run(self._mux, x, spec, token, progress, output,
-                       resident=("vae",), pixels=pixels)
-            del x
+            # Audio decoding is optional and belongs to its own
+            # MemoryManager stage.
+            audio = None
+            roles = model.audio_components()
+
+            if roles:
+                audio = stages.run(
+                    model.decode_audio, x,
+                    resident=roles,
+                    pixels=pixels,
+                )
+                token.check()
+
+            stages.run(
+                self._mux, x, spec, token, progress, output, audio,
+                resident=("vae",),
+                pixels=pixels,
+            )
+            del x, audio
 
         logger.info("Video saved: %s", output)
 
@@ -180,7 +233,7 @@ class VideoPipelineController:
             step_callback=stepping(token, progress, "sampling", done, total))
 
     def _mux(self, latents, spec: ResolvedVideo, token: Cancellation,
-             progress, output: Path) -> None:
+             progress, output: Path, audio=None) -> None:
         """Decode into the container: the clip never exists all at once.
 
         Stays inside the ``vae`` stage because the generator pulls from the codec as the
@@ -200,7 +253,13 @@ class VideoPipelineController:
                     yield pixels_to_pil(frame)
 
         progress("encoding", 0, total)
-        encode_video(frames(), spec, token, output, progress)
+        if audio is None:
+            # WAN and other video-only adapters keep their existing call.
+            encode_video(frames(), spec, token, output, progress)
+        else:
+            sound, sample_rate = audio
+            encode_video(frames(), spec, token, output, progress,
+                         audio=sound, sample_rate=sample_rate)
 
 
 __all__ = ["VideoPipelineController"]

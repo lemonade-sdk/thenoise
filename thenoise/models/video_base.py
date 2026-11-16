@@ -67,6 +67,19 @@ class VideoModel(PixelModel):
         return resolved
 
     # ------------------------------------------------------------ schedule
+    def transition_segment(self, latents: torch.Tensor, previous: Segment,
+                           next_segment: Segment, params, token) -> torch.Tensor:
+        """Optional model-specific latent transition between complete segments.
+
+        Called after the previous stage releases its weights and before the next
+        stage is held. Wan's high/low experts share latents unchanged. AV models
+        may use a separate staged spatial upscaler here.
+        """
+        return latents
+
+    def clear_video_state(self) -> None:
+        """Release transient, request-owned reference state on success or failure."""
+
     def segments(self, params, schedule: Sequence[Step],
                  guidance_scale: float) -> list[Segment]:
         """The schedule split by the component that answers each span.
@@ -81,6 +94,14 @@ class VideoModel(PixelModel):
         self._segment = segment
 
     # ------------------------------------------------------------ codec
+    def audio_components(self) -> tuple[str, ...]:
+        """Extra MemoryManager roles needed to decode audio, if this codec has any."""
+        return ()
+
+    def decode_audio(self, latents: torch.Tensor):
+        """Optional ``(waveform, sample_rate)`` for the AV muxer."""
+        return None
+
     @abstractmethod
     def decode_frames(self, latents: torch.Tensor) -> Iterator[torch.Tensor]:
         """Canonical clip latent -> pixels ``[C, H, W]`` in [-1, 1], yielded one frame at

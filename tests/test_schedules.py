@@ -98,6 +98,8 @@ BARE = {
     # A clip's schedule reads its variant's flow shift and nothing else: no VAE, no
     # DiT, no frame count.
     "wan22": {"variant": VARIANTS["ti2v_5b"]},
+    "LTX-2.3-Distilled": {},
+    "LTX-2.5-Distilled": {},
 }
 
 # The adapters whose step schedule shifts with the image token count. Krea 2 is
@@ -109,6 +111,8 @@ RESOLUTION_AWARE = {"flux_klein", "qwen_image", "qwen_image21", "ming_image"}
 @pytest.mark.parametrize("model_cls", MODEL_CATALOG, ids=CATALOG_IDS)
 @pytest.mark.parametrize("steps", [1, 4, 8])
 def test_schedule_contract(model_cls, steps):
+    if model_cls.name in ("LTX-2.3-Distilled", "LTX-2.5-Distilled") and steps != 8:
+        pytest.skip("LTX distilled checkpoints require exactly 8 steps")
     model = _bare(model_cls, **BARE[model_cls.name])
     schedule = model.schedule(_params(steps=steps))
 

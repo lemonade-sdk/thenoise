@@ -112,8 +112,8 @@ defaults when optional fields are omitted.
 | `image` | string | Optional base64-encoded first frame (I2V; omit for T2V) |
 | `end_image` | string | Optional base64-encoded last frame (FLF2V; needs `image`) |
 | `negative_prompt` | string | Optional negative text prompt |
-| `width`, `height` | integer | Video dimensions |
-| `frames` | integer | Desired frame count |
+| `width`, `height` | integer | Video dimensions (Wan aligns down to 32 px; LTX to 64 px) |
+| `frames` | integer | Desired frame count (Wan uses `4n+1`; LTX uses `8n+1`) |
 | `duration`, `fps` | number, integer | Duration in seconds and frames/second; explicit `frames` takes priority |
 | `steps`, `guidance_scale`, `seed` | number | Sampling parameters |
 | `flow_shift` | number | Noise schedule shift. Defaults to the model's release value |

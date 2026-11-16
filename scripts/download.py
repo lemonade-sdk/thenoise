@@ -12,6 +12,8 @@ Models:
                   https://huggingface.co/circlestone-labs/Anima
   krea2           Krea 2 Turbo (bf16 / raw)
                   https://huggingface.co/Comfy-Org/Krea-2
+  ltx23           LTX 2.3 Distilled (audio/video + Gemma 3)
+  ltx25           LTX 2.5 Distilled (audio/video + Gemma 4)
   wan22           Wan 2.2 TI2V-5B, FastWan turbo by default (text-to-video and
                   image-to-video; --variant base takes the FP16 release)
                   https://huggingface.co/thenoise-ai/diffusion-models
@@ -417,6 +419,67 @@ def _esrgan_jobs(args: argparse.Namespace) -> list[Artifact]:
     ]
 
 
+# Explicit manifests: INT8 ConvRot is the default for both releases.
+# BF16 is an opt-in (--variant bf16) and is never downloaded implicitly.
+_LTX23_GEMMA_FILES = (
+    "added_tokens.json", "chat_template.json", "config.json",
+    "generation_config.json", "model.safetensors.index.json",
+    "preprocessor_config.json", "processor_config.json",
+    "special_tokens_map.json", "tokenizer.json", "tokenizer.model",
+    "tokenizer_config.json",
+    *(f"model-{i:05d}-of-00005.safetensors" for i in range(1, 6)),
+)
+_LTX23_GEMMA_ASSETS = (
+    "config.json", "tokenizer.json", "tokenizer_config.json",
+    "special_tokens_map.json",
+)
+
+
+def _ltx23_jobs(args: argparse.Namespace) -> list[Artifact]:
+    variant = getattr(args, "variant", None) or "int8-convrot"
+    repo = "Lightricks/LTX-2.3"
+    gemma = "Lightricks/gemma-3-12b-it-qat-q4_0-unquantized"
+    shared = [("spatial_upscaler", repo,
+               "ltx-2.3-spatial-upscaler-x2-1.1.safetensors")]
+    if variant == "bf16":
+        return [("dit", repo, "ltx-2.3-22b-distilled-1.1.safetensors"),
+                *shared,
+                *((f"gemma3/{name}", gemma, name) for name in _LTX23_GEMMA_FILES)]
+    if variant != "int8-convrot":
+        raise ValueError(f"unsupported LTX 2.3 variant {variant!r}")
+    # Lightricks does not publish an official INT8 2.3 checkpoint. Use
+    # explicitly identified community Comfy-native ConvRot weights instead.
+    return [
+        ("dit", "milo01/ComfyUI-Native-INT8_ConvRot",
+         "checkpoints/ltx-2.3-22b-distilled-1.1-int8-ConvRot.safetensors"),
+        *shared,
+        # The community INT8 file has no VAE or vocoder tensors.
+        ("vae", "Kijai/LTX2.3_comfy", "vae/LTX23_video_vae_bf16.safetensors"),
+        ("audio_vae", "Kijai/LTX2.3_comfy", "vae/LTX23_audio_vae_bf16.safetensors"),
+        ("text_projection", "Kijai/LTX2.3_comfy",
+         "text_encoders/ltx-2.3_text_projection_bf16.safetensors"),
+        ("gemma3/gemma_3_12B_it_int8_convrot.safetensors",
+         "Stick9190/gemma-3-12b-it-int8-convrot", "gemma_3_12B_it_int8_convrot.safetensors"),
+        *((f"gemma3/{name}", gemma, name) for name in _LTX23_GEMMA_ASSETS),
+    ]
+
+
+def _ltx25_jobs(args: argparse.Namespace) -> list[Artifact]:
+    variant = getattr(args, "variant", None) or "int8-convrot"
+    if variant not in ("int8-convrot", "bf16"):
+        raise ValueError(f"unsupported LTX 2.5 variant {variant!r}")
+    repo = "Lightricks/LTX-2.5"
+    suffix = "comfy-int8-convrot" if variant == "int8-convrot" else "bf16"
+    return [
+        ("dit", repo, f"diffusion_models/ltx-2.5-22b-distilled-transformer-{suffix}.safetensors"),
+        ("text_encoder", repo, f"text_encoders/gemma4-12b-with-proj-ltx-2.5-{suffix}.safetensors"),
+        ("vae", repo, "vae/ltx-2.5-video-vae-conv-bf16.safetensors"),
+        ("audio_vae", repo, "vae/ltx-2.5-audio-vae-bf16.safetensors"),
+        ("spatial_upscaler", repo,
+         "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"),
+    ]
+
+
 _WAN_REPO = "Comfy-Org/Wan-2.2"
 
 
@@ -614,6 +677,18 @@ MODELS: dict[str, ModelSpec] = {
         "MiniMax H3-Image (t2i + edit in one DiT)",
         _h3_image_jobs,
     ),
+    "ltx23": ModelSpec(
+        "ltx23", "./models/ltx23",
+        "LTX 2.3 Distilled (T2V / I2V + audio; INT8 ConvRot default)", _ltx23_jobs,
+        has_int8=True, variant_supported=True,
+        variant_choices=("int8-convrot", "bf16"), default_variant="int8-convrot",
+    ),
+    "ltx25": ModelSpec(
+        "ltx25", "./models/ltx-2.5",
+        "LTX 2.5 Distilled (T2V / I2V + audio; INT8 ConvRot default)", _ltx25_jobs,
+        has_int8=True, variant_supported=True,
+        variant_choices=("int8-convrot", "bf16"), default_variant="int8-convrot",
+    ),
     "wan22": ModelSpec(
         "wan22", "./models/wan22",
         "Wan 2.2 TI2V-5B (T2V / I2V; FastWan turbo by default)",
@@ -683,6 +758,9 @@ def _epilog() -> str:
         "  python scripts/download.py --model fibo2",
         "  python scripts/download.py --model fibo2 --variant dev --int8-convrot",
         "  python scripts/download.py --model h3-image",
+        "  python scripts/download.py --model ltx23 --dry-run  # INT8 ConvRot",
+        "  python scripts/download.py --model ltx25            # INT8 ConvRot",
+        "  python scripts/download.py --model ltx25 --variant bf16",
         "  python scripts/download.py --model wan22",
         "  python scripts/download.py --model wan22 --variant base",
         "  python scripts/download.py --model wan22-14b",
@@ -775,6 +853,8 @@ def main() -> None:
         ap.error("--image-only / --edit-only are only supported by --model mage-flow, qwen-image")
     if args.image_only and args.edit_only:
         ap.error("--image-only and --edit-only are mutually exclusive")
+    if args.model in ("ltx23", "ltx25") and args.int8_convrot and args.variant == "bf16":
+        ap.error("LTX --int8-convrot cannot be combined with --variant bf16")
     if args.int8_convrot and not spec.has_int8:
         ap.error(f"--int8-convrot is not supported by --model {args.model}")
 
@@ -785,7 +865,13 @@ def main() -> None:
     if args.dry_run:
         print(f"plan for --model {args.model} -> {out_dir}")
         for name, repo, path in jobs:
-            print(f"  {name:34s} {repo} :: {path}")
+            directory, _, _ = name.rpartition("/")
+            destination = (Path(out_dir).parent / "gemma3-12b" if args.model == "ltx23"
+                           and directory == "gemma3" else
+                           Path(out_dir) / directory if directory else Path(out_dir))
+            target = destination / path
+            print(f"  {'exists' if target.is_file() else 'missing':7s} "
+                  f"{name:34s} {repo} :: {path} -> {target}")
         return
 
     out = Path(out_dir)
@@ -796,9 +882,30 @@ def main() -> None:
         # A label naming a directory lands there: a control-map pool keeps one
         # directory per checkpoint, and --out points at the pool.
         directory, _, _ = name.rpartition("/")
-        destination = out / directory if directory else out
+        destination = (out.parent / "gemma3-12b" if args.model == "ltx23"
+                       and directory == "gemma3" else
+                       out / directory if directory else out)
         destination.mkdir(parents=True, exist_ok=True)
-        dest = hf_hub_download(repo, path, local_dir=str(destination))
+        target = destination / path
+        if target.is_file() and target.stat().st_size > 0:
+            print(f"  {'exists':18s} {name:34s} {repo} :: {path} -> {target}")
+            continue
+        try:
+            dest = hf_hub_download(repo, path, local_dir=str(destination))
+        except Exception as failure:
+            code = getattr(getattr(failure, "response", None), "status_code", None)
+            if type(failure).__name__ == "GatedRepoError":
+                raise SystemExit(
+                    f"Hugging Face gated repository {repo}/{path}: "
+                    f"accept its terms at https://huggingface.co/{repo} and run `hf auth login`"
+                ) from None
+            if code in (401, 403):
+                raise SystemExit(
+                    f"Hugging Face HTTP {code} for {repo}/{path}. "
+                    "Check the repository/file URL and authentication; "
+                    "an HTTP error alone does not prove that the repository is gated."
+                ) from None
+            raise
         print(f"  {name:34s} {repo} :: {path} -> {dest}")
     print(f"done: {args.model} ({len(jobs)} artifact(s))")
 

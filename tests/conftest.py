@@ -43,6 +43,8 @@ from thenoise.models import (  # noqa: E402
     MossImageModel,
     QwenImageModel,
     QwenImage21Model,
+    LTX23Video,
+    LTX25Video,
     VideoModel,
     Wan22Model,
     ZImageModel,
@@ -841,6 +843,25 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "time_embedding.0.weight",
         ],
     ),
+    # LTX audiovisual key signatures, in original and Comfy-wrapped files.
+    "ltx23": (LTX23Video, [
+        "patchify_proj.weight",
+        "audio_patchify_proj.weight",
+    ]),
+    "ltx23_wrapped": (LTX23Video, [
+        "model.diffusion_model.patchify_proj.weight",
+        "model.diffusion_model.audio_patchify_proj.weight",
+    ]),
+    "ltx25": (LTX25Video, [
+        "patchify_proj.weight",
+        "audio_patchify_proj.weight",
+        "keyframes_abs_pos_embedding",
+    ]),
+    "ltx25_wrapped": (LTX25Video, [
+        "model.diffusion_model.patchify_proj.weight",
+        "model.diffusion_model.audio_patchify_proj.weight",
+        "model.diffusion_model.keyframes_abs_pos_embedding",
+    ]),
     "unknown": (None, ["some.random.key", "blocks.0.attn.gate.weight"]),
 }
 
