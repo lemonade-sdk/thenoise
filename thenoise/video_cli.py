@@ -112,6 +112,9 @@ def run_video(args) -> None:
     runtime.load(ModelPaths(
         dit_path=args.dit, vae_path=args.vae, text_encoder_path=args.text_encoder,
         lora_dir=args.lora_dir, dit_low_path=args.dit_low,
+        ltx_audio_vae_path=args.ltx_audio_vae,
+        ltx_upscaler_path=args.ltx_upscaler,
+        ltx_text_projection_path=args.ltx_text_projection,
     ))
     if runtime.medium != "video":
         raise SystemExit(

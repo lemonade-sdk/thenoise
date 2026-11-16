@@ -29,6 +29,16 @@ def _add_dit_low(p: argparse.ArgumentParser) -> None:
                         "(--dit selects the high-noise expert)")
 
 
+def _add_ltx_paths(p: argparse.ArgumentParser) -> None:
+    """LTX-specific checkpoint roles; no inferred filenames or directories."""
+    p.add_argument("--ltx-audio-vae", default="", metavar="PATH",
+                   help="LTX audio VAE and vocoder checkpoint")
+    p.add_argument("--ltx-upscaler", default="", metavar="PATH",
+                   help="LTX spatial latent upscaler checkpoint")
+    p.add_argument("--ltx-text-projection", default="", metavar="PATH",
+                   help="LTX 2.3 split text projection checkpoint")
+
+
 def _add_upscaler_args(p: argparse.ArgumentParser) -> None:
     """Pixel-upscaler flags for a subcommand: ``serve`` takes ``--upscaler-dir``, the
     upscaler itself being selected per request through the ``pixel_upscaler`` API field."""
@@ -159,6 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve = sub.add_parser("serve", help="run the FastAPI HTTP server")
     _add_model_paths(serve, required=False)
     _add_dit_low(serve)
+    _add_ltx_paths(serve)
     _add_upscaler_args(serve)
     _add_controlmap_args(serve)
     serve.add_argument("--cache-dir", default="~/.cache/thenoise", metavar="DIR",
@@ -193,6 +204,7 @@ def build_parser() -> argparse.ArgumentParser:
     video = sub.add_parser("video", help="run one generation and save a clip")
     _add_model_paths(video)
     _add_dit_low(video)
+    _add_ltx_paths(video)
     _add_video_args(video)
 
     # upscale

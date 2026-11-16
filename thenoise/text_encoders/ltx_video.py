@@ -10,10 +10,10 @@ import json
 from pathlib import Path
 
 import torch
-from safetensors import safe_open
+from thenoise.utils.safetensors import MemoryEfficientSafeOpen
 from torch import nn
 
-from thenoise.dit.ltx_video.checkpoint import _assign
+from thenoise.utils.loader import load_streamed_components
 
 
 class GemmaFeatures(nn.Module):
@@ -271,8 +271,8 @@ def load_ltx_gemma(path: str | Path, *, version: str, cancel):
                 replace_linears(text)
             _materialize_gemma3_constants(text)
             wrapper = GemmaFeatures(text)
-            with safe_open(str(quant_path), framework="pt", device="cpu") as f:
-                _assign(f, {"gemma": wrapper}, cancel=cancel,
+            with MemoryEfficientSafeOpen(str(quant_path)) as f:
+                load_streamed_components(f, {"gemma": wrapper}, cancel=cancel,
                         selector=_gemma3_key, dtype=torch.bfloat16)
             return wrapper.eval(), tokenizer, hf_config.text_config
         if not (path / "model.safetensors.index.json").exists() and not (
@@ -293,7 +293,7 @@ def load_ltx_gemma(path: str | Path, *, version: str, cancel):
         raise ValueError("LTX-2.5 Gemma-4 must be a packed .safetensors file or a HF directory")
     from tokenizers import Tokenizer
 
-    with safe_open(str(path), framework="pt", device="cpu") as f:
+    with MemoryEfficientSafeOpen(str(path)) as f:
         meta = f.metadata() or {}
         raw_config = meta.get("gemma_config")
         if not raw_config:
@@ -323,7 +323,7 @@ def load_ltx_gemma(path: str | Path, *, version: str, cancel):
         # layout, not guesses based on an HF release. Every other learned
         # tensor must match exactly before any heavy data is read.
         expected = set(wrapper.state_dict())
-        _assign(
+        load_streamed_components(
             f, {"gemma": wrapper}, cancel=cancel,
             selector=lambda raw: _gemma4_key(raw, expected),
             dtype=torch.bfloat16,

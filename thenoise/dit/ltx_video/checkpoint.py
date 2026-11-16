@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Callable
 
 import torch
-from safetensors import safe_open
+from thenoise.utils.safetensors import MemoryEfficientSafeOpen
+from thenoise.utils.loader import load_streamed_components
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ def version_from_checkpoint(path: str | Path) -> str | None:
     path = Path(path).expanduser()
     if not path.is_file():
         return None
-    with safe_open(str(path), framework="pt", device="cpu") as f:
+    with MemoryEfficientSafeOpen(str(path)) as f:
         keys = set(f.keys())
         meta = f.metadata() or {}
     cfg = meta.get("config")
@@ -47,13 +48,9 @@ def version_from_checkpoint(path: str | Path) -> str | None:
     if any(k.endswith("patchify_proj.weight") for k in keys) and any(
         k.endswith("audio_patchify_proj.weight") for k in keys
     ):
-        # If there is no model-version stamp, accept only the official names;
-        # a guessed generic AV checkpoint would otherwise be misclassified.
-        n = path.name
-        if n.startswith("ltx-2.3-"):
-            return VERSION_23
-        if n.startswith("ltx-2.5-"):
-            return VERSION_25
+        # Version 2.5 carries the keyframe embedding; its absence is 2.3.
+        # Never infer an architecture from user-controlled path names.
+        return VERSION_23
     return None
 
 
@@ -173,155 +170,6 @@ def _map_component(comp: str, k: str) -> str | None:
     if comp == "vocoder":
         return _remap_vocoder(k)
     return k
-
-
-_INT8_SCALE_SUFFIXES = (".weight_scale", ".scale_weight")
-
-
-def _quant_auxiliary(raw: str) -> bool:
-    """Comfy per-layer metadata, not learned state_dict parameters."""
-    return raw.endswith((*_INT8_SCALE_SUFFIXES, ".comfy_quant", ".scale_input",
-                         ".input_scale", ".comfy_attention.config"))
-
-
-def _int8_siblings(raw: str, keys: set[str]) -> tuple[str | None, str | None]:
-    """The scale and per-linear ConvRot profile of one original INT8 weight."""
-    stem = raw.removesuffix(".weight")
-    scales = [stem + suffix for suffix in _INT8_SCALE_SUFFIXES
-              if stem + suffix in keys]
-    if len(scales) != 1:
-        return None, None
-    marker = stem + ".comfy_quant"
-    return scales[0], marker if marker in keys else None
-
-
-def _assign(source, components: dict, *, cancel: Callable[[], None],
-            selector: Callable[[str], tuple[str, str] | None], dtype: torch.dtype,
-            allow_missing: set[str] | None = None,
-            already_loaded: set[tuple[str, str]] | None = None,
-            defer_complete: set[str] | None = None) -> dict[str, set[str]]:
-    """Strict streaming load of native BF16 and Comfy INT8 ConvRot checkpoints.
-
-    TheNoise's shared QuantizedLinear/QuantizedTensor protocol retains the I8
-    storage and ConvRot metadata. Only embeddings (which perform gathers rather
-    than GEMMs) are dequantized. Nothing builds a 40+ GiB intermediate state dict.
-
-    Only split LTX connectors may be incomplete after one file: the DiT
-    supplies their attention weights, and the separate Gemma with-proj file
-    supplies their text projection. The caller checks the full module once
-    both files have been processed.
-    """
-    already_loaded = already_loaded or set()
-    defer_complete = defer_complete or set()
-    expected = {(comp, key): tuple(value.shape)
-                for comp, module in components.items()
-                for key, value in module.state_dict().items()}
-    all_keys = set(source.keys())
-    used: set[tuple[str, str]] = set()
-    jobs: list[tuple[str, tuple[str, str], str | None, str | None]] = []
-    bad = []
-    for raw in sorted(all_keys):
-        if _quant_auxiliary(raw) or raw == "scaled_fp8" or raw.endswith(".scaled_fp8"):
-            continue
-        mapped = selector(raw)
-        if mapped is None:
-            continue
-        comp, key = mapped
-        if comp not in components:
-            continue
-        key = _map_component(comp, key)
-        if key is None:
-            continue
-        dest = (comp, key)
-        if dest in used or dest in already_loaded or dest not in expected:
-            bad.append((raw, dest, "duplicate" if dest in used or dest in already_loaded
-                        else "unexpected"))
-            continue
-        sl = source.get_slice(raw)
-        if tuple(sl.get_shape()) != expected[dest]:
-            bad.append((raw, dest, f"shape {sl.get_shape()} != {expected[dest]}"))
-            continue
-        storage = sl.get_dtype()
-        scale = marker = None
-        if storage == "I8":
-            if not raw.endswith(".weight"):
-                bad.append((raw, dest, "INT8 is supported on linear/embedding weights only"))
-                continue
-            scale, marker = _int8_siblings(raw, all_keys)
-            if scale is None or marker is None:
-                bad.append((raw, dest, "INT8 ConvRot needs exactly one weight scale "
-                            "and its .comfy_quant marker"))
-                continue
-            parent, _, attr = key.rpartition(".")
-            submodule = components[comp].get_submodule(parent)
-            if attr != "weight" or not (hasattr(submodule, "load_quantized") or
-                                        isinstance(submodule, torch.nn.Embedding)):
-                bad.append((raw, dest, "INT8 weight requires TheNoise QuantizedLinear "
-                            "or embedding"))
-                continue
-        elif storage not in ("BF16", "F16", "F32"):
-            bad.append((raw, dest, f"unsupported dtype {storage}"))
-            continue
-        used.add(dest)
-        jobs.append((raw, dest, scale, marker))
-    missing = set(expected) - used - already_loaded
-    if allow_missing:
-        missing = {x for x in missing if x[1] not in allow_missing}
-    missing = {x for x in missing if x[0] not in defer_complete}
-    if missing or bad:
-        raise ValueError(
-            f"LTX checkpoint mismatch: missing={sorted(missing)[:8]}, "
-            f"invalid={bad[:8]} (never continue with random/meta weights)"
-        )
-    loaded: dict[str, set[str]] = {name: set() for name in components}
-    for i, (raw, (comp, key), scale, marker) in enumerate(jobs):
-        if i % 8 == 0:
-            cancel()
-        tensor = source.get_tensor(raw)
-        if scale is not None:
-            # Reuse TheNoise's existing ConvRot representation and its true INT8
-            # matmul dispatch, instead of dequantizing every Linear into BF16.
-            from thenoise.utils.loader import (
-                _build_quantized_tensor, _parse_comfy_quant, _switch_to_quantized,
-            )
-            metadata = _parse_comfy_quant(source.get_tensor(marker))
-            if not metadata.get("convrot", False):
-                # The export can mix unrotated small projections with ConvRot;
-                # their quantization is still valid and explicitly described.
-                log.debug("LTX INT8 layer %s is unrotated", key)
-            quant = _build_quantized_tensor(
-                tensor, source.get_tensor(scale), metadata, f"{comp}.{key}"
-            )
-            parent, _, _ = key.rpartition(".")
-            module = components[comp].get_submodule(parent)
-            _switch_to_quantized(module, quant, f"{comp}.{key}", dtype)
-        else:
-            if tensor.is_floating_point():
-                tensor = tensor.to(dtype)
-            # The destination and shape were checked above. Do not call
-            # load_state_dict() once per tensor: each call traverses the entire
-            # 48-layer model again, even for a single leaf.
-            parent, _, attr = key.rpartition(".")
-            module = components[comp].get_submodule(parent)
-            target = getattr(module, attr)
-            if isinstance(target, torch.nn.Parameter):
-                setattr(module, attr, torch.nn.Parameter(tensor, requires_grad=False))
-            elif isinstance(target, torch.Tensor):
-                setattr(module, attr, tensor)
-            else:
-                raise ValueError(f"LTX target is neither parameter nor buffer: {comp}.{key}")
-        loaded[comp].add(key)
-        del tensor
-    for comp, module in components.items():
-        if comp in defer_complete:
-            continue  # checked after all connector source files
-        leftover = [name for name, p in module.named_parameters() if p.is_meta]
-        leftover += [name for name, buf in module.named_buffers() if buf.is_meta]
-        if leftover:
-            raise RuntimeError(
-                f"LTX component {comp} has uninitialized meta tensors: {leftover[:8]}"
-            )
-    return loaded
 
 
 def make_transformer(version: str):
@@ -526,7 +374,7 @@ def load_original_components(
     assigned: set[tuple[str, str]] = set()
     for path, names in groups.items():
         cancel()
-        with safe_open(str(path), framework="pt", device="cpu") as f:
+        with MemoryEfficientSafeOpen(str(path)) as f:
             items = {k: m for k,m in modules.items() if k in names}
             if "dit" in items or "connectors" in items:
                 selector = split_ltx_key
@@ -541,8 +389,16 @@ def load_original_components(
                 selector = _upscaler_key
             else:
                 raise RuntimeError(f"Unhandled LTX checkpoint roles: {sorted(names)}")
-            loaded = _assign(
-                f, items, cancel=cancel, selector=selector, dtype=dtype,
+            def mapped_selector(raw):
+                selected = selector(raw)
+                if selected is None:
+                    return None
+                component, key = selected
+                mapped = _map_component(component, key)
+                return (component, mapped) if mapped is not None else None
+
+            loaded = load_streamed_components(
+                f, items, cancel=cancel, selector=mapped_selector, dtype=dtype,
                 already_loaded=assigned,
                 defer_complete={"connectors"} if "connectors" in items else None,
             )

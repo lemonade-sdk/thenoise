@@ -123,24 +123,26 @@ class LTXVideo(VideoModel):
         self._params: VideoSamplingParams | None = None
         self._group_offloaded = False
 
-        self.audio_vae_path = (dit if self.version == VERSION_23 else
-                               vae.parent / "ltx-2.5-audio-vae-bf16.safetensors")
-        up_name = ("ltx-2.3-spatial-upscaler-x2-1.1.safetensors" if self.version == VERSION_23
-                   else "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors")
-        # The official 2.3 monolith sits at the root; the community ConvRot
-        # export keeps its upstream 'checkpoints/' directory below that root.
-        root = (dit.parent.parent if self.version == VERSION_23 and
-                dit.parent.name == "checkpoints" else
-                dit.parent if self.version == VERSION_23 else dit.parent.parent)
-        self.upscaler_path = (root if self.version == VERSION_23
-                             else root / "latent_upscale_models") / up_name
-        # Unlike the BF16 monolith, the community INT8 checkpoint contains
-        # only DiT and connector attention; VAEs and text projections are separate.
-        self.text_projection_path = None
-        if self.version == VERSION_23 and vae.resolve() != dit.resolve():
-            self.audio_vae_path = root / "vae" / "LTX23_audio_vae_bf16.safetensors"
-            self.text_projection_path = (root / "text_encoders" /
-                                         "ltx-2.3_text_projection_bf16.safetensors")
+        # Required auxiliary weights are explicit CLI paths. Neither the download
+        # directory layout nor the checkpoint basename is an architecture hint.
+        self.audio_vae_path = (Path(config.ltx_audio_vae_path).expanduser()
+                               if config.ltx_audio_vae_path else None)
+        self.upscaler_path = (Path(config.ltx_upscaler_path).expanduser()
+                              if config.ltx_upscaler_path else None)
+        self.text_projection_path = (Path(config.ltx_text_projection_path).expanduser()
+                                     if config.ltx_text_projection_path else None)
+        if self.audio_vae_path is None:
+            if self.version == VERSION_23 and dit.resolve() == vae.resolve():
+                self.audio_vae_path = dit  # The explicitly passed BF16 monolith.
+            else:
+                raise ValueError("LTX requires --ltx-audio-vae PATH")
+        if self.upscaler_path is None:
+            raise ValueError("LTX requires --ltx-upscaler PATH")
+        if (self.version == VERSION_23 and dit.resolve() != vae.resolve()
+                and self.text_projection_path is None):
+            raise ValueError("LTX 2.3 split checkpoints require --ltx-text-projection PATH")
+        if self.version == VERSION_25 and self.text_projection_path is not None:
+            raise ValueError("LTX 2.5 text projections already belong to --text-encoder")
         required = [self.audio_vae_path, self.upscaler_path]
         if self.text_projection_path is not None:
             required.append(self.text_projection_path)

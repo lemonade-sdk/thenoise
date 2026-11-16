@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from safetensors import safe_open
+from thenoise.utils.loader import load_streamed_components
 from safetensors.torch import save_file
 
 
@@ -54,7 +55,7 @@ def test_streamed_load_is_strict_and_materializes_parameters_and_buffers(tmp_pat
             "net.running": torch.full((3,), 5.)}
     path = _save(tmp_path / "okay.safetensors", data)
     with safe_open(str(path), framework="pt", device="cpu") as f:
-        result = m._assign(f, {"dit": model}, cancel=lambda: None,
+        result = load_streamed_components(f, {"dit": model}, cancel=lambda: None,
                            selector=m.split_ltx_key, dtype=torch.float32)
     assert result == {"dit": {"weight", "bias", "running"}}
     assert not any(x.is_meta for x in (*model.parameters(), *model.buffers()))
@@ -67,7 +68,7 @@ def test_streamed_load_is_strict_and_materializes_parameters_and_buffers(tmp_pat
         model.register_buffer("running", torch.zeros(3))
     with safe_open(str(path), framework="pt", device="cpu") as f:
         with pytest.raises(ValueError, match="shape"):
-            m._assign(f, {"dit": model}, cancel=lambda: None,
+            load_streamed_components(f, {"dit": model}, cancel=lambda: None,
                       selector=m.split_ltx_key, dtype=torch.float32)
     assert model.weight.is_meta
 
@@ -94,7 +95,7 @@ def test_int8_requires_scale_and_comfy_quant_marker(tmp_path):
         path = _save(tmp_path / f"missing_{missing}.safetensors", data)
         with safe_open(str(path), framework="pt", device="cpu") as f:
             with pytest.raises(ValueError, match="INT8 ConvRot needs"):
-                m._assign(f, {"dit": QuantLinear()}, cancel=lambda: None,
+                load_streamed_components(f, {"dit": QuantLinear()}, cancel=lambda: None,
                           selector=m.split_ltx_key, dtype=torch.bfloat16)
 
 

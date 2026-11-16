@@ -50,6 +50,9 @@ Run LTX 2.3 on CUDA (or ROCm with the corresponding PyTorch build):
 ./thenoise.sh serve \
   --dit ./models/ltx23/checkpoints/ltx-2.3-22b-distilled-1.1-int8-ConvRot.safetensors \
   --vae ./models/ltx23/vae/LTX23_video_vae_bf16.safetensors \
+  --ltx-audio-vae ./models/ltx23/vae/LTX23_audio_vae_bf16.safetensors \
+  --ltx-upscaler ./models/ltx23/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
+  --ltx-text-projection ./models/ltx23/text_encoders/ltx-2.3_text_projection_bf16.safetensors \
   --text-encoder ./models/gemma3-12b \
   --device cuda:0 --offload-device cpu --port 8000
 ```
@@ -70,12 +73,14 @@ Run LTX 2.5:
 ./thenoise.sh serve \
   --dit ./models/ltx-2.5/diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors \
   --vae ./models/ltx-2.5/vae/ltx-2.5-video-vae-conv-bf16.safetensors \
+  --ltx-audio-vae ./models/ltx-2.5/vae/ltx-2.5-audio-vae-bf16.safetensors \
+  --ltx-upscaler ./models/ltx-2.5/latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors \
   --text-encoder ./models/ltx-2.5/text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors \
   --device cuda:0 --offload-device cpu --port 8000
 ```
 
 The separate LTX 2.5 audio VAE, vocoder, spatial upscaler and text connectors
-are resolved by the adapter under the same model root. The code checks scale
+are passed explicitly through the CLI. The code checks scale
 and `.comfy_quant` siblings before assigning a quantized weight; absent or
 incompatible metadata is a hard error, not a silent BF16 fallback.
 

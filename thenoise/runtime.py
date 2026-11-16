@@ -38,6 +38,9 @@ class ModelPaths:
     text_encoder_path: str = ""
     lora_dir: str = ""
     dit_low_path: str = ""
+    ltx_audio_vae_path: str = ""
+    ltx_upscaler_path: str = ""
+    ltx_text_projection_path: str = ""
 
     @property
     def dit_paths(self) -> dict[str, str]:
@@ -97,6 +100,9 @@ class Runtime:
             device=self._settings.device,
             offload_device=self._settings.offload_device,
             lora_dir=paths.lora_dir or None,
+            ltx_audio_vae_path=paths.ltx_audio_vae_path,
+            ltx_upscaler_path=paths.ltx_upscaler_path,
+            ltx_text_projection_path=paths.ltx_text_projection_path,
         )
         cls.validate_paths(config.all_headers())
 
