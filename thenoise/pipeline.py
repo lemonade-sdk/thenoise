@@ -18,7 +18,6 @@ what a request means is cheap to learn and running it is not.
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import math
 import random
@@ -35,7 +34,7 @@ from thenoise.models.config import EncodePromptArgs, GenerateRequest, SamplingPa
 from thenoise.samplers import Step, create_sampler, sigma_steps
 from thenoise.samplers.euler import EulerSampler
 from thenoise.upscale.pixel import PixelUpscalerManager
-from thenoise.utils.pipeline_cache import PipelineCache
+from thenoise.utils.pipeline_cache import PipelineCache, content_digest
 from thenoise.utils.image_tensor import (
     center_crop,
     load_image,
@@ -210,10 +209,8 @@ class PipelineController:
         was encoded at and the canvas size that policy was given: a model may fit a
         reference to the result (``DiffusionModel.fit_references``).
         """
-        digests = tuple(
-            hashlib.md5(load_image(img).tobytes()).hexdigest() for img in images
-        )
-        return ("reference", self.model.REFERENCE_SIZING, target, digests)
+        return ("reference", self.model.REFERENCE_SIZING, target,
+                content_digest(load_image(img) for img in images))
 
     def _cache_key_sampling(
         self,

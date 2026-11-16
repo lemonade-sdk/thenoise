@@ -469,6 +469,11 @@ resampling. A request that omits `seed` (or passes `-1`) draws a fresh seed
 before the key is built and so never hits it; when timing repeated requests, vary
 the seed or prompt.
 
+A video run caches its two encode stages and not the clip: repeating a request
+over the same reference image skips the codec, and one that changes only the
+prompt skips the text encoder as well. A changed image costs the text encoder
+too.
+
 ## Error semantics
 
 A route answers a refusal in the format it speaks.

@@ -29,23 +29,6 @@ TINY_CONFIG = dict(
 )
 
 
-@pytest.fixture(autouse=True)
-def _blocks_run_eagerly(monkeypatch):
-    """Call the transformer blocks un-compiled.
-
-    ``conftest`` disables dynamo suite-wide, and a ``fullgraph=True`` block *raises*
-    rather than falling back when dynamo is off: unwrap to the pre-compile function.
-    """
-    from thenoise.dit.lumina.models import LuminaTransformerBlock
-
-    monkeypatch.setattr(
-        LuminaTransformerBlock,
-        "forward",
-        LuminaTransformerBlock.forward._torchdynamo_orig_callable,
-        raising=False,
-    )
-
-
 @pytest.fixture(params=["learned", "zero_masked"])
 def core(request):
     """One tiny Lumina transformer per padding convention."""

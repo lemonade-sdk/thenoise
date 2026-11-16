@@ -8,11 +8,21 @@ Stage dependency graph (upstream -> downstream):
 
     reference  ->  prompt  ->  sampling  ->  decode
 
-``reference`` is the encoded input image (edit path only).
+``reference`` is the encoded input image (edit path only). A caller that caches fewer
+stages leaves the downstream slots empty.
 """
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple
+import hashlib
+from typing import TYPE_CHECKING, Any, Iterable, Tuple
+
+if TYPE_CHECKING:
+    from PIL import Image
+
+
+def content_digest(images: Iterable["Image.Image"]) -> Tuple[str, ...]:
+    """Each image's decoded pixels, hashed: a re-saved picture is still one reference."""
+    return tuple(hashlib.md5(image.tobytes()).hexdigest() for image in images)
 
 
 class _CacheSlot:

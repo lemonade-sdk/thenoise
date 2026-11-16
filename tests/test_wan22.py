@@ -870,6 +870,22 @@ def test_native_t2v_i2v_t2v_reuses_models(fake_video, tmp_path):
     assert out.read_bytes() == b"video"
 
 
+def test_a_reused_reference_latent_still_conditions_the_run(fake_video, tmp_path):
+    """A cached reference is read, not consumed."""
+    video, controller, calls = fake_video
+    image = io.BytesIO()
+    Image.new("RGB", (64, 64), "red").save(image, format="PNG")
+    spec = _spec(video, image=image.getvalue())
+    out = tmp_path / "out.mp4"
+
+    controller.render(spec, Cancellation(), lambda *_: None, out)
+    encoded, forwards = calls.count("vae_encode"), calls.count("dit")
+    controller.render(spec, Cancellation(), lambda *_: None, out)
+
+    assert calls.count("vae_encode") == encoded
+    assert calls.count("dit") == 2 * forwards
+
+
 def test_the_prompt_is_projected_once_per_segment(fake_video, tmp_path):
     """The text projection is expert weights, so a segment does it once for itself."""
     video, controller, calls = fake_video

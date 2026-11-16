@@ -88,20 +88,6 @@ def _compute():
         yield
 
 
-@pytest.fixture(autouse=True)
-def _blocks_run_eagerly(monkeypatch):
-    """Call the joint blocks un-compiled: a ``fullgraph=True`` block raises rather than
-    falling back when dynamo is off, which ``conftest`` disables suite-wide."""
-    from thenoise.dit.moss_image.models import Block
-
-    monkeypatch.setattr(
-        Block,
-        "forward",
-        Block.forward._torchdynamo_orig_callable,
-        raising=False,
-    )
-
-
 # --------------------------------------------------------------------- rope convention
 
 
