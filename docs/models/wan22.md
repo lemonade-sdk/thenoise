@@ -75,7 +75,7 @@ defaults is in the table above.
 
 ### Image-to-video
 
-`--image` names a PNG or JPEG the clip starts on, and the prompt says what happens
+`--image` names the image the clip starts on, and the prompt says what happens
 after it. With `--width`/`--height` left out the image's own aspect ratio decides
 the clip's shape.
 

@@ -109,8 +109,8 @@ defaults when optional fields are omitted.
 |---|---|---|
 | `prompt` | string | Required text prompt |
 | `model` | string | Optional loaded model name, checked if provided |
-| `image` | string | Optional base64-encoded PNG/JPEG first frame (I2V; omit for T2V) |
-| `end_image` | string | Optional base64-encoded PNG/JPEG last frame (FLF2V; needs `image`, and a model whose reference is concatenated — Wan 2.2 I2V-A14B) |
+| `image` | string | Optional base64-encoded first frame (I2V; omit for T2V) |
+| `end_image` | string | Optional base64-encoded last frame (FLF2V; needs `image`, and a model whose reference is concatenated — Wan 2.2 I2V-A14B) |
 | `negative_prompt` | string | Optional negative text prompt |
 | `width`, `height` | integer | Video dimensions (Wan rounds down to multiples of 32) |
 | `frames` | integer | Desired frame count (Wan uses a `4n+1` grid) |
@@ -132,7 +132,7 @@ curl -fS http://127.0.0.1:8000/video -H 'content-type: application/json' \
 
 ### Image-to-video (I2V)
 
-Send an existing PNG or JPEG as the first frame with the `image` field. Its value
+Send an existing image as the first frame with the `image` field. Its value
 is base64 of the raw file bytes, **not** a `data:` URL or a file path. The
 request field is `image`, not `image_b64`. For example, on Linux:
 
@@ -323,7 +323,7 @@ upscaler configured via `--upscaler-dir`.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `image_b64` | `string` | *(required)* | Base64-encoded input image (PNG/JPEG) |
+| `image_b64` | `string` | *(required)* | Base64-encoded input image |
 | `upscale_factor` | `float` | `0.0` | Desired final factor (`0.0` = the upscaler's detected native scale; must be in [1, that scale]; larger values are rejected) |
 | `pixel_upscaler` | `string` | *(required)* | Pixel upscaler name (no `.safetensors` suffix) from `--upscaler-dir` |
 | `out` | `string` | `png` | `png` (returns an image) or `json` (returns `b64_json`) |
@@ -394,7 +394,7 @@ needs no diffusion model loaded.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `image_b64` | `string` | *(required)* | Base64-encoded input image (PNG/JPEG) |
+| `image_b64` | `string` | *(required)* | Base64-encoded input image |
 | `type` | `string` | *(required)* | Control-map type, one of those listed by `/controlmaps` |
 | `model` | `string` | type default | Implementation to use for that type |
 | `canny` | `object` | defaults | `low` (100), `high` (200) thresholds in Sobel magnitude units, `thickness` (1) in pixels |

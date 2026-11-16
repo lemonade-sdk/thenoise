@@ -145,8 +145,8 @@ bars the stages as it goes.
 | `--flow-shift` | no | model default | Schedule shift; a distilled LoRA wants the one it ships with |
 | `--sampler` | no | model default | Denoising solver, of the ones the loaded model supports |
 | `--seed` | no | random | Random seed |
-| `--image` | no | — | PNG or JPEG the clip starts on |
-| `--end-image` | no | — | PNG or JPEG the clip ends on; needs `--image`, and a model that can be told where a clip ends ([FLF2V](models/wan22.md#first-and-last-frame-flf2v)) |
+| `--image` | no | — | image the clip starts on |
+| `--end-image` | no | — | image the clip ends on; needs `--image`, and a model that can be told where a clip ends ([FLF2V](models/wan22.md#first-and-last-frame-flf2v)) |
 | `--lora` | no | — | LoRA for the primary transformer; repeatable, `file:weight` |
 | `--lora-low` | no | — | LoRA for the low-noise expert of a `--dit-low` model; a LoRA meant for the whole clip goes to both flags |
 | `--output-format` | no | model default | `mp4` or `webm`; `--out`'s extension answers when this is left out |

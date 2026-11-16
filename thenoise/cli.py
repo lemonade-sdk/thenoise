@@ -131,9 +131,9 @@ def _add_video_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--output-format", choices=["mp4", "webm"],
                    help="container; --out's extension is taken when this is left out")
     p.add_argument("--image", metavar="PATH",
-                   help="PNG or JPEG the clip starts on")
+                   help="image the clip starts on")
     p.add_argument("--end-image", metavar="PATH",
-                   help="PNG or JPEG the clip ends on, for a model that can be told "
+                   help="image the clip ends on, for a model that can be told "
                         "where a clip ends; needs --image")
     p.add_argument("--lora", action="append", default=[], metavar="FILE[:WEIGHT]",
                    help="LoRA for the primary transformer (repeatable)")
