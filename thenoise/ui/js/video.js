@@ -6,7 +6,6 @@ let vOutMeta = null;      // request + server-resolved settings of the current r
 
 const videoJob = { id: null }; // in flight, for the Cancel button to name
 const VIDEO_PROGRESS = { root: 'v_progress', label: 'v_progress_label', bar: 'v_bar' };
-const VIDEO_POLL = { first: 2500, ceiling: 8000 }; // a clip renders in minutes
 const VIDEO_MODES = {t2v: 'text-to-video', i2v: 'image-to-video',
                      flf2v: 'first and last frame'};
 
@@ -129,7 +128,6 @@ $('video_generate').addEventListener('click', () => {
     timerEl: 'vtimer',
     timerTextEl: 'vtimer_text',
     progress: VIDEO_PROGRESS,
-    poll: VIDEO_POLL,
     onArtifact: async (blob, status) => {
       if (vOutUrl) URL.revokeObjectURL(vOutUrl);
       vOutUrl = URL.createObjectURL(blob);

@@ -705,7 +705,8 @@ async function postJSONData(url, body) {
 }
 
 /* ---------- queued jobs: submit, watch, fetch ---------- */
-const JOB_POLL = { first: 800, ceiling: 2500, growth: 1.5, retries: 3 };
+const JOB_POLL_MS = 500;
+const JOB_POLL_RETRIES = 5;
 
 // Stage names are their own labels except this one.
 const JOB_STAGE_LABELS = { postprocessing: 'post-processing' };
@@ -728,22 +729,19 @@ async function fetchJob(id) {
   return await res.json();
 }
 
-// Reads start at `first`, grow to `ceiling`, and forgive `retries` failures while /health answers.
-async function pollJob(id, onProgress, { first = JOB_POLL.first,
-                                         ceiling = JOB_POLL.ceiling } = {}) {
-  let delay = first;
+// Forgives JOB_POLL_RETRIES consecutive failures while /health answers.
+async function pollJob(id, onProgress) {
   let misses = 0;
   for (;;) {
     await waitVisible();
-    await sleep(delay);
-    delay = Math.min(delay * JOB_POLL.growth, ceiling);
+    await sleep(JOB_POLL_MS);
     let status;
     try {
       status = await fetchJob(id);
     } catch (e) {
       // One look at /health settles it: gone means there is nothing left to wait for.
       if (await serverGone()) throw e;
-      if (++misses >= JOB_POLL.retries) throw e;
+      if (++misses >= JOB_POLL_RETRIES) throw e;
       continue;
     }
     if (status === null) throw new Error('the server no longer knows this job');
@@ -796,13 +794,13 @@ async function withBusy({ btn, overlay, timerEl, timerTextEl }, work) {
 
 // `job` is the caller's box, so its Cancel button knows what to name.
 async function runQueuedJob({ job, submit, body, btn, cancelBtn, overlay,
-                              timerEl, timerTextEl, progress, poll, onArtifact }) {
+                              timerEl, timerTextEl, progress, onArtifact }) {
   try {
     await withBusy({ btn, overlay, timerEl, timerTextEl }, async (elapsed) => {
       job.id = (await postJSONData(submit, body)).id;
       cancelBtn.disabled = false;
       setProgress(progress, { stage: 'queued' });
-      const status = await pollJob(job.id, (p) => setProgress(progress, p), poll);
+      const status = await pollJob(job.id, (p) => setProgress(progress, p));
       if (status.status === 'canceled') return { state: 'error', text: 'canceled' };
       if (status.status !== 'completed') throw new Error(status.error || status.status);
       // Serving an artifact unlinks it: this read is the only one there will be.
