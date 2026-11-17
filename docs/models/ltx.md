@@ -4,13 +4,14 @@ LTX is wired into the **current** TheNoise video architecture: the shared
 `VideoPipelineController`, `VideoModel` and `JobQueue` own execution, staging,
 progress, cancellation and output. The model adapter supplies only LTX's
 text/AV conditioning, latent generation, stages, original checkpoint loading,
-spatial refinement and video/audio decoding. `diffusers>=0.43` from PyPI
-supplies Apache-2 modular numerical classes; it does not run a Diffusers
-pipeline. No `ltx-core`/`ltx-pipelines` or Git-Python dependencies are used.
+spatial refinement and video/audio decoding. The numerical AV modules
+are native PyTorch, using TheNoise attention and quantization with
+comfy-kitchen. No Diffusers, LTX pipelines or Git dependencies are used.
 
-**Validation:** LTX 2.3 and LTX 2.5 have both been tested with full
-checkpoints on GPU. Weight-free CPU tests cover the integration and
-checkpoint mapping; they do not replace end-to-end GPU validation.
+**Validation:** The prior Diffusers-backed implementation was tested with
+both full checkpoints on GPU. Revalidate both variants after the native
+port: state-dict parity, real checkpoint load, T2V/I2V and audio muxing.
+Weight-free CPU tests alone do not establish full GPU parity.
 
 ## Setup / weights (INT8 ConvRot default)
 
@@ -19,7 +20,7 @@ The model is not dequantized into a BF16 DiT. The auxiliary video/audio VAEs and
 spatial upscaler remain BF16 as supplied by Lightricks.
 
 ```sh
-uv pip install --python .venv/bin/python -e '.[ltx,scripts]'
+uv pip install --python .venv/bin/python -e '.[scripts]'
 # Prints exact HF repositories, files, and which already exist locally:
 .venv/bin/python scripts/download.py --model ltx23 --dry-run
 .venv/bin/python scripts/download.py --model ltx25 --dry-run
@@ -84,10 +85,10 @@ are passed explicitly through the CLI. The code checks scale
 and `.comfy_quant` siblings before assigning a quantized weight; absent or
 incompatible metadata is a hard error, not a silent BF16 fallback.
 
-**GPU status:** Both LTX 2.3 and LTX 2.5 have passed end-to-end GPU
-generation tests. T2V and I2V use the same TheNoise video controller;
-audio is encoded through the shared PyAV container path. The CPU suite
-tests these interfaces without asserting audiovisual output quality.
+**GPU status:** Run fresh end-to-end T2V/I2V tests for both versions
+after this native conversion. The video controller and PyAV muxing
+remain unchanged. Successful earlier Diffusers-backed runs do not
+automatically validate the new numerical implementation.
 
 ## Request
 

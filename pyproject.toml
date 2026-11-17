@@ -29,8 +29,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
-# Apache-2 modular LTX numerical modules from PyPI, never a Diffusers pipeline.
-ltx = ["diffusers>=0.43.0,<0.44.0"]
 # Download helpers in scripts/ (not needed at runtime).
 scripts = ["huggingface-hub>=0.34.3"]
 

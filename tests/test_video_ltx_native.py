@@ -181,23 +181,111 @@ def test_denoise_scales_all_timesteps_and_marks_only_ltx25_first_frame():
             assert args["timestep"].item() == 750
 
 
-def test_vocoder_cpu_runtime_filter_if_diffusers_installed():
-    pytest.importorskip("diffusers")
-    model = _checkpoint().make_vocoder()
+def test_native_ltx_vocoder_checkpoint_layout_and_hann_filter():
+    from thenoise.dit.ltx_video.vocoder import LTXVocoderWithBWE
+
+    with torch.device("meta"):
+        model = _checkpoint().make_vocoder()
+    assert isinstance(model, LTXVocoderWithBWE)
+    assert model.vocoder.conv_in.weight.shape == (1536, 128, 7)
+    assert model.bwe_generator.conv_in.weight.shape == (512, 128, 7)
+    assert model.mel_stft.stft_fn.forward_basis.shape == (514, 1, 512)
+    assert model.resampler.filter.shape == (1, 1, 43)
     assert not model.resampler.filter.is_meta
-    assert "resampler.filter" not in model.state_dict()
     assert model.vocoder.conv_in.weight.is_meta
+    assert "resampler.filter" not in model.state_dict()
+    assert "vocoder.resnets.0.acts1.0.act.alpha" in model.state_dict()
+    assert "vocoder.resnets.0.acts1.0.upsample.filter" in model.state_dict()
+    assert "mel_stft.stft_fn.forward_basis" in model.state_dict()
+    assert "mel_stft.mel_basis" in model.state_dict()
+
+
+def test_native_ltx_audio_vae_checkpoint_layout_and_forward():
+    from thenoise.vae.ltx_audio import LTXAudioVAE
+
+    with torch.device("meta"):
+        model = _checkpoint().make_audio_vae()
+    assert isinstance(model, LTXAudioVAE)
+    assert model.encoder.conv_in.conv.weight.shape == (128, 2, 3, 3)
+    assert model.decoder.conv_in.conv.weight.shape == (512, 8, 3, 3)
+    assert model.latents_mean.shape == (128,)
+    assert "encoder.down.0.block.0.conv1.conv.weight" in model.state_dict()
+    assert "decoder.up.0.block.0.conv1.conv.weight" in model.state_dict()
+    assert "latents_mean" in model.state_dict()
+    small = LTXAudioVAE(base_channels=32, ch_mult=(1, 2), num_res_blocks=1,
+                        resolution=32, latent_channels=4, mel_bins=8).eval()
+    with torch.no_grad():
+        output = small.decode(torch.randn(1, 4, 3, 8), return_dict=False)[0]
+    assert output.shape == (1, 2, 9, 8)
+    assert output.isfinite().all()
+
+
+def test_native_ltx_vocoder_short_audio_waveform_and_streaming(tmp_path):
+    from thenoise.dit.ltx_video.vocoder import LTXVocoderWithBWE
+    from thenoise.utils.safetensors import MemoryEfficientSafeOpen
+
+    cfg = dict(
+        in_channels=8, hidden_channels=16, out_channels=2,
+        upsample_kernel_sizes=[4], upsample_factors=[2],
+        resnet_kernel_sizes=[3], resnet_dilations=[[1]],
+        act_fn="leaky_relu", antialias=False, final_act_fn="tanh",
+        bwe_in_channels=8, bwe_hidden_channels=16, bwe_out_channels=2,
+        bwe_upsample_kernel_sizes=[8], bwe_upsample_factors=[6],
+        bwe_resnet_kernel_sizes=[3], bwe_resnet_dilations=[[1]],
+        bwe_act_fn="leaky_relu", bwe_antialias=False,
+        filter_length=16, hop_length=2, window_length=16, num_mel_channels=4,
+    )
+    reference = LTXVocoderWithBWE(**cfg).eval()
+    file = tmp_path / "vocoder.safetensors"
+    save_file({k: v.detach().contiguous() for k, v in reference.state_dict().items()}, str(file))
+    with torch.device("meta"):
+        candidate = LTXVocoderWithBWE(**cfg)
+    with MemoryEfficientSafeOpen(str(file)) as reader:
+        loaded = load_streamed_components(
+            reader, {"vocoder": candidate}, cancel=lambda: None,
+            selector=lambda key: ("vocoder", key), dtype=torch.float32,
+        )
+    assert loaded == {"vocoder": set(reference.state_dict())}
+    assert not any(p.is_meta for p in candidate.parameters())
+    candidate.eval()
+    mel = torch.randn(1, 2, 8, 4)
+    with torch.no_grad():
+        got = candidate(mel)
+        expected = reference(mel)
+    assert got.shape == (1, 2, 48)
+    torch.testing.assert_close(got, expected)
+
+
+def test_native_ltx_audio_vae_streams_full_weights(tmp_path):
+    from thenoise.vae.ltx_audio import LTXAudioVAE
+    from thenoise.utils.safetensors import MemoryEfficientSafeOpen
+
+    cfg = dict(base_channels=32, ch_mult=(1, 2), num_res_blocks=1,
+               resolution=32, latent_channels=4, mel_bins=8)
+    reference = LTXAudioVAE(**cfg).eval()
+    file = tmp_path / "audio_vae.safetensors"
+    save_file({k: v.detach().contiguous() for k, v in reference.state_dict().items()}, str(file))
+    with torch.device("meta"):
+        candidate = LTXAudioVAE(**cfg)
+    with MemoryEfficientSafeOpen(str(file)) as reader:
+        loaded = load_streamed_components(
+            reader, {"audio_vae": candidate}, cancel=lambda: None,
+            selector=lambda key: ("audio_vae", key), dtype=torch.float32,
+        )
+    assert loaded == {"audio_vae": set(reference.state_dict())}
+    assert not any(t.is_meta for t in candidate.parameters())
+    candidate.eval()
+    latents = torch.randn(1, 4, 3, 8)
+    with torch.no_grad():
+        torch.testing.assert_close(
+            candidate.decode(latents, return_dict=False)[0],
+            reference.decode(latents, return_dict=False)[0],
+        )
 
 
 def test_split_connectors_are_complete_across_dit_and_text_file(tmp_path, monkeypatch):
     """A split LTX 2.5 connector cannot pass with missing learned weights."""
-    import sys
-    import types
-
     m = _checkpoint()
-    diffusers = types.ModuleType("diffusers")
-    diffusers.__version__ = "0.43.0"
-    monkeypatch.setitem(sys.modules, "diffusers", diffusers)
 
     def linear():
         with torch.device("meta"):
@@ -299,3 +387,53 @@ def test_ltx_variants_resolve_with_shared_video_contract_and_fixed_refinement():
             model.resolve_video(VideoSpec(prompt="moving fox", steps=4))
         with pytest.raises(ValueError, match="MP4"):
             model.resolve_video(VideoSpec(prompt="moving fox", output_format="webm"))
+
+def test_native_ltx_spatial_upscaler_weights_and_forward():
+    """x2 spatial, temporal length unchanged, original checkpoint state names."""
+    from thenoise.dit.ltx_video.upscaler import LTXSpatialUpscaler
+
+    with torch.device("meta"):
+        prod = LTXSpatialUpscaler()
+    assert prod.initial_conv.weight.shape == (1024, 128, 3, 3, 3)
+    assert prod.upsampler[0].weight.shape == (4096, 1024, 3, 3)
+    assert prod.final_conv.weight.shape == (128, 1024, 3, 3, 3)
+    expected = {
+        "initial_conv.weight", "initial_norm.weight", "res_blocks.0.conv1.weight",
+        "upsampler.0.weight", "post_upsample_res_blocks.3.norm2.weight",
+        "final_conv.weight",
+    }
+    assert expected.issubset(prod.state_dict())
+    assert prod.dtype == torch.float32
+    # CPU-size stub exercises the same parameter names and temporal handling.
+    small = LTXSpatialUpscaler(in_channels=8, mid_channels=32, num_blocks_per_stage=1)
+    sample = torch.randn(1, 8, 2, 4, 4)
+    with torch.no_grad():
+        result = small(sample)
+    assert result.shape == (1, 8, 2, 8, 8)
+    assert torch.isfinite(result).all()
+
+
+def test_native_ltx_spatial_upscaler_streams_original_checkpoint_keys(tmp_path):
+    """Shared streaming loader must materialize exactly the native parameter keys."""
+    from thenoise.dit.ltx_video.upscaler import LTXSpatialUpscaler
+    from thenoise.utils.loader import load_streamed_components
+    from thenoise.utils.safetensors import MemoryEfficientSafeOpen
+
+    source = LTXSpatialUpscaler(in_channels=8, mid_channels=32, num_blocks_per_stage=1).eval()
+    weights = {key: tensor.detach().contiguous() for key, tensor in source.state_dict().items()}
+    checkpoint = tmp_path / "native_spatial_x2.safetensors"
+    save_file(weights, str(checkpoint))
+
+    with torch.device("meta"):
+        target = LTXSpatialUpscaler(in_channels=8, mid_channels=32, num_blocks_per_stage=1)
+    with MemoryEfficientSafeOpen(str(checkpoint)) as reader:
+        loaded = load_streamed_components(
+            reader, {"upscaler": target}, cancel=lambda: None,
+            selector=lambda key: ("upscaler", key), dtype=torch.float32,
+        )
+    assert loaded == {"upscaler": set(weights)}
+    assert all(not param.is_meta for param in target.parameters())
+    target.eval()
+    sample = torch.randn(1, 8, 2, 4, 4)
+    with torch.no_grad():
+        torch.testing.assert_close(target(sample), source(sample))

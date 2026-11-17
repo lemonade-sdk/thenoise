@@ -2,8 +2,8 @@
 
 The controller owns execution, stages, LoRAs, cancellation, progress and encoding.
 This module owns only the LTX kernels and the low-resolution -> refine transition.
-Numerical AV modules are from the Apache-2 PyPI diffusers distribution; no
-Lightricks Python packages or Diffusers pipeline are imported.
+All LTX numerical modules are native PyTorch and use TheNoise's existing
+checkpoint loader, attention, quantization and memory-management seams.
 """
 from __future__ import annotations
 
@@ -122,6 +122,7 @@ class LTXVideo(VideoModel):
         self._pass = 1
         self._params: VideoSamplingParams | None = None
         self._group_offloaded = False
+        self._block_offloader = None
 
         # Required auxiliary weights are explicit CLI paths. Neither the download
         # directory layout nor the checkpoint basename is an architecture hint.
@@ -180,10 +181,9 @@ class LTXVideo(VideoModel):
         size = self.memory.weight_bytes("dit")
         if free >= size + (4 << 30):
             return
-        from diffusers.hooks.group_offloading import apply_group_offloading
-        apply_group_offloading(
+        from thenoise.dit.ltx_video.offload import LTXBlockOffload
+        self._block_offloader = LTXBlockOffload(
             self.dit, onload_device=device, offload_device=self.offload_device,
-            offload_type="block_level", num_blocks_per_group=1, use_stream=False,
         )
         self._group_offloaded = True
         self.memory.register("dit", _GroupOffloadedMarker(device))
@@ -196,6 +196,10 @@ class LTXVideo(VideoModel):
         return {"dit": self.dit}
 
     def _clear_weights(self):
+        guard = getattr(self, "_block_offloader", None)
+        if guard is not None:
+            guard.close()  # Drop hooks and restore CPU masters before unloading.
+            self._block_offloader = None
         self.dit = self.vae = self.text_encoder = self.tokenizer = None
         self.audio_vae = self.vocoder = self.upscaler = None
         self.clear_video_state()

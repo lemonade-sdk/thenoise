@@ -2,8 +2,8 @@
 
 TheNoise owns the I/O and residency. This loader never materializes a full
 44-GiB state dictionary or imports the Lightricks Python packages. Numerical
-modules come from the optional, *PyPI-released*, Apache-2 diffusers package.
-No Diffusers pipeline is instantiated. ComfyUI is a layout reference only.
+modules are native PyTorch; neither Diffusers nor ComfyUI is a runtime
+dependency. ComfyUI is used only as a checkpoint-layout reference.
 """
 from __future__ import annotations
 
@@ -173,7 +173,7 @@ def _map_component(comp: str, k: str) -> str | None:
 
 
 def make_transformer(version: str):
-    from diffusers import LTX2VideoTransformer3DModel
+    from thenoise.dit.ltx_video.transformer import LTX2VideoTransformer3DModel
     cfg = dict(
         in_channels=128, out_channels=128, patch_size=1, patch_size_t=1,
         num_attention_heads=32, attention_head_dim=128, cross_attention_dim=4096,
@@ -203,7 +203,7 @@ def make_transformer(version: str):
 
 
 def make_video_vae():
-    from diffusers import AutoencoderKLLTX2Video
+    from thenoise.vae.ltx_video import LTXVideoVAE
     cfg = dict(
         in_channels=3, out_channels=3, latent_channels=128,
         block_out_channels=(256,512,1024,1024),
@@ -222,11 +222,11 @@ def make_video_vae():
         spatial_compression_ratio=32, temporal_compression_ratio=8,
     )
     with torch.device("meta"):
-        return AutoencoderKLLTX2Video(**cfg)
+        return LTXVideoVAE(**cfg)
 
 
 def make_audio_vae():
-    from diffusers import AutoencoderKLLTX2Audio
+    from thenoise.vae.ltx_audio import LTXAudioVAE
     cfg = dict(
         base_channels=128, output_channels=2, ch_mult=(1,2,4),
         num_res_blocks=2, attn_resolutions=None, in_channels=2,
@@ -236,11 +236,11 @@ def make_audio_vae():
         mel_bins=64, double_z=True,
     )
     with torch.device("meta"):
-        return AutoencoderKLLTX2Audio(**cfg)
+        return LTXAudioVAE(**cfg)
 
 
 def make_vocoder():
-    from diffusers.pipelines.ltx2.vocoder import LTX2VocoderWithBWE
+    from thenoise.dit.ltx_video.vocoder import LTXVocoderWithBWE
     cfg = dict(
         in_channels=128, hidden_channels=1536, out_channels=2,
         upsample_kernel_sizes=[11,4,4,4,4,4],
@@ -264,23 +264,7 @@ def make_vocoder():
         input_sampling_rate=16000, output_sampling_rate=48000,
     )
     with torch.device("meta"):
-        model = LTX2VocoderWithBWE(**cfg)
-
-    # Diffusers' LTX2VocoderWithBWE.resampler is constructed with
-    # persistent=False: its deterministic Hann filter is absent from the
-    # checkpoint/state_dict. Building the vocoder on meta therefore leaves
-    # resampler.filter uninitialized even after *all* checkpoint weights load.
-    # Recreate this small buffer on CPU, without materializing any weights or
-    # changing the checkpoint-key validation performed by _assign().
-    from diffusers.pipelines.ltx2.vocoder import UpSample1d
-    with torch.device("cpu"):
-        resampler = UpSample1d(
-            ratio=cfg["output_sampling_rate"] // cfg["input_sampling_rate"],
-            window_type="hann", persistent=False,
-        )
-    model.resampler.filter = resampler.filter
-    return model
-
+        return LTXVocoderWithBWE(**cfg)
 
 def _upscaler_key(raw: str) -> tuple[str, str]:
     """Keep ``upsampler.``: it is a real module name, not a file wrapper.
@@ -293,17 +277,15 @@ def _upscaler_key(raw: str) -> tuple[str, str]:
 
 
 def make_upsampler():
-    from diffusers.models.latent_upscaler.latent_upscaler_ltx2 import LTX2LatentUpsamplerModel
+    # Only the released spatial x2 model, using TheNoise's existing module seam.
+    from thenoise.dit.ltx_video.upscaler import LTXSpatialUpscaler
     with torch.device("meta"):
-        return LTX2LatentUpsamplerModel(
-            in_channels=128, mid_channels=1024, num_blocks_per_stage=4,
-            dims=3, spatial_upsample=True, temporal_upsample=False,
-            rational_spatial_scale=2.0, use_rational_resampler=False,
-        )
+        return LTXSpatialUpscaler(in_channels=128, mid_channels=1024,
+                                 num_blocks_per_stage=4)
 
 
 def make_connectors(version: str, gemma_text_config):
-    from diffusers.models.condition_embedders.condition_embedder_ltx2 import LTX2TextConnectors
+    from thenoise.dit.ltx_video.connectors import LTX2TextConnectors
     if version == VERSION_23:
         caption_channels, factor = 3840, 49
     else:
@@ -339,10 +321,6 @@ def load_original_components(
     text_projection_path: str | Path | None = None,
 ) -> dict:
     """Load only original checkpoint tensors required by these LTX-2.x models."""
-    from diffusers import __version__ as diffusers_version
-    if tuple(map(int, diffusers_version.split(".")[:2])) < (0, 43):
-        raise RuntimeError("LTX requires diffusers >=0.43 from PyPI (no git dependency)")
-
     modules = dict(
         dit=make_transformer(version), vae=make_video_vae(),
         audio_vae=make_audio_vae(), vocoder=make_vocoder(),
