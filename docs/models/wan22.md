@@ -7,10 +7,14 @@ different models rather than two sizes of one.
 |---|---|---|
 | Modes | text-to-video, image-to-video | text-to-video, or image-to-video with the I2V pair, which also takes a last frame |
 | Transformer | one checkpoint (`--dit`) | two experts: `--dit` high noise, `--dit-low` low noise |
-| Latent and codec | 48 channels, Wan 2.2 causal 3D VAE, BF16 compute | 16 channels, Wan 2.1 causal 3D VAE, FP16 compute; the I2V pair's transformer takes 36, the extra 20 being mask and reference |
-| Text encoder | UMT5-XXL, FP16 file, BF16 compute | the same file |
+| Latent and codec | 48 channels, Wan 2.2 causal 3D VAE | 16 channels, Wan 2.1 causal 3D VAE |
+| Text encoder | UMT5-XXL | UMT5-XXL |
 | Samplers | UniPC or Euler | UniPC or Euler |
 | Defaults | 1280×704, 33 frames, 24 FPS, 12 steps, CFG 5.0, UniPC, WebM, flow shift 5 | 832×480, 33 frames, 16 FPS, 40 steps, Euler, CFG 4.0, flow shift 12, high/low boundary 0.875 (the I2V pair: shift 5, boundary 0.900, CFG 3.5 on both halves) |
+
+Each of the three is downloadable in two forms: the **turbo** one the downloader fetches
+by default, distilled to 4 steps at CFG 1.0, and the **base** release the Defaults row
+describes. [What to send](#what-to-send) keeps them straight.
 
 Both answer the same video request, from the command line with
 [`video`](../cli.md#generate-a-single-clip) or over the
@@ -24,8 +28,10 @@ temporal grid, with no fixed maximum frame count.
 
 ## TI2V-5B
 
-Native text-to-video and image-to-video from the Comfy-Org Wan 2.2 5B checkpoint.
-The two modes are the same model and the same request: `--image` selects one,
+Native text-to-video and image-to-video. The downloaded DiT is FastWan by default, the
+distill of the Comfy-Org Wan 2.2 5B checkpoint: same geometry, same codec, most of its
+steps distilled away. `--variant base` takes that checkpoint instead. The two modes are
+the same model and the same request: `--image` selects one,
 `prompt` describes what happens after the first frame.
 
 ### Download
@@ -39,9 +45,18 @@ The three files, about 23 GB together:
 
 ```
 models/wan22/split_files/
-  diffusion_models/wan2.2_ti2v_5B_fp16.safetensors
+  diffusion_models/fastwan2.2_ti2v-5b_bf16.safetensors
   text_encoders/umt5_xxl_fp16.safetensors
   vae/wan2.2_vae.safetensors
+```
+
+`--variant base` takes the FP16 release, and `--int8-convrot` the int8-convrot form of
+the turbo DiT and of the encoder. On the base release `--int8-convrot` reaches the
+encoder alone, that DiT being published in FP16 only:
+
+```bash
+.venv/bin/python scripts/download.py --model wan22 --variant base
+.venv/bin/python scripts/download.py --model wan22 --int8-convrot
 ```
 
 ### Serve
@@ -51,7 +66,7 @@ Start the server using the ROCm-configured launcher (which sets
 
 ```bash
 ./thenoise.sh serve \
-  --dit ./models/wan22/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors \
+  --dit ./models/wan22/split_files/diffusion_models/fastwan2.2_ti2v-5b_bf16.safetensors \
   --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors \
   --vae ./models/wan22/split_files/vae/wan2.2_vae.safetensors \
   --port 8000
@@ -65,11 +80,11 @@ defaults is in the table above.
 
 ```bash
 ./thenoise.sh video \
-  --dit ./models/wan22/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors \
+  --dit ./models/wan22/split_files/diffusion_models/fastwan2.2_ti2v-5b_bf16.safetensors \
   --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors \
   --vae ./models/wan22/split_files/vae/wan2.2_vae.safetensors \
   --prompt "A fox walking through snow" \
-  --width 704 --height 480 --frames 33 --steps 8 --sampler unipc \
+  --width 704 --height 480 --frames 33 --steps 4 --guidance-scale 1 --sampler unipc \
   --out fox.mp4
 ```
 
@@ -82,12 +97,12 @@ the clip's shape.
 
 ```bash
 ./thenoise.sh video \
-  --dit ./models/wan22/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors \
+  --dit ./models/wan22/split_files/diffusion_models/fastwan2.2_ti2v-5b_bf16.safetensors \
   --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors \
   --vae ./models/wan22/split_files/vae/wan2.2_vae.safetensors \
   --image reference.png \
   --prompt "The fox starts walking forward while the camera tracks it" \
-  --width 704 --height 480 --frames 33 --fps 24 --steps 8 --sampler unipc \
+  --width 704 --height 480 --frames 33 --fps 24 --steps 4 --guidance-scale 1 --sampler unipc \
   --out fox_i2v.mp4
 ```
 
@@ -95,7 +110,8 @@ TheNoise cover-crops the frame to the clip's canvas, encodes it with the video V
 and conditions the clip's first frame on it. Over HTTP that frame goes in the
 `image` field as base64 of the file bytes — not a `data:image/...;base64,` URL and
 not a path — see [HTTP API](../api.md#image-to-video-i2v), and
-[Video jobs](#video-jobs) to queue a render instead of waiting for it.
+[Asynchronous jobs](../api.md#asynchronous-jobs) to queue a render instead of waiting
+for it.
 
 ## Examples
 
@@ -110,13 +126,13 @@ not a path — see [HTTP API](../api.md#image-to-video-i2v), and
 
 Two separately loaded DiTs (high- and low-noise), the **Wan 2.1 16-channel VAE**
 (`wan_2.1_vae.safetensors` — Wan 2.1 by latent format, not a version mismatch: it is the
-codec Qwen-Image uses for stills), and the same FP16 UMT5 encoder as 5B.
+codec Qwen-Image uses for stills), and the same UMT5 encoder as 5B.
 
 Pass **both expert files explicitly**: `--dit` selects high noise and `--dit-low`
 selects low noise. File names and directories are not inspected to infer the expert
-role. FP16 and ComfyUI FP8-scaled experts are supported. The latent width is read off
-the `--vae` file, and a codec that does not match the transformer is refused at load
-rather than at the first denoising step.
+role. The 4-step int8-convrot pair and ComfyUI's FP16 pair are both supported. The
+latent width is read off the `--vae` file, and a codec that does not match the
+transformer is refused at load rather than at the first denoising step.
 
 Both experts are swapped by the normal device memory manager at the sigma boundary,
 which keeps both on the card when they fit; do not run both as resident GPU models on a
@@ -130,15 +146,17 @@ default); low-noise CFG is 0.75× that (3.0 by default).
 
 ```bash
 .venv/bin/python scripts/download.py --model wan22-14b
-.venv/bin/python scripts/download.py --model wan22-14b --variant fp8_scaled
+.venv/bin/python scripts/download.py --model wan22-14b --variant base
 ```
 
-The default is FP16; `--variant fp8_scaled` takes the ComfyUI FP8-scaled experts:
+The default is the 4-step pair, int8-convrot because that is how it is published;
+`--variant base` takes ComfyUI's FP16 experts and `--int8-convrot` swaps the encoder for
+its int8-convrot form:
 
 ```
 models/wan22/split_files/
-  diffusion_models/wan2.2_t2v_high_noise_14B_fp16.safetensors
-  diffusion_models/wan2.2_t2v_low_noise_14B_fp16.safetensors
+  diffusion_models/wan2.2_t2v_high_noise_14B_4step_int8_convrot.safetensors
+  diffusion_models/wan2.2_t2v_low_noise_14B_4step_int8_convrot.safetensors
   text_encoders/umt5_xxl_fp16.safetensors
   vae/wan_2.1_vae.safetensors
 ```
@@ -147,8 +165,8 @@ models/wan22/split_files/
 
 ```bash
 ./thenoise.sh serve \
-  --dit ./models/wan22/split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp16.safetensors \
-  --dit-low ./models/wan22/split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp16.safetensors \
+  --dit ./models/wan22/split_files/diffusion_models/wan2.2_t2v_high_noise_14B_4step_int8_convrot.safetensors \
+  --dit-low ./models/wan22/split_files/diffusion_models/wan2.2_t2v_low_noise_14B_4step_int8_convrot.safetensors \
   --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors \
   --vae ./models/wan22/split_files/vae/wan_2.1_vae.safetensors \
   --port 8000
@@ -158,12 +176,12 @@ Or one clip, with both experts passed the same way:
 
 ```bash
 ./thenoise.sh video \
-  --dit ./models/wan22/split_files/diffusion_models/wan2.2_t2v_high_noise_14B_fp16.safetensors \
-  --dit-low ./models/wan22/split_files/diffusion_models/wan2.2_t2v_low_noise_14B_fp16.safetensors \
+  --dit ./models/wan22/split_files/diffusion_models/wan2.2_t2v_high_noise_14B_4step_int8_convrot.safetensors \
+  --dit-low ./models/wan22/split_files/diffusion_models/wan2.2_t2v_low_noise_14B_4step_int8_convrot.safetensors \
   --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors \
   --vae ./models/wan22/split_files/vae/wan_2.1_vae.safetensors \
   --prompt "A fox walking through snow" \
-  --width 704 --height 480 --frames 33 --steps 12 \
+  --width 704 --height 480 --frames 33 --steps 4 --guidance-scale 1 \
   --out fox_14b.mp4
 ```
 
@@ -185,14 +203,8 @@ Each expert is LoRA-able on its own — `--lora` for the one `--dit` names,
   --lora-low wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise:1.0
 ```
 
-Over HTTP the same two go by role:
-
-```json
-{"lora_specs": {"dit": ["style:0.8"], "dit_low": ["pose"]}}
-```
-
-A bare list belongs to the high-noise expert, so a LoRA meant for the whole clip is
-sent under both roles. `GET /lora` lists the roles this model offers.
+The 4-step pair has its distillation baked in already, so that recipe is for the
+`--variant base` experts.
 
 ## I2V-A14B
 
@@ -209,10 +221,13 @@ the same door takes a clip that ends as well as starts — see
 .venv/bin/python scripts/download.py --model wan22-14b-i2v
 ```
 
+Turbo by default; `--variant base` and `--int8-convrot` mean what they mean for
+[T2V-A14B](#t2v-a14b-two-experts):
+
 ```
 models/wan22/split_files/
-  diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors
-  diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors
+  diffusion_models/wan2.2_i2v_high_noise_14B_4step_int8_convrot.safetensors
+  diffusion_models/wan2.2_i2v_low_noise_14B_4step_int8_convrot.safetensors
   text_encoders/umt5_xxl_fp16.safetensors
   vae/wan_2.1_vae.safetensors
 ```
@@ -221,19 +236,20 @@ models/wan22/split_files/
 
 ```bash
 ./thenoise.sh serve \
-  --dit ./models/wan22/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors \
-  --dit-low ./models/wan22/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors \
+  --dit ./models/wan22/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_4step_int8_convrot.safetensors \
+  --dit-low ./models/wan22/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_4step_int8_convrot.safetensors \
   --vae ./models/wan22/split_files/vae/wan_2.1_vae.safetensors \
   --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors
 ```
 
 ```bash
 ./thenoise.sh video \
-  --dit ./models/wan22/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors \
-  --dit-low ./models/wan22/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors \
+  --dit ./models/wan22/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_4step_int8_convrot.safetensors \
+  --dit-low ./models/wan22/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_4step_int8_convrot.safetensors \
   --vae ./models/wan22/split_files/vae/wan_2.1_vae.safetensors \
   --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors \
   --image reference.png --prompt "a fox in the snow" \
+  --steps 4 --guidance-scale 1 \
   --out fox_i2v.mp4
 ```
 
@@ -252,12 +268,13 @@ checkpoint.
 
 ```bash
 ./thenoise.sh video \
-  --dit ./models/wan22/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors \
-  --dit-low ./models/wan22/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors \
+  --dit ./models/wan22/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_4step_int8_convrot.safetensors \
+  --dit-low ./models/wan22/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_4step_int8_convrot.safetensors \
   --vae ./models/wan22/split_files/vae/wan_2.1_vae.safetensors \
   --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors \
   --image first.png --end-image last.png \
   --prompt "the fox looks up, the snow thickens and the camera pulls back" \
+  --steps 4 --guidance-scale 1 \
   --out fox_flf2v.mp4
 ```
 
@@ -278,40 +295,17 @@ frames by default.
 
 ## What to send
 
-Defaults are what each release ships, so a request that names nothing gets them. The
-4-step recipes are the lightx2v LoRA pairs; they want a different shift and CFG than the
-files they are loaded onto.
+What a request leaves unset falls back to the **base** releases' numbers:
 
-| Run | `steps` | `flow_shift` | `guidance_scale` | `lora_specs` |
-|---|---|---|---|---|
-| T2V-A14B | 40 | 12 | 4.0 | — |
-| T2V-A14B, 4-step | 4 | 5 | 1.0 | `{"dit": ["wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise"], "dit_low": ["…_low_noise"]}` |
-| I2V-A14B | 40 | 5 | 3.5 | — |
-| I2V-A14B, 4-step | 4 | 5 | 1.0 | `{"dit": ["wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise"], "dit_low": ["…_low_noise"]}` |
+| Run | `steps` | `flow_shift` | `guidance_scale` |
+|---|---|---|---|
+| TI2V-5B | 12 | 5 | 5.0 |
+| T2V-A14B | 40 | 12 | 4.0 |
+| I2V-A14B | 40 | 5 | 3.5 |
 
-Each half takes its own LoRA file, named for the mode of the pair it belongs to. At CFG
-1.0 the negative prompt is not sent at all, so a distilled run needs none.
+The turbo checkpoints are step-distilled, and none of them says so in its header, so a
+run on one names its own three numbers: **4 steps, flow shift 5, CFG 1.0** — the same
+recipe for FastWan 5B and for both 4-step A14B pairs.
 
-## Video jobs
-
-Both variants queue the same way:
-
-```bash
-curl -sS http://127.0.0.1:8000/jobs/video -H 'content-type: application/json' \
-  -d '{"prompt":"A fox walking through snow","frames":33,"steps":8}'
-```
-
-The response contains the job ID. Poll `/jobs/{id}`, whose `progress` reports `stage`,
-`step` and `of`, and fetch `/jobs/{id}/content` once the status is `completed`. Send
-`POST /jobs/{id}/cancel` to request cancellation. I2V uses the same flow and the same
-base64 `image` field. The whole lifecycle is described in
-[Asynchronous jobs](../api.md#asynchronous-jobs), which is also what a queued image
-goes through.
-
-For LoRAs, supply `--lora-dir ./models/loras` when starting the server, then
-send `"lora_specs": ["style:0.8"]` in either video request — the same conventions as
-image generation. The engine loads only supported DiT projections, reports unmatched
-keys and switches LoRAs between requests. The FP8 text-encoder checkpoint is not
-supported.
-
-See the [HTTP API](../api.md#video-generation) for parameters and responses.
+Each half of a pair takes its own LoRA file, named for the mode of the pair it belongs
+to; the 4-step pair needs none. At CFG 1.0 the negative prompt is not sent at all.

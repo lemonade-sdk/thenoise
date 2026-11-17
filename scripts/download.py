@@ -12,8 +12,14 @@ Models:
                   https://huggingface.co/circlestone-labs/Anima
   krea2           Krea 2 Turbo (bf16 / raw)
                   https://huggingface.co/Comfy-Org/Krea-2
-  wan22           Wan 2.2 TI2V-5B (text-to-video and image-to-video)
+  wan22           Wan 2.2 TI2V-5B, FastWan turbo by default (text-to-video and
+                  image-to-video; --variant base takes the FP16 release)
+                  https://huggingface.co/thenoise-ai/diffusion-models
                   https://huggingface.co/Comfy-Org/Wan-2.2
+  wan22-14b       Wan 2.2 T2V-A14B, the 4-step expert pair by default
+                  (--variant base takes the FP16 pair)
+  wan22-14b-i2v   Wan 2.2 I2V-A14B, the 4-step expert pair by default
+                  (--variant base takes the FP16 pair)
   zimage          Z-Image Turbo (distilled, 8-step) or Z-Image (base)
                   https://huggingface.co/Comfy-Org/z_image_turbo
                   https://huggingface.co/Comfy-Org/z_image
@@ -67,6 +73,10 @@ Usage:
     python scripts/download.py --model fibo2 --variant dev --int8-convrot
     python scripts/download.py --model h3-image
     python scripts/download.py --model wan22
+    python scripts/download.py --model wan22 --variant base
+    python scripts/download.py --model wan22-14b
+    python scripts/download.py --model wan22-14b --variant base --int8-convrot
+    python scripts/download.py --model wan22-14b-i2v
     python scripts/download.py --model esrgan
     python scripts/download.py --model controlmaps
     python scripts/download.py --model controlmaps --variant pose
@@ -90,6 +100,17 @@ JobsFn = Callable[["argparse.Namespace"], list[Artifact]]
 # Artifact registries (repo, in-repo path). Layouts match the per-model
 # download scripts this file replaces, byte for byte.
 # ---------------------------------------------------------------------------
+
+#: Our own registry: what we distilled, baked or quantized. Its files are stored flat
+#: at the repo root, so a job that wants one filed in a subdirectory says so in the
+#: label (``hf_hub_download`` recreates the in-repo tree, and there is none here).
+_OWN_REPO = "thenoise-ai/diffusion-models"
+
+
+def _own(path: str, directory: str) -> Artifact:
+    """One of ``_OWN_REPO``'s files, filed under ``directory``."""
+    return (f"{directory}/{path}", _OWN_REPO, path)
+
 
 def _anima_jobs(args: argparse.Namespace) -> list[Artifact]:
     """Anima: DiT (per variant, bf16 or int8-convrot) + Qwen3-06B TE + Qwen VAE."""
@@ -208,10 +229,8 @@ def _ming_image_jobs(args: argparse.Namespace) -> list[Artifact]:
 
 #: MOSS-Image repos, and variant -> (repo, bf16 DiT, int8-convrot DiT). The
 #: ``*8steps`` entries are these same checkpoints with the 8-step DMD2 LoRA baked by
-#: ``scripts/merge_lora.py``; our registry keeps its files at the repo root, so those
-#: jobs carry the local subdirectory in the label (``main`` lands a slashed label there).
+#: ``scripts/merge_lora.py``.
 _MOSS_REPO = "Comfy-Org/MOSS-Image"
-_MOSS_BAKED_REPO = "thenoise-ai/diffusion-models"
 _MOSS_VARIANTS: dict[str, tuple[str, str, str]] = {
     "sft": (
         _MOSS_REPO,
@@ -224,12 +243,12 @@ _MOSS_VARIANTS: dict[str, tuple[str, str, str]] = {
         "diffusion_models/moss_image_base_int8_convrot.safetensors",
     ),
     "8steps": (
-        _MOSS_BAKED_REPO,
+        _OWN_REPO,
         "moss_image_sft_bf16_8steps.safetensors",
         "moss_image_sft_8steps__int8_convrot.safetensors",
     ),
     "base-8steps": (
-        _MOSS_BAKED_REPO,
+        _OWN_REPO,
         "moss_image_base_bf16_8steps.safetensors",
         "moss_image_base_8steps__int8_convrot.safetensors",
     ),
@@ -398,14 +417,33 @@ def _esrgan_jobs(args: argparse.Namespace) -> list[Artifact]:
     ]
 
 
+_WAN_REPO = "Comfy-Org/Wan-2.2"
+
+
+def _wan_text_encoder(int8: bool) -> Artifact:
+    """UMT5-XXL, the encoder of every Wan 2.2 release, FP16 or int8-convrot.
+
+    The int8 encoder is ours: Comfy-Org ships Wan's full-precision only.
+    """
+    if int8:
+        return _own("umt5_xxl_int8_convrot.safetensors", "split_files/text_encoders")
+    return ("text_encoder", _WAN_REPO, "split_files/text_encoders/umt5_xxl_fp16.safetensors")
+
+
 def _wan22_jobs(args: argparse.Namespace) -> list[Artifact]:
-    """Wan 2.2 TI2V-5B: FP16 DiT, UMT5 encoder, and causal video VAE."""
-    repo = "Comfy-Org/Wan-2.2"
-    return [
-        ("dit", repo, "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors"),
-        ("text_encoder", repo, "split_files/text_encoders/umt5_xxl_fp16.safetensors"),
-        ("vae", repo, "split_files/vae/wan2.2_vae.safetensors"),
-    ]
+    """Wan 2.2 TI2V-5B: FastWan turbo DiT, UMT5 encoder, and causal video VAE.
+
+    Comfy-Org releases the 5B in FP16 alone, so ``--int8-convrot`` reaches the turbo
+    DiT and the encoder, and leaves the base DiT alone.
+    """
+    if args.variant == "turbo":
+        suffix = "int8_convrot" if args.int8_convrot else "bf16"
+        dit = _own(f"fastwan2.2_ti2v-5b_{suffix}.safetensors",
+                   "split_files/diffusion_models")
+    else:
+        dit = ("dit", _WAN_REPO, "split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors")
+    return [dit, _wan_text_encoder(args.int8_convrot),
+            ("vae", _WAN_REPO, "split_files/vae/wan2.2_vae.safetensors")]
 
 
 def _wan22_14b_jobs(args: argparse.Namespace,
@@ -413,17 +451,22 @@ def _wan22_14b_jobs(args: argparse.Namespace,
     """Wan 2.2 A14B: high/low-noise DiTs, UMT5, and 16-channel Wan 2.1 VAE.
 
     Both released A14B pairs are the same trunk with the same neighbours; only the
-    file name says whether the transformer takes a concatenated reference.
+    file name says whether the transformer takes a concatenated reference. The 4-step
+    pair is published int8-convrot only, so ``--int8-convrot`` reaches the encoder
+    alone.
     """
-    repo = "Comfy-Org/Wan-2.2"
-    jobs = [
-        (f"dit ({noise} noise)", repo,
-         f"split_files/diffusion_models/wan2.2_{mode}_{noise}_noise_14B_{args.variant}.safetensors")
-        for noise in ("high", "low")
-    ]
+    if args.variant == "turbo":
+        jobs = [_own(f"wan2.2_{mode}_{noise}_noise_14B_4step_int8_convrot.safetensors",
+                     "split_files/diffusion_models") for noise in ("high", "low")]
+    else:
+        jobs = [
+            (f"dit ({noise} noise)", _WAN_REPO,
+             f"split_files/diffusion_models/wan2.2_{mode}_{noise}_noise_14B_fp16.safetensors")
+            for noise in ("high", "low")
+        ]
     return jobs + [
-        ("text_encoder", repo, "split_files/text_encoders/umt5_xxl_fp16.safetensors"),
-        ("vae", repo, "split_files/vae/wan_2.1_vae.safetensors"),
+        _wan_text_encoder(args.int8_convrot),
+        ("vae", _WAN_REPO, "split_files/vae/wan_2.1_vae.safetensors"),
     ]
 
 
@@ -573,27 +616,27 @@ MODELS: dict[str, ModelSpec] = {
     ),
     "wan22": ModelSpec(
         "wan22", "./models/wan22",
-        "Wan 2.2 TI2V-5B (T2V / I2V)",
+        "Wan 2.2 TI2V-5B (T2V / I2V; FastWan turbo by default)",
         _wan22_jobs,
-        has_int8=False,
+        variant_supported=True,
+        variant_choices=("turbo", "base"),
+        default_variant="turbo",
     ),
     "wan22-14b": ModelSpec(
         "wan22-14b", "./models/wan22",
-        "Wan 2.2 T2V-A14B (two experts; FP16 or FP8-scaled)",
+        "Wan 2.2 T2V-A14B (two experts; 4-step turbo by default, or base FP16)",
         _wan22_14b_jobs,
-        has_int8=False,
         variant_supported=True,
-        variant_choices=("fp16", "fp8_scaled"),
-        default_variant="fp16",
+        variant_choices=("turbo", "base"),
+        default_variant="turbo",
     ),
     "wan22-14b-i2v": ModelSpec(
         "wan22-14b-i2v", "./models/wan22",
-        "Wan 2.2 I2V-A14B (two experts; FP16 or FP8-scaled)",
+        "Wan 2.2 I2V-A14B (two experts; 4-step turbo by default, or base FP16)",
         lambda args: _wan22_14b_jobs(args, "i2v"),
-        has_int8=False,
         variant_supported=True,
-        variant_choices=("fp16", "fp8_scaled"),
-        default_variant="fp16",
+        variant_choices=("turbo", "base"),
+        default_variant="turbo",
     ),
     "esrgan": ModelSpec(
         "esrgan", "./models/esrgan",
@@ -641,6 +684,10 @@ def _epilog() -> str:
         "  python scripts/download.py --model fibo2 --variant dev --int8-convrot",
         "  python scripts/download.py --model h3-image",
         "  python scripts/download.py --model wan22",
+        "  python scripts/download.py --model wan22 --variant base",
+        "  python scripts/download.py --model wan22-14b",
+        "  python scripts/download.py --model wan22-14b --variant base",
+        "  python scripts/download.py --model wan22-14b-i2v --int8-convrot",
         "  python scripts/download.py --model esrgan",
         "  python scripts/download.py --model controlmaps            # depth + pose",
         "  python scripts/download.py --model controlmaps --variant base",
@@ -677,6 +724,7 @@ def main() -> None:
             "mage-flow: turbo | rl | base (default: turbo) | "
             "moss-image: sft | base | 8steps | base-8steps (default: sft) | "
             "fibo2: edit-turbo | dev (default: edit-turbo) | "
+            "wan22 / wan22-14b / wan22-14b-i2v: turbo | base (default: turbo) | "
             "controlmaps: all | small | base | large | pose | pose-r50vd "
             "(default: all, the depth model and both pose checkpoints)"
         ),

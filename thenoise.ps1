@@ -409,7 +409,7 @@ if (-not $torchInstalled) {
     exit $LASTEXITCODE
   }
 
-  & uv pip install "triton-windows<3.9>"
+  & uv pip install "triton-windows<3.9"
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 

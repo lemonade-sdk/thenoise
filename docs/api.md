@@ -110,10 +110,10 @@ defaults when optional fields are omitted.
 | `prompt` | string | Required text prompt |
 | `model` | string | Optional loaded model name, checked if provided |
 | `image` | string | Optional base64-encoded first frame (I2V; omit for T2V) |
-| `end_image` | string | Optional base64-encoded last frame (FLF2V; needs `image`, and a model whose reference is concatenated — Wan 2.2 I2V-A14B) |
+| `end_image` | string | Optional base64-encoded last frame (FLF2V; needs `image`) |
 | `negative_prompt` | string | Optional negative text prompt |
-| `width`, `height` | integer | Video dimensions (Wan rounds down to multiples of 32) |
-| `frames` | integer | Desired frame count (Wan uses a `4n+1` grid) |
+| `width`, `height` | integer | Video dimensions |
+| `frames` | integer | Desired frame count |
 | `duration`, `fps` | number, integer | Duration in seconds and frames/second; explicit `frames` takes priority |
 | `steps`, `guidance_scale`, `seed` | number | Sampling parameters |
 | `flow_shift` | number | Noise schedule shift. Defaults to the model's release value |
@@ -145,9 +145,7 @@ curl -fS http://127.0.0.1:8000/video \
 ```
 
 The image is cover-cropped to the requested output size and encoded as first-frame
-conditioning. For a platform-independent Python-based example, see the
-[Wan 2.2 model page](models/wan22.md#image-to-video). To queue I2V instead, send the
-same request to `POST /jobs/video`.
+conditioning.
 
 ### First-and-last-frame video (FLF2V)
 
@@ -166,9 +164,7 @@ curl -fS http://127.0.0.1:8000/video \
 ```
 
 Which model can do this is `video.flf2v` in [GET /health](#get-health); a request that
-asks a variant without it is refused with HTTP 400. On Wan 2.2 that is the I2V-A14B pair
-alone, and no extra weights are involved — see
-[First-and-last-frame](models/wan22.md#first-and-last-frame-flf2v).
+asks a variant without it is refused with HTTP 400.
 
 The normal `GET /lora` endpoint also lists LoRAs available to a loaded video
 model, along with the `roles` a `lora_specs` request may name. A bare list goes

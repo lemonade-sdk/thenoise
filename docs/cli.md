@@ -120,10 +120,10 @@ two-expert variant takes `--dit-low` beside `--dit`.
 
 ```bash
 ./thenoise.sh video \
-  --dit ./models/wan22/split_files/diffusion_models/wan2.2_ti2v_5B_fp16.safetensors \
+  --dit ./models/wan22/split_files/diffusion_models/fastwan2.2_ti2v-5b_bf16.safetensors \
   --vae ./models/wan22/split_files/vae/wan2.2_vae.safetensors \
   --text-encoder ./models/wan22/split_files/text_encoders/umt5_xxl_fp16.safetensors \
-  --prompt "a fox walking through snow" --frames 33 --steps 8 \
+  --prompt "a fox walking through snow" --frames 33 --steps 4 --guidance-scale 1 \
   --out /tmp/fox.mp4
 ```
 
