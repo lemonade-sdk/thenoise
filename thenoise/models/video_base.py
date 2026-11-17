@@ -45,7 +45,7 @@ class Segment:
 
 
 class VideoModel(DiffusionModel):
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES,
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "image": None,
                     "video": {"t2v": False, "i2v": False, "flf2v": False}}
 
     #: The video preferences every adapter shares. What a release decides for itself —

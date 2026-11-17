@@ -177,7 +177,7 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
 
 
 @pytest.mark.parametrize(
-    "model_cls,edit,kv_cache",
+    "model_cls,i2i,kv_cache",
     [
         (AnimaModel, False, False),
         (Krea2Model, False, False),
@@ -194,26 +194,27 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
     ],
     ids=IMAGE_CATALOG_IDS,
 )
-def test_image_model_capabilities_describe_the_adapter(model_cls, edit, kv_cache):
+def test_image_model_capabilities_describe_the_adapter(model_cls, i2i, kv_cache):
     """``CAPABILITIES`` must describe the adapter: the pipeline rejects a request the
     model cannot serve and ``/health`` lets the UI grey out what it lacks.
 
-      * ``edit``     -> the reference encoder is really overridden.
+      * ``image``    -> the whole group is answered, a still from text always and a
+        reference only where the reference encoder is really overridden.
       * ``kv_cache`` -> the shared cache protocol really starts a run cache, and
-        freezing reference K/V needs a reference latent, so it implies ``edit``.
+        freezing reference K/V needs a reference latent, so it implies ``i2i``.
 
-    That first tie belongs to the image medium: a clip overrides ``encode_reference``
-    for its own reference frame while declaring ``edit`` False, so video's vocabulary is
-    pinned in ``test_video_shared.py`` instead.
+    That tie belongs to the image medium: a clip overrides ``encode_reference`` for its
+    own reference frame while answering ``image`` null, so video's vocabulary is pinned
+    in ``test_video_shared.py`` instead.
     """
     model = _bare(model_cls, **BARE[model_cls.name])
-    assert model.capability("edit") is edit
+    assert model.capability("image") == {"t2i": True, "i2i": i2i}
     assert model.capability("kv_cache") is kv_cache
-    assert not kv_cache or edit  # freezing reference K/V needs a reference latent
+    assert not kv_cache or i2i  # freezing reference K/V needs a reference latent
     # ``encode_reference`` is the kernel the pipeline calls. ``pack_reference_latent``
     # is not part of the contract: a model that reads one latent cell per token has no
     # packing step to override.
-    assert (model_cls.encode_reference is not DiffusionModel.encode_reference) is edit
+    assert (model_cls.encode_reference is not DiffusionModel.encode_reference) is i2i
     model.start_kv_caches(replace(_params(), kv_cache=True), True, True)
     assert (model._kv_caches is not None) is kv_cache
 

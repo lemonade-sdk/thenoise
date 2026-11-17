@@ -51,7 +51,8 @@ class MageFlowModel(DiffusionModel):
 
     # The single-row timestep embedding modulates the references at ``t``, so their
     # K/V change every step.
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": False}
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": False,
+                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
 
     # Upstream caps a reference's longest side instead of normalising its area.
     REFERENCE_SIZING = ReferenceSizing(fit="long_edge", cap=1024, align=16)

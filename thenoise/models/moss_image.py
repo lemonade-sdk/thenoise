@@ -37,7 +37,7 @@ class MossImageModel(DiffusionModel):
         "guidance_scale": 3.0,
     }
 
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": False, "kv_cache": False}
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": False}
 
     REFINE_DENOISE = 0.1
 

@@ -47,7 +47,8 @@ class FluxKleinModel(DiffusionModel):
 
     # Reference-latent editing by "index"; the KV cache is valid only with
     # ``ref_method="index_timestep_zero"``.
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": True}
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": True,
+                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
     # Per-reference t-axis offset.
     REF_INDEX = 10
 

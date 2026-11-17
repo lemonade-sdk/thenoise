@@ -52,7 +52,8 @@ class Flux3Model(DiffusionModel):
     }
 
     # Reference-latent editing, no KV cache (see the module docstring).
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": False}
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": False,
+                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
 
     # The DiT fuses q/k/v even where the checkpoint does not; a LoRA trained on the
     # separate projections is stacked onto it before matching.

@@ -1017,9 +1017,10 @@ class StubModel(DiffusionModel):
 
 
 class EditingStubModel(StubModel):
-    """A stub that declares the ``edit`` capability (reference-latent path)."""
+    """A stub that answers the image medium's ``i2i`` mode (reference-latent path)."""
 
-    CAPABILITIES = {**StubModel.CAPABILITIES, "edit": True}
+    CAPABILITIES = {**StubModel.CAPABILITIES,
+                    "image": {**StubModel.CAPABILITIES["image"], "i2i": True}}
 
 
 # ---------------------------------------------------------------------------- fixtures

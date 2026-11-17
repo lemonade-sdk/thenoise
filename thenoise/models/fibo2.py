@@ -54,7 +54,8 @@ class Fibo2Model(DiffusionModel):
         "ref_method": "index_timestep_zero",
     }
 
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": True}
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": True,
+                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
     KV_CACHED_SLICE = "suffix"
 
     REF_METHODS = ("index_timestep_zero",)

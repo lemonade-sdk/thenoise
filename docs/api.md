@@ -179,7 +179,8 @@ unused.
 ```json
 {"status": "ok", "models": ["qwen_image"],
   "samplers": ["er_sde", "euler", "unipc"],
-  "capabilities": {"edit": true, "kv_cache": true, "upscale": true, "video": null}}
+  "capabilities": {"image": {"t2i": true, "i2i": true}, "kv_cache": true,
+                   "upscale": true, "video": null}}
 ```
 
 With a video model:
@@ -187,18 +188,22 @@ With a video model:
 ```json
 {"status": "ok", "models": ["wan22"],
   "samplers": ["er_sde", "euler", "unipc"],
-  "capabilities": {"edit": false, "kv_cache": false, "upscale": false,
+  "capabilities": {"image": null, "kv_cache": false, "upscale": false,
                    "video": {"t2v": true, "i2v": true, "flf2v": true}}}
 ```
 
-`models` is empty until a DiT is loaded, and `capabilities` is the loaded
-adapter's `CAPABILITIES` dict verbatim (`{}` with no model) - the web UI uses it
-to gate the Edit tab, the KV-cache control and which layout the Generate tab
-shows, and a request asking for a capability the model lacks is rejected
-with HTTP 400 rather than silently ignored. A medium's own capabilities are
-nested under the medium's name, and a model of another medium answers that key
-with `null`. `i2v` and `flf2v` follow the loaded variant rather than the model
-name.
+`models` is empty until a DiT is loaded, and `capabilities` is that adapter's
+own `CAPABILITIES` dict, unchanged (`{}` with nothing loaded).
+
+The request modes sit under their medium: `t2i` and `i2i` under `image`, `t2v`,
+`i2v` and `flf2v` under `video`. A model answers the other medium with `null`.
+`kv_cache` and `upscale` are not modes, so they stay at the top; either medium
+can use them.
+
+The web UI reads all of this to decide what to show - the Edit tab follows
+`i2i`. A request for something the loaded model cannot do is refused with HTTP
+400, not quietly downgraded. `i2v` and `flf2v` come from the variant you
+loaded, not from the model name.
 
 ## `POST /text2image`
 

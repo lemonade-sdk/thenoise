@@ -93,14 +93,16 @@ class DiffusionModel(LoRASupport, ABC):
     REFINE_STEPS = 1
     REFINE_DENOISE = 0.25
 
-    # Which optional generation features this adapter implements — one vocabulary for
-    # image and video, so ``/health`` needs no per-medium table and ``capability()`` is
-    # one lookup. Adapters override only the entries they differ on, merging as above.
-    # Reported verbatim by ``/health`` so the UI can gate its controls.
+    # Which optional generation features this adapter implements. What a request picks a
+    # medium for is nested under that medium's name and named for its request mode, so
+    # ``/health`` needs no per-medium table and ``capability()`` is one lookup; a feature
+    # either medium can want stays at the top level, where a video adapter can answer it
+    # too. Adapters override only the entries they differ on, merging as above. Reported
+    # verbatim by ``/health`` so the UI can gate its controls.
     CAPABILITIES: ClassVar[Dict[str, Any]] = {
-        # Reference-latent editing: image + instruction -> edited image. Requires
-        # overriding ``encode_reference``/``pack_reference_latent``.
-        "edit": False,
+        # ``i2i`` is reference-latent editing: image + instruction -> edited image,
+        # which requires overriding ``encode_reference``/``pack_reference_latent``.
+        "image": {"t2i": True, "i2i": False},
         # Freeze the reference tokens' K/V across denoise steps through the shared
         # ``start_kv_caches`` / ``kv_cache`` / ``end_kv_caches`` protocol.
         "kv_cache": False,

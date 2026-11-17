@@ -55,7 +55,8 @@ class QwenImageModel(DiffusionModel):
 
     # Instruction-based editing off the Qwen-Image-Edit recipe. The KV cache is valid
     # only with ``ref_method="index_timestep_zero"``.
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": True}
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": True,
+                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
 
     @staticmethod
     def detect(f) -> bool:

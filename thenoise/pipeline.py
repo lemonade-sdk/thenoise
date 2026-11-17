@@ -283,10 +283,11 @@ class PipelineController:
         request that comes back is not always the one that arrived.
         """
         model = self.model
+        if not model.capability("image")["i2i" if is_edit else "t2i"]:
+            raise ValueError(f"model '{model.name}' does not support "
+                             f"{'image editing' if is_edit else 'text-to-image'}")
         if not is_edit:
             return request, self._resolve_pipeline(request, is_edit=False)
-        if not model.capability("edit"):
-            raise ValueError(f"model '{model.name}' does not support image editing")
         images = self._edit_images(request)
         if not images:
             raise ValueError("edit requires an input image")

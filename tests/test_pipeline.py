@@ -883,6 +883,22 @@ def test_kv_cache_requires_a_model_that_supports_it():
         )
 
 
+def test_the_request_mode_is_checked_against_the_adapter():
+    """Whichever mode the request's shape names, a group that answers it False is a
+    refusal: no shipped adapter has to be asked for a still it cannot do, and none for
+    a reference it never wired in.
+    """
+    from PIL import Image
+
+    with pytest.raises(ValueError, match="does not support image editing"):
+        _controller(StubModel()).edit(
+            _request(image=Image.new("RGB", (64, 64), "white"), steps=1))
+
+    edit_only = StubModel(capabilities={"image": {"t2i": False, "i2i": True}})
+    with pytest.raises(ValueError, match="does not support text-to-image"):
+        _controller(edit_only).generate(_request())
+
+
 # ---------------------------------------------------- residency across the stages
 class _Device(MemoryManager):
     """A manager whose device reports a fixed capacity, so placement is decidable."""
