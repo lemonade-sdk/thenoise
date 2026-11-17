@@ -29,7 +29,7 @@ from PIL import Image
 
 from thenoise.inference import inference, inference_lock
 from thenoise.jobs import UNCANCELLABLE, Cancellation, Progress, idle, stepping
-from thenoise.models.base import DiffusionModel, Conditioning
+from thenoise.models.base import LATENT_REF_METHODS, DiffusionModel, Conditioning
 from thenoise.models.config import EncodePromptArgs, GenerateRequest, SamplingParams
 from thenoise.samplers import Step, check_sampler, create_sampler, sigma_steps
 from thenoise.samplers.euler import EulerSampler
@@ -78,10 +78,10 @@ class ResolvedImage:
     seed: int
     pixel_upscaler: Optional[str]
     kv_cache: bool
-    # Reference conditioning method for a reference-latent edit; meaningless in the
-    # other modes.
-    ref_method: str
-    #: How the model uses the request's picture: ``t2i``, ``i2i`` or ``ref2i``.
+    #: How a reference reaches the run (``index``, ``index_timestep_zero``, ``vision``),
+    #: or None when it brought no picture. Meaningless in the other modes.
+    ref_method: Optional[str]
+    #: What the model does with the request's picture: ``t2i`` or ``i2i``.
     mode: str
     #: LoRA specs by role, so a component the model does not have is refused here.
     lora_specs: Mapping[str, list[str]]
@@ -92,10 +92,10 @@ class ResolvedImage:
         return self.mode != "t2i"
 
     @property
-    def has_reference(self) -> bool:
-        """The run encodes a reference latent, rather than letting the conditioner read
-        the picture and no more."""
-        return self.mode == "i2i"
+    def has_reference_latent(self) -> bool:
+        """The run encodes the picture as a latent. ``vision`` conditions with a picture
+        the conditioner read and no more, so it has no stage in the VAE."""
+        return self.ref_method in LATENT_REF_METHODS
 
     def public(self) -> dict:
         """The request as this model will actually run it.
@@ -110,27 +110,24 @@ class ResolvedImage:
             "seed": self.seed, "upscale_factor": self.factor,
             "upscale_type": self.upscale_type, "pixel_upscaler": self.pixel_upscaler,
             "kv_cache": self.kv_cache,
-            "ref_method": self.ref_method if self.has_reference else None,
+            "ref_method": self.ref_method,
             "lora_specs": dict(self.lora_specs),
         }
 
 
 def _image_mode(model, *, is_edit: bool) -> str:
-    """The image-medium mode a request runs in: ``t2i``, ``i2i`` or ``ref2i``.
+    """The image-medium mode a request runs in: ``t2i``, or ``i2i`` when it brought a
+    picture the model can take.
 
-    A request that brought a picture takes whichever way of using it this model has,
-    the reference latent first because it can change pixels the conditioner alone
-    cannot. A model with neither is refused here, which is the one place that question
-    is answered.
+    What the model does *with* that picture is a separate question, answered by the
+    resolved reference method rather than by the mode. A model with no way with a
+    picture at all is refused here, which is the one place that question is answered.
     """
     if not is_edit:
         return "t2i"
-    modes = model.capability("image")
-    if modes["i2i"]:
-        return "i2i"
-    if modes["ref2i"]:
-        return "ref2i"
-    raise ValueError(f"model '{model.name}' does not support image editing")
+    if not model.capability("image")["i2i"]:
+        raise ValueError(f"model '{model.name}' does not support image editing")
+    return "i2i"
 
 
 def _normalize_sigmas(
@@ -208,13 +205,17 @@ class PipelineController:
         guidance_scale: float,
         lora_specs: Mapping[str, list[str]] | None = None,
         ref_key: Optional[Tuple] = None,
+        ref_method: Optional[str] = None,
     ) -> Tuple:
         """Cache key for prompt conditioning.
 
         Includes ``lora_specs`` because the fused text is computed from the
         LoRA-adjusted DiT weights, keyed by role so a LoRA on one component is not
         confused with the same file on another. The edit path appends ``ref_key`` so
-        encoders whose conditioning depends on the input image invalidate correctly.
+        encoders whose conditioning depends on the input image invalidate correctly,
+        and ``ref_method`` because ``vision`` conditions on that image through the text
+        encoder itself: the same picture read instead of encoded is different
+        conditioning, not the same conditioning twice.
         """
         base = (
             prompt,
@@ -226,7 +227,7 @@ class PipelineController:
         )
         if ref_key is None:
             return ("prompt",) + base
-        return ("prompt_edit",) + base + (ref_key,)
+        return ("prompt_edit",) + base + (ref_key, ref_method)
 
     def _cache_key_reference(self, images: list[Image.Image], target: Tuple[int, int]) -> Tuple:
         """Cache key for the encoded reference latent(s) (edit path).
@@ -309,8 +310,9 @@ class PipelineController:
         An edit that left its size unset takes it from the first reference, so the
         request that comes back is not always the one that arrived.
 
-        Which of a model's ways with a picture a request gets is never the caller's to
-        pick: see :func:`_image_mode`.
+        Which of a model's ways with a picture a request gets is the caller's to ask
+        for and the model's to allow: see :func:`_image_mode` and
+        :attr:`DiffusionModel.REF_METHODS`.
         """
         model = self.model
         if not is_edit and not model.capability("image")["t2i"]:
@@ -321,9 +323,6 @@ class PipelineController:
         images = self._edit_images(request)
         if not images:
             raise ValueError("edit requires an input image")
-        if mode == "ref2i" and len(images) > 1:
-            raise ValueError(f"model '{model.name}' reads one reference image, "
-                             f"got {len(images)}")
 
         # Without explicit width/height the first reference decides the output size.
         width, height = model.size_from_reference(request.width, request.height,
@@ -345,7 +344,6 @@ class PipelineController:
                    if images else None)
         with inference():
             pixels = self._run(request, r, ref_key=ref_key,
-                               ref_method=r.ref_method if r.has_reference else None,
                                token=token, progress=progress)
             progress("postprocessing")
             return self._finalize(pixels, request, r,
@@ -366,15 +364,14 @@ class PipelineController:
         r: ResolvedImage,
         *,
         ref_key: Optional[Tuple] = None,
-        ref_method: Optional[str] = None,
         token: Cancellation = UNCANCELLABLE,
         progress: Progress = idle,
     ) -> torch.Tensor:
         """Locked, cache-checked stage pipeline -> decoded pixels ``[C,H,W]``.
 
         Runs reference -> prompt -> sampling -> decode. The reference-latent stage runs
-        only for the mode that has one; a picture the conditioner alone read still keys
-        the prompt cache, because that conditioning saw it.
+        only when the resolved method wants one; a picture the conditioner alone read
+        still keys the prompt cache, because that conditioning saw it.
 
         Each stage boundary is a progress tick and a cancellation point, so a job can
         still be stopped between stages when its solver never got a step in.
@@ -385,11 +382,11 @@ class PipelineController:
 
         prompt_key = self._cache_key_prompt(
             request.prompt, request.negative_prompt, r.guidance_scale,
-            loras, ref_key=ref_key,
+            loras, ref_key=ref_key, ref_method=r.ref_method,
         )
         sampling_key = self._cache_key_sampling(
             prompt_key, r.width, r.height, r.steps, r.seed, r.effective_sampler,
-            ref_method=ref_method, kv_cache=r.kv_cache, sigmas=r.sigmas,
+            ref_method=r.ref_method, kv_cache=r.kv_cache, sigmas=r.sigmas,
         )
         decode_key = self._cache_key_decode(sampling_key, r.refined)
 
@@ -400,7 +397,7 @@ class PipelineController:
 
             # Stage 0: reference (image) latent — deterministic per image (edit).
             ref_latents: Optional[list[torch.Tensor]] = None
-            if r.has_reference:
+            if r.has_reference_latent:
                 if self._cache.reference_hit(ref_key):
                     ref_latents = self._cache.reference_get()
                 else:
@@ -448,7 +445,8 @@ class PipelineController:
                         cond = model.fuse_text(cond_raw)
                         self._cache.prompt_store(prompt_key, cond)
                     latents = s.run(
-                        self._denoise, cond, params, ref_latents, ref_method or "index",
+                        self._denoise, cond, params, ref_latents,
+                        r.ref_method or "index",
                         sigmas=r.sigmas, token=token, progress=progress,
                     )
                 self._cache.sampling_store(sampling_key, latents)
@@ -521,15 +519,23 @@ class PipelineController:
         """
         model = self.model
         mode = _image_mode(model, is_edit=is_edit)
-        # A ref method describes a reference LATENT.
-        reference = mode == "i2i"
+        reference = mode != "t2i"
+        if request.ref_method is not None and not reference:
+            raise ValueError("ref_method describes a reference; this request has none")
         # Precedence: explicit request > checkpoint marker > model default.
         width = model.pref("width", request.width)
         height = model.pref("height", request.height)
         steps = model.pref("steps", request.steps)
         guidance_scale = model.pref("guidance_scale", request.guidance_scale)
         effective_sampler = model.pref("sampler", request.sampler)
-        ref_method = model.pref("ref_method", request.ref_method)
+        ref_method = (model.pref("ref_method", request.ref_method) if reference
+                      else None)
+        # A model's ways with a picture are its own, so an unusable one is refused here
+        # rather than reaching a stage that would quietly ignore it.
+        if reference and ref_method not in model.REF_METHODS:
+            raise ValueError(
+                f"model '{model.name}' does not support ref_method {ref_method!r}; "
+                f"it has {list(model.REF_METHODS)}")
         # After the merge: a preference can name the solver too.
         check_sampler(effective_sampler)
 
@@ -554,8 +560,7 @@ class PipelineController:
 
         if request.kv_cache is None:
             kv_cache = bool(
-                reference
-                and ref_method == "index_timestep_zero"
+                ref_method == "index_timestep_zero"
                 and model.capability("kv_cache")
             )
         else:
@@ -596,9 +601,9 @@ class PipelineController:
 
         # Reference-method restrictions apply only to a run with a reference latent;
         # a cache that freezes something else takes whatever method the run resolved.
-        if kv_cache and reference and request.ref_method is None:
+        if kv_cache and ref_method in LATENT_REF_METHODS and request.ref_method is None:
             ref_method = "index_timestep_zero"
-        if kv_cache and reference and ref_method != "index_timestep_zero":
+        if kv_cache and ref_method and ref_method != "index_timestep_zero":
             raise ValueError(
                 "kv_cache requires ref_method='index_timestep_zero': the cached "
                 "reference K/V are only step-invariant when the reference tokens are "
@@ -670,7 +675,7 @@ class PipelineController:
             lora_specs=flat_lora_specs(r.lora_specs) or None,
             pixel_upscaler=r.pixel_upscaler,
             sigmas=list(r.sigmas) if r.sigmas else None,
-            ref_method=r.ref_method if r.has_reference else None,
+            ref_method=r.ref_method,
             kv_cache=r.kv_cache,
             source=source,
         )

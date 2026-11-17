@@ -87,12 +87,15 @@ def test_load_resolves_the_model_from_the_dit_and_passes_the_paths_through(catal
 
 
 def test_model_capabilities_are_reported_verbatim(catalog):
-    """``/health`` gets the adapter's own capability dict, copied not aliased."""
-    catalog(CAPABILITIES={"image": {"t2i": True, "i2i": True}, "kv_cache": False})
+    """``/health`` gets the adapter's own capability dict, copied not aliased, plus the
+    reference methods it can honour."""
+    catalog(CAPABILITIES={"image": {"t2i": True, "i2i": True}, "kv_cache": False},
+          REF_METHODS=("index", "vision"))
     runtime = Runtime(Settings())
     runtime.load(ModelPaths("dit", "vae", "te"))
     assert runtime.model_capabilities() == {"image": {"t2i": True, "i2i": True},
-                                            "kv_cache": False}
+                                            "kv_cache": False,
+                                            "ref_methods": ["index", "vision"]}
     runtime.model_capabilities()["kv_cache"] = True
     assert runtime.model_capabilities()["kv_cache"] is False
 

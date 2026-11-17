@@ -32,7 +32,8 @@ from thenoise.models import (
     QwenImage21Model,
     ZImageModel,
 )
-from thenoise.models.base import DiffusionModel
+from thenoise.models.base import (
+    LATENT_REF_METHODS, VISION_REF_METHOD, DiffusionModel)
 from thenoise.models.wan_video import VARIANTS
 from thenoise.models.config import VideoSamplingParams
 from thenoise.utils.math import round_up
@@ -177,46 +178,52 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
 
 
 @pytest.mark.parametrize(
-    "model_cls,i2i,ref2i,kv_cache",
+    "model_cls,i2i,ref_methods,kv_cache",
     [
-        (AnimaModel, False, False, False),
-        (Krea2Model, False, False, False),
-        (ZImageModel, False, False, False),
-        (MingImageModel, False, False, False),
-        (FluxKleinModel, True, False, True),
-        (Flux3Model, True, False, False),
-        (H3ImageModel, True, False, True),
-        (MageFlowModel, True, False, False),
-        (QwenImageModel, True, False, True),
-        (QwenImage21Model, True, False, True),
-        (MossImageModel, False, True, False),
-        (Fibo2Model, True, False, True),
+        (AnimaModel, False, (), False),
+        (Krea2Model, False, (), False),
+        (ZImageModel, False, (), False),
+        (MingImageModel, False, (), False),
+        (FluxKleinModel, True, LATENT_REF_METHODS, True),
+        (Flux3Model, True, LATENT_REF_METHODS, False),
+        (H3ImageModel, True, ("index_timestep_zero", VISION_REF_METHOD), True),
+        (MageFlowModel, True, LATENT_REF_METHODS + (VISION_REF_METHOD,), False),
+        (QwenImageModel, True, LATENT_REF_METHODS + (VISION_REF_METHOD,), True),
+        (QwenImage21Model, True, LATENT_REF_METHODS + (VISION_REF_METHOD,), True),
+        (MossImageModel, True, (VISION_REF_METHOD,), False),
+        (Fibo2Model, True, ("index_timestep_zero", VISION_REF_METHOD), True),
     ],
     ids=IMAGE_CATALOG_IDS,
 )
-def test_image_model_capabilities_describe_the_adapter(model_cls, i2i, ref2i, kv_cache):
-    """``CAPABILITIES`` must describe the adapter: the pipeline rejects a request the
-    model cannot serve and ``/health`` lets the UI grey out what it lacks.
+def test_image_model_capabilities_describe_the_adapter(model_cls, i2i, ref_methods,
+                                                       kv_cache):
+    """``CAPABILITIES`` and ``REF_METHODS`` must describe the adapter: the pipeline
+    rejects what the model cannot serve and ``/health`` lets the UI grey it out.
 
-      * ``image``    -> the whole group is answered, a still from text always, a
-        reference one way or the other only where the adapter really reads one.
+      * ``image``    -> the whole group is answered, a still from text always and a
+        reference by some method only where the adapter really has one.
+      * ``ref_methods`` -> the ways it can take that reference, and its own default is
+        one of them. A latent method implies the ``encode_reference`` kernel; the
+        ``vision`` method belongs to the conditioner and implies no kernel at all,
+        which is why the pipeline, not the base class, is where it is checked.
       * ``kv_cache`` -> the shared cache protocol really starts a run cache, and
-        freezing reference K/V needs a reference latent, so it implies ``i2i``.
+        freezing reference K/V needs a reference latent, so it implies a latent method.
 
-    ``i2i`` is the tie to a kernel: it means ``encode_reference`` is overridden.
-    ``ref2i`` reaches the conditioner instead, which is not a kernel the base class
-    can see, so only the pipeline half of it is pinned — in ``test_pipeline.py``. A
-    clip answers the whole group null, so video's vocabulary is pinned in
+    A clip answers the group null, so video's vocabulary is pinned in
     ``test_video_shared.py`` instead.
     """
     model = _bare(model_cls, **BARE[model_cls.name])
-    assert model.capability("image") == {"t2i": True, "i2i": i2i, "ref2i": ref2i}
+    assert model.capability("image") == {"t2i": True, "i2i": i2i}
+    assert model.REF_METHODS == ref_methods
+    assert bool(ref_methods) is i2i
+    # A model that can take a reference defaults to one of its own ways.
+    assert not ref_methods or model.pref("ref_method") in ref_methods
+    latent = bool(set(ref_methods) & set(LATENT_REF_METHODS))
     assert model.capability("kv_cache") is kv_cache
-    assert not kv_cache or i2i  # freezing reference K/V needs a reference latent
-    # ``encode_reference`` is the kernel the pipeline calls. ``pack_reference_latent``
-    # is not part of the contract: a model that reads one latent cell per token has no
-    # packing step to override.
-    assert (model_cls.encode_reference is not DiffusionModel.encode_reference) is i2i
+    assert not kv_cache or latent  # freezing reference K/V needs a reference latent
+    # ``encode_reference`` is the kernel the pipeline calls for a latent. There is no
+    # matching kernel for ``vision``: the conditioner takes the picture itself.
+    assert (model_cls.encode_reference is not DiffusionModel.encode_reference) is latent
     model.start_kv_caches(replace(_params(), kv_cache=True), True, True)
     assert (model._kv_caches is not None) is kv_cache
 

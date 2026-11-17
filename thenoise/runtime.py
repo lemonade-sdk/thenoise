@@ -199,10 +199,16 @@ class Runtime:
         return [self._model_name] if self._model else []
 
     def model_capabilities(self) -> dict:
-        """The loaded model's capabilities (empty when none loaded)."""
+        """What the loaded model can serve, as ``/health`` reports it (empty if none).
+
+        The adapter's ``CAPABILITIES`` plus ``ref_methods``, which lives on the class
+        as :attr:`DiffusionModel.REF_METHODS` because it describes a request field
+        rather than a feature switch.
+        """
         if self._model is None:
             return {}
-        return dict(self._model.CAPABILITIES)
+        return {**self._model.CAPABILITIES,
+                "ref_methods": list(self._model.REF_METHODS)}
 
     def model_pixel_channels(self) -> int:
         """The loaded model's pixel width (3 = RGB, 4 = RGBA); 3 with no model."""

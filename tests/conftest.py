@@ -46,7 +46,8 @@ from thenoise.models import (  # noqa: E402
     Wan22Model,
     ZImageModel,
 )
-from thenoise.models.base import Conditioning, DiffusionModel  # noqa: E402
+from thenoise.models.base import (
+    LATENT_REF_METHODS, VISION_REF_METHOD, Conditioning, DiffusionModel)  # noqa: E402
 from thenoise.models.config import ModelConfig, SamplingParams  # noqa: E402
 from thenoise.samplers import Step  # noqa: E402
 from thenoise.upscale import LatentUpscaler  # noqa: E402
@@ -926,6 +927,7 @@ class StubModel(DiffusionModel):
     # (``vae.z_dim`` / ``vae.spatial_compression``), which this stub has none of.
     LATENT_CHANNELS = 4
     _VAE_SCALE = 8
+    REF_METHODS = LATENT_REF_METHODS
     UPSCALE_SCALE = 2
     REFINE_STEPS = 1
     REFINE_DENOISE = 0.1
@@ -1017,18 +1019,22 @@ class StubModel(DiffusionModel):
 
 
 class EditingStubModel(StubModel):
-    """A stub that answers the image medium's ``i2i`` mode (reference-latent path)."""
+    """A stub that answers the image medium's ``i2i`` mode, by latent or by tower."""
 
     CAPABILITIES = {**StubModel.CAPABILITIES,
                     "image": {**StubModel.CAPABILITIES["image"], "i2i": True}}
+    REF_METHODS = LATENT_REF_METHODS + (VISION_REF_METHOD,)
 
 
 class VisionReferenceStubModel(StubModel):
-    """A stub that answers ``ref2i``: it reads one picture in the conditioner and has
-    no reference latent to encode."""
+    """A stub whose only way with a picture is to have the conditioner read it: no
+    reference method of the latent kind, so the VAE stage never runs."""
+
+    DEFAULT_PREFS = {**StubModel.DEFAULT_PREFS, "ref_method": VISION_REF_METHOD}
 
     CAPABILITIES = {**StubModel.CAPABILITIES,
-                    "image": {**StubModel.CAPABILITIES["image"], "ref2i": True}}
+                    "image": {**StubModel.CAPABILITIES["image"], "i2i": True}}
+    REF_METHODS = (VISION_REF_METHOD,)
 
 
 # ---------------------------------------------------------------------------- fixtures
@@ -1090,6 +1096,7 @@ def fake_model_cls():
             "unload": lambda self: None,
             # A model that declares no capability; tests override it via ``**attrs``.
             "CAPABILITIES": {},
+            "REF_METHODS": (),
             **attrs,
         }
         return type("FakeModel", (), namespace)

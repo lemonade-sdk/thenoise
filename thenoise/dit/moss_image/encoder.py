@@ -86,6 +86,14 @@ class MossImageTextEncoder(nn.Module):
         )
         input_ids = torch.as_tensor(inputs["input_ids"], dtype=torch.long,
                                     device=self.device)
+        if images and input_ids.shape[-1] > MAX_SEQUENCE_LENGTH:
+            # Truncation is off with a picture present — cutting a placeholder run
+            # would leave fewer tokens than the tower has features for — so the
+            # conditioner's window is the real limit on how many can be shown.
+            raise ValueError(
+                f"{len(images)} reference image(s) plus this prompt need "
+                f"{input_ids.shape[-1]} conditioning tokens; the Qwen3.5 conditioner "
+                f"holds {MAX_SEQUENCE_LENGTH}")
         model_inputs = {
             "input_ids": input_ids,
             # One sequence per call, hence an all-valid mask.

@@ -7,8 +7,9 @@ are put in one sequence and read by the same attention, in 42 blocks of width 30
 It is conditioned by Qwen3.5-9B and draws on the Flux.2 AE, so its latent is the
 packed 128-channel one at 16 pixels per cell.
 
-- Text-to-image, plus `ref2i`: one reference read by the conditioner's vision tower
-  (experimental) — there is no reference-latent path, so nothing is repainted
+- Text-to-image, plus a reference read by the conditioner's vision tower
+  (`--ref-method vision`, experimental) — there is no reference-latent path, so
+  nothing is repainted
 - Built-in defaults: **25 steps, guidance 3.0, er_sde**
 - Not a distilled checkpoint: `--sampler euler --steps 50` is the release recipe, and
   the stochastic `er_sde` gets about the same picture in half the steps
@@ -28,8 +29,8 @@ packed 128-channel one at 16 pixels per cell.
 | Architecture | joint-stream DiT (flow matching), 42 blocks, dim 3072, 24 heads |
 | Download size | ~14 GB int8-convrot (5.0 GB DiT + 9.1 GB text encoder + 0.3 GB VAE); ~19 GB with the bf16 DiT |
 | VAE | Flux.2 AE, 128-ch packed latent at 16× (the file Flux.2 Klein uses) |
-| Text encoder | Qwen3.5-9B, int8-convrot (the only release); its vision tower reads a `ref2i` reference |
-| Editing | `ref2i` — the reference reaches the DiT as conditioner tokens, never as a latent |
+| Text encoder | Qwen3.5-9B, int8-convrot (the only release); its vision tower reads a reference |
+| Reference | `vision` only — it reaches the DiT as conditioner tokens, never as a latent |
 | KV cache | — |
 | Default settings | 1024×1024, 25 steps, guidance 3.0, er_sde |
 
@@ -109,7 +110,7 @@ Generate:
   --vae ./models/moss-image/vae/flux2-vae.safetensors
 ```
 
-## Reading a reference (`ref2i`) — experimental
+## Reading a reference (`vision`) — experimental
 
 A picture cannot be repainted here: the architecture has no reference-latent path. What
 it can do is show one to the vision tower its conditioner already ships with. The
@@ -128,8 +129,12 @@ of over it.
 
 What to expect, and what not to:
 
-- **One image**, arriving at the reference's own aspect ratio (about a megapixel)
-  unless `--width`/`--height` say otherwise.
+- **As many as fit.** Each picture costs about 144 of the conditioner's 4096 tokens
+  and is labelled `Picture 1:`, `Picture 2:` … ahead of the prompt, so a subject, a
+  place and a palette can be shown at once. The first one sets the output size — its
+  own aspect ratio at about a megapixel — unless `--width`/`--height` say otherwise.
+  Past the window the run is refused, because a truncated placeholder run would not
+  match the features the tower emits.
 - **A hint, not a copy.** The reference is scaled to a 384² area on the Qwen3.5 vision
   grid (a 16 px patch, merged 2×2) before the tower sees it, so it carries a subject,
   a palette and a composition — no texture, no legible text, no pixel alignment.

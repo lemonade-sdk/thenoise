@@ -98,12 +98,15 @@ def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png
     p.add_argument("--no-kv-cache", dest="kv_cache", action="store_false",
                    help="disable KV caching (overrides automatic editing defaults)")
     p.set_defaults(kv_cache=None)
-    p.add_argument("--ref-method", choices=["index", "index_timestep_zero"],
+    p.add_argument("--ref-method",
+                   choices=["index", "index_timestep_zero", "vision"],
                    default=None,
-                   help="reference conditioning for editing (default: auto, i.e. "
-                        "detected from the checkpoint marker, else 'index'); "
+                   help="how a reference is used (default: auto, i.e. detected from "
+                        "the checkpoint marker, else 'index'); "
                         "'index_timestep_zero' conditions reference tokens at "
-                        "timestep zero, which is what makes the KV cache valid")
+                        "timestep zero, which is what makes the KV cache valid, and "
+                        "'vision' has the text encoder read the picture rather than "
+                        "the VAE. Which of them a model takes is the model's own")
     _add_postprocess_args(p)
     p.add_argument("--device", default="cuda",
                    help="inference device; ROCm aliases cuda -> hip (default: cuda)")

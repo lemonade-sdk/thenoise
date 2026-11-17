@@ -23,6 +23,8 @@ from thenoise.dit.qwen_image import sampling as qwen_sampling
 from thenoise.dit.qwen_image import utils as qwen_utils
 from thenoise.dit.qwen_image.models import build_txt_positions, build_video_positions
 from thenoise.models.base import (
+    LATENT_REF_METHODS,
+    VISION_REF_METHOD,
     Conditioning,
     DiffusionModel,
     Step,
@@ -57,6 +59,9 @@ class QwenImageModel(DiffusionModel):
     # only with ``ref_method="index_timestep_zero"``.
     CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": True,
                     "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
+    # Qwen2.5-VL was built multimodal, so the same reference can be read by the
+    # conditioner instead of encoded: a hint rather than a canvas to repaint.
+    REF_METHODS = LATENT_REF_METHODS + (VISION_REF_METHOD,)
 
     @staticmethod
     def detect(f) -> bool:

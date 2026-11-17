@@ -33,6 +33,8 @@ from thenoise.dit.qwen_image21.models import QwenImage21Sequence
 from thenoise.dit.qwen_image21.utils import is_qwen_image21_key
 from thenoise.dit.qwen_image21.utils import load_qwen_image21_dit
 from thenoise.models.base import (
+    LATENT_REF_METHODS,
+    VISION_REF_METHOD,
     Conditioning,
     DiffusionModel,
     Step,
@@ -75,6 +77,9 @@ class QwenImage21Model(DiffusionModel):
 
     CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": True,
                     "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
+    # Qwen2.5-VL was built multimodal, so the same reference can be read by the
+    # conditioner instead of encoded: a hint rather than a canvas to repaint.
+    REF_METHODS = LATENT_REF_METHODS + (VISION_REF_METHOD,)
 
     # The step-invariant slice is the LEADING text/reference prefix (target last).
     KV_CACHED_SLICE = "prefix"

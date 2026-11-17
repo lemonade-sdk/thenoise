@@ -205,8 +205,9 @@ async function applyModelState() {
   const capable = (name) => models === null || !!caps[name];
   // Nested under the medium's name, and null on a model of the other one.
   const video = caps.video || null;
-  // The Edit tab is honest whichever way the model takes the picture in.
-  const takesImage = models === null || !!(caps.image?.i2i || caps.image?.ref2i);
+  // One bit now: a model either takes a reference or does not. How it uses one
+  // (``caps.ref_methods``) is a request field, not something the tabs split on.
+  const takesImage = models === null || !!caps.image?.i2i;
 
   // An RGBA model can return transparent pixels; without something behind them
   // they would read as black (or as the panel colour) rather than as transparency.

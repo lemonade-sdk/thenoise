@@ -67,6 +67,18 @@ def normalize_keys(keys):
         yield unwrap_key(k)
 
 
+#: The ways a reference picture can enter a run.
+#:
+#: ``index`` and ``index_timestep_zero`` are the latent paths: the VAE encodes the
+#: picture and its tokens join the sequence, ``index_timestep_zero`` conditioning those
+#: tokens at timestep zero, which is what makes their K/V step-invariant and therefore
+#: cacheable. ``vision`` is the conditioner's own vision tower: no VAE stage and no
+#: reference latent, so the run is drawn beside the reference rather than over it and
+#: nothing about it survives pixel for pixel.
+LATENT_REF_METHODS = ("index", "index_timestep_zero")
+VISION_REF_METHOD = "vision"
+
+
 class DiffusionModel(LoRASupport, ABC):
     """Base class for model adapters. Subclasses must set ``name``."""
 
@@ -100,12 +112,11 @@ class DiffusionModel(LoRASupport, ABC):
     # too. Adapters override only the entries they differ on, merging as above. Reported
     # verbatim by ``/health`` so the UI can gate its controls.
     CAPABILITIES: ClassVar[Dict[str, Any]] = {
-        # ``i2i`` is reference-latent editing: image + instruction -> edited image,
-        # which requires overriding ``encode_reference``/``pack_reference_latent``.
-        # ``ref2i`` is one picture the conditioner only *reads*: no latent, so
-        # ``encode_reference`` stays unimplemented and the reference survives as
-        # conditioning tokens and nothing else.
-        "image": {"t2i": True, "i2i": False, "ref2i": False},
+        # ``i2i`` means this model takes a picture with the request, by any of the
+        # reference methods it lists in ``REF_METHODS``. Which one runs is resolved per
+        # request, so a model that only reads the picture answers ``i2i`` as plainly as
+        # one that repaints it.
+        "image": {"t2i": True, "i2i": False},
         # Freeze the reference tokens' K/V across denoise steps through the shared
         # ``start_kv_caches`` / ``kv_cache`` / ``end_kv_caches`` protocol.
         "kv_cache": False,
@@ -114,6 +125,13 @@ class DiffusionModel(LoRASupport, ABC):
         "upscale": True,
         "video": None,
     }
+
+    #: The ways this model can use a reference picture, best first; empty means it
+    #: takes none. The pipeline resolves a request against this list and ``/health``
+    #: reports it, so a method the adapter does not implement is refused at submit
+    #: instead of being ignored by a stage that cannot act on it. See
+    #: :data:`LATENT_REF_METHODS` and :data:`VISION_REF_METHOD`.
+    REF_METHODS: ClassVar[Tuple[str, ...]] = ()
 
     # The run's caches: created by ``start_kv_caches``, dropped by ``end_kv_caches``.
     # The empty class default keeps ``kv_cache`` answering ``None`` on adapters built

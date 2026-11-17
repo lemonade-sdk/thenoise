@@ -84,7 +84,7 @@ Then open <http://localhost:8000/> for the web UI. Full endpoint reference:
 | `--sharpening` | no | `0.0` | RCAS sharpening strength (0.0–1.0) |
 | `--film-grain` | no | `0.0` | Film grain strength (0.0–10.0) |
 | `--kv-cache` / `--no-kv-cache` | no | auto | Reuse step-invariant K/V across denoising steps. T2I defaults off (opt-in); compatible edits auto-enable for `index_timestep_zero` |
-| `--ref-method` | no | auto | Reference conditioning for editing: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index`. The cache default follows it |
+| `--ref-method` | no | auto | How a reference is used for editing: `index`, `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid) or `vision` (the text encoder reads the picture instead of the VAE, so nothing is repainted). Auto = detected from the checkpoint, else the model's first listed method. The cache default follows it |
 
 > **Note:** T2I caching is supported by models with a cacheable text prefix;
 > other cache-capable models may accept the flag without a T2I speedup.
@@ -96,8 +96,8 @@ Requires an editing-capable model and shares all generation flags with `generate
 `--image` is repeatable. The **first** image sets the output size when
 `--width`/`--height` are omitted: its own aspect ratio at about a megapixel.
 
-A model that only reads its reference through the text encoder - MOSS-Image - takes
-this command too, with one image and no latent path behind it.
+A model whose only way with a picture is the text encoder — MOSS-Image — lists
+`vision` and nothing else, so `edit` is how you show it one.
 
 ```bash
 ./thenoise.sh edit \
@@ -111,7 +111,7 @@ this command too, with one image and no latent path behind it.
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--image` | yes | — | Input image(s) to edit; repeatable for multiple reference images (first sets the output size). A `ref2i` model takes one |
+| `--image` | yes | — | Input image(s) to edit; repeatable for multiple reference images (first sets the output size) |
 | `--out` | no | `out_edit.png` | Output file path |
 
 ## Generate a single clip

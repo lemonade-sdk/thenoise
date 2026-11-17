@@ -29,7 +29,13 @@ from thenoise.dit.flux3.models import (
 )
 from thenoise.dit.flux3.sampling import get_schedule, target_times
 from thenoise.dit.flux3.utils import detect_params, load_flux3_dit
-from thenoise.models.base import Conditioning, DiffusionModel, Step, normalize_keys
+from thenoise.models.base import (
+    LATENT_REF_METHODS,
+    Conditioning,
+    DiffusionModel,
+    Step,
+    normalize_keys,
+)
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.math import round_up
@@ -54,6 +60,9 @@ class Flux3Model(DiffusionModel):
     # Reference-latent editing, no KV cache (see the module docstring).
     CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": False,
                     "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
+    # Qwen3-VL-4B carries a vision tower, but this conditioner reads the language taps
+    # only, so a reference has nowhere to be read: latent methods until it is wired.
+    REF_METHODS = LATENT_REF_METHODS
 
     # The DiT fuses q/k/v even where the checkpoint does not; a LoRA trained on the
     # separate projections is stacked onto it before matching.

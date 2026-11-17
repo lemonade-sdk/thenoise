@@ -4,11 +4,10 @@ OpenMOSS' text-to-image model. What is new here is the DiT (``dit/moss_image``) 
 its conditioner; the codec is the Flux.2 AE, so latents are the canonical 128-channel
 ones at 16 pixels per cell and the latent upscaler is the one that codec uses.
 
-Text-to-image, plus ``ref2i``: a reference image is read by the conditioner's vision
-tower and reaches the DiT as conditioning tokens and nothing else, because the
-architecture has no reference-latent path — every token of one image goes through the
-same joint stream. The checkpoints are not distilled, so the step count is a plain
-quality/time trade.
+Text-to-image, plus a reference read through the conditioner's vision tower: one image
+goes to the DiT as conditioning tokens and nothing else, because the architecture has no
+reference-latent path — every token of one image goes through the same joint stream.
+The checkpoints are not distilled, so the step count is a plain quality/time trade.
 """
 from __future__ import annotations
 
@@ -21,7 +20,13 @@ from thenoise.dit.moss_image.encoder import load_moss_image_text_encoder
 from thenoise.dit.moss_image.models import MossImageParams, joint_positions
 from thenoise.dit.moss_image.sampling import get_schedule
 from thenoise.dit.moss_image.utils import detect_params, load_moss_image_dit
-from thenoise.models.base import Conditioning, DiffusionModel, Step, normalize_keys
+from thenoise.models.base import (
+    VISION_REF_METHOD,
+    Conditioning,
+    DiffusionModel,
+    Step,
+    normalize_keys,
+)
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.image_tensor import ReferenceSizing, flatten_alpha
@@ -38,10 +43,14 @@ class MossImageModel(DiffusionModel):
         **DiffusionModel.DEFAULT_PREFS,
         "steps": 25,
         "guidance_scale": 3.0,
+        "ref_method": VISION_REF_METHOD,
     }
 
     CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": False,
-                    "image": {**DiffusionModel.CAPABILITIES["image"], "ref2i": True}}
+                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
+    # There is no latent path here: the one reference goes through the Qwen3.5 vision
+    # tower its conditioner already ships with, and nothing is repainted.
+    REF_METHODS = (VISION_REF_METHOD,)
 
     REFERENCE_SIZING = ReferenceSizing(cap=384 * 384, align=32)
 

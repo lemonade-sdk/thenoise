@@ -894,15 +894,15 @@ def test_the_request_mode_is_checked_against_the_adapter():
         _controller(StubModel()).edit(
             _request(image=Image.new("RGB", (64, 64), "white"), steps=1))
 
-    edit_only = StubModel(capabilities={"image": {"t2i": False, "i2i": True, "ref2i": False}})
+    edit_only = StubModel(capabilities={"image": {"t2i": False, "i2i": True}})
     with pytest.raises(ValueError, match="does not support text-to-image"):
         _controller(edit_only).generate(_request())
 
 
-def test_a_ref2i_picture_is_read_by_the_conditioner_and_stops_there():
-    """``ref2i`` is the mode where nothing is drawn over the picture: no reference
-    latent is encoded, so the VAE stage never runs and ``prepare_latent`` gets none.
-    """
+def test_a_vision_reference_is_read_by_the_conditioner_and_stops_there():
+    """The ``vision`` method draws nothing over the picture: no reference latent is
+    encoded, so the VAE stage never runs and ``prepare_latent`` gets none. The mode is
+    still ``i2i``, because a picture came in — the method is what says what happened."""
     from PIL import Image
 
     from conftest import VisionReferenceStubModel
@@ -912,10 +912,8 @@ def test_a_ref2i_picture_is_read_by_the_conditioner_and_stops_there():
     controller = _controller(model)
     request, r = controller.resolve(_request(image=image, width=64, height=64),
                                     is_edit=True)
-    assert r.mode == "ref2i"
-    assert r.kv_cache is False  # nothing step-invariant to freeze
-    # And nothing is echoed either: a reference method describes a latent there is none of.
-    assert r.public()["ref_method"] is None
+    assert (r.mode, r.ref_method, r.kv_cache) == ("i2i", "vision", False)
+    assert r.public()["ref_method"] == "vision"  # the record says which way it went
 
     assert controller.produce(request, r).size == (64, 64)
     assert model.encode_prompt_args.image is image
@@ -923,15 +921,23 @@ def test_a_ref2i_picture_is_read_by_the_conditioner_and_stops_there():
     assert model.prepared[-1]["ref"] is None
 
 
-def test_a_ref2i_model_refuses_more_than_the_one_picture_it_reads():
+def test_a_picture_read_and_a_picture_encoded_are_not_the_same_conditioning():
+    """Same prompt, same picture, two methods: the second run must condition again
+    rather than take the first one's cached answer."""
     from PIL import Image
 
-    from conftest import VisionReferenceStubModel
+    from conftest import EditingStubModel
 
-    with pytest.raises(ValueError, match="one reference image"):
-        _controller(VisionReferenceStubModel()).edit(
-            _request(image=[Image.new("RGB", (32, 32), "white"),
-                            Image.new("RGB", (32, 32), "black")], steps=1))
+    model = EditingStubModel()
+    controller = _controller(model)
+    image = Image.new("RGB", (64, 64), "white")
+    conditioned = []
+    for method in ("index", "vision"):
+        controller.edit(_request(image=image, steps=1, ref_method=method))
+        conditioned.append(model.calls["encode_prompt"])
+
+    assert conditioned == [1, 2]  # not [1, 1]: the second method re-ran the encoder
+    assert model.calls["encode_reference"] == 1  # only the latent run encoded it
 
 
 # ---------------------------------------------------- residency across the stages

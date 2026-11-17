@@ -27,7 +27,13 @@ from thenoise.dit.fibo2.models import Fibo2Params, gist_count, sequence_position
 from thenoise.dit.fibo2.sampling import get_sigmas, shift
 from thenoise.dit.fibo2.sizes import trained_size
 from thenoise.dit.fibo2.utils import detect_params, is_fibo2, load_fibo2_dit
-from thenoise.models.base import Conditioning, DiffusionModel, Step, normalize_keys
+from thenoise.models.base import (
+    VISION_REF_METHOD,
+    Conditioning,
+    DiffusionModel,
+    Step,
+    normalize_keys,
+)
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.image_tensor import cover_crop
@@ -58,7 +64,7 @@ class Fibo2Model(DiffusionModel):
                     "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
     KV_CACHED_SLICE = "suffix"
 
-    REF_METHODS = ("index_timestep_zero",)
+    REF_METHODS = ("index_timestep_zero", VISION_REF_METHOD)
 
     #: Fused sub-projections a LoRA may train apart, in each fused matrix's row order.
     lora_fusions = {
@@ -134,12 +140,6 @@ class Fibo2Model(DiffusionModel):
         is fixed here, per branch, so the per-step ``denoise_step`` stays a pure DiT
         forward. Safe under the lock.
         """
-        if ref and ref_method not in self.REF_METHODS:
-            raise ValueError(
-                f"unsupported ref_latents_method {ref_method!r}; Fibo 2.0 always "
-                "conditions its reference tokens at timestep zero, on a rope plane of "
-                "their own"
-            )
         dev = torch.device(self.device)
         x = latents.to(device=dev, dtype=self.dtype)
         height, width = x.shape[-2], x.shape[-1]

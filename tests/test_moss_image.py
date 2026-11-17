@@ -700,3 +700,30 @@ def test_a_reference_is_conditioning_through_the_vision_tower_and_nothing_else()
     assert tuple(lm.seen["pixel_values"].shape) == (4, 8)
     assert lm.seen["image_grid_thw"].tolist() == [[1, 2, 2]]
     assert sum(lm.seen["mm_token_type_ids"][0]) == 4
+
+
+def test_several_references_are_shown_in_order_and_labelled():
+    """The conditioner's template carries one labelled block per picture, so a run can
+    be shown a subject, a place and a palette at once."""
+    encoder, tokenizer, lm = _fake_encoder(40)
+    first = Image.new("RGB", (64, 48), "white")
+    second = Image.new("RGB", (32, 32), "black")
+    with torch.no_grad():
+        encoder.encode("the second one again", [first, second])
+
+    text = tokenizer.seen["text"]
+    assert text.count(VISION_BLOCK) == 2
+    assert text.index("Picture 1:") < text.index("Picture 2:")
+    assert text.index("Picture 2:") < text.index("the second one again")
+    assert encoder.processor.seen["images"] == [first, second]
+    assert tuple(lm.seen["pixel_values"].shape) == (8, 8)
+    assert lm.seen["image_grid_thw"].tolist() == [[1, 2, 2], [1, 2, 2]]
+
+
+def test_more_pictures_than_the_conditioner_holds_are_refused():
+    """A sequence too long for the window is refused rather than truncated: a cut
+    placeholder run would not match the features the tower emits."""
+    encoder, _, lm = _fake_encoder(MAX_SEQUENCE_LENGTH + 1)
+    with pytest.raises(ValueError, match="the Qwen3.5 conditioner holds"):
+        encoder.encode("a cat", [Image.new("RGB", (32, 32), "white")])
+    assert "input_ids" not in lm.seen
