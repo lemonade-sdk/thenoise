@@ -50,6 +50,7 @@ _CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs"
 QWEN25_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "qwen25_tokenizer")
 QWEN35_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "qwen35_tokenizer")
 T5_TOKENIZER_CONFIG_DIR = os.path.join(_CONFIG_DIR, "t5")
+GEMMA3_LTX_CONFIG_DIR = os.path.join(_CONFIG_DIR, "gemma3_ltx")
 
 # The shared ``qwen25_tokenizer`` config is the Qwen3 one; the fields that differ
 # per variant are applied as post-load overrides.

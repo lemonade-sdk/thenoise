@@ -15,7 +15,6 @@ from typing import Callable
 
 import torch
 from thenoise.utils.safetensors import MemoryEfficientSafeOpen
-from thenoise.utils.loader import load_streamed_components
 
 log = logging.getLogger(__name__)
 
@@ -313,6 +312,110 @@ def make_connectors(version: str, gemma_text_config):
         return model
 
 
+def load_ltx_component(
+    name: str, module: torch.nn.Module, groups: dict[Path, set[str]],
+    *, cancel: Callable[[], None], dtype: torch.dtype,
+) -> torch.nn.Module:
+    """Assemble one LTX component's split checkpoint files, then use TheNoise's loader.
+
+    The component-specific *key mapping* belongs here. Quantization, ConvRot and
+    assignment are handled by the existing shared load_quantized_state_dict.
+    In particular this does not add a new generic loader to thenoise.utils.
+    """
+    from thenoise.utils.checkpoint import CHECKPOINT_MARKER_KEYS
+    from thenoise.utils.loader import RUNTIME_STATE_SUFFIXES, load_quantized_state_dict
+    from thenoise.utils.safetensors import unwrap_key
+
+    expected = {key: tuple(value.shape) for key, value in module.state_dict().items()}
+    weights: dict[str, torch.Tensor] = {}
+    quant_suffixes = (".weight_scale", ".scale_weight", ".scale_input",
+                      ".input_scale", ".comfy_quant")
+    quant_dtypes = {torch.int8}
+    quant_dtypes.update(getattr(torch, attr) for attr in ("float8_e4m3fn", "float8_e5m2")
+                        if hasattr(torch, attr))
+
+    for path, roles in groups.items():
+        if name not in roles:
+            continue
+        cancel()
+        with MemoryEfficientSafeOpen(str(path)) as source:
+            for index, raw in enumerate(source.keys()):
+                if index % 16 == 0:
+                    cancel()
+                if raw.endswith(RUNTIME_STATE_SUFFIXES) or unwrap_key(raw) in CHECKPOINT_MARKER_KEYS:
+                    continue
+                if "dit" in roles or "connectors" in roles:
+                    mapped = split_ltx_key(raw)
+                elif "vae" in roles:
+                    mapped = ("vae", raw.removeprefix("vae."))
+                elif "audio_vae" in roles:
+                    mapped = (("vocoder", raw.removeprefix("vocoder."))
+                              if raw.startswith("vocoder.") else
+                              ("audio_vae", raw.removeprefix("audio_vae.")))
+                elif "upscaler" in roles:
+                    mapped = _upscaler_key(raw)
+                else:
+                    raise RuntimeError(f"unknown LTX checkpoint group: {roles}")
+                if mapped is None or mapped[0] != name:
+                    continue
+                key = _map_component(name, mapped[1])
+                if key is None:
+                    continue
+                # A scale/marker belongs to a weight, not the module's state_dict.
+                suffix = next((s for s in quant_suffixes if key.endswith(s)), None)
+                if suffix is not None:
+                    parent = key[:-len(suffix)]
+                    if parent + ".weight" not in expected:
+                        raise ValueError(f"{path}: unexpected LTX quantization metadata {raw!r}")
+                elif key not in expected:
+                    # Checkpoint-wide metadata is not a learned parameter.
+                    if key == "scaled_fp8" or key.endswith(".scaled_fp8"):
+                        continue
+                    raise ValueError(f"{path}: unexpected {name} tensor {raw!r} -> {key!r}")
+                elif tuple(source.header[raw]["shape"]) != expected[key]:
+                    raise ValueError(f"{path}: {raw!r} shape "
+                                     f"{source.header[raw]['shape']} != {expected[key]}")
+                if key in weights:
+                    raise ValueError(f"{path}: duplicate LTX {name} weight {key!r}")
+                weights[key] = source.get_tensor(raw)
+
+    missing = set(expected) - set(weights)
+    if missing:
+        raise ValueError(f"LTX {name} checkpoint missing={sorted(missing)[:8]} "
+                         "(no random/meta weight fallback)")
+    is_quantized = any(key in expected and tensor.dtype in quant_dtypes
+                       for key, tensor in weights.items())
+    if is_quantized:
+        # Shared quant loader checks marker structure and restores the native
+        # QuantizedTensor layout. Do not implement a second quantized assigner.
+        for key, value in weights.items():
+            if key not in expected or value.dtype != torch.int8:
+                continue
+            if not key.endswith(".weight"):
+                raise ValueError(f"LTX {name} unexpected INT8 parameter {key!r}")
+            stem = key[:-len(".weight")]
+            scales = [stem + s for s in (".weight_scale", ".scale_weight")
+                      if stem + s in weights]
+            if len(scales) != 1 or stem + ".comfy_quant" not in weights:
+                raise ValueError(f"LTX {name}: INT8 {key} requires a single "
+                                 "weight scale and .comfy_quant marker")
+        load_quantized_state_dict(module, weights, dtype=dtype)
+    else:
+        stray = sorted(set(weights) - set(expected))
+        if stray:
+            raise ValueError(f"LTX {name} checkpoint has unused quant metadata: {stray[:8]}")
+        module.load_state_dict(
+            {key: value.to(dtype=dtype) if value.is_floating_point() else value
+             for key, value in weights.items()},
+            strict=True, assign=True,
+        )
+    leftover = [key for key, weight in module.named_parameters() if weight.is_meta]
+    leftover += [key for key, weight in module.named_buffers() if weight.is_meta]
+    if leftover:
+        raise RuntimeError(f"LTX {name} contains uninitialized tensors: {leftover[:8]}")
+    return module.eval()
+
+
 def load_original_components(
     dit_path: str | Path, vae_path: str | Path,
     audio_vae_path: str | Path, upscaler_path: str | Path,
@@ -320,7 +423,11 @@ def load_original_components(
     gemma_text_config=None, text_encoder_path: str | Path | None = None,
     text_projection_path: str | Path | None = None,
 ) -> dict:
-    """Load only original checkpoint tensors required by these LTX-2.x models."""
+    """Original LTX file roles and mappings, using TheNoise's quantized loader.
+
+    Multiple explicitly provided checkpoint paths may be identical (LTX 2.3
+    monolith). The LTX 2.5 Gemma *with-proj* file contains its projections.
+    """
     modules = dict(
         dit=make_transformer(version), vae=make_video_vae(),
         audio_vae=make_audio_vae(), vocoder=make_vocoder(),
@@ -328,74 +435,24 @@ def load_original_components(
     )
     if gemma_text_config is not None:
         modules["connectors"] = make_connectors(version, gemma_text_config)
+
     sources = {
         "dit": Path(dit_path), "vae": Path(vae_path),
         "audio_vae": Path(audio_vae_path), "upscaler": Path(upscaler_path),
     }
     groups: dict[Path, set[str]] = {}
-    for comp, path in sources.items():
-        groups.setdefault(path.resolve(), set()).add(comp)
-    # Both releases store connector attention weights in the DiT. 2.5's
-    # Gemma-4 "with-proj" file additionally stores the text aggregation
-    # projections, not the audio/video attention blocks.
-    if version == VERSION_25 and text_encoder_path is None:
-        raise ValueError("LTX 2.5 requires the Gemma-4 with-proj text checkpoint")
+    for component, path in sources.items():
+        groups.setdefault(path.expanduser().resolve(), set()).add(component)
+    groups[Path(audio_vae_path).expanduser().resolve()].add("vocoder")
     if "connectors" in modules:
-        groups.setdefault(Path(dit_path).resolve(), set()).add("connectors")
+        groups[Path(dit_path).expanduser().resolve()].add("connectors")
         if version == VERSION_25:
-            groups.setdefault(Path(text_encoder_path).resolve(), set()).add("connectors")
+            if text_encoder_path is None:
+                raise ValueError("LTX 2.5 needs a Gemma with-proj text checkpoint")
+            groups.setdefault(Path(text_encoder_path).expanduser().resolve(), set()).add("connectors")
         elif text_projection_path is not None:
-            # The LTX 2.3 community DiT omits the four learned Gemma projections.
-            # Feed the standalone projection through the existing strict split loader.
-            groups.setdefault(Path(text_projection_path).resolve(), set()).add("connectors")
-    groups[Path(audio_vae_path).resolve()].add("vocoder")
-    assigned: set[tuple[str, str]] = set()
-    for path, names in groups.items():
-        cancel()
-        with MemoryEfficientSafeOpen(str(path)) as f:
-            items = {k: m for k,m in modules.items() if k in names}
-            if "dit" in items or "connectors" in items:
-                selector = split_ltx_key
-            elif "vae" in items:
-                selector = lambda raw: ("vae", raw.removeprefix("vae."))
-            elif "audio_vae" in items:
-                def selector(raw):
-                    if raw.startswith("vocoder."):
-                        return "vocoder", raw.removeprefix("vocoder.")
-                    return "audio_vae", raw.removeprefix("audio_vae.")
-            elif "upscaler" in items:
-                selector = _upscaler_key
-            else:
-                raise RuntimeError(f"Unhandled LTX checkpoint roles: {sorted(names)}")
-            def mapped_selector(raw):
-                selected = selector(raw)
-                if selected is None:
-                    return None
-                component, key = selected
-                mapped = _map_component(component, key)
-                return (component, mapped) if mapped is not None else None
+            groups.setdefault(Path(text_projection_path).expanduser().resolve(), set()).add("connectors")
 
-            loaded = load_streamed_components(
-                f, items, cancel=cancel, selector=mapped_selector, dtype=dtype,
-                already_loaded=assigned,
-                defer_complete={"connectors"} if "connectors" in items else None,
-            )
-            assigned.update((name, key) for name, keys in loaded.items() for key in keys)
-
-    # A split component is only valid once every source has contributed.
-    # Never accept a partial connector or silently replace a missing weight.
-    missing = sorted((name, key) for name, module in modules.items()
-                     for key in module.state_dict() if (name, key) not in assigned)
-    if missing:
-        raise ValueError(
-            f"LTX checkpoint mismatch across component files: missing={missing[:8]} "
-            "(never continue with random/meta weights)"
-        )
-    for name, module in modules.items():
-        leftover = [key for key, value in module.named_parameters() if value.is_meta]
-        leftover += [key for key, value in module.named_buffers() if value.is_meta]
-        if leftover:
-            raise RuntimeError(
-                f"LTX component {name} has uninitialized meta tensors: {leftover[:8]}"
-            )
-    return {name: m.eval() for name, m in modules.items()}
+    for component, module in modules.items():
+        load_ltx_component(component, module, groups, cancel=cancel, dtype=dtype)
+    return modules

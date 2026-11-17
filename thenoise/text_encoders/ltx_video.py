@@ -1,8 +1,8 @@
 """Gemma 3/4 prompt features for LTX 2.x; no LTX Python package imports.
 
-The single-file LTX-2.5 encoder stores its HF config, tokenizer and
-processor assets alongside the weights. Do not silently substitute an
-ordinary Gemma-4 checkpoint: the LTX projection weights are model-specific.
+Both Gemma 3 and Gemma 4 encoders are single-file safetensors. Gemma 3
+uses vendored minimal tokenizer/config assets; Gemma 4 embeds those assets
+with its model-specific LTX projection weights.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import torch
 from thenoise.utils.safetensors import MemoryEfficientSafeOpen
 from torch import nn
 
-from thenoise.utils.loader import load_streamed_components
+from thenoise.utils.loader import load_text_encoder_weights
 
 
 class GemmaFeatures(nn.Module):
@@ -223,74 +223,75 @@ def _gemma3_key(raw: str) -> tuple[str, str] | None:
     return "gemma", "model." + key
 
 
+def _load_ltx_text_weights(module, path: Path, key_map, drop_keys: tuple[str, ...]):
+    """Use TheNoise's shared Gemma/quantized text-encoder loader.
+
+    Only checkpoint-specific name mapping lives here. Tokenizer/config blobs are
+    assets, not model tensors. Learned unknown keys must fail, not be dropped.
+    """
+    def mapped(raw):
+        result = key_map(raw)
+        if result is None:
+            raise ValueError(f"unmapped Gemma weight in {path}: {raw!r}")
+        return result[1]
+
+    return load_text_encoder_weights(
+        module, str(path), device="cpu", dtype=torch.bfloat16,
+        key_map=mapped, drop_keys=drop_keys,
+    )
+
+
 def load_ltx_gemma(path: str | Path, *, version: str, cancel):
     """Return `(GemmaFeatures, tokenizer, text_config)` on CPU.
 
-    All construction of a single-file Gemma-4 is on meta and weights are read
-    one at a time. A Gemma-3 HF directory uses Transformers' indexed shard
-    loader; no HF network access, git URL, or second LTX SDK is required.
+    Model weights come from one safetensors file. Gemma3 uses a vendored
+    tokenizer/config; Gemma4 uses assets embedded in the checkpoint.
     """
     try:
-        from transformers import (AutoModelForImageTextToText, AutoTokenizer,
-                                  PreTrainedTokenizerFast)
+        from transformers import AutoModelForImageTextToText, PreTrainedTokenizerFast
         from transformers.models.auto.configuration_auto import CONFIG_MAPPING
     except ImportError as e:
         raise RuntimeError("LTX text encoding requires transformers>=5.4") from e
 
     path = Path(path).expanduser()
     cancel()
-    if path.is_dir():
-        config_file = path / "config.json"
-        if not config_file.is_file():
-            raise FileNotFoundError(
-                f"Missing LTX {version} text-encoder config: {config_file}. "
-                "For LTX 2.3 INT8 run: python scripts/download.py --model ltx23 "
-                "(downloads only missing assets; already present weights are skipped)."
-            )
-        config = json.loads(config_file.read_text())
-        if (version == "2.3" and config.get("model_type") != "gemma3") or (
-            version == "2.5" and config.get("model_type") != "gemma4_unified"
-        ):
-            raise ValueError(f"Wrong Gemma model type for LTX {version}: {config.get('model_type')!r}")
-        tokenizer = AutoTokenizer.from_pretrained(str(path), local_files_only=True)
-        quant_path = next(
-            (path / name for name in (
-                "gemma_3_12B_it-int8-convrot-simple.safetensors",
-                "gemma_3_12B_it_int8_convrot.safetensors",
-            ) if (path / name).is_file()),
-            None,
+    if not path.is_file() or path.suffix != ".safetensors":
+        raise ValueError(f"LTX {version} text encoder requires one existing .safetensors file: {path}")
+    if version == "2.3":
+        from transformers import Gemma3TextConfig, Gemma3TextModel, GemmaTokenizer
+        from thenoise.dit.quantized import replace_linears
+        from thenoise.utils.text_encoder import GEMMA3_LTX_CONFIG_DIR
+
+        vendor = Path(GEMMA3_LTX_CONFIG_DIR)
+        config = Gemma3TextConfig(**json.loads(
+            (vendor / "text_config.json").read_text(encoding="utf-8")
+        ))
+        tokenizer_path = vendor / "tokenizer.model"
+        if not tokenizer_path.is_file():
+            raise FileNotFoundError(f"LTX Gemma3 tokenizer is not bundled: {tokenizer_path}")
+        tokenizer = GemmaTokenizer(
+            vocab_file=str(tokenizer_path),
+            add_bos_token=True, add_eos_token=False,
         )
-        if version == "2.3" and quant_path is not None:
-            # The Comfy pack contains the Gemma text model only. The tokenizer
-            # and the config live next to it; we never download BF16 shards.
-            from transformers import AutoConfig, Gemma3TextModel
-            from thenoise.dit.quantized import replace_linears
-            hf_config = AutoConfig.from_pretrained(str(path), local_files_only=True)
-            with torch.device("meta"):
-                text = Gemma3TextModel(hf_config.text_config)
-                replace_linears(text)
-            _materialize_gemma3_constants(text)
-            wrapper = GemmaFeatures(text)
-            with MemoryEfficientSafeOpen(str(quant_path)) as f:
-                load_streamed_components(f, {"gemma": wrapper}, cancel=cancel,
-                        selector=_gemma3_key, dtype=torch.bfloat16)
-            return wrapper.eval(), tokenizer, hf_config.text_config
-        if not (path / "model.safetensors.index.json").exists() and not (
-                path / "model.safetensors").exists():
-            raise FileNotFoundError(
-                f"No Gemma {version} weights found in {path}: expected INT8 ConvRot "
-                "file or a complete BF16 HF model directory")
-        # BF16 remains supported explicitly; no `device_map=auto` bypass.
-        model = AutoModelForImageTextToText.from_pretrained(
-            str(path), dtype=torch.bfloat16, low_cpu_mem_usage=True,
-            local_files_only=True,
+        with torch.device("meta"):
+            model = Gemma3TextModel(config)
+            replace_linears(model)
+        _materialize_gemma3_constants(model)
+        wrapper = GemmaFeatures(model)
+        _load_ltx_text_weights(
+            wrapper, path, _gemma3_key,
+            ("spiece_model", "gemma3_12b.spiece_model", "tokenizer_json",
+             "gemma3_12b.tokenizer_json", "hf_asset__", "multi_modal_projector.",
+             "model.multi_modal_projector.", "gemma3_12b.multi_modal_projector.",
+             "vision_tower.", "model.vision_tower.", "gemma3_12b.vision_tower.",
+             "vision_model.", "model.vision_model.", "gemma3_12b.vision_model."),
         )
-        return GemmaFeatures(model.eval()), tokenizer, model.config.text_config
+        return wrapper.eval(), tokenizer, config
 
     if version != "2.5":
-        raise ValueError("LTX-2.3 expects an original Gemma-3 HF directory")
+        raise ValueError(f"unsupported LTX text encoder version: {version!r}")
     if path.suffix != ".safetensors":
-        raise ValueError("LTX-2.5 Gemma-4 must be a packed .safetensors file or a HF directory")
+        raise ValueError("LTX-2.5 Gemma-4 must be a packed .safetensors file")
     from tokenizers import Tokenizer
 
     with MemoryEfficientSafeOpen(str(path)) as f:
@@ -323,9 +324,13 @@ def load_ltx_gemma(path: str | Path, *, version: str, cancel):
         # layout, not guesses based on an HF release. Every other learned
         # tensor must match exactly before any heavy data is read.
         expected = set(wrapper.state_dict())
-        load_streamed_components(
-            f, {"gemma": wrapper}, cancel=cancel,
-            selector=lambda raw: _gemma4_key(raw, expected),
-            dtype=torch.bfloat16,
-        )
+        # The model file is closed before the common loader opens it for
+        # actual weight assignment. Only tokenizer/config parsing uses the
+        # model-specific asset reader above.
+    _load_ltx_text_weights(
+        wrapper, path, lambda raw: _gemma4_key(raw, expected),
+        ("tokenizer_json", "hf_asset__", "text_embedding_projection.",
+         "connectors.", "video_embeddings_connector.", "audio_embeddings_connector.",
+         "video_connector.", "audio_connector.", "lm_head.", "model.lm_head."),
+    )
     return wrapper.eval(), tokenizer, hf_config.text_config

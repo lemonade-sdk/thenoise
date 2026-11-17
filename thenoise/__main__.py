@@ -31,18 +31,18 @@ def _serve(args) -> None:
                 text_encoder_path=args.text_encoder,
                 lora_dir=args.lora_dir,
                 dit_low_path=args.dit_low,
-                ltx_audio_vae_path=args.ltx_audio_vae,
-                ltx_upscaler_path=args.ltx_upscaler,
-                ltx_text_projection_path=args.ltx_text_projection,
+                audio_vae_path=args.audio_vae,
+                spatial_upscaler_path=args.spatial_upscaler,
+                text_projection_path=args.text_projection,
             ),
         )
     elif any((
         args.vae,
         args.text_encoder,
         args.dit_low,
-        args.ltx_audio_vae,
-        args.ltx_upscaler,
-        args.ltx_text_projection,
+        args.audio_vae,
+        args.spatial_upscaler,
+        args.text_projection,
     )):
         raise SystemExit("serve: auxiliary model checkpoints require --dit")
 

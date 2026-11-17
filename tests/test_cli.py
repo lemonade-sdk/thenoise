@@ -50,13 +50,13 @@ def test_cli_serve_parses_model_paths_and_defaults(parse):
 
 
 def test_ltx_auxiliary_checkpoint_flags_are_explicit(parse):
-    paths = ["--ltx-audio-vae", "audio.safetensors", "--ltx-upscaler", "up.safetensors",
-             "--ltx-text-projection", "projection.safetensors"]
+    paths = ["--audio-vae", "audio.safetensors", "--spatial-upscaler", "up.safetensors",
+             "--text-projection", "projection.safetensors"]
     for command, extra in (("serve", []), ("video", ["--prompt", "a fox"])):
         args = parse([command, *PATHS, *paths, *extra])
-        assert args.ltx_audio_vae == "audio.safetensors"
-        assert args.ltx_upscaler == "up.safetensors"
-        assert args.ltx_text_projection == "projection.safetensors"
+        assert args.audio_vae == "audio.safetensors"
+        assert args.spatial_upscaler == "up.safetensors"
+        assert args.text_projection == "projection.safetensors"
 
 
 def test_cli_rejects_removed_flags(parse):

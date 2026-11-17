@@ -8,8 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from safetensors import safe_open
-from thenoise.utils.loader import load_streamed_components
+from thenoise.dit.ltx_video.checkpoint import load_ltx_component
 from safetensors.torch import save_file
 
 
@@ -54,10 +53,9 @@ def test_streamed_load_is_strict_and_materializes_parameters_and_buffers(tmp_pat
     data = {"net.weight": torch.ones(3, 2), "net.bias": torch.ones(3),
             "net.running": torch.full((3,), 5.)}
     path = _save(tmp_path / "okay.safetensors", data)
-    with safe_open(str(path), framework="pt", device="cpu") as f:
-        result = load_streamed_components(f, {"dit": model}, cancel=lambda: None,
-                           selector=m.split_ltx_key, dtype=torch.float32)
-    assert result == {"dit": {"weight", "bias", "running"}}
+    result = load_ltx_component(
+        "dit", model, {path: {"dit"}}, cancel=lambda: None, dtype=torch.float32)
+    assert result is model
     assert not any(x.is_meta for x in (*model.parameters(), *model.buffers()))
     torch.testing.assert_close(model(torch.ones(2)), torch.tensor([3., 3., 3.]))
     torch.testing.assert_close(model.running, torch.full((3,), 5.))
@@ -66,10 +64,9 @@ def test_streamed_load_is_strict_and_materializes_parameters_and_buffers(tmp_pat
     with torch.device("meta"):
         model = torch.nn.Linear(2, 3)
         model.register_buffer("running", torch.zeros(3))
-    with safe_open(str(path), framework="pt", device="cpu") as f:
-        with pytest.raises(ValueError, match="shape"):
-            load_streamed_components(f, {"dit": model}, cancel=lambda: None,
-                      selector=m.split_ltx_key, dtype=torch.float32)
+    with pytest.raises(ValueError, match="shape"):
+        load_ltx_component(
+            "dit", model, {path: {"dit"}}, cancel=lambda: None, dtype=torch.float32)
     assert model.weight.is_meta
 
 
@@ -85,18 +82,18 @@ def test_int8_requires_scale_and_comfy_quant_marker(tmp_path):
             self.weight = weight
 
     for missing in ("scale", "marker"):
-        data = {"net.weight": torch.ones(2, 4, dtype=torch.int8)}
+        data = {"net.layer.weight": torch.ones(2, 4, dtype=torch.int8)}
         if missing != "scale":
-            data["net.weight_scale"] = torch.tensor([.01, .01])
+            data["net.layer.weight_scale"] = torch.tensor([.01, .01])
         if missing != "marker":
-            data["net.comfy_quant"] = torch.tensor(
+            data["net.layer.comfy_quant"] = torch.tensor(
                 list(json.dumps({"convrot": True}).encode()), dtype=torch.uint8
             )
         path = _save(tmp_path / f"missing_{missing}.safetensors", data)
-        with safe_open(str(path), framework="pt", device="cpu") as f:
-            with pytest.raises(ValueError, match="INT8 ConvRot needs"):
-                load_streamed_components(f, {"dit": QuantLinear()}, cancel=lambda: None,
-                          selector=m.split_ltx_key, dtype=torch.bfloat16)
+        with pytest.raises(ValueError, match="requires a single"):
+            load_ltx_component(
+                "dit", torch.nn.ModuleDict({"layer": QuantLinear()}), {path: {"dit"}},
+                cancel=lambda: None, dtype=torch.bfloat16)
 
 
 def test_gemma3_wrapper_mapping_and_deterministic_meta_buffers():
@@ -135,7 +132,7 @@ def test_gemma3_wrapper_mapping_and_deterministic_meta_buffers():
     assert model.embed_tokens.weight.is_meta  # The learned weight must still load strictly.
 
 
-def test_denoise_scales_all_timesteps_and_marks_only_ltx25_first_frame():
+def test_denoise_scales_timesteps_and_does_not_mark_regular_frames():
     from thenoise.models.ltx_video import LTXVideo
 
     class RecordingDiT:
@@ -168,12 +165,9 @@ def test_denoise_scales_all_timesteps_and_marks_only_ltx25_first_frame():
         assert args["sigma"].item() == 750
         assert args["audio_sigma"].item() == 750
         assert args["audio_timestep"].item() == 750
-        marker = args["video_keyframes_mask"]
-        if version == "2.3":
-            assert marker is None
-        else:
-            assert marker.shape == (1, nv, 1)
-            assert marker.sum().item() == 6
+        # Plain T2V tokens and I2V reference latents are not standalone
+        # generated keyframe slots; only those slots receive a keyframe mask.
+        assert args["video_keyframes_mask"] is None
         if i2v:
             assert torch.all(args["timestep"][:, :6] == 0)
             assert torch.all(args["timestep"][:, 6:] == 750)
@@ -222,7 +216,6 @@ def test_native_ltx_audio_vae_checkpoint_layout_and_forward():
 
 def test_native_ltx_vocoder_short_audio_waveform_and_streaming(tmp_path):
     from thenoise.dit.ltx_video.vocoder import LTXVocoderWithBWE
-    from thenoise.utils.safetensors import MemoryEfficientSafeOpen
 
     cfg = dict(
         in_channels=8, hidden_channels=16, out_channels=2,
@@ -237,15 +230,15 @@ def test_native_ltx_vocoder_short_audio_waveform_and_streaming(tmp_path):
     )
     reference = LTXVocoderWithBWE(**cfg).eval()
     file = tmp_path / "vocoder.safetensors"
-    save_file({k: v.detach().contiguous() for k, v in reference.state_dict().items()}, str(file))
+    save_file({"vocoder." + k: v.detach().contiguous()
+               for k, v in reference.state_dict().items()}, str(file))
     with torch.device("meta"):
         candidate = LTXVocoderWithBWE(**cfg)
-    with MemoryEfficientSafeOpen(str(file)) as reader:
-        loaded = load_streamed_components(
-            reader, {"vocoder": candidate}, cancel=lambda: None,
-            selector=lambda key: ("vocoder", key), dtype=torch.float32,
+    loaded = load_ltx_component(
+            "vocoder", candidate, {file: {"audio_vae", "vocoder"}},
+            cancel=lambda: None, dtype=torch.float32,
         )
-    assert loaded == {"vocoder": set(reference.state_dict())}
+    assert loaded is candidate
     assert not any(p.is_meta for p in candidate.parameters())
     candidate.eval()
     mel = torch.randn(1, 2, 8, 4)
@@ -258,21 +251,20 @@ def test_native_ltx_vocoder_short_audio_waveform_and_streaming(tmp_path):
 
 def test_native_ltx_audio_vae_streams_full_weights(tmp_path):
     from thenoise.vae.ltx_audio import LTXAudioVAE
-    from thenoise.utils.safetensors import MemoryEfficientSafeOpen
 
     cfg = dict(base_channels=32, ch_mult=(1, 2), num_res_blocks=1,
                resolution=32, latent_channels=4, mel_bins=8)
     reference = LTXAudioVAE(**cfg).eval()
     file = tmp_path / "audio_vae.safetensors"
-    save_file({k: v.detach().contiguous() for k, v in reference.state_dict().items()}, str(file))
+    save_file({"audio_vae." + k: v.detach().contiguous()
+               for k, v in reference.state_dict().items()}, str(file))
     with torch.device("meta"):
         candidate = LTXAudioVAE(**cfg)
-    with MemoryEfficientSafeOpen(str(file)) as reader:
-        loaded = load_streamed_components(
-            reader, {"audio_vae": candidate}, cancel=lambda: None,
-            selector=lambda key: ("audio_vae", key), dtype=torch.float32,
+    loaded = load_ltx_component(
+            "audio_vae", candidate, {file: {"audio_vae", "vocoder"}},
+            cancel=lambda: None, dtype=torch.float32,
         )
-    assert loaded == {"audio_vae": set(reference.state_dict())}
+    assert loaded is candidate
     assert not any(t.is_meta for t in candidate.parameters())
     candidate.eval()
     latents = torch.randn(1, 4, 3, 8)
@@ -350,7 +342,7 @@ def test_split_connectors_are_complete_across_dit_and_text_file(tmp_path, monkey
     assert all(not t.is_meta for module in parts.values() for t in module.parameters())
 
     _save(path_text, {"text_embedding_projection.video_aggregate_embed.weight": weight})
-    with pytest.raises(ValueError, match="across component files: missing="):
+    with pytest.raises(ValueError, match="checkpoint missing="):
         load()
 
 
@@ -358,6 +350,7 @@ def test_ltx_variants_resolve_with_shared_video_contract_and_fixed_refinement():
     """Both released variants use VideoModel, sigma_steps and shared Segments."""
     from thenoise.models.config import VideoSamplingParams
     from thenoise.models.ltx_video import LTX23Video, LTX25Video
+    from thenoise.video.controller import VideoPipelineController
     from thenoise.video.spec import VideoSpec
 
     for model_cls in (LTX23Video, LTX25Video):
@@ -385,8 +378,8 @@ def test_ltx_variants_resolve_with_shared_video_contract_and_fixed_refinement():
 
         with pytest.raises(ValueError, match="steps=8"):
             model.resolve_video(VideoSpec(prompt="moving fox", steps=4))
-        with pytest.raises(ValueError, match="MP4"):
-            model.resolve_video(VideoSpec(prompt="moving fox", output_format="webm"))
+        with pytest.raises(ValueError, match="mp4"):
+            VideoPipelineController(model).resolve(VideoSpec(prompt="moving fox", output_format="webm"))
 
 def test_native_ltx_spatial_upscaler_weights_and_forward():
     """x2 spatial, temporal length unchanged, original checkpoint state names."""
@@ -416,8 +409,6 @@ def test_native_ltx_spatial_upscaler_weights_and_forward():
 def test_native_ltx_spatial_upscaler_streams_original_checkpoint_keys(tmp_path):
     """Shared streaming loader must materialize exactly the native parameter keys."""
     from thenoise.dit.ltx_video.upscaler import LTXSpatialUpscaler
-    from thenoise.utils.loader import load_streamed_components
-    from thenoise.utils.safetensors import MemoryEfficientSafeOpen
 
     source = LTXSpatialUpscaler(in_channels=8, mid_channels=32, num_blocks_per_stage=1).eval()
     weights = {key: tensor.detach().contiguous() for key, tensor in source.state_dict().items()}
@@ -426,14 +417,43 @@ def test_native_ltx_spatial_upscaler_streams_original_checkpoint_keys(tmp_path):
 
     with torch.device("meta"):
         target = LTXSpatialUpscaler(in_channels=8, mid_channels=32, num_blocks_per_stage=1)
-    with MemoryEfficientSafeOpen(str(checkpoint)) as reader:
-        loaded = load_streamed_components(
-            reader, {"upscaler": target}, cancel=lambda: None,
-            selector=lambda key: ("upscaler", key), dtype=torch.float32,
+    loaded = load_ltx_component(
+            "upscaler", target, {checkpoint: {"upscaler"}},
+            cancel=lambda: None, dtype=torch.float32,
         )
-    assert loaded == {"upscaler": set(weights)}
+    assert loaded is target
     assert all(not param.is_meta for param in target.parameters())
     target.eval()
     sample = torch.randn(1, 8, 2, 4, 4)
     with torch.no_grad():
         torch.testing.assert_close(target(sample), source(sample))
+
+
+def test_ltx_gemma3_requires_single_safetensors_file(tmp_path):
+    from thenoise.text_encoders.ltx_video import load_ltx_gemma
+    with pytest.raises(ValueError, match="one existing"):
+        load_ltx_gemma(tmp_path, version="2.3", cancel=lambda: None)
+    with pytest.raises(ValueError, match="one existing"):
+        load_ltx_gemma(tmp_path / "model-00001-of-00005.safetensors",
+                       version="2.3", cancel=lambda: None)
+
+
+def test_ltx_gemma3_vendored_minimal_assets():
+    from transformers import GemmaTokenizer
+    from thenoise.utils.text_encoder import GEMMA3_LTX_CONFIG_DIR
+    from pathlib import Path
+    import json
+    assets = Path(GEMMA3_LTX_CONFIG_DIR)
+    cfg = json.loads((assets / "text_config.json").read_text())
+    assert cfg["hidden_size"] == 3840 and cfg["num_hidden_layers"] == 48
+    assert cfg["rope_scaling"] == {"factor": 8.0, "rope_type": "linear"}
+    tokenizer = GemmaTokenizer(vocab_file=str(assets / "tokenizer.model"),
+                               add_bos_token=True, add_eos_token=False)
+    assert tokenizer("A red fox")["input_ids"][0] == tokenizer.bos_token_id
+
+
+def test_ltx_auxiliary_path_roles_and_lora_contract():
+    from thenoise.models.ltx_video import LTXVideo
+    assert LTXVideo.AUXILIARY_PATHS == (
+        "audio_vae_path", "spatial_upscaler_path", "text_projection_path")
+    assert LTXVideo.lora_components(object()) == {}

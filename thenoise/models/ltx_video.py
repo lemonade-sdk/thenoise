@@ -82,18 +82,12 @@ class _PromptTower(nn.Module):
         return self.connectors(hidden, mask, padding_side="left")
 
 
-class _GroupOffloadedMarker(nn.Module):
-    """The stage's residency marker when the actual 22B DiT is block-offloaded."""
-
-    def __init__(self, device):
-        super().__init__()
-        self.register_buffer("device_marker", torch.empty(1, device=device))
-
-
 class LTXVideo(VideoModel):
     """A shared LTX2.x kernel adapter with explicit 2.3/2.5 checkpoint differences."""
 
     version: ClassVar[str]
+    AUXILIARY_PATHS: ClassVar[tuple[str, ...]] = (
+        "audio_vae_path", "spatial_upscaler_path", "text_projection_path")
     CAPABILITIES = {**VideoModel.CAPABILITIES, "upscale": False,
                     "video": {"t2v": True, "i2v": True, "flf2v": False}}
     DEFAULT_PREFS = {
@@ -115,33 +109,25 @@ class LTXVideo(VideoModel):
 
     def __init__(self, *, config):
         super().__init__(config=config)
-        dit = Path(self.dit_path).expanduser()
-        vae = Path(self.vae_path).expanduser()
         self._ref_low = None
         self._ref_high = None
         self._pass = 1
         self._params: VideoSamplingParams | None = None
-        self._group_offloaded = False
-        self._block_offloader = None
 
         # Required auxiliary weights are explicit CLI paths. Neither the download
         # directory layout nor the checkpoint basename is an architecture hint.
-        self.audio_vae_path = (Path(config.ltx_audio_vae_path).expanduser()
-                               if config.ltx_audio_vae_path else None)
-        self.upscaler_path = (Path(config.ltx_upscaler_path).expanduser()
-                              if config.ltx_upscaler_path else None)
-        self.text_projection_path = (Path(config.ltx_text_projection_path).expanduser()
-                                     if config.ltx_text_projection_path else None)
+        self.audio_vae_path = (Path(config.audio_vae_path).expanduser()
+                               if config.audio_vae_path else None)
+        self.upscaler_path = (Path(config.spatial_upscaler_path).expanduser()
+                              if config.spatial_upscaler_path else None)
+        self.text_projection_path = (Path(config.text_projection_path).expanduser()
+                                     if config.text_projection_path else None)
         if self.audio_vae_path is None:
-            if self.version == VERSION_23 and dit.resolve() == vae.resolve():
-                self.audio_vae_path = dit  # The explicitly passed BF16 monolith.
-            else:
-                raise ValueError("LTX requires --ltx-audio-vae PATH")
+            raise ValueError("LTX requires --audio-vae PATH")
         if self.upscaler_path is None:
-            raise ValueError("LTX requires --ltx-upscaler PATH")
-        if (self.version == VERSION_23 and dit.resolve() != vae.resolve()
-                and self.text_projection_path is None):
-            raise ValueError("LTX 2.3 split checkpoints require --ltx-text-projection PATH")
+            raise ValueError("LTX requires --spatial-upscaler PATH")
+        # The strict LTX connector loader diagnoses any missing projection.
+        # Do not infer its presence from whether --dit and --vae name one file.
         if self.version == VERSION_25 and self.text_projection_path is not None:
             raise ValueError("LTX 2.5 text projections already belong to --text-encoder")
         required = [self.audio_vae_path, self.upscaler_path]
@@ -160,46 +146,30 @@ class LTXVideo(VideoModel):
             cancel=lambda: None, text_encoder_path=self.text_encoder_path,
             text_projection_path=self.text_projection_path,
         )
-        self.dit = components["dit"]
-        self.vae = components["vae"]
-        self.audio_vae = components["audio_vae"]
+        # Same admission policy as all other model adapters: consult the
+        # shared memory manager before placing each independently swappable role.
+        # Connectors are part of the text-encoder residency role, not the DiT.
+        self.dit = components["dit"].to(self._load_target(self.dit_path))
+        self.vae = components["vae"].to(self._load_target(self.vae_path))
+        self.audio_vae = components["audio_vae"].to(self._load_target(str(self.audio_vae_path)))
         self.vocoder = components["vocoder"]
-        self.upscaler = components["upscaler"]
+        self.upscaler = components["upscaler"].to(self._load_target(str(self.upscaler_path)))
         self.text_encoder = _PromptTower(gemma, components["connectors"])
+        self.text_encoder.to(self._load_target(self.text_encoder_path))
+        self.vocoder.to(self._load_target(str(self.audio_vae_path)))
         for role in ("vae", "audio_vae", "vocoder", "upscaler", "text_encoder"):
             self.memory.register(role, getattr(self, role))
         self.memory.register("dit", self.dit)
-        self._enable_block_offload_if_needed()
-        logger.info("LTX %s loaded through VideoModel + MemoryManager", self.version)
-
-    def _enable_block_offload_if_needed(self):
-        """Avoid moving a 44 GiB BF16 DiT into a 32 GiB accelerator."""
-        device = torch.device(self.device)
-        if device.type != "cuda" or not self.memory.offloads or not torch.cuda.is_available():
-            return
-        free, _total = torch.cuda.mem_get_info(device)
-        size = self.memory.weight_bytes("dit")
-        if free >= size + (4 << 30):
-            return
-        from thenoise.dit.ltx_video.offload import LTXBlockOffload
-        self._block_offloader = LTXBlockOffload(
-            self.dit, onload_device=device, offload_device=self.offload_device,
-        )
-        self._group_offloaded = True
-        self.memory.register("dit", _GroupOffloadedMarker(device))
-        logger.info("LTX transformer %.1f GiB: block CPU-offload", size / (1 << 30))
+        logger.info("LTX %s loaded with shared MemoryManager residency", self.version)
 
     def _create_upscaler(self):
         raise NotImplementedError("LTX uses an internal AV refinement stage")
 
     def lora_components(self) -> dict[str, nn.Module]:
-        return {"dit": self.dit}
+        # Not enabled/tested for LTX: let the shared LoRA role checker reject it.
+        return {}
 
     def _clear_weights(self):
-        guard = getattr(self, "_block_offloader", None)
-        if guard is not None:
-            guard.close()  # Drop hooks and restore CPU masters before unloading.
-            self._block_offloader = None
         self.dit = self.vae = self.text_encoder = self.tokenizer = None
         self.audio_vae = self.vocoder = self.upscaler = None
         self.clear_video_state()
@@ -223,20 +193,14 @@ class LTXVideo(VideoModel):
 
     def resolve_video(self, spec: VideoSpec) -> ResolvedVideo:
         r = super().resolve_video(spec)
-        if r.image is None and r.end_image is not None:
-            raise ValueError("end_image requires image")
-        if r.end_image is not None:
-            raise ValueError("LTX does not support end_image / FLF2V")
-        if r.lora_specs:
-            raise ValueError("LTX runtime LoRAs are not yet supported")
+        # Mode/LoRA support is validated by the shared controller.
         if r.steps != 8:
             raise ValueError("LTX distilled checkpoints require steps=8 (plus 3 refine steps)")
         if r.guidance_scale != 1.0 or r.negative_prompt:
             raise ValueError("LTX distilled requires guidance_scale=1 and no negative_prompt")
         if r.sampler not in ("euler", "native"):
             raise ValueError("LTX distilled supports the Euler solver (sampler=euler)")
-        if r.output_format != "mp4":
-            raise ValueError("LTX AV output requires MP4")
+        # The shared controller validates audio container compatibility.
         return dataclasses.replace(r, sampler="euler",
                                    frame_count=frame_grid(r.frame_count,
                                                           explicit=r.explicit_frames))
@@ -246,8 +210,20 @@ class LTXVideo(VideoModel):
         self.tokenizer.padding_side = "left"
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        encoded = self.tokenizer([args.prompt.strip()], padding="max_length",
-                                 truncation=True, max_length=1024, return_tensors="pt")
+        encoded = self.tokenizer(
+            args.prompt.strip(), padding=False, truncation=True,
+            max_length=1024, return_tensors="pt",
+        )
+        bos_id = self.tokenizer.bos_token_id
+        if bos_id is None:
+            raise ValueError("LTX Gemma tokenizer has no BOS token")
+        ids = encoded.input_ids[0].tolist()
+        if not ids or ids[0] != bos_id:
+            ids = [bos_id, *ids][:1024]
+        encoded = self.tokenizer.pad(
+            {"input_ids": [ids]}, padding="max_length", max_length=1024,
+            return_tensors="pt", return_attention_mask=True,
+        )
         v, a, mask = self.text_encoder(
             encoded.input_ids.to(self.device), encoded.attention_mask.to(self.device)
         )
@@ -378,12 +354,7 @@ class LTXVideo(VideoModel):
             audio_sigma=scaled_t,
             num_frames=lt, height=h, width=w, fps=params.fps,
             audio_num_frames=audio.shape[1],
-            # LTX 2.5 marks the causal first latent frame, with or without I2V.
-            video_keyframes_mask=(
-                (torch.arange(nv, device=video.device) < h * w)[None, :, None]
-                .expand(video.shape[0], -1, -1)
-                if self.version == VERSION_25 else None
-            ),
+            video_keyframes_mask=None,
             use_cross_timestep=True, return_dict=False,
         )
         if mask is not None:
