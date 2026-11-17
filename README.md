@@ -48,7 +48,7 @@ TheNoise ships:
 | Model | Generate | Edit | Details |
 |---|---|---|---|
 | **Anima**, small and fast | ✓ | — | [anima](docs/models/anima.md) |
-| **Krea 2**, highest image quality | ✓ | — | [krea2](docs/models/krea2.md) |
+| **Krea 2**, highest image quality | ✓ | vision | [krea2](docs/models/krea2.md) |
 | **Qwen-Image 2.1**, generation and editing in one model | ✓ | ✓ | [qwen-image-2.1](docs/models/qwen-image-2.1.md) |
 | **MOSS-Image**, joint-stream DiT with a Qwen3.5 conditioner | ✓ | vision | [moss-image](docs/models/moss-image.md) |
 | **Z-Image / Z-Image-Turbo**, quality at 8 steps | ✓ | — | [zimage](docs/models/zimage.md) |

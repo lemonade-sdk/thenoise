@@ -29,7 +29,7 @@ from thenoise.models.base import (
 )
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
-from thenoise.utils.image_tensor import ReferenceSizing, flatten_alpha
+from thenoise.utils.image_tensor import ReferenceSizing
 from thenoise.utils.math import round_up
 from thenoise.vae import load_flux2_vae
 
@@ -114,19 +114,12 @@ class MossImageModel(DiffusionModel):
         A reference is shown to the vision tower from here. Both branches see it, 
         so the guidance direction stays about the words rather than about the image.
         """
-        images = self._reference_images(args)
+        images = self.conditioned_images(args)
         cond = self.text_encoder(args.prompt, images)
         null = None
         if args.guidance_scale > 1.0:
             null = self.text_encoder(args.negative_prompt, images)
         return Conditioning(cond=cond, null=null)
-
-    def _reference_images(self, args: EncodePromptArgs) -> list:
-        """``args.image``, single or list, as the vision tower wants it: RGB, fitted."""
-        if args.image is None:
-            return []
-        images = args.image if isinstance(args.image, list) else [args.image]
-        return [flatten_alpha(self.prepare_reference(image)) for image in images]
 
     def init_latents(self, params: SamplingParams) -> torch.Tensor:
         dev = torch.device(self.device)

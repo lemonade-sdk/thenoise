@@ -60,8 +60,10 @@ class Flux3Model(DiffusionModel):
     # Reference-latent editing, no KV cache (see the module docstring).
     CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": False,
                     "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
-    # Qwen3-VL-4B carries a vision tower, but this conditioner reads the language taps
-    # only, so a reference has nowhere to be read: latent methods until it is wired.
+    # Qwen3-VL-4B carries a vision tower, but it is not run: ``Flux3TextEncoder``
+    # takes a prompt alone, and it has no way to know whether the run resolved
+    # ``vision`` or a latent method. Offering the method would therefore start running
+    # the tower on ordinary edits — so it stays latent-only until the encoder is told.
     REF_METHODS = LATENT_REF_METHODS
 
     # The DiT fuses q/k/v even where the checkpoint does not; a LoRA trained on the

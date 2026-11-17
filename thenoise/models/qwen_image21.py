@@ -42,7 +42,7 @@ from thenoise.models.base import (
 )
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, Qwen21TranscodeUpscaler
-from thenoise.utils.image_tensor import flatten_alpha, ReferenceSizing
+from thenoise.utils.image_tensor import ReferenceSizing
 from thenoise.utils.lora import FUSE_GATE_UP
 from thenoise.utils.math import round_up
 from thenoise.vae import load_wan22_vae
@@ -126,25 +126,13 @@ class QwenImage21Model(DiffusionModel):
         logger.info("Qwen-Image 2.1 model ready on %s (%s)", config.device, config.dtype)
 
     # ------------------------------------------------------------ kernels
-    def _encoder_images(self, args: EncodePromptArgs) -> Optional[list]:
-        """``args.image`` (single or list) as RGB, at the size the VAE sees.
-
-        An alpha is composited onto white: the vision tower takes RGB only.
-        """
-        if args.image is None:
-            return None
-        images = args.image if isinstance(args.image, list) else [args.image]
-        if not images:
-            return None
-        return [flatten_alpha(self.prepare_reference(img)) for img in images]
-
     def encode_prompt(self, args: EncodePromptArgs) -> Conditioning:
         """Prompt (and, when editing, the references) -> embeddings + image slots.
 
         One prompt at a time needs no padding, so there is no attention mask: the
         DiT splices the reference latents into the vision tokens' places.
         """
-        images = self._encoder_images(args)
+        images = self.conditioned_images(args)
         cond, cond_slots = self.text_encoder(args.prompt, images)
         null = null_slots = None
         if args.guidance_scale > 1.0:

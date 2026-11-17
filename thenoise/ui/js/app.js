@@ -228,6 +228,16 @@ async function applyModelState() {
   kv.disabled = !hasKvCache;
   if (!hasKvCache) kv.value = '';
   kv.title = hasKvCache ? '' : 'the loaded model has no reference-latent KV cache';
+  // The ways a model can use a reference are the model's own: one way and there is
+  // nothing to choose, and offering a method it lacks would only earn a refusal.
+  const method = $('edit_ref_method');
+  const methods = caps.ref_methods || [];
+  const picked = method.value;
+  method.replaceChildren(new Option('auto', ''), ...methods.map((m) => new Option(m, m)));
+  method.value = methods.includes(picked) ? picked : '';
+  method.disabled = methods.length < 2;
+  method.title = method.disabled
+    ? 'the loaded model has only one way with a reference' : '';
   // The I2V initial frame exists only when the loaded variant can condition on one.
   $('video_i2v_field').classList.toggle('hidden', !video?.i2v);
   // A last frame needs a reference that carries a mask to name it with.

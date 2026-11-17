@@ -90,8 +90,8 @@ class _Recorder:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, prompts):
-        self.calls.append(list(prompts))
+    def __call__(self, prompts, images=None):
+        self.calls.append((list(prompts), list(images or ())))
         batch = len(prompts)
         # (B, seq, L, D) with a fully-valid mask (gather is then a no-op).
         txt = torch.arange(batch * 4 * 1 * 2, dtype=torch.float32).reshape(batch, 4, 1, 2)
@@ -103,16 +103,24 @@ def test_krea2_encode_prompts_encodes_the_unconditional_branch_only_when_cfg():
     enc = _Recorder()
     txt, txtmask, untxt, untxtmask = encode_prompts(enc, ["a", "b"], cfg=True)
     # No negatives given -> a batch of empty prompts, shaped like the conditional one.
-    assert enc.calls == [["a", "b"], ["", ""]]
+    assert enc.calls == [(["a", "b"], []), (["", ""], [])]
     assert untxt.shape == txt.shape and untxtmask.shape == txtmask.shape
 
     enc = _Recorder()
     encode_prompts(enc, ["a"], negative_prompts=["bad"], cfg=True)
-    assert enc.calls == [["a"], ["bad"]]
+    assert enc.calls == [(["a"], []), (["bad"], [])]
+
+
+def test_a_reference_is_encoded_into_both_branches():
+    """Guidance asks about the words, so the branch that has none still sees the
+    picture; an unseen reference would be what the two branches differ about."""
+    enc = _Recorder()
+    encode_prompts(enc, ["a"], ["bad"], cfg=True, images=["a picture"])
+    assert enc.calls == [(["a"], ["a picture"]), (["bad"], ["a picture"])]
 
     enc = _Recorder()
     assert encode_prompts(enc, ["a"], cfg=False)[2] is None
-    assert enc.calls == [["a"]]
+    assert enc.calls == [(["a"], [])]
 
 
 # ------------------------------------------------------------------ anima utils

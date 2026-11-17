@@ -177,26 +177,29 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
     assert model.percent_to_sigma(1.0) == 0.0
 
 
-@pytest.mark.parametrize(
-    "model_cls,i2i,ref_methods,kv_cache",
-    [
-        (AnimaModel, False, (), False),
-        (Krea2Model, False, (), False),
-        (ZImageModel, False, (), False),
-        (MingImageModel, False, (), False),
-        (FluxKleinModel, True, LATENT_REF_METHODS, True),
-        (Flux3Model, True, LATENT_REF_METHODS, False),
-        (H3ImageModel, True, ("index_timestep_zero", VISION_REF_METHOD), True),
-        (MageFlowModel, True, LATENT_REF_METHODS + (VISION_REF_METHOD,), False),
-        (QwenImageModel, True, LATENT_REF_METHODS + (VISION_REF_METHOD,), True),
-        (QwenImage21Model, True, LATENT_REF_METHODS + (VISION_REF_METHOD,), True),
-        (MossImageModel, True, (VISION_REF_METHOD,), False),
-        (Fibo2Model, True, ("index_timestep_zero", VISION_REF_METHOD), True),
-    ],
-    ids=IMAGE_CATALOG_IDS,
-)
-def test_image_model_capabilities_describe_the_adapter(model_cls, i2i, ref_methods,
-                                                       kv_cache):
+# Keyed by adapter name and parametrized over the catalog's own ids, so a row can
+# never be reported under another model's name — and a model added to the catalog
+# fails this test by having no entry rather than by shifting the ones after it.
+IMAGE_CAPABILITY_EXPECTATIONS = {
+    "anima": (False, (), False),
+    "krea2": (True, (VISION_REF_METHOD,), False),
+    "zimage": (False, (), False),
+    "ming_image": (False, (), False),
+    "flux_klein": (True, LATENT_REF_METHODS, True),
+    "flux3": (True, LATENT_REF_METHODS, False),
+    "h3_image": (True, ("index_timestep_zero", VISION_REF_METHOD), True),
+    "mage_flow": (True, LATENT_REF_METHODS + (VISION_REF_METHOD,), False),
+    "qwen_image": (True, LATENT_REF_METHODS + (VISION_REF_METHOD,), True),
+    "qwen_image21": (True, LATENT_REF_METHODS + (VISION_REF_METHOD,), True),
+    "moss_image": (True, (VISION_REF_METHOD,), False),
+    "fibo2": (True, ("index_timestep_zero", VISION_REF_METHOD), True),
+}
+
+
+@pytest.mark.parametrize("name", IMAGE_CATALOG_IDS)
+def test_image_model_capabilities_describe_the_adapter(name):
+    model_cls = {cls.name: cls for cls in IMAGE_CATALOG}[name]
+    i2i, ref_methods, kv_cache = IMAGE_CAPABILITY_EXPECTATIONS[name]
     """``CAPABILITIES`` and ``REF_METHODS`` must describe the adapter: the pipeline
     rejects what the model cannot serve and ``/health`` lets the UI grey it out.
 

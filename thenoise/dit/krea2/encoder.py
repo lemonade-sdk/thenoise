@@ -12,10 +12,11 @@ layout.
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
 
 import torch
 from torch import Tensor
+from PIL import Image
 
 from thenoise.utils.text_encoder import (
     QWEN25_TOKENIZER_CONFIG_DIR,
@@ -24,7 +25,9 @@ from thenoise.utils.text_encoder import (
     QWEN_VL_PROMPT_SUFFIX,
     QWEN_VL_SYSTEM_PROMPT,
     load_qwen3_vl_model,
+    load_qwen3_vl_processor,
     load_qwen3_vl_tokenizer,
+    prompt_with_pictures,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,7 +65,12 @@ def load_qwen3_vl_conditioner(
     tokenizer, processor = load_qwen3_vl_tokenizer(
         tokenizer_dir, max_length=max_length, overrides=QWEN3_VL_TOKENIZER_OVERRIDES
     )
-    conditioner = Qwen3VLConditioner(qwen, tokenizer, processor, max_length=max_length, select_layers=select_layers)
+    # The tokenizer came back twice; the model is shown a picture through a real
+    # processor, which tokenizes text exactly as the tokenizer does.
+    conditioner = Qwen3VLConditioner(
+        qwen, tokenizer, load_qwen3_vl_processor(tokenizer),
+        max_length=max_length, select_layers=select_layers,
+    )
     return conditioner
 
 
@@ -86,9 +94,28 @@ class Qwen3VLConditioner(torch.nn.Module):
         self.prompt_template_encode_start_idx = QWEN_VL_DROP_IDX
         self.prompt_template_encode_suffix_start_idx = 5
 
-    def forward(self, text: list[str]) -> tuple[Tensor, Tensor]:
+    @property
+    def dtype(self) -> torch.dtype:
+        return next(self.qwen.parameters()).dtype
+
+    def forward(self, text: list[str],
+                images: Optional[Sequence[Image.Image]] = None) -> tuple[Tensor, Tensor]:
+        """Prompts -> ``(hiddens, mask)``, the selected layers stacked behind dim 2.
+
+        ``images`` are shown to every prompt in the call, which is how a reference
+        reaches both CFG branches: guidance then points at the words rather than at
+        the picture. Krea 2 has no reference-latent path, so this conditioner sees a
+        picture only when the run was asked to read one.
+        """
+        images = [] if images is None else list(images)
+        if images and len(text) > 1:
+            raise ValueError("a picture is shown to one prompt at a time")
         prefix_idx = self.prompt_template_encode_start_idx
-        text = [self.prompt_template_encode_prefix + item for item in text]
+        text = [
+            self.prompt_template_encode_prefix
+            + (prompt_with_pictures(item, len(images)) if images else item)
+            for item in text
+        ]
         suffix_text = [self.prompt_template_encode_suffix] * len(text)
         suffix_inputs = self.processor(text=suffix_text, return_tensors="pt").to(self.qwen.device, non_blocking=True)
         suffix_ids, suffix_mask = (
@@ -96,18 +123,41 @@ class Qwen3VLConditioner(torch.nn.Module):
             suffix_inputs["attention_mask"].bool(),
         )
 
-        inputs = self.tokenizer(
-            text,
-            truncation=True,
-            return_length=False,
-            return_overflowing_tokens=False,
-            padding="max_length",
-            max_length=self.max_length + prefix_idx - self.prompt_template_encode_suffix_start_idx,
-            return_tensors="pt",
-        ).to(self.qwen.device, non_blocking=True)
+        padded = self.max_length + prefix_idx - self.prompt_template_encode_suffix_start_idx
+        if images:
+            # Not truncated: a cut placeholder run would leave fewer tokens than the
+            # vision tower has features for. The reference is pre-fitted, so its
+            # placeholders are bounded, and padding past them is dropped downstream.
+            inputs = self.processor(
+                text=text,
+                images=images,
+                padding="max_length",
+                max_length=padded,
+                return_tensors="pt",
+            )
+        else:
+            inputs = self.tokenizer(
+                text,
+                truncation=True,
+                return_length=False,
+                return_overflowing_tokens=False,
+                padding="max_length",
+                max_length=padded,
+                return_tensors="pt",
+            )
+        inputs = inputs.to(self.qwen.device, non_blocking=True)
         input_ids = torch.cat([inputs["input_ids"], suffix_ids], dim=1)
         mask = torch.cat([inputs["attention_mask"].bool(), suffix_mask], dim=1)
-        states = self.qwen.model(input_ids=input_ids, attention_mask=mask, output_hidden_states=True)
+
+        model_inputs = {"input_ids": input_ids, "attention_mask": mask,
+                        "output_hidden_states": True}
+        if images:
+            model_inputs["pixel_values"] = inputs["pixel_values"].to(self.dtype)
+            model_inputs["image_grid_thw"] = inputs["image_grid_thw"]
+            # M-RoPE places the vision spans; the suffix appended after them is text.
+            model_inputs["mm_token_type_ids"] = torch.cat(
+                [inputs["mm_token_type_ids"], torch.zeros_like(suffix_ids)], dim=1)
+        states = self.qwen.model(**model_inputs)
 
         hiddens = torch.stack([states.hidden_states[i] for i in self.select_layers], dim=2)
         hiddens = hiddens[:, prefix_idx:]

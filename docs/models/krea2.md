@@ -8,6 +8,8 @@ Halo depending on quantization, and a ~35 GB download, but the results are the
 reason people run TheNoise at all.
 
 - Text-to-image (Turbo and RAW checkpoints)
+- A reference read by the conditioner's vision tower (`--ref-method vision`):
+  the single-stream DiT carries no reference tokens, so nothing is repainted
 - Built-in defaults: **8 steps, guidance 1.0** (CFG off)
 - int8-convrot variant available (faster generation, lower memory)
 
@@ -23,7 +25,7 @@ reason people run TheNoise at all.
 | Download size | ~35 GB (Turbo + VAE + text encoder, bf16) |
 | VAE | Qwen-Image VAE |
 | Text encoder | Qwen3-VL-4B |
-| Editing | — |
+| Reference | `vision` only — it reaches the DiT as conditioner tokens, never as a latent |
 | KV cache | — |
 | Default settings | 1024×1024, 8 steps, guidance 1.0 |
 
@@ -93,6 +95,26 @@ Serve over HTTP with the web UI (open <http://localhost:8000/>):
   --text-encoder ./models/krea2/text_encoders/qwen3vl_4b_bf16.safetensors \
   --host 127.0.0.1 --port 8000
 ```
+
+## Reading a reference (`vision`)
+
+Krea 2's DiT has no way to carry reference tokens, so a picture cannot be edited here.
+What it can do is be *shown* one: the Qwen3-VL conditioner it already uses has a vision
+tower, and the run conditions on whatever that makes of the picture.
+
+```bash
+./thenoise.sh edit \
+  --dit ./models/krea2/diffusion_models/krea2_turbo_bf16.safetensors \
+  --vae ./models/krea2/vae/qwen_image_vae.safetensors \
+  --text-encoder ./models/krea2/text_encoders/qwen3vl_4b_bf16.safetensors \
+  --image ./palette.png --prompt "a lighthouse on a cliff at dusk"
+```
+
+Each picture is scaled to a 384² area before the tower sees it, which costs about 144 of
+the conditioner's 512-token window: enough for a subject, a palette and a mood, not for
+detail or alignment. Any number of them fits alongside a short prompt. The release never
+trained this model on a reference, so treat it as steering input — and note that its
+default guidance is 1.0, so there is no second branch for the picture to sit in.
 
 For every flag (size, steps, seed, LoRAs, upscaling, post-processing), see the
 [CLI reference](../cli.md) and the [HTTP API reference](../api.md).

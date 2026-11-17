@@ -29,7 +29,7 @@ from thenoise.models.lora_support import LoRASupport
 from thenoise.utils.device_patches import apply_device_patches
 from thenoise.utils.dynamo import apply_recompile_limit
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
-from thenoise.utils.image_tensor import ReferenceSizing
+from thenoise.utils.image_tensor import ReferenceSizing, flatten_alpha
 from thenoise.samplers import Step
 from thenoise.upscale import LatentUpscaler
 
@@ -361,6 +361,19 @@ class DiffusionModel(LoRASupport, ABC):
         for pixel overrides this to put that reference on the canvas's own grid.
         """
         return [self.prepare_reference(img) for img in images]
+
+    def conditioned_images(self, args: EncodePromptArgs) -> List[Image.Image]:
+        """``args.image``, single or several, as a conditioner that reads pictures
+        wants them: RGB, and fitted the way this model fits any reference.
+
+        The alpha is composited because a vision tower takes three channels; the fit is
+        the one in :meth:`prepare_reference`, so a model shows its conditioner the same
+        pixels it would hand its VAE.
+        """
+        if args.image is None:
+            return []
+        images = args.image if isinstance(args.image, list) else [args.image]
+        return [flatten_alpha(self.prepare_reference(image)) for image in images]
 
     def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
         """Encode input pixels (``[C,H,W]`` in [-1, 1]) into the canonical latent."""
