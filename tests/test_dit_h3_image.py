@@ -11,13 +11,12 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from conftest import write_safetensors
+from conftest import TINY_HIDDEN, TINY_LAYERS, tiny_qwen_config, write_safetensors
 from thenoise.dit.h3_image import sampling
 from thenoise.dit.kvcache import KVCache
 from thenoise.dit.h3_image.encoder import (
     _truncate_qwen3_vl,
     layer_count,
-    prompt_with_pictures,
     vision_token_tags,
 )
 from thenoise.dit.h3_image.layout import Layout, frame_grid, pad_to_patch
@@ -503,12 +502,6 @@ def test_percent_to_sigma_spans_the_endpoints():
 # --------------------------------------------------------------- presentation
 
 
-def test_references_are_labelled_in_prompt_order():
-    text = prompt_with_pictures("swap the hat", 2)
-    assert text.index("Picture 1: ") < text.index("Picture 2: ") < text.index("swap the hat")
-    assert prompt_with_pictures("a fox", 0) == "a fox"
-
-
 def test_vision_token_tags_cover_the_markers_framing_the_pictures():
     """A picture's span is its patches *and* the two markers around them."""
     image_pad, frame = 151655, 151652
@@ -527,35 +520,6 @@ def test_a_prompt_without_pictures_is_all_text():
 # types the truncated model asks for, and the sequence the DiT modulates being the one
 # that was embedded.
 
-TINY_HIDDEN = 64
-TINY_LAYERS = 5
-
-
-def _tiny_qwen_config():
-    """The vendored 32B conditioner config at a width a CPU test can afford. Reduced rather
-    than written out, so it cannot drift from the release's own fields.
-    """
-    import copy
-
-    from transformers import Qwen3VLConfig
-
-    from thenoise.utils.qwen_configs import QWEN3_VL_32B_H3_CONFIG
-
-    config = Qwen3VLConfig.from_dict(copy.deepcopy(QWEN3_VL_32B_H3_CONFIG))
-    for name, value in {
-        "hidden_size": TINY_HIDDEN, "num_hidden_layers": TINY_LAYERS,
-        "num_attention_heads": 4, "num_key_value_heads": 2,
-        "intermediate_size": 128, "max_position_embeddings": 4096,
-    }.items():
-        setattr(config.text_config, name, value)
-    for name, value in {
-        "depth": 2, "hidden_size": 32, "intermediate_size": 64, "num_heads": 2,
-        "out_hidden_size": TINY_HIDDEN,
-    }.items():
-        setattr(config.vision_config, name, value)
-    return config
-
-
 @pytest.fixture(scope="module")
 def tiny_conditioner():
     from PIL import Image
@@ -568,7 +532,7 @@ def tiny_conditioner():
         load_qwen3_vl_tokenizer,
     )
 
-    model = _truncate_qwen3_vl(_tiny_qwen_config(), 2).eval().requires_grad_(False)
+    model = _truncate_qwen3_vl(tiny_qwen_config(), 2).eval().requires_grad_(False)
     tokenizer, _ = load_qwen3_vl_tokenizer(
         QWEN25_TOKENIZER_CONFIG_DIR,
         max_length=4096,
@@ -580,7 +544,7 @@ def tiny_conditioner():
 
 def test_truncation_sets_the_depth_and_replaces_the_norm():
     """The released file is a 32B cut to 50 layers, and the final RMSNorm went with the cut."""
-    config = _tiny_qwen_config()
+    config = tiny_qwen_config()
     model = _truncate_qwen3_vl(config, 3)
 
     assert len(model.model.language_model.layers) == 3

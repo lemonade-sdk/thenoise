@@ -29,7 +29,7 @@ from thenoise.models.lora_support import LoRASupport
 from thenoise.utils.device_patches import apply_device_patches
 from thenoise.utils.dynamo import apply_recompile_limit
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
-from thenoise.utils.image_tensor import ReferenceSizing
+from thenoise.utils.image_tensor import ReferenceSizing, flatten_alpha
 from thenoise.samplers import Step
 from thenoise.upscale import LatentUpscaler
 
@@ -67,6 +67,18 @@ def normalize_keys(keys):
         yield unwrap_key(k)
 
 
+#: The ways a reference picture can enter a run.
+#:
+#: ``index`` and ``index_timestep_zero`` are the latent paths: the VAE encodes the
+#: picture and its tokens join the sequence, ``index_timestep_zero`` conditioning those
+#: tokens at timestep zero, which is what makes their K/V step-invariant and therefore
+#: cacheable. ``vision`` is the conditioner's own vision tower: no VAE stage and no
+#: reference latent, so the run is drawn beside the reference rather than over it and
+#: nothing about it survives pixel for pixel.
+LATENT_REF_METHODS = ("index", "index_timestep_zero")
+VISION_REF_METHOD = "vision"
+
+
 class DiffusionModel(LoRASupport, ABC):
     """Base class for model adapters. Subclasses must set ``name``."""
 
@@ -93,14 +105,18 @@ class DiffusionModel(LoRASupport, ABC):
     REFINE_STEPS = 1
     REFINE_DENOISE = 0.25
 
-    # Which optional generation features this adapter implements — one vocabulary for
-    # image and video, so ``/health`` needs no per-medium table and ``capability()`` is
-    # one lookup. Adapters override only the entries they differ on, merging as above.
-    # Reported verbatim by ``/health`` so the UI can gate its controls.
+    # Which optional generation features this adapter implements. What a request picks a
+    # medium for is nested under that medium's name and named for its request mode, so
+    # ``/health`` needs no per-medium table and ``capability()`` is one lookup; a feature
+    # either medium can want stays at the top level, where a video adapter can answer it
+    # too. Adapters override only the entries they differ on, merging as above. Reported
+    # verbatim by ``/health`` so the UI can gate its controls.
     CAPABILITIES: ClassVar[Dict[str, Any]] = {
-        # Reference-latent editing: image + instruction -> edited image. Requires
-        # overriding ``encode_reference``/``pack_reference_latent``.
-        "edit": False,
+        # ``i2i`` means this model takes a picture with the request, by any of the
+        # reference methods it lists in ``REF_METHODS``. Which one runs is resolved per
+        # request, so a model that only reads the picture answers ``i2i`` as plainly as
+        # one that repaints it.
+        "image": {"t2i": True, "i2i": False},
         # Freeze the reference tokens' K/V across denoise steps through the shared
         # ``start_kv_caches`` / ``kv_cache`` / ``end_kv_caches`` protocol.
         "kv_cache": False,
@@ -109,6 +125,13 @@ class DiffusionModel(LoRASupport, ABC):
         "upscale": True,
         "video": None,
     }
+
+    #: The ways this model can use a reference picture, best first; empty means it
+    #: takes none. The pipeline resolves a request against this list and ``/health``
+    #: reports it, so a method the adapter does not implement is refused at submit
+    #: instead of being ignored by a stage that cannot act on it. See
+    #: :data:`LATENT_REF_METHODS` and :data:`VISION_REF_METHOD`.
+    REF_METHODS: ClassVar[Tuple[str, ...]] = ()
 
     # The run's caches: created by ``start_kv_caches``, dropped by ``end_kv_caches``.
     # The empty class default keeps ``kv_cache`` answering ``None`` on adapters built
@@ -338,6 +361,19 @@ class DiffusionModel(LoRASupport, ABC):
         for pixel overrides this to put that reference on the canvas's own grid.
         """
         return [self.prepare_reference(img) for img in images]
+
+    def conditioned_images(self, args: EncodePromptArgs) -> List[Image.Image]:
+        """``args.image``, single or several, as a conditioner that reads pictures
+        wants them: RGB, and fitted the way this model fits any reference.
+
+        The alpha is composited because a vision tower takes three channels; the fit is
+        the one in :meth:`prepare_reference`, so a model shows its conditioner the same
+        pixels it would hand its VAE.
+        """
+        if args.image is None:
+            return []
+        images = args.image if isinstance(args.image, list) else [args.image]
+        return [flatten_alpha(self.prepare_reference(image)) for image in images]
 
     def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
         """Encode input pixels (``[C,H,W]`` in [-1, 1]) into the canonical latent."""

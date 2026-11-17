@@ -105,6 +105,13 @@ def test_cli_edit_parses_images_size_and_kv_cache(parse):
     assert args.ref_method == "index_timestep_zero"
 
 
+def test_the_read_only_reference_method_parses(parse):
+    """``vision`` is a method like any other, so argparse must not be the thing that
+    refuses it: which model accepts one is not knowable before a model is loaded."""
+    assert parse(["edit", *PATHS, "--prompt", "x", "--image", "in.png",
+                  "--ref-method", "vision"]).ref_method == "vision"
+
+
 def test_cli_edit_defaults(parse):
     """No size on the CLI -> the pipeline derives it from the image. ``kv_cache`` is
     a tri-state: both ``--kv-cache`` and ``--no-kv-cache`` override a ``None`` default.

@@ -27,7 +27,14 @@ from thenoise.dit.mage_flow import sampling as mage_sampling
 from thenoise.dit.mage_flow.encoder import load_mage_flow_text_encoder
 from thenoise.dit.mage_flow.utils import detect_params
 from thenoise.dit.qwen_image.models import build_video_positions
-from thenoise.models.base import Conditioning, DiffusionModel, Step, normalize_keys
+from thenoise.models.base import (
+    LATENT_REF_METHODS,
+    VISION_REF_METHOD,
+    Conditioning,
+    DiffusionModel,
+    Step,
+    normalize_keys,
+)
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.image_tensor import ReferenceSizing
@@ -51,7 +58,11 @@ class MageFlowModel(DiffusionModel):
 
     # The single-row timestep embedding modulates the references at ``t``, so their
     # K/V change every step.
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": False}
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": False,
+                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
+    # The Qwen3-VL conditioner is multimodal already, so a reference can be read by it
+    # instead of encoded: no alignment, and no reference tokens in the sequence.
+    REF_METHODS = LATENT_REF_METHODS + (VISION_REF_METHOD,)
 
     # Upstream caps a reference's longest side instead of normalising its area.
     REFERENCE_SIZING = ReferenceSizing(fit="long_edge", cap=1024, align=16)

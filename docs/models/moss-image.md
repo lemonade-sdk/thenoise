@@ -7,7 +7,9 @@ are put in one sequence and read by the same attention, in 42 blocks of width 30
 It is conditioned by Qwen3.5-9B and draws on the Flux.2 AE, so its latent is the
 packed 128-channel one at 16 pixels per cell.
 
-- Text-to-image only — the architecture has no reference-latent path at all
+- Text-to-image, plus a reference read by the conditioner's vision tower
+  (`--ref-method vision`, experimental) — there is no reference-latent path, so
+  nothing is repainted
 - Built-in defaults: **25 steps, guidance 3.0, er_sde**
 - Not a distilled checkpoint: `--sampler euler --steps 50` is the release recipe, and
   the stochastic `er_sde` gets about the same picture in half the steps
@@ -27,8 +29,8 @@ packed 128-channel one at 16 pixels per cell.
 | Architecture | joint-stream DiT (flow matching), 42 blocks, dim 3072, 24 heads |
 | Download size | ~14 GB int8-convrot (5.0 GB DiT + 9.1 GB text encoder + 0.3 GB VAE); ~19 GB with the bf16 DiT |
 | VAE | Flux.2 AE, 128-ch packed latent at 16× (the file Flux.2 Klein uses) |
-| Text encoder | Qwen3.5-9B, int8-convrot (the only release); its vision tower is loaded and left unused |
-| Editing | — |
+| Text encoder | Qwen3.5-9B, int8-convrot (the only release); its vision tower reads a reference |
+| Reference | `vision` only — it reaches the DiT as conditioner tokens, never as a latent |
 | KV cache | — |
 | Default settings | 1024×1024, 25 steps, guidance 3.0, er_sde |
 
@@ -107,6 +109,38 @@ Generate:
   --text-encoder ./models/moss-image/text_encoders/qwen3.5_9b_int8_convrot.safetensors \
   --vae ./models/moss-image/vae/flux2-vae.safetensors
 ```
+
+## Reading a reference (`vision`) — experimental
+
+A picture cannot be repainted here: the architecture has no reference-latent path. What
+it can do is show one to the vision tower its conditioner already ships with. The
+released Qwen3.5 file carries the visual weights and this engine has always loaded them
+and never run them; now the tower's output joins the conditioning, the DiT reads it as
+tokens beside the prompt, and the run draws something new beside the reference instead
+of over it.
+
+```bash
+./thenoise.sh edit \
+  --dit ./models/moss-image/diffusion_models/moss_image_sft_int8_convrot.safetensors \
+  --text-encoder ./models/moss-image/text_encoders/qwen3.5_9b_int8_convrot.safetensors \
+  --vae ./models/moss-image/vae/flux2-vae.safetensors \
+  --image /tmp/fox.png --prompt "the same fox asleep on a red scarf"
+```
+
+What to expect, and what not to:
+
+- **As many as fit.** Each picture costs about 144 of the conditioner's 4096 tokens
+  and is labelled `Picture 1:`, `Picture 2:` … ahead of the prompt, so a subject, a
+  place and a palette can be shown at once. The first one sets the output size — its
+  own aspect ratio at about a megapixel — unless `--width`/`--height` say otherwise.
+  Past the window the run is refused, because a truncated placeholder run would not
+  match the features the tower emits.
+- **A hint, not a copy.** The reference is scaled to a 384² area on the Qwen3.5 vision
+  grid (a 16 px patch, merged 2×2) before the tower sees it, so it carries a subject,
+  a palette and a composition — no texture, no legible text, no pixel alignment.
+- **Nothing here was trained for this.** The release never showed MOSS a picture, so
+  how well the tower's features read into the DiT is an experiment, not a spec. The
+  conditioner is int8-convrot throughout, vision tower included.
 
 ## Notes on the recipe
 

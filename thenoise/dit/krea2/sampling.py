@@ -61,20 +61,23 @@ def timesteps(seq_len, steps, x1, x2, y1=0.5, y2=1.15, sigma=1.0, mu=None):
     return ts.tolist()
 
 
-def encode_prompts(encoder, prompts, negative_prompts=None, *, cfg=True):
+def encode_prompts(encoder, prompts, negative_prompts=None, *, cfg=True, images=None):
     """Encode prompts (and optional negatives) into gathered varlen text embeddings.
+
+    ``images``, when given, are shown to both branches: the guidance direction is then
+    about the words, not about whether a picture was there.
 
     Returns ``(txt, txtmask, untxt, untxtmask)``; the unconditional pair is ``None``
     when ``cfg`` is False.
     """
-    txt, txtmask = encoder(prompts)
+    txt, txtmask = encoder(prompts, images)
     txt, txtmask = gather_valid_text(txt, txtmask)
 
     untxt = untxtmask = None
     if cfg:
         if negative_prompts is None:
             negative_prompts = [""] * len(prompts)
-        untxt, untxtmask = encoder(negative_prompts)
+        untxt, untxtmask = encoder(negative_prompts, images)
         untxt, untxtmask = gather_valid_text(untxt, untxtmask)
 
     return txt, txtmask, untxt, untxtmask

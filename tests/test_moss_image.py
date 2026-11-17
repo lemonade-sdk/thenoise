@@ -10,6 +10,7 @@ import contextlib
 
 import pytest
 import torch
+from PIL import Image
 
 from conftest import write_safetensors
 from thenoise.dit.moss_image.encoder import (
@@ -17,6 +18,7 @@ from thenoise.dit.moss_image.encoder import (
     MossImageTextEncoder,
     prompt_template,
 )
+from thenoise.utils.text_encoder import VISION_BLOCK, prompt_with_pictures
 from thenoise.dit.moss_image.models import (
     SITU_CAP,
     MossImage,
@@ -347,20 +349,42 @@ def test_init_latents_uses_the_vae_geometry_and_the_seed():
 def test_encode_prompt_runs_the_negative_branch_only_under_guidance():
     seen = []
 
-    def encode(prompt):
-        seen.append(prompt)
+    def encode(prompt, images):
+        seen.append((prompt, images))
         return torch.zeros(1, 6, CTX)
 
     model = _bare(text_encoder=encode)
     cond = model.encode_prompt(
         EncodePromptArgs(prompt="cat", negative_prompt="blur", guidance_scale=3.0)
     )
-    assert seen == ["cat", "blur"]
+    assert seen == [("cat", []), ("blur", [])]
     assert cond.null is not None
 
     seen.clear()
     model.encode_prompt(EncodePromptArgs(prompt="cat", guidance_scale=1.0))
-    assert seen == ["cat"]
+    assert seen == [("cat", [])]
+
+
+def test_a_reference_is_shown_to_both_branches_as_rgb():
+    """Guidance asks about the words, not about the picture: an uncond branch that
+    had never seen it would point away from the reference itself.
+    """
+    seen = []
+
+    def encode(prompt, images):
+        seen.append((prompt, images))
+        return torch.zeros(1, 6, CTX)
+
+    model = _bare(text_encoder=encode)
+    source = Image.new("RGBA", (200, 100), (10, 20, 30, 128))
+    model.encode_prompt(EncodePromptArgs(prompt="cat", negative_prompt="blur",
+                                         guidance_scale=3.0, image=source))
+
+    assert [prompt for prompt, _ in seen] == ["cat", "blur"]
+    for _, images in seen:
+        shown, = images
+        assert shown.mode == "RGB"  # the tower takes no alpha
+        assert shown.size == model.prepare_reference(source).size
 
 
 def test_prepare_latent_keeps_the_latent_and_refines_the_text_once(dit):
@@ -586,6 +610,28 @@ class _FakeTokenizer:
         return {"input_ids": list(range(10, 10 + self.length))}
 
 
+class _FakeProcessor:
+    """What the conditioner asks of a processor: text to the tokenizer, and for a
+    picture the pixel tensor, the grid it made and the modality map M-RoPE wants."""
+
+    def __init__(self, tokenizer, pads: int = 4):
+        self.tokenizer = tokenizer
+        self.pads = pads
+        self.seen: dict = {}
+
+    def __call__(self, text, images=None, **kwargs):
+        self.seen = {"text": text[0], "images": images, **kwargs}
+        ids = self.tokenizer(text[0], add_special_tokens=False, **kwargs)["input_ids"]
+        out = {"input_ids": [ids]}
+        if images:
+            out["pixel_values"] = torch.zeros(len(images) * self.pads, 8)
+            out["image_grid_thw"] = torch.tensor([[1, 2, 2]] * len(images))
+            out["mm_token_type_ids"] = [
+                [0] * 3 + [1] * (self.pads * len(images)) + [0] * 2
+            ]
+        return out
+
+
 class _FakeBody:
     def __init__(self, lm):
         self.lm = lm
@@ -609,7 +655,7 @@ class _FakeLM(torch.nn.Module):
 def _fake_encoder(length=12):
     tokenizer = _FakeTokenizer(length)
     lm = _FakeLM()
-    return MossImageTextEncoder(lm, tokenizer), tokenizer, lm
+    return MossImageTextEncoder(lm, _FakeProcessor(tokenizer)), tokenizer, lm
 
 
 def test_the_template_is_a_user_turn_left_open_in_a_thinking_block():
@@ -633,3 +679,51 @@ def test_the_prompt_is_neither_padded_nor_special_token_stripped():
     assert lm.seen["use_cache"] is False
     assert embeds.shape == (1, 17, 6)
     assert embeds.dtype is torch.bfloat16
+    assert "pixel_values" not in lm.seen  # no picture asked for, none invented
+
+
+def test_a_reference_is_conditioning_through_the_vision_tower_and_nothing_else():
+    """Its placeholders go inside the user turn, ahead of the words, and the tower's
+    own tensors reach the language model: the picture never becomes a latent."""
+    encoder, tokenizer, lm = _fake_encoder(24)
+    image = Image.new("RGB", (64, 48), "white")
+    with torch.no_grad():
+        encoder.encode("a cat", [image])
+
+    text = tokenizer.seen["text"]
+    assert text == prompt_template(prompt_with_pictures("a cat", 1))
+    assert text.index(VISION_BLOCK) < text.index("a cat")
+    assert encoder.processor.seen["images"] == [image]
+    # A placeholder run cannot survive truncation, so the cap is lifted instead.
+    assert tokenizer.seen["truncation"] is False
+
+    assert tuple(lm.seen["pixel_values"].shape) == (4, 8)
+    assert lm.seen["image_grid_thw"].tolist() == [[1, 2, 2]]
+    assert sum(lm.seen["mm_token_type_ids"][0]) == 4
+
+
+def test_several_references_are_shown_in_order_and_labelled():
+    """The conditioner's template carries one labelled block per picture, so a run can
+    be shown a subject, a place and a palette at once."""
+    encoder, tokenizer, lm = _fake_encoder(40)
+    first = Image.new("RGB", (64, 48), "white")
+    second = Image.new("RGB", (32, 32), "black")
+    with torch.no_grad():
+        encoder.encode("the second one again", [first, second])
+
+    text = tokenizer.seen["text"]
+    assert text.count(VISION_BLOCK) == 2
+    assert text.index("Picture 1:") < text.index("Picture 2:")
+    assert text.index("Picture 2:") < text.index("the second one again")
+    assert encoder.processor.seen["images"] == [first, second]
+    assert tuple(lm.seen["pixel_values"].shape) == (8, 8)
+    assert lm.seen["image_grid_thw"].tolist() == [[1, 2, 2], [1, 2, 2]]
+
+
+def test_more_pictures_than_the_conditioner_holds_are_refused():
+    """A sequence too long for the window is refused rather than truncated: a cut
+    placeholder run would not match the features the tower emits."""
+    encoder, _, lm = _fake_encoder(MAX_SEQUENCE_LENGTH + 1)
+    with pytest.raises(ValueError, match="the Qwen3.5 conditioner holds"):
+        encoder.encode("a cat", [Image.new("RGB", (32, 32), "white")])
+    assert "input_ids" not in lm.seen

@@ -21,7 +21,8 @@ from thenoise.dit.h3_image import sampling as h3_sampling
 from thenoise.dit.h3_image.encoder import load_h3_image_text_encoder
 from thenoise.dit.h3_image.layout import PATCH_SIZE, Layout, pad_to_patch
 from thenoise.dit.h3_image.models import H3ImageParams, detect_params, load_h3_image_dit
-from thenoise.models.base import Conditioning, DiffusionModel, normalize_keys
+from thenoise.models.base import (
+    VISION_REF_METHOD, Conditioning, DiffusionModel, normalize_keys)
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.samplers import Step
 from thenoise.upscale import LatentUpscaler, VAEPixelUpscaler
@@ -64,14 +65,15 @@ class H3ImageModel(DiffusionModel):
         "ref_method": "index_timestep_zero",
     }
 
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": True}
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": True,
+                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
     KV_CACHED_SLICE = "suffix"
 
     REFERENCE_SIZING = ReferenceSizing(
         fit="short_edge", floor=1024, cap=2048, align=CANVAS_MULTIPLE
     )
 
-    REF_METHODS = ("index_timestep_zero",)
+    REF_METHODS = ("index_timestep_zero", VISION_REF_METHOD)
 
     @staticmethod
     def detect(f) -> bool:

@@ -33,6 +33,8 @@ from thenoise.dit.qwen_image21.models import QwenImage21Sequence
 from thenoise.dit.qwen_image21.utils import is_qwen_image21_key
 from thenoise.dit.qwen_image21.utils import load_qwen_image21_dit
 from thenoise.models.base import (
+    LATENT_REF_METHODS,
+    VISION_REF_METHOD,
     Conditioning,
     DiffusionModel,
     Step,
@@ -40,7 +42,7 @@ from thenoise.models.base import (
 )
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, Qwen21TranscodeUpscaler
-from thenoise.utils.image_tensor import flatten_alpha, ReferenceSizing
+from thenoise.utils.image_tensor import ReferenceSizing
 from thenoise.utils.lora import FUSE_GATE_UP
 from thenoise.utils.math import round_up
 from thenoise.vae import load_wan22_vae
@@ -73,7 +75,11 @@ class QwenImage21Model(DiffusionModel):
         "sigmas": [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568]
     }
 
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": True}
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": True,
+                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
+    # Qwen2.5-VL was built multimodal, so the same reference can be read by the
+    # conditioner instead of encoded: a hint rather than a canvas to repaint.
+    REF_METHODS = LATENT_REF_METHODS + (VISION_REF_METHOD,)
 
     # The step-invariant slice is the LEADING text/reference prefix (target last).
     KV_CACHED_SLICE = "prefix"
@@ -120,25 +126,13 @@ class QwenImage21Model(DiffusionModel):
         logger.info("Qwen-Image 2.1 model ready on %s (%s)", config.device, config.dtype)
 
     # ------------------------------------------------------------ kernels
-    def _encoder_images(self, args: EncodePromptArgs) -> Optional[list]:
-        """``args.image`` (single or list) as RGB, at the size the VAE sees.
-
-        An alpha is composited onto white: the vision tower takes RGB only.
-        """
-        if args.image is None:
-            return None
-        images = args.image if isinstance(args.image, list) else [args.image]
-        if not images:
-            return None
-        return [flatten_alpha(self.prepare_reference(img)) for img in images]
-
     def encode_prompt(self, args: EncodePromptArgs) -> Conditioning:
         """Prompt (and, when editing, the references) -> embeddings + image slots.
 
         One prompt at a time needs no padding, so there is no attention mask: the
         DiT splices the reference latents into the vision tokens' places.
         """
-        images = self._encoder_images(args)
+        images = self.conditioned_images(args)
         cond, cond_slots = self.text_encoder(args.prompt, images)
         null = null_slots = None
         if args.guidance_scale > 1.0:

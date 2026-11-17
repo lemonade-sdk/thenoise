@@ -11,7 +11,11 @@ import torch
 
 from conftest import write_key_checkpoint, write_safetensors
 from thenoise.dit.anima.utils import _count_anima_blocks
-from thenoise.utils.text_encoder import QWEN_VL_DROP_IDX, compute_drop_idx
+from thenoise.utils.text_encoder import (
+    QWEN_VL_DROP_IDX,
+    compute_drop_idx,
+    prompt_with_pictures,
+)
 from thenoise.dit.krea2.sampling import (
     encode_prompts,
     gather_valid_text,
@@ -86,8 +90,8 @@ class _Recorder:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, prompts):
-        self.calls.append(list(prompts))
+    def __call__(self, prompts, images=None):
+        self.calls.append((list(prompts), list(images or ())))
         batch = len(prompts)
         # (B, seq, L, D) with a fully-valid mask (gather is then a no-op).
         txt = torch.arange(batch * 4 * 1 * 2, dtype=torch.float32).reshape(batch, 4, 1, 2)
@@ -99,16 +103,24 @@ def test_krea2_encode_prompts_encodes_the_unconditional_branch_only_when_cfg():
     enc = _Recorder()
     txt, txtmask, untxt, untxtmask = encode_prompts(enc, ["a", "b"], cfg=True)
     # No negatives given -> a batch of empty prompts, shaped like the conditional one.
-    assert enc.calls == [["a", "b"], ["", ""]]
+    assert enc.calls == [(["a", "b"], []), (["", ""], [])]
     assert untxt.shape == txt.shape and untxtmask.shape == txtmask.shape
 
     enc = _Recorder()
     encode_prompts(enc, ["a"], negative_prompts=["bad"], cfg=True)
-    assert enc.calls == [["a"], ["bad"]]
+    assert enc.calls == [(["a"], []), (["bad"], [])]
+
+
+def test_a_reference_is_encoded_into_both_branches():
+    """Guidance asks about the words, so the branch that has none still sees the
+    picture; an unseen reference would be what the two branches differ about."""
+    enc = _Recorder()
+    encode_prompts(enc, ["a"], ["bad"], cfg=True, images=["a picture"])
+    assert enc.calls == [(["a"], ["a picture"]), (["bad"], ["a picture"])]
 
     enc = _Recorder()
     assert encode_prompts(enc, ["a"], cfg=False)[2] is None
-    assert enc.calls == [["a"]]
+    assert enc.calls == [(["a"], [])]
 
 
 # ------------------------------------------------------------------ anima utils
@@ -411,6 +423,12 @@ def test_drop_idx_counts_markers_rather_than_assuming_a_prefix_length():
     assert compute_drop_idx(t2i) == QWEN_VL_DROP_IDX
     assert compute_drop_idx(edit) == 64
     assert compute_drop_idx(torch.tensor([151644, 1, 2, 3])) == 0  # no user turn at all
+
+
+def test_references_are_labelled_in_prompt_order():
+    text = prompt_with_pictures("swap the hat", 2)
+    assert text.index("Picture 1: ") < text.index("Picture 2: ") < text.index("swap the hat")
+    assert prompt_with_pictures("a fox", 0) == "a fox"
 
 
 def test_a_key_map_that_collides_is_refused(tmp_path):

@@ -179,7 +179,9 @@ unused.
 ```json
 {"status": "ok", "models": ["qwen_image"],
   "samplers": ["er_sde", "euler", "unipc"],
-  "capabilities": {"edit": true, "kv_cache": true, "upscale": true, "video": null}}
+  "capabilities": {"image": {"t2i": true, "i2i": true}, "kv_cache": true,
+                   "upscale": true, "video": null,
+                   "ref_methods": ["index", "index_timestep_zero", "vision"]}}
 ```
 
 With a video model:
@@ -187,18 +189,29 @@ With a video model:
 ```json
 {"status": "ok", "models": ["wan22"],
   "samplers": ["er_sde", "euler", "unipc"],
-  "capabilities": {"edit": false, "kv_cache": false, "upscale": false,
+  "capabilities": {"image": null, "kv_cache": false, "upscale": false,
                    "video": {"t2v": true, "i2v": true, "flf2v": true}}}
 ```
 
-`models` is empty until a DiT is loaded, and `capabilities` is the loaded
-adapter's `CAPABILITIES` dict verbatim (`{}` with no model) - the web UI uses it
-to gate the Edit tab, the KV-cache control and which layout the Generate tab
-shows, and a request asking for a capability the model lacks is rejected
-with HTTP 400 rather than silently ignored. A medium's own capabilities are
-nested under the medium's name, and a model of another medium answers that key
-with `null`. `i2v` and `flf2v` follow the loaded variant rather than the model
-name.
+`models` is empty until a DiT is loaded, and `capabilities` is that adapter's own
+`CAPABILITIES` dict plus `ref_methods`, the reference methods it honours (`{}` with
+nothing loaded).
+
+The request modes sit under their medium: `t2i` and `i2i` under `image`, `t2v`,
+`i2v` and `flf2v` under `video`. A model answers the other medium with `null`.
+`kv_cache` and `upscale` are not modes, so they stay at the top; either medium
+can use them.
+
+`i2i` says a model takes a picture with the request, not what it does with one. That is
+`ref_method`: `index` and `index_timestep_zero` encode the picture as a latent the DiT
+can line the result up against, while `vision` hands it to the text encoder's vision
+tower, which steers what gets drawn and leaves nothing of the picture in place. A
+model's `ref_methods` says which of those it offers; naming one it lacks is a 400.
+
+The web UI reads all of this to decide what to show - the Edit tab follows
+`i2i`. A request for something the loaded model cannot do is refused with HTTP
+400, not quietly downgraded. `i2v` and `flf2v` come from the variant you
+loaded, not from the model name.
 
 ## `POST /text2image`
 
@@ -284,15 +297,22 @@ curl -s localhost:8000/text2image \
 
 ## `POST /edit`
 
-Instruction-based editing: image(s) + prompt → edited image. Requires an
-editing-capable model; otherwise returns **HTTP 400**.
+Instruction-based editing: image(s) + prompt → edited image. Requires a model that
+takes a reference; otherwise returns **HTTP 400**.
+
+What the model does with the picture is `ref_method`, and each model accepts only the
+methods `ref_methods` lists for it: an edit model the latent pair, a model whose text
+encoder is multimodal also `vision` for being shown the picture without being asked to
+repaint it, and a model with no latent path `vision` alone (MOSS-Image today). The
+latent pair takes a per-reference timestep-zero marker; `vision` takes any number of
+pictures and keeps none of them pixel for pixel.
 
 Accepts all `/text2image` fields plus:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `image` | `string` \| `string[]` | *(required)* | One or more base64-encoded reference images (OpenAI-style; first sets the output size when `width`/`height` omitted) |
-| `ref_method` | `string` | auto | Reference conditioning: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index`. The cache default follows it |
+| `ref_method` | `string` | auto | How the reference is used: `index`, `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid), or `vision` (the text encoder reads the picture; no latent, nothing repainted). Auto = detected from the checkpoint, else the model's first listed method. The cache default follows it |
 
 > **Reference method.** Checkpoints trained to condition their reference tokens
 > at timestep zero carry the `__index_timestep_zero__` marker, which makes
@@ -300,7 +320,9 @@ Accepts all `/text2image` fields plus:
 > with it. An explicit `ref_method` always wins over detection: markers are only
 > a hint, and some trained checkpoints do not carry one. An explicit `kv_cache`
 > together with an explicit `ref_method: index` is rejected rather than silently
-> degraded.
+> degraded. A method the loaded model does not list is a **400** too, as is any
+> `ref_method` on a request without an image: what cannot be acted on is refused
+> rather than ignored.
 
 ### Example
 
@@ -483,7 +505,7 @@ A route answers a refusal in the format it speaks.
 
 | Status | Meaning |
 |--------|---------|
-| `400` | A value the loaded model refuses: a capability it lacks (e.g. `/edit` without an editing model, `kv_cache` with `ref_method: index`), a sampler it does not implement, an `image` it cannot decode. A job's `400` arrives at submit, never in its status |
+| `400` | A value the loaded model refuses: a capability it lacks (e.g. `/edit` without an editing model, `kv_cache` with `ref_method: index`), a `ref_method` it does not offer, a sampler it does not implement, an `image` it cannot decode. A job's `400` arrives at submit, never in its status |
 | `404` | No such job, or its content has already been handed out |
 | `409` | A job is not in the state the request needs: content before completion, cancel after it settled |
 | `429` | The job queue is full |

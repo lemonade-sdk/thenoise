@@ -24,7 +24,13 @@ from thenoise.dit.flux2.utils import (
 )
 from thenoise.dit.kvcache import KVCache
 from thenoise.utils.text_encoder import find_tokenizer_dir
-from thenoise.models.base import Conditioning, DiffusionModel, Step, normalize_keys
+from thenoise.models.base import (
+    LATENT_REF_METHODS,
+    Conditioning,
+    DiffusionModel,
+    Step,
+    normalize_keys,
+)
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.lora import FUSE_QKV
@@ -45,9 +51,12 @@ class FluxKleinModel(DiffusionModel):
         "sampler": "euler",
     }
 
-    # Reference-latent editing by "index"; the KV cache is valid only with
-    # ``ref_method="index_timestep_zero"``.
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "edit": True, "kv_cache": True}
+    # Reference-latent editing, and nothing else: Flux.2's Qwen3 text encoder has no
+    # vision tower, so there is no way to read a reference without encoding it. The KV
+    # cache is valid only with ``ref_method="index_timestep_zero"``.
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": True,
+                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
+    REF_METHODS = LATENT_REF_METHODS
     # Per-reference t-axis offset.
     REF_INDEX = 10
 

@@ -35,7 +35,7 @@ def test_the_vision_tokens_get_an_rgb_composite_not_a_dropped_alpha():
     """A transparent reference must not reach Qwen3-VL as its raw RGB."""
     transparent_red = Image.new("RGBA", (32, 32), (255, 0, 0, 0))
 
-    images = _bare()._encoder_images(
+    images = _bare().conditioned_images(
         EncodePromptArgs(prompt="p", image=transparent_red)
     )
 
@@ -44,7 +44,7 @@ def test_the_vision_tokens_get_an_rgb_composite_not_a_dropped_alpha():
 
 
 def test_every_reference_in_a_list_is_composited():
-    images = _bare()._encoder_images(
+    images = _bare().conditioned_images(
         EncodePromptArgs(
             prompt="p",
             image=[Image.new("RGBA", (32, 32), (0, 0, 255, 0)), Image.new("RGB", (32, 32), "red")],
@@ -60,7 +60,7 @@ def test_the_vision_half_and_the_latent_half_are_fitted_by_the_same_rule():
     have to agree on shape."""
     refs = [Image.new("RGB", (200, 100), "gray"), Image.new("RGB", (60, 300), "gray")]
 
-    images = _bare()._encoder_images(EncodePromptArgs(prompt="p", image=refs))
+    images = _bare().conditioned_images(EncodePromptArgs(prompt="p", image=refs))
 
     assert [img.size for img in images] == [
         QwenImage21Model.REFERENCE_SIZING.target_size(*img.size) for img in refs

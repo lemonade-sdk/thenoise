@@ -118,7 +118,8 @@ def test_the_boundary_is_scoped_to_the_request():
 
 def test_edit_runs_the_reference_stage_in_inference_mode():
     model = _SpyingModel()
-    model.CAPABILITIES = {**model.CAPABILITIES, "edit": True}
+    model.CAPABILITIES = {**model.CAPABILITIES,
+                          "image": {**model.CAPABILITIES["image"], "i2i": True}}
 
     _pipeline(model).edit(_request(image=Image.new("RGB", (64, 64))))
 

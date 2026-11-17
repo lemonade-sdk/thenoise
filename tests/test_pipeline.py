@@ -883,6 +883,63 @@ def test_kv_cache_requires_a_model_that_supports_it():
         )
 
 
+def test_the_request_mode_is_checked_against_the_adapter():
+    """Whichever mode the request's shape names, a group that answers it False is a
+    refusal: no shipped adapter has to be asked for a still it cannot do, and none for
+    a reference it never wired in.
+    """
+    from PIL import Image
+
+    with pytest.raises(ValueError, match="does not support image editing"):
+        _controller(StubModel()).edit(
+            _request(image=Image.new("RGB", (64, 64), "white"), steps=1))
+
+    edit_only = StubModel(capabilities={"image": {"t2i": False, "i2i": True}})
+    with pytest.raises(ValueError, match="does not support text-to-image"):
+        _controller(edit_only).generate(_request())
+
+
+def test_a_vision_reference_is_read_by_the_conditioner_and_stops_there():
+    """The ``vision`` method draws nothing over the picture: no reference latent is
+    encoded, so the VAE stage never runs and ``prepare_latent`` gets none. The mode is
+    still ``i2i``, because a picture came in — the method is what says what happened."""
+    from PIL import Image
+
+    from conftest import VisionReferenceStubModel
+
+    model = VisionReferenceStubModel()
+    image = Image.new("RGB", (64, 64), "white")
+    controller = _controller(model)
+    request, r = controller.resolve(_request(image=image, width=64, height=64),
+                                    is_edit=True)
+    assert (r.mode, r.ref_method, r.kv_cache) == ("i2i", "vision", False)
+    assert r.public()["ref_method"] == "vision"  # the record says which way it went
+
+    assert controller.produce(request, r).size == (64, 64)
+    assert model.encode_prompt_args.image is image
+    assert model.calls["encode_reference"] == 0
+    assert model.prepared[-1]["ref"] is None
+
+
+def test_a_picture_read_and_a_picture_encoded_are_not_the_same_conditioning():
+    """Same prompt, same picture, two methods: the second run must condition again
+    rather than take the first one's cached answer."""
+    from PIL import Image
+
+    from conftest import EditingStubModel
+
+    model = EditingStubModel()
+    controller = _controller(model)
+    image = Image.new("RGB", (64, 64), "white")
+    conditioned = []
+    for method in ("index", "vision"):
+        controller.edit(_request(image=image, steps=1, ref_method=method))
+        conditioned.append(model.calls["encode_prompt"])
+
+    assert conditioned == [1, 2]  # not [1, 1]: the second method re-ran the encoder
+    assert model.calls["encode_reference"] == 1  # only the latent run encoded it
+
+
 # ---------------------------------------------------- residency across the stages
 class _Device(MemoryManager):
     """A manager whose device reports a fixed capacity, so placement is decidable."""

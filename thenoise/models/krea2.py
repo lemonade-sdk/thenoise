@@ -10,6 +10,7 @@ from einops import rearrange
 from thenoise.dit.krea2 import utils as krea2_utils
 from thenoise.dit.krea2.sampling import encode_prompts, prepare, timesteps
 from thenoise.models.base import (
+    VISION_REF_METHOD,
     Conditioning,
     DiffusionModel,
     Step,
@@ -17,6 +18,7 @@ from thenoise.models.base import (
 )
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
+from thenoise.utils.image_tensor import ReferenceSizing
 from thenoise.utils.math import round_up
 from thenoise.vae import load_qwen_vae
 
@@ -31,7 +33,18 @@ class Krea2Model(DiffusionModel):
         **DiffusionModel.DEFAULT_PREFS,
         "steps": 8,
         "guidance_scale": 1.0,
+        "ref_method": VISION_REF_METHOD,
     }
+
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES,
+                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
+    # The single-stream DiT has no way to carry reference tokens, so a reference is
+    # read by the Qwen3-VL conditioner it already ships with and nothing else.
+    REF_METHODS = (VISION_REF_METHOD,)
+
+    # One merged vision token per 32 px, and about 144 of them per picture at this
+    # area: the conditioner's text window is 512, so a reference is a hint by design.
+    REFERENCE_SIZING = ReferenceSizing(cap=384 * 384, align=32)
     DEFAULT_Y1 = 0.5
     DEFAULT_Y2 = 1.15
     DEFAULT_MU = 1.15
@@ -86,10 +99,14 @@ class Krea2Model(DiffusionModel):
         self,
         args: EncodePromptArgs,
     ) -> Conditioning:
-        """Raw prompt embeddings; the DiT-side fusion happens in ``fuse_text``."""
+        """Raw prompt embeddings; the DiT-side fusion happens in ``fuse_text``.
+
+        A reference is shown to both branches, so guidance measures the words.
+        """
         cfg = args.guidance_scale > 1.0
         txt, txtmask, untxt, untxtmask = encode_prompts(
-            self.encoder, [args.prompt], [args.negative_prompt], cfg=cfg
+            self.encoder, [args.prompt], [args.negative_prompt], cfg=cfg,
+            images=self.conditioned_images(args),
         )
         return Conditioning(
             cond=txt, cond_mask=txtmask, null=untxt, null_mask=untxtmask

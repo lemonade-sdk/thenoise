@@ -40,7 +40,7 @@ from thenoise.dit.fibo2.sizes import TRAINED_AREA, trained_size
 from thenoise.dit.kvcache import KVCache
 from thenoise.dit.fibo2.utils import detect_params, load_fibo2_dit
 from thenoise.models import Fibo2Model
-from thenoise.models.base import Conditioning
+from thenoise.models.base import Conditioning, VISION_REF_METHOD
 from thenoise.models.config import EncodePromptArgs, SamplingParams
 from thenoise.upscale import SesquiLSRUpscaler
 
@@ -498,9 +498,10 @@ def test_prepare_latent_puts_each_reference_on_its_own_plane(dit):
 
 def test_the_accepted_reference_method_is_the_one_the_model_uses(dit):
     """A reference joins the sequence on its own plane at ``t = 0`` and there is no
-    other reading of it, so the one accepted name is also the model's own default."""
+    other reading of it, so that is also the model's own default. Its one other way
+    with a picture asks the conditioner, not the DiT."""
     model = _bare(dit=dit, params=_params_dict(), vae=FakeVAE())
-    assert Fibo2Model.REF_METHODS == ("index_timestep_zero",)
+    assert Fibo2Model.REF_METHODS == ("index_timestep_zero", VISION_REF_METHOD)
     assert Fibo2Model.DEFAULT_PREFS["ref_method"] == "index_timestep_zero"
 
     x = model.prepare_latent(
@@ -510,19 +511,6 @@ def test_the_accepted_reference_method_is_the_one_the_model_uses(dit):
     with _compute():
         velocity = model._dit_forward(x, torch.full((1,), 0.5, dtype=torch.float32), "cond")
     assert velocity.shape == x.shape
-
-
-@pytest.mark.parametrize("method", ["index", "channel", "index_timestep_one"])
-def test_an_unsupported_reference_method_is_refused(dit, method):
-    """Including the plain ``index`` other edit models offer: there is no variant of
-    this architecture where a reference carries the step's timestep."""
-    model = _bare(dit=dit, params=_params_dict(), vae=FakeVAE())
-
-    with pytest.raises(ValueError, match="unsupported ref_latents_method"):
-        model.prepare_latent(
-            _n(1, Z, 4, 3), Conditioning(cond=_n(1, 6, CTX)), _params(),
-            ref=[torch.ones(1, Z, 2, 2)], ref_method=method,
-        )
 
 
 def test_the_method_is_only_asked_of_a_run_that_carries_references(dit):

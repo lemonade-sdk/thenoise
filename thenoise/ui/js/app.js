@@ -205,6 +205,9 @@ async function applyModelState() {
   const capable = (name) => models === null || !!caps[name];
   // Nested under the medium's name, and null on a model of the other one.
   const video = caps.video || null;
+  // One bit now: a model either takes a reference or does not. How it uses one
+  // (``caps.ref_methods``) is a request field, not something the tabs split on.
+  const takesImage = models === null || !!caps.image?.i2i;
 
   // An RGBA model can return transparent pixels; without something behind them
   // they would read as black (or as the panel colour) rather than as transparency.
@@ -218,13 +221,23 @@ async function applyModelState() {
   $('no_model').classList.toggle('hidden', !noModel);
   $('edit_no_model').classList.toggle('hidden', !noModel);
   // Edit is usable only when an image model is loaded AND it supports editing.
-  $('edit_no_support').classList.toggle('hidden', !hasModel || capable('edit'));
+  $('edit_no_support').classList.toggle('hidden', !hasModel || takesImage);
   // KV cache: off the menu (literally) when the model never wired the cache in.
   const kv = $('edit_kv_cache');
   const hasKvCache = capable('kv_cache');
   kv.disabled = !hasKvCache;
   if (!hasKvCache) kv.value = '';
   kv.title = hasKvCache ? '' : 'the loaded model has no reference-latent KV cache';
+  // The ways a model can use a reference are the model's own: one way and there is
+  // nothing to choose, and offering a method it lacks would only earn a refusal.
+  const method = $('edit_ref_method');
+  const methods = caps.ref_methods || [];
+  const picked = method.value;
+  method.replaceChildren(new Option('auto', ''), ...methods.map((m) => new Option(m, m)));
+  method.value = methods.includes(picked) ? picked : '';
+  method.disabled = methods.length < 2;
+  method.title = method.disabled
+    ? 'the loaded model has only one way with a reference' : '';
   // The I2V initial frame exists only when the loaded variant can condition on one.
   $('video_i2v_field').classList.toggle('hidden', !video?.i2v);
   // A last frame needs a reference that carries a mask to name it with.

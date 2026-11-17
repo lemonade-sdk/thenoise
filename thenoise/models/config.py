@@ -47,8 +47,9 @@ class ModelConfig:
 class EncodePromptArgs:
     """Arguments for ``encode_prompt``, bundled into one struct.
 
-    ``image`` is only set in the edit path; multimodal encoders feed it as vision
-    tokens in addition to any reference latent.
+    ``image`` is only set when the request brought one: a multimodal encoder feeds it
+    as vision tokens, on its own where the model has no reference latent and as well as
+    one where it has.
     """
 
     prompt: str

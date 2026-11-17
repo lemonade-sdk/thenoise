@@ -83,7 +83,10 @@ def test_an_adapter_declines_the_features_it_does_not_implement():
     """
     model = wan_adapter()
     assert model.capability("video")["t2v"]
-    assert not model.capability("upscale") and not model.capability("edit")
+    assert not model.capability("upscale")
+    # The other medium is answered null, not with a group of refusals: a clip serves
+    # no stills at all, whatever a request asks of it.
+    assert model.capability("image") is None
     with pytest.raises(NotImplementedError, match="no latent upscaler"):
         model.get_upscaler()
 

@@ -133,12 +133,28 @@ class _ZeroCondModel(_KvCacheModel):
 
 
 def test_resolve_takes_the_reference_method_from_the_checkpoint():
-    """The marker layer feeds the pipeline: no request field, method auto-detected."""
+    """The marker layer feeds the pipeline: no request field, method auto-detected.
+
+    A generation reports no method at all, because a method describes a reference and
+    a generation has none to describe.
+    """
     model = EditingStubModel()
     model.checkpoint_prefs = {"ref_method": "index_timestep_zero"}
-    r = _controller(model)._resolve_pipeline(_request(), is_edit=False)
-    assert r.ref_method == "index_timestep_zero"
-    assert r.kv_cache is False  # a generation has no reference K/V to freeze
+    controller = _controller(model)
+
+    detected = controller._resolve_pipeline(_edit_request(), is_edit=True)
+    assert detected.ref_method == "index_timestep_zero"
+    assert controller._resolve_pipeline(_request(), is_edit=False).ref_method is None
+    assert detected.kv_cache is False  # the stub has no KV cache to switch on
+
+
+def test_a_reference_method_without_a_picture_is_refused():
+    """``ref_method`` picks how a picture is used, so naming one with no picture is a
+    request the pipeline cannot run rather than a field to ignore.
+    """
+    with pytest.raises(ValueError, match="this request has none"):
+        _controller(EditingStubModel())._resolve_pipeline(
+            _request(ref_method="index"), is_edit=False)
 
 
 def test_the_reference_method_decides_the_cache():
@@ -190,10 +206,12 @@ def test_an_explicit_false_wins_over_the_derived_default():
 
 
 def test_t2i_kv_cache_does_not_require_a_reference_method():
+    """A cache can freeze what is step-invariant besides a reference — a model's own
+    text prefix — so asking for one without a picture stays legal."""
     r = _controller(_ZeroCondModel())._resolve_pipeline(
-        _request(kv_cache=True, ref_method="index"), is_edit=False
+        _request(kv_cache=True), is_edit=False
     )
-    assert (r.kv_cache, r.ref_method) == (True, "index")
+    assert (r.kv_cache, r.ref_method) == (True, None)
 
 
 def test_edit_passes_the_resolved_method_to_the_model():

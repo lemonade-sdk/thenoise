@@ -46,7 +46,8 @@ from thenoise.models import (  # noqa: E402
     Wan22Model,
     ZImageModel,
 )
-from thenoise.models.base import Conditioning, DiffusionModel  # noqa: E402
+from thenoise.models.base import (
+    LATENT_REF_METHODS, VISION_REF_METHOD, Conditioning, DiffusionModel)  # noqa: E402
 from thenoise.models.config import ModelConfig, SamplingParams  # noqa: E402
 from thenoise.samplers import Step  # noqa: E402
 from thenoise.upscale import LatentUpscaler  # noqa: E402
@@ -926,6 +927,7 @@ class StubModel(DiffusionModel):
     # (``vae.z_dim`` / ``vae.spatial_compression``), which this stub has none of.
     LATENT_CHANNELS = 4
     _VAE_SCALE = 8
+    REF_METHODS = LATENT_REF_METHODS
     UPSCALE_SCALE = 2
     REFINE_STEPS = 1
     REFINE_DENOISE = 0.1
@@ -1017,9 +1019,22 @@ class StubModel(DiffusionModel):
 
 
 class EditingStubModel(StubModel):
-    """A stub that declares the ``edit`` capability (reference-latent path)."""
+    """A stub that answers the image medium's ``i2i`` mode, by latent or by tower."""
 
-    CAPABILITIES = {**StubModel.CAPABILITIES, "edit": True}
+    CAPABILITIES = {**StubModel.CAPABILITIES,
+                    "image": {**StubModel.CAPABILITIES["image"], "i2i": True}}
+    REF_METHODS = LATENT_REF_METHODS + (VISION_REF_METHOD,)
+
+
+class VisionReferenceStubModel(StubModel):
+    """A stub whose only way with a picture is to have the conditioner read it: no
+    reference method of the latent kind, so the VAE stage never runs."""
+
+    DEFAULT_PREFS = {**StubModel.DEFAULT_PREFS, "ref_method": VISION_REF_METHOD}
+
+    CAPABILITIES = {**StubModel.CAPABILITIES,
+                    "image": {**StubModel.CAPABILITIES["image"], "i2i": True}}
+    REF_METHODS = (VISION_REF_METHOD,)
 
 
 # ---------------------------------------------------------------------------- fixtures
@@ -1058,6 +1073,40 @@ def stub_model_cls():
     return _Stub
 
 
+# --------------------------------------------------------------------- tiny Qwen3-VL
+#
+# A conditioner at a width a CPU test can afford. Reduced from a vendored release
+# config rather than written out, so it cannot drift from the fields a real one has.
+
+TINY_HIDDEN = 64
+TINY_LAYERS = 5
+
+
+def tiny_qwen_config():
+    """A vendored Qwen3-VL conditioner config shrunk to CPU size: 64-wide text, five
+    layers, and a two-layer vision tower whose merger lands on the same width.
+    """
+    import copy
+
+    from transformers import Qwen3VLConfig
+
+    from thenoise.utils.qwen_configs import QWEN3_VL_32B_H3_CONFIG
+
+    config = Qwen3VLConfig.from_dict(copy.deepcopy(QWEN3_VL_32B_H3_CONFIG))
+    for name, value in {
+        "hidden_size": TINY_HIDDEN, "num_hidden_layers": TINY_LAYERS,
+        "num_attention_heads": 4, "num_key_value_heads": 2,
+        "intermediate_size": 128, "max_position_embeddings": 4096,
+    }.items():
+        setattr(config.text_config, name, value)
+    for name, value in {
+        "depth": 2, "hidden_size": 32, "intermediate_size": 64, "num_heads": 2,
+        "out_hidden_size": TINY_HIDDEN,
+    }.items():
+        setattr(config.vision_config, name, value)
+    return config
+
+
 @pytest.fixture
 def fake_model_cls():
     """Factory for stand-in entries of ``thenoise.models.MODEL_CATALOG``.
@@ -1081,6 +1130,7 @@ def fake_model_cls():
             "unload": lambda self: None,
             # A model that declares no capability; tests override it via ``**attrs``.
             "CAPABILITIES": {},
+            "REF_METHODS": (),
             **attrs,
         }
         return type("FakeModel", (), namespace)
