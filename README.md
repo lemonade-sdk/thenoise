@@ -50,7 +50,7 @@ TheNoise ships:
 | **Anima**, small and fast | ✓ | — | [anima](docs/models/anima.md) |
 | **Krea 2**, highest image quality | ✓ | — | [krea2](docs/models/krea2.md) |
 | **Qwen-Image 2.1**, generation and editing in one model | ✓ | ✓ | [qwen-image-2.1](docs/models/qwen-image-2.1.md) |
-| **MOSS-Image**, joint-stream DiT with a Qwen3.5 conditioner | ✓ | — | [moss-image](docs/models/moss-image.md) |
+| **MOSS-Image**, joint-stream DiT with a Qwen3.5 conditioner | ✓ | ref2i | [moss-image](docs/models/moss-image.md) |
 | **Z-Image / Z-Image-Turbo**, quality at 8 steps | ✓ | — | [zimage](docs/models/zimage.md) |
 | **Flux.2 Klein 4B / 9B**, 4 steps, with editing | ✓ | ✓ | [flux2-klein](docs/models/flux2-klein.md) |
 | **Qwen-Image / Qwen-Image-Edit**, generation and editing | ✓ | ✓ | [qwen-image](docs/models/qwen-image.md) |
@@ -61,6 +61,10 @@ TheNoise ships:
 | **H3-Image**, MiniMax's 20 B generate-and-edit model | ✓ | ✓ | [h3-image](docs/models/h3-image.md) |
 
 New models are added over time. PRs adding model support are welcome.
+
+`ref2i` is a reference the model only *reads*: the text encoder's vision tower turns it
+into conditioning and the run draws something new, rather than the model repainting the
+picture it was given.
 
 ### Video models
 

@@ -11,7 +11,7 @@ DiT checkpoint.
 | Command | What it does | Model needed |
 |---|---|---|
 | `generate` | Generate one image from a text prompt | yes |
-| `edit` | Edit an image from an instruction (image + prompt → edited image) | editing-capable model |
+| `edit` | Edit an image from an instruction (image + prompt → edited image) | model that takes a reference |
 | `video` | Generate one clip (text, or an image to start from) | video model |
 | `upscale` | Pixel-upscale an existing image | no (upscaler only) |
 | `controlmap` | Extract a control map (canny / depth / pose) from an image | no |
@@ -93,9 +93,11 @@ Then open <http://localhost:8000/> for the web UI. Full endpoint reference:
 
 Edits an existing image from an instruction (image + prompt → edited image).
 Requires an editing-capable model and shares all generation flags with `generate`.
-
 `--image` is repeatable. The **first** image sets the output size when
 `--width`/`--height` are omitted: its own aspect ratio at about a megapixel.
+
+A model that only reads its reference through the text encoder - MOSS-Image - takes
+this command too, with one image and no latent path behind it.
 
 ```bash
 ./thenoise.sh edit \
@@ -109,7 +111,7 @@ Requires an editing-capable model and shares all generation flags with `generate
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--image` | yes | — | Input image(s) to edit; repeatable for multiple reference images (first sets the output size) |
+| `--image` | yes | — | Input image(s) to edit; repeatable for multiple reference images (first sets the output size). A `ref2i` model takes one |
 | `--out` | no | `out_edit.png` | Output file path |
 
 ## Generate a single clip

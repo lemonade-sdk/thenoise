@@ -17,7 +17,6 @@ from thenoise.dit.kvcache import KVCache
 from thenoise.dit.h3_image.encoder import (
     _truncate_qwen3_vl,
     layer_count,
-    prompt_with_pictures,
     vision_token_tags,
 )
 from thenoise.dit.h3_image.layout import Layout, frame_grid, pad_to_patch
@@ -501,12 +500,6 @@ def test_percent_to_sigma_spans_the_endpoints():
 
 
 # --------------------------------------------------------------- presentation
-
-
-def test_references_are_labelled_in_prompt_order():
-    text = prompt_with_pictures("swap the hat", 2)
-    assert text.index("Picture 1: ") < text.index("Picture 2: ") < text.index("swap the hat")
-    assert prompt_with_pictures("a fox", 0) == "a fox"
 
 
 def test_vision_token_tags_cover_the_markers_framing_the_pictures():

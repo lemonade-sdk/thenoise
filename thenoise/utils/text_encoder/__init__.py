@@ -76,6 +76,21 @@ VISION_END = "<|vision_end|>"
 IMAGE_PAD = "<|image_pad|>"
 VISION_BLOCK = VISION_START + IMAGE_PAD + VISION_END
 
+#: The label in front of each reference, 1-based, matching how the prompt refers to
+#: them. ``<Picture n>: `` with angle brackets belongs to the video models.
+PICTURE_LABEL = "Picture {}: "
+
+
+def prompt_with_pictures(prompt: str, num_images: int) -> str:
+    """The conditioning text: one labelled vision block per reference, then the prompt.
+
+    One :data:`VISION_BLOCK` per picture, not one per vision token: the processor is
+    what widens it into the run the vision grid needs.
+    """
+    labels = "".join(PICTURE_LABEL.format(i + 1) + VISION_BLOCK
+                     for i in range(num_images))
+    return labels + prompt
+
 #: Shared Qwen image-description prompt template (text-to-image path): the system
 #: prompt, the closing ``user`` header, and the number of tokens that prefix
 #: occupies (the user content begins at ``QWEN_VL_DROP_IDX``).
@@ -316,6 +331,26 @@ def load_qwen35_tokenizer(tokenizer_dir: Optional[str] = None, *, overrides: Opt
     return load_tokenizer(tokenizer_dir or QWEN35_TOKENIZER_CONFIG_DIR, overrides=overrides)
 
 
+def load_qwen35_processor(tokenizer, *, image_processor=None):
+    """Build a Qwen3.5 processor (image preprocessor + the same tokenizer) locally.
+
+    Qwen3.5 ships Qwen3-VL's image preprocessor config byte for byte and names
+    ``Qwen3VLProcessor`` as its own processor class, so the vendored Qwen3-VL numbers
+    are reused rather than copied. The video processor takes its defaults: this engine
+    feeds the encoder single images only, but the processor requires one.
+
+    ``image_processor`` replaces the preprocessor, which is how a test drives the
+    token side without the vision tower's pixel work.
+    """
+    return Qwen3VLProcessor(
+        image_processor=image_processor
+        if image_processor is not None
+        else Qwen2VLImageProcessor.from_dict(dict(QWEN3_VL_PREPROCESSOR_CONFIG)),
+        tokenizer=tokenizer,
+        video_processor=Qwen3VLVideoProcessor(),
+    )
+
+
 def load_qwen3_vl_tokenizer(
     tokenizer_dir: Optional[str] = None, *, max_length: int, overrides: Optional[dict] = None
 ) -> tuple:
@@ -401,6 +436,7 @@ __all__ = [
     "load_qwen3_text_encoder",
     "load_qwen35_model",
     "load_qwen35_tokenizer",
+    "load_qwen35_processor",
     "load_qwen3_vl_model",
     "load_qwen2_5_vl_model",
     "load_qwen3_tokenizer",
@@ -423,6 +459,8 @@ __all__ = [
     "VISION_END",
     "IMAGE_PAD",
     "VISION_BLOCK",
+    "PICTURE_LABEL",
+    "prompt_with_pictures",
     "QWEN3_06B_TOKENIZER_OVERRIDES",
     "QWEN3_VL_TOKENIZER_OVERRIDES",
     "QWEN2_5_VL_TOKENIZER_OVERRIDES",

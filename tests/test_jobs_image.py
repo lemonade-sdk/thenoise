@@ -104,7 +104,7 @@ def test_a_queued_edit_says_so_and_carries_its_reference_image(tmp_path):
                                                "image": _png_b64(), "seed": 2}).json()["id"]
             until(lambda: c.get(f"/jobs/{ident}").json()["status"] == "completed")
             status = c.get(f"/jobs/{ident}").json()
-            assert status["resolved"]["mode"] == "edit"
+            assert status["resolved"]["mode"] == "i2i"
             assert status["resolved"]["ref_method"] == "index"
             image = Image.open(io.BytesIO(c.get(f"/jobs/{ident}/content").content))
             assert image.size == (status["resolved"]["width"], status["resolved"]["height"])

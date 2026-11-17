@@ -102,7 +102,10 @@ class DiffusionModel(LoRASupport, ABC):
     CAPABILITIES: ClassVar[Dict[str, Any]] = {
         # ``i2i`` is reference-latent editing: image + instruction -> edited image,
         # which requires overriding ``encode_reference``/``pack_reference_latent``.
-        "image": {"t2i": True, "i2i": False},
+        # ``ref2i`` is one picture the conditioner only *reads*: no latent, so
+        # ``encode_reference`` stays unimplemented and the reference survives as
+        # conditioning tokens and nothing else.
+        "image": {"t2i": True, "i2i": False, "ref2i": False},
         # Freeze the reference tokens' K/V across denoise steps through the shared
         # ``start_kv_caches`` / ``kv_cache`` / ``end_kv_caches`` protocol.
         "kv_cache": False,

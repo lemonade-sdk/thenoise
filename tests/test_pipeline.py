@@ -894,9 +894,44 @@ def test_the_request_mode_is_checked_against_the_adapter():
         _controller(StubModel()).edit(
             _request(image=Image.new("RGB", (64, 64), "white"), steps=1))
 
-    edit_only = StubModel(capabilities={"image": {"t2i": False, "i2i": True}})
+    edit_only = StubModel(capabilities={"image": {"t2i": False, "i2i": True, "ref2i": False}})
     with pytest.raises(ValueError, match="does not support text-to-image"):
         _controller(edit_only).generate(_request())
+
+
+def test_a_ref2i_picture_is_read_by_the_conditioner_and_stops_there():
+    """``ref2i`` is the mode where nothing is drawn over the picture: no reference
+    latent is encoded, so the VAE stage never runs and ``prepare_latent`` gets none.
+    """
+    from PIL import Image
+
+    from conftest import VisionReferenceStubModel
+
+    model = VisionReferenceStubModel()
+    image = Image.new("RGB", (64, 64), "white")
+    controller = _controller(model)
+    request, r = controller.resolve(_request(image=image, width=64, height=64),
+                                    is_edit=True)
+    assert r.mode == "ref2i"
+    assert r.kv_cache is False  # nothing step-invariant to freeze
+    # And nothing is echoed either: a reference method describes a latent there is none of.
+    assert r.public()["ref_method"] is None
+
+    assert controller.produce(request, r).size == (64, 64)
+    assert model.encode_prompt_args.image is image
+    assert model.calls["encode_reference"] == 0
+    assert model.prepared[-1]["ref"] is None
+
+
+def test_a_ref2i_model_refuses_more_than_the_one_picture_it_reads():
+    from PIL import Image
+
+    from conftest import VisionReferenceStubModel
+
+    with pytest.raises(ValueError, match="one reference image"):
+        _controller(VisionReferenceStubModel()).edit(
+            _request(image=[Image.new("RGB", (32, 32), "white"),
+                            Image.new("RGB", (32, 32), "black")], steps=1))
 
 
 # ---------------------------------------------------- residency across the stages

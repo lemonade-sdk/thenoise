@@ -4,9 +4,11 @@ OpenMOSS' text-to-image model. What is new here is the DiT (``dit/moss_image``) 
 its conditioner; the codec is the Flux.2 AE, so latents are the canonical 128-channel
 ones at 16 pixels per cell and the latent upscaler is the one that codec uses.
 
-Text-to-image only: the architecture has no reference-latent path at all — every
-token of one image goes through the same joint stream. The checkpoints are not
-distilled, so the step count is a plain quality/time trade.
+Text-to-image, plus ``ref2i``: a reference image is read by the conditioner's vision
+tower and reaches the DiT as conditioning tokens and nothing else, because the
+architecture has no reference-latent path — every token of one image goes through the
+same joint stream. The checkpoints are not distilled, so the step count is a plain
+quality/time trade.
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ from thenoise.dit.moss_image.utils import detect_params, load_moss_image_dit
 from thenoise.models.base import Conditioning, DiffusionModel, Step, normalize_keys
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
+from thenoise.utils.image_tensor import ReferenceSizing, flatten_alpha
 from thenoise.utils.math import round_up
 from thenoise.vae import load_flux2_vae
 
@@ -37,7 +40,10 @@ class MossImageModel(DiffusionModel):
         "guidance_scale": 3.0,
     }
 
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": False}
+    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": False,
+                    "image": {**DiffusionModel.CAPABILITIES["image"], "ref2i": True}}
+
+    REFERENCE_SIZING = ReferenceSizing(cap=384 * 384, align=32)
 
     REFINE_DENOISE = 0.1
 
@@ -94,12 +100,24 @@ class MossImageModel(DiffusionModel):
 
     # ------------------------------------------------------------ kernels
     def encode_prompt(self, args: EncodePromptArgs) -> Conditioning:
-        """Encode the prompt, and the negative under CFG — each at its own length."""
-        cond = self.text_encoder(args.prompt)
+        """Encode the prompt, and the negative under CFG — each at its own length.
+
+        A reference is shown to the vision tower from here. Both branches see it, 
+        so the guidance direction stays about the words rather than about the image.
+        """
+        images = self._reference_images(args)
+        cond = self.text_encoder(args.prompt, images)
         null = None
         if args.guidance_scale > 1.0:
-            null = self.text_encoder(args.negative_prompt)
+            null = self.text_encoder(args.negative_prompt, images)
         return Conditioning(cond=cond, null=null)
+
+    def _reference_images(self, args: EncodePromptArgs) -> list:
+        """``args.image``, single or list, as the vision tower wants it: RGB, fitted."""
+        if args.image is None:
+            return []
+        images = args.image if isinstance(args.image, list) else [args.image]
+        return [flatten_alpha(self.prepare_reference(image)) for image in images]
 
     def init_latents(self, params: SamplingParams) -> torch.Tensor:
         dev = torch.device(self.device)

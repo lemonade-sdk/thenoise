@@ -11,7 +11,11 @@ import torch
 
 from conftest import write_key_checkpoint, write_safetensors
 from thenoise.dit.anima.utils import _count_anima_blocks
-from thenoise.utils.text_encoder import QWEN_VL_DROP_IDX, compute_drop_idx
+from thenoise.utils.text_encoder import (
+    QWEN_VL_DROP_IDX,
+    compute_drop_idx,
+    prompt_with_pictures,
+)
 from thenoise.dit.krea2.sampling import (
     encode_prompts,
     gather_valid_text,
@@ -411,6 +415,12 @@ def test_drop_idx_counts_markers_rather_than_assuming_a_prefix_length():
     assert compute_drop_idx(t2i) == QWEN_VL_DROP_IDX
     assert compute_drop_idx(edit) == 64
     assert compute_drop_idx(torch.tensor([151644, 1, 2, 3])) == 0  # no user turn at all
+
+
+def test_references_are_labelled_in_prompt_order():
+    text = prompt_with_pictures("swap the hat", 2)
+    assert text.index("Picture 1: ") < text.index("Picture 2: ") < text.index("swap the hat")
+    assert prompt_with_pictures("a fox", 0) == "a fox"
 
 
 def test_a_key_map_that_collides_is_refused(tmp_path):

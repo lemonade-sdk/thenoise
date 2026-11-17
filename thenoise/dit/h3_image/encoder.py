@@ -21,21 +21,17 @@ from thenoise.utils.safetensors import MemoryEfficientSafeOpen, unwrap_key
 from thenoise.utils.text_encoder import (
     QWEN25_TOKENIZER_CONFIG_DIR,
     QWEN3_VL_TOKENIZER_OVERRIDES,
-    VISION_BLOCK,
     find_tokenizer_dir,
     load_qwen3_vl_model,
     load_qwen3_vl_processor,
     load_qwen3_vl_tokenizer,
+    prompt_with_pictures,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - only for annotations
     from PIL import Image
 
 logger = logging.getLogger(__name__)
-
-#: The label in front of each reference, 1-based, matching how the prompt refers to
-#: them. ``<Picture n>: `` with angle brackets belongs to the video models.
-PICTURE_LABEL = "Picture {}: "
 
 #: Modality tag of a DiT-modulation group: 0 is visual, 1 is text.
 TAG_VISUAL, TAG_TEXT = 0, 1
@@ -44,13 +40,6 @@ TAG_VISUAL, TAG_TEXT = 0, 1
 #: the pad token a wholly empty prompt falls back to.
 IMAGE_PAD_ID = QWEN3_VL_32B_H3_CONFIG["image_token_id"]
 PAD_TOKEN_ID = QWEN3_VL_32B_H3_CONFIG["text_config"]["bos_token_id"]
-
-
-def prompt_with_pictures(prompt: str, num_images: int) -> str:
-    """The conditioning text: one labelled vision block per reference, then the prompt."""
-    labels = "".join(PICTURE_LABEL.format(i + 1) + VISION_BLOCK
-                     for i in range(num_images))
-    return labels + prompt
 
 
 def vision_token_tags(input_ids: torch.Tensor, image_pad_id: int = IMAGE_PAD_ID
@@ -192,10 +181,8 @@ def load_h3_image_text_encoder(
 
 
 __all__ = [
-    "PICTURE_LABEL",
     "H3ImageTextEncoder",
     "layer_count",
     "load_h3_image_text_encoder",
-    "prompt_with_pictures",
     "vision_token_tags",
 ]

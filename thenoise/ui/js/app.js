@@ -205,7 +205,8 @@ async function applyModelState() {
   const capable = (name) => models === null || !!caps[name];
   // Nested under the medium's name, and null on a model of the other one.
   const video = caps.video || null;
-  const i2i = models === null || !!caps.image?.i2i;
+  // The Edit tab is honest whichever way the model takes the picture in.
+  const takesImage = models === null || !!(caps.image?.i2i || caps.image?.ref2i);
 
   // An RGBA model can return transparent pixels; without something behind them
   // they would read as black (or as the panel colour) rather than as transparency.
@@ -219,7 +220,7 @@ async function applyModelState() {
   $('no_model').classList.toggle('hidden', !noModel);
   $('edit_no_model').classList.toggle('hidden', !noModel);
   // Edit is usable only when an image model is loaded AND it supports editing.
-  $('edit_no_support').classList.toggle('hidden', !hasModel || i2i);
+  $('edit_no_support').classList.toggle('hidden', !hasModel || takesImage);
   // KV cache: off the menu (literally) when the model never wired the cache in.
   const kv = $('edit_kv_cache');
   const hasKvCache = capable('kv_cache');

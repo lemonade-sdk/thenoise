@@ -177,38 +177,40 @@ def test_percent_to_sigma_stays_strictly_below_one(model_cls):
 
 
 @pytest.mark.parametrize(
-    "model_cls,i2i,kv_cache",
+    "model_cls,i2i,ref2i,kv_cache",
     [
-        (AnimaModel, False, False),
-        (Krea2Model, False, False),
-        (ZImageModel, False, False),
-        (MingImageModel, False, False),
-        (FluxKleinModel, True, True),
-        (Flux3Model, True, False),
-        (H3ImageModel, True, True),
-        (MageFlowModel, True, False),
-        (QwenImageModel, True, True),
-        (QwenImage21Model, True, True),
-        (MossImageModel, False, False),
-        (Fibo2Model, True, True),
+        (AnimaModel, False, False, False),
+        (Krea2Model, False, False, False),
+        (ZImageModel, False, False, False),
+        (MingImageModel, False, False, False),
+        (FluxKleinModel, True, False, True),
+        (Flux3Model, True, False, False),
+        (H3ImageModel, True, False, True),
+        (MageFlowModel, True, False, False),
+        (QwenImageModel, True, False, True),
+        (QwenImage21Model, True, False, True),
+        (MossImageModel, False, True, False),
+        (Fibo2Model, True, False, True),
     ],
     ids=IMAGE_CATALOG_IDS,
 )
-def test_image_model_capabilities_describe_the_adapter(model_cls, i2i, kv_cache):
+def test_image_model_capabilities_describe_the_adapter(model_cls, i2i, ref2i, kv_cache):
     """``CAPABILITIES`` must describe the adapter: the pipeline rejects a request the
     model cannot serve and ``/health`` lets the UI grey out what it lacks.
 
-      * ``image``    -> the whole group is answered, a still from text always and a
-        reference only where the reference encoder is really overridden.
+      * ``image``    -> the whole group is answered, a still from text always, a
+        reference one way or the other only where the adapter really reads one.
       * ``kv_cache`` -> the shared cache protocol really starts a run cache, and
         freezing reference K/V needs a reference latent, so it implies ``i2i``.
 
-    That tie belongs to the image medium: a clip overrides ``encode_reference`` for its
-    own reference frame while answering ``image`` null, so video's vocabulary is pinned
-    in ``test_video_shared.py`` instead.
+    ``i2i`` is the tie to a kernel: it means ``encode_reference`` is overridden.
+    ``ref2i`` reaches the conditioner instead, which is not a kernel the base class
+    can see, so only the pipeline half of it is pinned — in ``test_pipeline.py``. A
+    clip answers the whole group null, so video's vocabulary is pinned in
+    ``test_video_shared.py`` instead.
     """
     model = _bare(model_cls, **BARE[model_cls.name])
-    assert model.capability("image") == {"t2i": True, "i2i": i2i}
+    assert model.capability("image") == {"t2i": True, "i2i": i2i, "ref2i": ref2i}
     assert model.capability("kv_cache") is kv_cache
     assert not kv_cache or i2i  # freezing reference K/V needs a reference latent
     # ``encode_reference`` is the kernel the pipeline calls. ``pack_reference_latent``

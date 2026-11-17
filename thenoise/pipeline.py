@@ -78,15 +78,24 @@ class ResolvedImage:
     seed: int
     pixel_upscaler: Optional[str]
     kv_cache: bool
-    # Reference conditioning method for editing; meaningless when it is not an edit.
+    # Reference conditioning method for a reference-latent edit; meaningless in the
+    # other modes.
     ref_method: str
-    is_edit: bool
+    #: How the model uses the request's picture: ``t2i``, ``i2i`` or ``ref2i``.
+    mode: str
     #: LoRA specs by role, so a component the model does not have is refused here.
     lora_specs: Mapping[str, list[str]]
 
     @property
-    def mode(self) -> str:
-        return "edit" if self.is_edit else "t2i"
+    def is_edit(self) -> bool:
+        """The request carries a picture, whichever way this model was able to use it."""
+        return self.mode != "t2i"
+
+    @property
+    def has_reference(self) -> bool:
+        """The run encodes a reference latent, rather than letting the conditioner read
+        the picture and no more."""
+        return self.mode == "i2i"
 
     def public(self) -> dict:
         """The request as this model will actually run it.
@@ -101,9 +110,27 @@ class ResolvedImage:
             "seed": self.seed, "upscale_factor": self.factor,
             "upscale_type": self.upscale_type, "pixel_upscaler": self.pixel_upscaler,
             "kv_cache": self.kv_cache,
-            "ref_method": self.ref_method if self.is_edit else None,
+            "ref_method": self.ref_method if self.has_reference else None,
             "lora_specs": dict(self.lora_specs),
         }
+
+
+def _image_mode(model, *, is_edit: bool) -> str:
+    """The image-medium mode a request runs in: ``t2i``, ``i2i`` or ``ref2i``.
+
+    A request that brought a picture takes whichever way of using it this model has,
+    the reference latent first because it can change pixels the conditioner alone
+    cannot. A model with neither is refused here, which is the one place that question
+    is answered.
+    """
+    if not is_edit:
+        return "t2i"
+    modes = model.capability("image")
+    if modes["i2i"]:
+        return "i2i"
+    if modes["ref2i"]:
+        return "ref2i"
+    raise ValueError(f"model '{model.name}' does not support image editing")
 
 
 def _normalize_sigmas(
@@ -281,16 +308,22 @@ class PipelineController:
         checked before it is accepted rather than after it has waited behind another.
         An edit that left its size unset takes it from the first reference, so the
         request that comes back is not always the one that arrived.
+
+        Which of a model's ways with a picture a request gets is never the caller's to
+        pick: see :func:`_image_mode`.
         """
         model = self.model
-        if not model.capability("image")["i2i" if is_edit else "t2i"]:
-            raise ValueError(f"model '{model.name}' does not support "
-                             f"{'image editing' if is_edit else 'text-to-image'}")
-        if not is_edit:
+        if not is_edit and not model.capability("image")["t2i"]:
+            raise ValueError(f"model '{model.name}' does not support text-to-image")
+        mode = _image_mode(model, is_edit=is_edit)
+        if mode == "t2i":
             return request, self._resolve_pipeline(request, is_edit=False)
         images = self._edit_images(request)
         if not images:
             raise ValueError("edit requires an input image")
+        if mode == "ref2i" and len(images) > 1:
+            raise ValueError(f"model '{model.name}' reads one reference image, "
+                             f"got {len(images)}")
 
         # Without explicit width/height the first reference decides the output size.
         width, height = model.size_from_reference(request.width, request.height,
@@ -312,7 +345,7 @@ class PipelineController:
                    if images else None)
         with inference():
             pixels = self._run(request, r, ref_key=ref_key,
-                               ref_method=r.ref_method if r.is_edit else None,
+                               ref_method=r.ref_method if r.has_reference else None,
                                token=token, progress=progress)
             progress("postprocessing")
             return self._finalize(pixels, request, r,
@@ -339,15 +372,15 @@ class PipelineController:
     ) -> torch.Tensor:
         """Locked, cache-checked stage pipeline -> decoded pixels ``[C,H,W]``.
 
-        Runs reference -> prompt -> sampling -> decode. ``ref_key``/``ref_method``
-        are only set in the edit path; their presence selects the reference stage
-        and image-aware prompt conditioning.
+        Runs reference -> prompt -> sampling -> decode. The reference-latent stage runs
+        only for the mode that has one; a picture the conditioner alone read still keys
+        the prompt cache, because that conditioning saw it.
 
         Each stage boundary is a progress tick and a cancellation point, so a job can
         still be stopped between stages when its solver never got a step in.
         """
         model = self.model
-        is_edit = ref_key is not None
+        is_edit = r.is_edit
         loras = r.lora_specs
 
         prompt_key = self._cache_key_prompt(
@@ -367,7 +400,7 @@ class PipelineController:
 
             # Stage 0: reference (image) latent — deterministic per image (edit).
             ref_latents: Optional[list[torch.Tensor]] = None
-            if is_edit:
+            if r.has_reference:
                 if self._cache.reference_hit(ref_key):
                     ref_latents = self._cache.reference_get()
                 else:
@@ -487,6 +520,9 @@ class PipelineController:
         queued request fails at submit.
         """
         model = self.model
+        mode = _image_mode(model, is_edit=is_edit)
+        # A ref method describes a reference LATENT.
+        reference = mode == "i2i"
         # Precedence: explicit request > checkpoint marker > model default.
         width = model.pref("width", request.width)
         height = model.pref("height", request.height)
@@ -518,7 +554,7 @@ class PipelineController:
 
         if request.kv_cache is None:
             kv_cache = bool(
-                is_edit
+                reference
                 and ref_method == "index_timestep_zero"
                 and model.capability("kv_cache")
             )
@@ -558,10 +594,11 @@ class PipelineController:
             factor, upscale_type, pixel_upscaler
         )
 
-        # Reference-method restrictions apply only to edits, not T2I.
-        if kv_cache and is_edit and request.ref_method is None:
+        # Reference-method restrictions apply only to a run with a reference latent;
+        # a cache that freezes something else takes whatever method the run resolved.
+        if kv_cache and reference and request.ref_method is None:
             ref_method = "index_timestep_zero"
-        if kv_cache and is_edit and ref_method != "index_timestep_zero":
+        if kv_cache and reference and ref_method != "index_timestep_zero":
             raise ValueError(
                 "kv_cache requires ref_method='index_timestep_zero': the cached "
                 "reference K/V are only step-invariant when the reference tokens are "
@@ -579,7 +616,7 @@ class PipelineController:
             factor=factor, upscale_type=upscale_type, target_width=target_width,
             target_height=target_height, refined=refined, pixel_scale=pixel_scale,
             effective_sampler=effective_sampler, seed=seed, pixel_upscaler=pixel_upscaler,
-            kv_cache=kv_cache, ref_method=ref_method, is_edit=is_edit, lora_specs=loras,
+            kv_cache=kv_cache, ref_method=ref_method, mode=mode, lora_specs=loras,
         )
 
     def _finalize(
@@ -633,7 +670,7 @@ class PipelineController:
             lora_specs=flat_lora_specs(r.lora_specs) or None,
             pixel_upscaler=r.pixel_upscaler,
             sigmas=list(r.sigmas) if r.sigmas else None,
-            ref_method=r.ref_method,
+            ref_method=r.ref_method if r.has_reference else None,
             kv_cache=r.kv_cache,
             source=source,
         )

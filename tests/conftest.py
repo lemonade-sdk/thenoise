@@ -1023,6 +1023,14 @@ class EditingStubModel(StubModel):
                     "image": {**StubModel.CAPABILITIES["image"], "i2i": True}}
 
 
+class VisionReferenceStubModel(StubModel):
+    """A stub that answers ``ref2i``: it reads one picture in the conditioner and has
+    no reference latent to encode."""
+
+    CAPABILITIES = {**StubModel.CAPABILITIES,
+                    "image": {**StubModel.CAPABILITIES["image"], "ref2i": True}}
+
+
 # ---------------------------------------------------------------------------- fixtures
 
 

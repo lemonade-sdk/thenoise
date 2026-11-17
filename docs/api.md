@@ -179,8 +179,8 @@ unused.
 ```json
 {"status": "ok", "models": ["qwen_image"],
   "samplers": ["er_sde", "euler", "unipc"],
-  "capabilities": {"image": {"t2i": true, "i2i": true}, "kv_cache": true,
-                   "upscale": true, "video": null}}
+  "capabilities": {"image": {"t2i": true, "i2i": true, "ref2i": false},
+                   "kv_cache": true, "upscale": true, "video": null}}
 ```
 
 With a video model:
@@ -195,10 +195,15 @@ With a video model:
 `models` is empty until a DiT is loaded, and `capabilities` is that adapter's
 own `CAPABILITIES` dict, unchanged (`{}` with nothing loaded).
 
-The request modes sit under their medium: `t2i` and `i2i` under `image`, `t2v`,
-`i2v` and `flf2v` under `video`. A model answers the other medium with `null`.
+The request modes sit under their medium: `t2i`, `i2i` and `ref2i` under `image`,
+`t2v`, `i2v` and `flf2v` under `video`. A model answers the other medium with `null`.
 `kv_cache` and `upscale` are not modes, so they stay at the top; either medium
 can use them.
+
+`i2i` repaints the picture: it reaches the DiT as a latent, so the result can line up
+with it. `ref2i` only *reads* one - the text encoder's vision tower turns it into
+conditioning tokens and the run draws something new - so it takes a single image and
+nothing about it survives into the result pixel for pixel.
 
 The web UI reads all of this to decide what to show - the Edit tab follows
 `i2i`. A request for something the loaded model cannot do is refused with HTTP
@@ -292,12 +297,17 @@ curl -s localhost:8000/text2image \
 Instruction-based editing: image(s) + prompt → edited image. Requires an
 editing-capable model; otherwise returns **HTTP 400**.
 
+What the model does with the picture is not the caller's choice. A model that encodes
+reference latents edits it (`i2i`); one whose text encoder has a vision tower and no
+latent path reads it and draws something new beside it (`ref2i`, MOSS-Image today).
+`ref2i` takes one image, not several.
+
 Accepts all `/text2image` fields plus:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `image` | `string` \| `string[]` | *(required)* | One or more base64-encoded reference images (OpenAI-style; first sets the output size when `width`/`height` omitted) |
-| `ref_method` | `string` | auto | Reference conditioning: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index`. The cache default follows it |
+| `ref_method` | `string` | auto | Reference conditioning: `index` or `index_timestep_zero` (reference tokens conditioned at timestep zero, which is what makes the KV cache valid). Auto = detected from the checkpoint, else `index`. The cache default follows it. Nothing to choose in `ref2i`, where there is no reference latent |
 
 > **Reference method.** Checkpoints trained to condition their reference tokens
 > at timestep zero carry the `__index_timestep_zero__` marker, which makes
