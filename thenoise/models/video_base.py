@@ -45,6 +45,8 @@ class Segment:
 
 
 class VideoModel(DiffusionModel):
+    MEDIUM = "video"
+
     CAPABILITIES = {**DiffusionModel.CAPABILITIES, "image": None,
                     "video": {"t2v": False, "i2v": False, "flf2v": False}}
 

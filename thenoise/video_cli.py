@@ -113,7 +113,7 @@ def run_video(args) -> None:
         dit_path=args.dit, vae_path=args.vae, text_encoder_path=args.text_encoder,
         lora_dir=args.lora_dir, dit_low_path=args.dit_low,
     ))
-    if not runtime.video:
+    if runtime.medium != "video":
         raise SystemExit(
             f"video: {runtime.model_name} renders stills; use `generate`")
 

@@ -127,6 +127,7 @@ def _counting_model(events: list):
 
     class Fake:
         name = "fake"
+        MEDIUM = "image"
         CAPABILITIES: dict = {}
         detect = staticmethod(lambda path: False)
         validate_paths = classmethod(lambda cls, dit_paths: None)

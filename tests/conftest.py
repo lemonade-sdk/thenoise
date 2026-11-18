@@ -815,7 +815,7 @@ KEYSET_IDS = sorted(MODEL_KEYSETS)
 CATALOG_IDS = [cls.name for cls in MODEL_CATALOG]
 # The contracts only the image medium answers to: a latent upscaler, and a sampler in
 # the class defaults (a video variant carries its own recipe, layered at resolve time).
-IMAGE_CATALOG = [cls for cls in MODEL_CATALOG if not issubclass(cls, VideoModel)]
+IMAGE_CATALOG = [cls for cls in MODEL_CATALOG if cls.MEDIUM == "image"]
 IMAGE_CATALOG_IDS = [cls.name for cls in IMAGE_CATALOG]
 
 
@@ -1122,6 +1122,7 @@ def fake_model_cls():
 
         namespace = {
             "name": name,
+            "MEDIUM": "image",
             "__init__": __init__,
             "detect": staticmethod(lambda f: False),
             # A catalog entry answers for its own DiT files and releases its own state;

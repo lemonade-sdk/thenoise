@@ -12,6 +12,7 @@ import base64
 from typing import List, Literal, Optional, Union
 
 from thenoise.api_errors import error, guarded
+from thenoise.mediums import install_routes
 from thenoise.utils.lora_roles import LoraSpecs
 
 from fastapi import FastAPI, Request
@@ -266,12 +267,7 @@ def create_app(runtime, *, jobs: Optional[JobQueue] = None) -> FastAPI:
 
     if jobs is not None:
         install_job_routes(app, jobs)
-        if runtime.video:
-            from thenoise.video.http import install_video_routes
-            from thenoise.video.service import video_planner
-            install_video_routes(app, jobs, video_planner(runtime), runtime.model_name)
-        else:
-            install_image_job_routes(app, jobs, runtime)
+        install_routes(app, jobs, runtime)
 
     def image_job(failure: str, action, out: str):
         """Run one image-producing request, answering with the image or the failure."""
@@ -311,6 +307,7 @@ def create_app(runtime, *, jobs: Optional[JobQueue] = None) -> FastAPI:
         return {
             "status": "ok",
             "models": runtime.available(),
+            "medium": runtime.medium,
             "capabilities": runtime.model_capabilities(),
             "samplers": sorted(SAMPLERS),
             "pixel_channels": runtime.model_pixel_channels(),

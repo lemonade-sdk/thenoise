@@ -50,10 +50,12 @@ def _serve(args) -> None:
     import uvicorn
 
     app = create_app(runtime, jobs=jobs)
-    if runtime.video:
-        print(f"thenoise serving video model '{runtime.model_name}' on {settings.device}")
-    elif runtime.available():
+    medium = runtime.medium
+    if medium == "image":
         print(f"thenoise serving model '{runtime.model_name}' on {settings.device}")
+    elif medium:
+        print(f"thenoise serving {medium} model '{runtime.model_name}' "
+              f"on {settings.device}")
     else:
         print(f"thenoise serving WITHOUT a model on {settings.device} "
               f"(only upscaling and control-map extraction are available)")

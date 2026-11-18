@@ -64,7 +64,7 @@ def _runtime(tmp_path=None, pipeline=None):
     """A runtime with a fake pipeline + model (and optionally an upscaler dir)."""
     runtime = Runtime(Settings())
     runtime._pipeline = pipeline if pipeline is not None else FakePipeline()
-    runtime._model = object()
+    runtime._model = type("Model", (), {"MEDIUM": "image"})()
     runtime._model_name = "fake"
     if tmp_path is not None:
         (tmp_path / "RealESRGAN_x4.safetensors").write_text("x")
@@ -123,6 +123,7 @@ def _rgba_png_b64(size=(2, 2)) -> str:
 def test_health_reports_the_loaded_model():
     runtime = _runtime()
     runtime._model = type("M", (), {
+        "MEDIUM": "image",
         "CAPABILITIES": {"image": {"t2i": True, "i2i": True}, "kv_cache": True,
                          "upscale": True, "video": None},
         "REF_METHODS": ("index", "index_timestep_zero", "vision"),
@@ -131,6 +132,7 @@ def test_health_reports_the_loaded_model():
     res = _endpoint(create_app(runtime), "/health")()
 
     assert res["models"] == ["fake"]
+    assert res["medium"] == "image"
     # The UI gates Edit, the KV cache and transparent output on these, and an image model
     # answers the video group null rather than leaving the key out. ``ref_methods`` says
     # what a reference would be used for, so a client can ask for one it can have.
@@ -146,6 +148,7 @@ def test_health_reports_the_loaded_model():
 def test_health_with_nothing_loaded():
     res = _endpoint(create_app(_empty_runtime()), "/health")()
     assert res["models"] == []
+    assert res["medium"] is None
     assert res["capabilities"] == {}
     assert res["samplers"] == sorted(SAMPLERS)  # a solver needs no weights
     assert res["pixel_channels"] == 3  # nothing loaded -> nothing can be transparent
