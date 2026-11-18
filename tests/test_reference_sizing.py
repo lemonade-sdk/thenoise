@@ -14,7 +14,7 @@ from thenoise.models import (
     QwenImage21Model,
     QwenImageModel,
 )
-from thenoise.models.base import DiffusionModel
+from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import GenerateRequest
 from thenoise.pipeline import PipelineController
 from thenoise.upscale.pixel import PixelUpscalerManager
@@ -102,7 +102,7 @@ def test_an_unnamed_edit_size_is_the_shared_area_at_the_reference_aspect():
     for size in ((200, 100), (100, 200), (4000, 3000), (900, 900)):
         width, height = model.default_edit_size(*size)
         assert abs((width / height) / (size[0] / size[1]) - 1) < 0.01
-        assert abs(width * height / DiffusionModel.EDIT_DEFAULT_AREA - 1) < 0.01
+        assert abs(width * height / PixelModel.EDIT_DEFAULT_AREA - 1) < 0.01
 
 
 def test_a_reference_is_no_longer_cropped_to_the_output():

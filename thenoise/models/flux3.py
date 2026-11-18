@@ -32,10 +32,10 @@ from thenoise.dit.flux3.utils import detect_params, load_flux3_dit
 from thenoise.models.base import (
     LATENT_REF_METHODS,
     Conditioning,
-    DiffusionModel,
     Step,
     normalize_keys,
 )
+from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.math import round_up
@@ -44,22 +44,22 @@ from thenoise.vae import load_flux2_vae
 logger = logging.getLogger(__name__)
 
 
-class Flux3Model(DiffusionModel):
+class Flux3Model(PixelModel):
     name = "flux3"
 
     # The reference samples this distilled flow map at 15 steps, guidance 1.0 — more
     # than the other distilled models here, because a flow map is conditioned on the
     # step size as well as the noise level. A base (CFG) release would want guidance > 1.
     DEFAULT_PREFS = {
-        **DiffusionModel.DEFAULT_PREFS,
+        **PixelModel.DEFAULT_PREFS,
         "steps": 15,
         "guidance_scale": 1.0,
         "sampler": "euler",
     }
 
     # Reference-latent editing, no KV cache (see the module docstring).
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": False,
-                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
+    CAPABILITIES = {**PixelModel.CAPABILITIES, "kv_cache": False,
+                    "image": {**PixelModel.CAPABILITIES["image"], "i2i": True}}
     # Qwen3-VL-4B carries a vision tower, but it is not run: ``Flux3TextEncoder``
     # takes a prompt alone, and it has no way to know whether the run resolved
     # ``vision`` or a latent method. Offering the method would therefore start running

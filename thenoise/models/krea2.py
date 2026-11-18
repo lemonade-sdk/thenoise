@@ -12,10 +12,10 @@ from thenoise.dit.krea2.sampling import encode_prompts, prepare, timesteps
 from thenoise.models.base import (
     VISION_REF_METHOD,
     Conditioning,
-    DiffusionModel,
     Step,
     normalize_keys,
 )
+from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.image_tensor import ReferenceSizing
@@ -25,19 +25,19 @@ from thenoise.vae import load_qwen_vae
 logger = logging.getLogger(__name__)
 
 
-class Krea2Model(DiffusionModel):
+class Krea2Model(PixelModel):
     name = "krea2"
 
     # Model-owned defaults, including the schedule shaping constants below.
     DEFAULT_PREFS = {
-        **DiffusionModel.DEFAULT_PREFS,
+        **PixelModel.DEFAULT_PREFS,
         "steps": 8,
         "guidance_scale": 1.0,
         "ref_method": VISION_REF_METHOD,
     }
 
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES,
-                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
+    CAPABILITIES = {**PixelModel.CAPABILITIES,
+                    "image": {**PixelModel.CAPABILITIES["image"], "i2i": True}}
     # The single-stream DiT has no way to carry reference tokens, so a reference is
     # read by the Qwen3-VL conditioner it already ships with and nothing else.
     REF_METHODS = (VISION_REF_METHOD,)

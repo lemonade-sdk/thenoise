@@ -22,7 +22,11 @@ from thenoise.dit.h3_image.encoder import load_h3_image_text_encoder
 from thenoise.dit.h3_image.layout import PATCH_SIZE, Layout, pad_to_patch
 from thenoise.dit.h3_image.models import H3ImageParams, detect_params, load_h3_image_dit
 from thenoise.models.base import (
-    VISION_REF_METHOD, Conditioning, DiffusionModel, normalize_keys)
+    VISION_REF_METHOD,
+    Conditioning,
+    normalize_keys,
+)
+from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.samplers import Step
 from thenoise.upscale import LatentUpscaler, VAEPixelUpscaler
@@ -52,11 +56,11 @@ class H3ImageConditioning(Conditioning):
     null_tags: Optional[torch.Tensor] = None
 
 
-class H3ImageModel(DiffusionModel):
+class H3ImageModel(PixelModel):
     name = "h3_image"
 
     DEFAULT_PREFS = {
-        **DiffusionModel.DEFAULT_PREFS,
+        **PixelModel.DEFAULT_PREFS,
         "width": 2048,
         "height": 2048,
         "steps": 4,
@@ -65,8 +69,8 @@ class H3ImageModel(DiffusionModel):
         "ref_method": "index_timestep_zero",
     }
 
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": True,
-                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
+    CAPABILITIES = {**PixelModel.CAPABILITIES, "kv_cache": True,
+                    "image": {**PixelModel.CAPABILITIES["image"], "i2i": True}}
     KV_CACHED_SLICE = "suffix"
 
     REFERENCE_SIZING = ReferenceSizing(

@@ -30,10 +30,10 @@ from thenoise.dit.fibo2.utils import detect_params, is_fibo2, load_fibo2_dit
 from thenoise.models.base import (
     VISION_REF_METHOD,
     Conditioning,
-    DiffusionModel,
     Step,
     normalize_keys,
 )
+from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.image_tensor import cover_crop
@@ -46,22 +46,22 @@ if TYPE_CHECKING:  # pragma: no cover - only for annotations
 logger = logging.getLogger(__name__)
 
 
-class Fibo2Model(DiffusionModel):
+class Fibo2Model(PixelModel):
     name = "fibo2"
 
     # Edit Turbo's recipe. Dev is the non-distilled parent of the same architecture
     # and wants ``--steps 50 --guidance-scale 5``; nothing in either file says which
     # it is, so the few-step one is the default and the flag is the escape hatch.
     DEFAULT_PREFS = {
-        **DiffusionModel.DEFAULT_PREFS,
+        **PixelModel.DEFAULT_PREFS,
         "steps": 4,
         "guidance_scale": 1.0,
         "sampler": "euler",
         "ref_method": "index_timestep_zero",
     }
 
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": True,
-                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
+    CAPABILITIES = {**PixelModel.CAPABILITIES, "kv_cache": True,
+                    "image": {**PixelModel.CAPABILITIES["image"], "i2i": True}}
     KV_CACHED_SLICE = "suffix"
 
     REF_METHODS = ("index_timestep_zero", VISION_REF_METHOD)

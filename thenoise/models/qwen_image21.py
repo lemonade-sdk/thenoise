@@ -36,10 +36,10 @@ from thenoise.models.base import (
     LATENT_REF_METHODS,
     VISION_REF_METHOD,
     Conditioning,
-    DiffusionModel,
     Step,
     normalize_keys,
 )
+from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, Qwen21TranscodeUpscaler
 from thenoise.utils.image_tensor import ReferenceSizing
@@ -63,11 +63,11 @@ class QwenImage21Conditioning(Conditioning):
     null_slots: Optional[List[int]] = None
 
 
-class QwenImage21Model(DiffusionModel):
+class QwenImage21Model(PixelModel):
     name = "qwen_image21"
 
     DEFAULT_PREFS = {
-        **DiffusionModel.DEFAULT_PREFS,
+        **PixelModel.DEFAULT_PREFS,
         "steps": 8,
         "guidance_scale": 1.0,
         "sampler": "euler",
@@ -75,8 +75,8 @@ class QwenImage21Model(DiffusionModel):
         "sigmas": [1.0, 0.978453, 0.95418, 0.926626, 0.89508, 0.845148, 0.704534, 0.414568]
     }
 
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": True,
-                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
+    CAPABILITIES = {**PixelModel.CAPABILITIES, "kv_cache": True,
+                    "image": {**PixelModel.CAPABILITIES["image"], "i2i": True}}
     # Qwen2.5-VL was built multimodal, so the same reference can be read by the
     # conditioner instead of encoded: a hint rather than a canvas to repaint.
     REF_METHODS = LATENT_REF_METHODS + (VISION_REF_METHOD,)

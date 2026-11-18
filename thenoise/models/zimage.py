@@ -19,10 +19,10 @@ from thenoise.dit.zimage.utils import (
 from thenoise.utils.text_encoder import find_tokenizer_dir
 from thenoise.models.base import (
     Conditioning,
-    DiffusionModel,
     Step,
     normalize_keys,
 )
+from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.lora import FUSE_QKV
@@ -32,12 +32,12 @@ from thenoise.vae import load_flux_vae
 logger = logging.getLogger(__name__)
 
 
-class ZImageModel(DiffusionModel):
+class ZImageModel(PixelModel):
     name = "zimage"
 
     # Distilled Turbo defaults (guidance 1 = CFG off).
     DEFAULT_PREFS = {
-        **DiffusionModel.DEFAULT_PREFS,
+        **PixelModel.DEFAULT_PREFS,
         "steps": 8,
         "guidance_scale": 1.0,
         "sampler": "euler",

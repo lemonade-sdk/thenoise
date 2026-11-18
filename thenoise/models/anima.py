@@ -10,10 +10,10 @@ from thenoise.dit.anima import sampling as anima_sampling
 from thenoise.dit.anima.strategy import AnimaTextEncodingStrategy, AnimaTokenizeStrategy
 from thenoise.models.base import (
     Conditioning,
-    DiffusionModel,
     Step,
     normalize_keys,
 )
+from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.math import round_up
@@ -23,12 +23,12 @@ from thenoise.vae import load_qwen_vae
 logger = logging.getLogger(__name__)
 
 
-class AnimaModel(DiffusionModel):
+class AnimaModel(PixelModel):
     name = "anima"
 
     # Defaults for the turbo version
     DEFAULT_PREFS = {
-        **DiffusionModel.DEFAULT_PREFS,
+        **PixelModel.DEFAULT_PREFS,
         "steps": 8,
         "guidance_scale": 1,
     }

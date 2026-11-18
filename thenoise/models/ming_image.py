@@ -17,10 +17,10 @@ from thenoise.dit.ming_image.utils import load_ming_dit
 from thenoise.text_encoders.ming_image import encode_ming_prompt, load_ming_text_encoder
 from thenoise.models.base import (
     Conditioning,
-    DiffusionModel,
     Step,
     normalize_keys,
 )
+from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, VAEPixelUpscaler
 from thenoise.utils.lora import FUSE_QKV
@@ -44,13 +44,13 @@ def _branch(extra: Optional[torch.Tensor]) -> Optional[list]:
     return None if extra is None else [extra[0]]
 
 
-class MingImageModel(DiffusionModel):
+class MingImageModel(PixelModel):
     name = "ming_image"
 
     # Defaults at the 1024 bucket it was trained on; the schedule's shift is
     # resolution dependent.
     DEFAULT_PREFS = {
-        **DiffusionModel.DEFAULT_PREFS,
+        **PixelModel.DEFAULT_PREFS,
         "steps": 12,
         "guidance_scale": 1.0,
         "sampler": "euler",

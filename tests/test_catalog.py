@@ -31,6 +31,12 @@ def test_every_catalog_medium_is_served():
         assert cls.MEDIUM in MEDIUMS, f"{cls.name} declares medium {cls.MEDIUM!r}"
 
 
+def test_the_engine_contract_asks_for_nothing_that_draws_pixels():
+    """A VAE, a latent upscaler and a size grid belong to ``PixelModel``, not the engine."""
+    assert DiffusionModel.__abstractmethods__ == frozenset(
+        {"detect", "encode_prompt", "init_latents", "schedule", "denoise_step"})
+
+
 def test_an_unregistered_medium_is_refused_by_name():
     """The message a medium gets before its registry entry exists."""
     class Unregistered:

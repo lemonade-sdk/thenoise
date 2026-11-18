@@ -5,7 +5,7 @@ import torch
 from PIL import Image
 
 from thenoise.models import QwenImage21Model
-from thenoise.models.base import DiffusionModel
+from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs
 from thenoise.upscale import LatentTranscodeNet, Qwen21TranscodeUpscaler
 from thenoise.upscale import qwen21_transcode
@@ -70,7 +70,7 @@ def test_the_vision_half_and_the_latent_half_are_fitted_by_the_same_rule():
 def test_the_adapter_does_not_override_the_shared_decode():
     """The alpha drop-out used to be a ``decode`` override; it must not come back."""
     assert "decode" not in QwenImage21Model.__dict__
-    assert QwenImage21Model.decode is DiffusionModel.decode
+    assert QwenImage21Model.decode is PixelModel.decode
 
 
 def test_the_adapter_upscales_with_the_trained_transcoder(monkeypatch):
