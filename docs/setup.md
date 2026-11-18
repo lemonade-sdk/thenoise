@@ -26,8 +26,9 @@ first image; Krea 2 (~35 GB) is the quality pick.
 Download the **portable** release asset for your GPU from the
 [releases page](https://github.com/lemonade-sdk/thenoise/releases). Each bundle
 is a self-contained directory with a standalone CPython, the ROCm build of
-PyTorch, all dependencies, TheNoise itself, and a bundled `clang`, so
-`torch.compile`/Triton JIT needs no system compiler.
+PyTorch, all dependencies, TheNoise itself, and a bundled `clang`. On Linux that
+is everything `torch.compile` needs; Windows has one exception, noted under
+[Generate your first image](#3-generate-your-first-image).
 
 ```bash
 # single archive
@@ -106,6 +107,17 @@ compiled code. No configuration needed.
 
 That's it. `fox.png` is in your current directory.
 
+**On Windows the bundle runs eagerly unless you ask for more.** Triton compiles
+its first kernel with a C compiler that reads Microsoft C++ and Windows SDK
+headers, which a portable bundle cannot carry, so `thenoise.bat` turns
+`torch.compile` off. If you have the Visual Studio 2022 "Desktop development
+with C++" workload installed, ask for the compiled - faster - path explicitly:
+
+```bat
+set TORCHDYNAMO_DISABLE=0
+thenoise.bat generate ...
+```
+
 ## Serve it instead
 
 To get the web UI (and the HTTP API other software can call) instead of one-shot
@@ -138,6 +150,7 @@ editing-capable models. Upscale and Control Maps need no diffusion model.
 |---|---|
 | `torch.compile` warnings on first run | Normal. They only happen while the DiT is being compiled. |
 | First generation takes minutes | Normal — see [first-run note](#3-generate-your-first-image). Subsequent runs are fast. |
+| Windows runs slower than Linux | Expected by default: the bundle runs eagerly. See the Windows note in [Generate your first image](#3-generate-your-first-image). |
 | `error while loading shared libraries` | Don't run the system Python against the bundle; always use `./bin/thenoise` (or `./bin/python3`). |
 | `libatomic.so.1: cannot open shared object file` at startup | Missing `libatomic` runtime library (seen on Fedora 44): install it with your package manager, e.g. `sudo dnf install libatomic`. Details in [#29](https://github.com/lemonade-sdk/thenoise/issues/29). |
 | GPU not detected | You're on the wrong bundle for your GPU — check `gfx` in the asset name against your hardware (gfx1151 for Strix Halo). |

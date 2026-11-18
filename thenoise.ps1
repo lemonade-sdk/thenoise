@@ -336,6 +336,35 @@ function Get-GfxArch {
   return $hit.Gfx
 }
 
+# clang-cl - which Triton prefers over its own bundled tcc - reads MSVC and
+# Windows SDK headers that no wheel carries, so a machine without them cannot
+# compile anything. This looks for what it needs, well enough to point a user at
+# the faster path; it does not prove the compiler works.
+function Test-MsvcToolchain {
+  try {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (-not (Test-Path $vswhere)) { return $false }
+    $vswhereArgs = @("-latest", "-products", "*",
+                     "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                     "-property", "installationPath")
+    $vs = & $vswhere @vswhereArgs | Select-Object -First 1
+    if (-not $vs) { return $false }
+    $msvc = Get-ChildItem (Join-Path $vs "VC\Tools\MSVC") -Directory -ErrorAction SilentlyContinue |
+      Where-Object { Test-Path (Join-Path $_.FullName "include\vcruntime.h") }
+    if (-not $msvc) { return $false }
+    $roots = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots" -ErrorAction SilentlyContinue
+    if (-not $roots.KitsRoot10) { return $false }
+    foreach ($dir in @("Include", "Lib")) {
+      $ucrt = Get-ChildItem (Join-Path $roots.KitsRoot10 $dir) -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path (Join-Path $_.FullName "ucrt\x64") }
+      if (-not $ucrt) { return $false }
+    }
+    return $true
+  } catch {
+    return $false
+  }
+}
+
 # ---- 1. Check that uv is available ----------------------------------------
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
   Write-Host @"
@@ -419,6 +448,13 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 # ---- 5. Set ROCm-specific environment variables ---------------------------
 $env:TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL = "1"
 $env:MIOPEN_FIND_MODE = "FAST"
+# Off unless asked for, as in the portable launcher: compiling needs a C
+# toolchain, and dying at the first kernel is worse than running slow. Any value
+# other than 1 enables compilation.
+if (-not $env:TORCHDYNAMO_DISABLE) { $env:TORCHDYNAMO_DISABLE = "1" }
+if ($env:TORCHDYNAMO_DISABLE -eq "1" -and (Test-MsvcToolchain)) {
+  Write-Host "MSVC build tools detected: for a faster compiled model, set `$env:TORCHDYNAMO_DISABLE = '0' before starting."
+}
 
 # ---- 6. Launch the project, forwarding all arguments ----------------------
 
