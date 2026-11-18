@@ -23,6 +23,7 @@ from thenoise.inference import inference
 from thenoise.jobs import Cancellation, stepping
 from thenoise.models.config import EncodePromptArgs, VideoSamplingParams
 from thenoise.samplers import check_sampler, create_sampler
+from thenoise.stages import Stages
 from thenoise.utils.image_tensor import load_image, pil_to_pixels, pixels_to_pil
 from thenoise.utils.lora_roles import check_lora_roles
 from thenoise.utils.pipeline_cache import PipelineCache, content_digest
@@ -106,55 +107,54 @@ class VideoPipelineController:
             images = self._reference_images(spec)
             ref_key = (self._cache_key_reference(images, spec) if images else None)
             prompt_key = self._cache_key_prompt(spec, ref_key)
+            stages = Stages(model, self._cache)
 
             # Stage 0: reference latent(s).
-            ref: Optional[list[torch.Tensor]] = None
+            ref = None
             if images:
-                if self._cache.reference_hit(ref_key):
-                    ref = self._cache.reference_get()
-                else:
-                    with model.memory.stage("vae", pixels=pixels) as stage:
-                        ref = stage.run(self._encode_references, images, spec)
-                    self._cache.reference_store(ref_key, ref)
+                ref = stages.run(self._encode_references, images, spec,
+                                 resident=("vae",), pixels=pixels,
+                                 cache="reference", key=ref_key)
                 token.check()
 
             # Stage 1: prompt conditioning — text encoder only, and checked after
             # stage 0 because its store clears this one.
-            if self._cache.prompt_hit(prompt_key):
-                cond_raw = self._cache.prompt_get()
-            else:
-                with model.memory.stage(
-                    "text_encoder",
-                    pixels=max(pixels, sum(image.width * image.height
-                                           for image in images)),
-                ) as stage:
-                    cond_raw = stage.run(model.encode_prompt, EncodePromptArgs(
-                        prompt=spec.prompt, negative_prompt=spec.negative_prompt,
-                        guidance_scale=spec.guidance_scale, image=images or None))
-                self._cache.prompt_store(prompt_key, cond_raw)
+            cond_raw = stages.run(
+                model.encode_prompt,
+                EncodePromptArgs(prompt=spec.prompt, negative_prompt=spec.negative_prompt,
+                                 guidance_scale=spec.guidance_scale, image=images or None),
+                resident=("text_encoder",),
+                pixels=max(pixels, sum(image.width * image.height
+                                       for image in images)),
+                cache="prompt", key=prompt_key)
             token.check()
 
             latents = model.init_latents(params)
             x = None
+            cond = None
             done = 0
             for segment in model.segments(params, model.schedule(params),
                                           spec.guidance_scale):
-                with model.memory.stage(segment.stage, pixels=pixels) as stage:
+                def prepare(segment=segment):
+                    nonlocal x, cond
                     model.switch_loras(spec.lora_specs.get(segment.stage),
-                                     segment.module, segment.stage)
+                                       segment.module, segment.stage)
                     model.begin_segment(segment)
                     cond = model.fuse_text(cond_raw)
-                    if x is None:  # once, and inside a stage: preparing may need weights
+                    # once, and inside a stage: preparing may need weights
+                    if x is None:
                         x = model.prepare_latent(latents, cond, params, ref=ref,
                                                  ref_method=model.pref("ref_method"))
-                    x = stage.run(self._denoise, x, segment, cond, params,
-                                  token, progress, done, spec.steps)
+
+                x = stages.run(lambda: self._denoise(x, segment, cond, params, token,
+                                                     progress, done, spec.steps),
+                               resident=(segment.stage,), pixels=pixels, prepare=prepare)
                 done += len(segment.steps)
             x = model.finalize_latent(x, params)
             del cond_raw, latents, ref
 
-            with model.memory.stage("vae", pixels=pixels) as stage:
-                stage.run(self._mux, x, spec, token, progress, output)
+            stages.run(self._mux, x, spec, token, progress, output,
+                       resident=("vae",), pixels=pixels)
             del x
 
         logger.info("Video saved: %s", output)

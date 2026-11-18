@@ -1,6 +1,3 @@
-"""One entry per medium — what a loaded model produces — mapping it to the pipeline
-controller that drives the adapter and the job routes a server installs for it.
-"""
 from __future__ import annotations
 
 from dataclasses import dataclass

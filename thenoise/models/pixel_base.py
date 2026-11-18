@@ -1,6 +1,3 @@
-"""What an adapter has when its latent decodes to a picture: a size on a grid, references
-a VAE can encode, and the decode itself. A medium that never draws stops at the engine.
-"""
 from __future__ import annotations
 
 from abc import abstractmethod

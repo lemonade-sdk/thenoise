@@ -40,8 +40,7 @@ class VideoModel(PixelModel):
     CAPABILITIES = {**PixelModel.CAPABILITIES, "image": None,
                     "video": {"t2v": False, "i2v": False, "flf2v": False}}
 
-    #: Shared video prefs; what a release decides for itself is absent here, and
-    #: ``tests/test_video_shared.py`` checks each variant supplies what a request may unset.
+    #: Shared video prefs; ``test_video_shared.py`` checks each variant covers them all.
     DEFAULT_PREFS = {**PixelModel.DEFAULT_PREFS,
                      "negative_prompt": "", "output_format": "webm"}
 

@@ -85,8 +85,7 @@ class DiffusionModel(LoRASupport, ABC):
     #: Features ``/health`` reports verbatim; a medium nests its own under its name.
     CAPABILITIES: ClassVar[Dict[str, Any]] = {"kv_cache": False}
 
-    #: How this model can use a reference picture, best first; empty means it takes
-    #: none. See :data:`LATENT_REF_METHODS` and :data:`VISION_REF_METHOD`.
+    #: How this model can use a reference picture, best first; empty means none.
     REF_METHODS: ClassVar[Tuple[str, ...]] = ()
 
     #: Created by ``start_kv_caches``, dropped by ``end_kv_caches``.
@@ -95,8 +94,7 @@ class DiffusionModel(LoRASupport, ABC):
     #: Preferences implied by the loaded checkpoint's markers; set per instance.
     checkpoint_prefs: Dict[str, Any] = {}
 
-    #: Which end of the attention sequence the KV cache freezes: ``"suffix"`` for a
-    #: ``text, target, references`` layout, ``"prefix"`` for ``text + references, target``.
+    #: Which end of the sequence the KV cache freezes: ``"suffix"`` or ``"prefix"``.
     KV_CACHED_SLICE: ClassVar[str] = "suffix"
 
     @staticmethod
@@ -126,8 +124,7 @@ class DiffusionModel(LoRASupport, ABC):
 
         self.checkpoint_prefs = detect_checkpoint_prefs(config.dit_path)
 
-        # Subclasses register ``dit`` / ``text_encoder`` / ``vae``; the controller stages
-        # them by name.
+        # Subclasses register ``dit`` / ``vae`` / ``text_encoder`` for staging by name.
         self.memory = MemoryManager(self.device, self.offload_device)
 
         apply_recompile_limit()
@@ -261,8 +258,7 @@ class DiffusionModel(LoRASupport, ABC):
         return 1.0 - percent
 
     # ------------------------------------------------------------ references
-    #: How a picture is fitted before anything encodes it. Must stay a pure function of
-    #: the image and this struct: the pipeline caches the encoded reference on it.
+    #: Fitted before anything encodes it; the pipeline caches on this struct, so stay pure.
     REFERENCE_SIZING: ClassVar[ReferenceSizing] = ReferenceSizing()
 
     def prepare_reference(self, image: Image.Image) -> Image.Image:
