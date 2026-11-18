@@ -245,7 +245,7 @@ jobs:
           [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "thenoise_version=$nv`r`n")
 
   # Real GPU smoke test on the gfx1151 dev_lab box: imports + GPU visibility +
-  # one end-to-end Anima generation (incl. first-run torch.compile). Runs only
+  # one end-to-end Anima generation. Runs only
   # when gfx1151 was built AND qualification was not skipped. It never blocks
   # assembly of the release (see create-release); it gates publication (see
   # publish-release).
@@ -328,8 +328,7 @@ jobs:
         run: rm -rf "${{ runner.temp }}/thenoise-qual" || true
 
   # Same GPU smoke test as qualify-linux, but on a Windows dev_lab runner
-  # against the Windows bundle (build-scripts/qualify_thenoise.ps1). torch.compile is
-  # disabled on Windows (no Triton), so the generation runs in eager mode.
+  # against the Windows bundle (build-scripts/qualify_thenoise.ps1).
   qualify-windows:
     needs: [prepare-matrix, build-windows]
     runs-on: [self-hosted, Windows, devlab-dispatch, strix-halo]

@@ -6,10 +6,6 @@
 # bundle imports, sees the GPU, downloads the Anima model, and runs one real
 # generation end-to-end. Writes a small JSON report.
 #
-# NOTE: torch.compile is disabled on Windows (Triton is Linux-only in the AMD
-# wheel index), so the generation runs in eager mode — there is no first-run
-# compile step as in the Linux qualification.
-#
 # Usage: qualify_thenoise.ps1 -Root <bundle_root> -ModelDir <dir>
 #                            [-Out <report.json>] [-Variant <anima-variant>]
 # ===========================================================================
@@ -50,7 +46,7 @@ function Fail-Report {
 
 # DLL resolution on Windows is PATH-based: bundled ROCm runtime + torch libs.
 $env:PATH = "$SPDir\_rocm_sdk_core\bin;$SPDir\_rocm_sdk_core\lib;$SPDir\_rocm_sdk_core\lib\llvm\lib;$SPDir\_rocm_sdk_libraries\bin;$SPDir\torch\lib;$SPDir;$Root;${Root}\Scripts;$env:PATH"
-# torch.compile is unavailable on Windows ROCm (no Triton); disable it.
+# The ROCm environment thenoise.bat sets, for the python calls below that skip it.
 $env:TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL = "1"
 $env:MIOPEN_FIND_MODE = "FAST"
 
@@ -92,7 +88,7 @@ foreach ($f in @($Dit, $Vae, $Te)) {
   if (-not (Test-Path $f)) { Fail-Report "missing checkpoint $f" }
 }
 
-Write-Host "=== run one generation (compile disabled on Windows) ==="
+Write-Host "=== run one generation ==="
 $outPng = Join-Path $OutDir "qualification.png"
 $genLog = Join-Path $OutDir "generate.log"
 # Run the bundle launcher via cmd so $LASTEXITCODE reliably reflects the .bat

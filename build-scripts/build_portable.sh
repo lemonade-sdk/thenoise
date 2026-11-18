@@ -2,8 +2,7 @@
 # build_portable.sh — Assemble a relocatable "portable" thenoise bundle.
 #
 # Produces a self-contained directory (standalone CPython + PyTorch ROCm + all
-# deps + thenoise itself + a bundled clang so torch.compile/Triton JIT works
-# without a system gcc) with a `bin/thenoise` launcher.
+# deps + thenoise itself + a bundled clang) with a `bin/thenoise` launcher.
 #
 # The result is a single directory you can copy to any Linux x86_64 machine
 # with a matching GPU and run without installing anything. This script is
@@ -202,7 +201,7 @@ say "Trimming bundle size"
 cd "$ROOT"
 
 # pip/wheel are not needed at runtime (keep setuptools — torch's
-# cpp_extension/Triton may need it).
+# cpp_extension may need it).
 rm -rf "$SP_DIR"/pip* "$SP_DIR"/wheel* 2>/dev/null || true
 find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 find . -name "*.pyc" -delete 2>/dev/null || true

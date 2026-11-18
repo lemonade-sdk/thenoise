@@ -26,8 +26,8 @@ first image; Krea 2 (~35 GB) is the quality pick.
 Download the **portable** release asset for your GPU from the
 [releases page](https://github.com/lemonade-sdk/thenoise/releases). Each bundle
 is a self-contained directory with a standalone CPython, the ROCm build of
-PyTorch, all dependencies, TheNoise itself, and a bundled `clang` (so
-`torch.compile`/Triton JIT works with no system compiler).
+PyTorch, all dependencies, TheNoise itself, and a bundled `clang`, so
+`torch.compile`/Triton JIT needs no system compiler.
 
 ```bash
 # single archive

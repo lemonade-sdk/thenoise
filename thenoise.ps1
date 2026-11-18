@@ -369,8 +369,7 @@ if ($UvVerLine -match '(\d+)\.(\d+)\.(\d+)') {
 if (-not (Test-Path $VenvDir)) {
   Write-Host "Creating virtual environment ($VenvDir) with Python 3.13 ..."
   # --managed-python forces uv to use its own standalone CPython build rather
-  # than a system python3.13. (On Windows, Triton JIT is unavailable anyway;
-  # this still gives a self-contained, sudo-free setup.)
+  # than a system python3.13, which keeps the setup self-contained and sudo-free.
   & uv venv $VenvDir --python 3.13 --managed-python
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
