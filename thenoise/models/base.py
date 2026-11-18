@@ -1,18 +1,6 @@
-"""Abstract interface for a diffusion model adapter.
-
-The base class owns the model kernels and the load/switch logic for the model's own
-weights (DiT, VAE, text encoder, LoRAs), ending at the final VAE decode. Pipeline
-orchestration lives in ``thenoise.pipeline.PipelineController``.
-
-Adapters work on the canonical 4D latent ``[B, C, H, W]`` — the VAE's own output
-format, ``C = vae.z_dim`` at ``vae.spatial_compression`` pixels per latent cell — so
-latent geometry lives on the VAE. ``init_latents`` produces and ``finalize_latent``
-returns that format. Model-internal reshaping lives in ``prepare_latent`` /
-``finalize_latent``, which run once around the denoise loop, keeping per-step
-``denoise_step`` a pure DiT forward.
-
-LoRAs mutate the DiT's parameters, so they are a model concern: they are swapped per
-request by ``switch_loras()``.
+"""The engine contract every adapter shares: the preferences and capabilities a model is
+asked for, where its weights live, and how one denoise pass runs. ``PixelModel``, in
+``thenoise.models.pixel_base``, derives further for a latent that decodes to pixels.
 """
 from __future__ import annotations
 
@@ -31,7 +19,6 @@ from thenoise.utils.dynamo import apply_recompile_limit
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.image_tensor import ReferenceSizing, flatten_alpha
 from thenoise.samplers import Step
-from thenoise.upscale import LatentUpscaler
 
 if TYPE_CHECKING:  # pragma: no cover - only for annotations
     from PIL import Image
@@ -67,14 +54,10 @@ def normalize_keys(keys):
         yield unwrap_key(k)
 
 
-#: The ways a reference picture can enter a run.
-#:
-#: ``index`` and ``index_timestep_zero`` are the latent paths: the VAE encodes the
-#: picture and its tokens join the sequence, ``index_timestep_zero`` conditioning those
-#: tokens at timestep zero, which is what makes their K/V step-invariant and therefore
-#: cacheable. ``vision`` is the conditioner's own vision tower: no VAE stage and no
-#: reference latent, so the run is drawn beside the reference rather than over it and
-#: nothing about it survives pixel for pixel.
+#: How a reference picture enters a run. The latent paths append VAE-encoded tokens
+#: (``index_timestep_zero`` conditions them at timestep zero, which is what makes their
+#: K/V step-invariant and cacheable); ``vision`` is the conditioner's own tower, so no
+#: VAE stage, no reference latent, and nothing survives pixel for pixel.
 LATENT_REF_METHODS = ("index", "index_timestep_zero")
 VISION_REF_METHOD = "vision"
 
@@ -84,67 +67,34 @@ class DiffusionModel(LoRASupport, ABC):
 
     name: str = ""
 
-    # Generation preferences and their model default; ``pref`` resolves the
-    # precedence. Adapters override only the entries they differ on, merging so a
-    # preference added later keeps its base default:
-    #
-    #     DEFAULT_PREFS = {**DiffusionModel.DEFAULT_PREFS, "steps": 4}
-    #
+    #: What this adapter produces; ``thenoise.mediums`` maps it to a controller and routes.
+    MEDIUM: ClassVar[str] = "image"
+
+    #: Required components; ``()`` when embedded.
+    REQUIRED_COMPONENTS: ClassVar[Tuple[str, ...]] = ("vae", "text_encoder")
+
+    #: Model defaults behind ``pref``; an adapter merges the entries it differs on.
     DEFAULT_PREFS: ClassVar[Dict[str, Any]] = {
-        "width": 1024,
-        "height": 1024,
         "steps": 28,
         # CFG scale; <= 1.0 disables the unconditional forward.
         "guidance_scale": 0.0,
         "sampler": "er_sde",
-        "ref_method": "index",
         "sigmas": None
     }
 
-    UPSCALE_SCALE = 2
-    REFINE_STEPS = 1
-    REFINE_DENOISE = 0.25
+    #: Features ``/health`` reports verbatim; a medium nests its own under its name.
+    CAPABILITIES: ClassVar[Dict[str, Any]] = {"kv_cache": False}
 
-    # Which optional generation features this adapter implements. What a request picks a
-    # medium for is nested under that medium's name and named for its request mode, so
-    # ``/health`` needs no per-medium table and ``capability()`` is one lookup; a feature
-    # either medium can want stays at the top level, where a video adapter can answer it
-    # too. Adapters override only the entries they differ on, merging as above. Reported
-    # verbatim by ``/health`` so the UI can gate its controls.
-    CAPABILITIES: ClassVar[Dict[str, Any]] = {
-        # ``i2i`` means this model takes a picture with the request, by any of the
-        # reference methods it lists in ``REF_METHODS``. Which one runs is resolved per
-        # request, so a model that only reads the picture answers ``i2i`` as plainly as
-        # one that repaints it.
-        "image": {"t2i": True, "i2i": False},
-        # Freeze the reference tokens' K/V across denoise steps through the shared
-        # ``start_kv_caches`` / ``kv_cache`` / ``end_kv_caches`` protocol.
-        "kv_cache": False,
-        # A latent upscaler, i.e. ``_create_upscaler``. True because it is an abstract
-        # method every model with one implements; a model without one says False.
-        "upscale": True,
-        "video": None,
-    }
-
-    #: The ways this model can use a reference picture, best first; empty means it
-    #: takes none. The pipeline resolves a request against this list and ``/health``
-    #: reports it, so a method the adapter does not implement is refused at submit
-    #: instead of being ignored by a stage that cannot act on it. See
-    #: :data:`LATENT_REF_METHODS` and :data:`VISION_REF_METHOD`.
+    #: How this model can use a reference picture, best first; empty means none.
     REF_METHODS: ClassVar[Tuple[str, ...]] = ()
 
-    # The run's caches: created by ``start_kv_caches``, dropped by ``end_kv_caches``.
-    # The empty class default keeps ``kv_cache`` answering ``None`` on adapters built
-    # without ``__init__``.
+    #: Created by ``start_kv_caches``, dropped by ``end_kv_caches``.
     _kv_caches: Optional[Dict[str, KVCache]] = None
 
-    # Preferences implied by the loaded checkpoint's markers; replaced per instance
-    # in ``__init__``, with the empty class default covering adapters built without it.
+    #: Preferences implied by the loaded checkpoint's markers; set per instance.
     checkpoint_prefs: Dict[str, Any] = {}
 
-    # Which end of the attention sequence this model's KV cache freezes: "suffix"
-    # for a ``text, target, references`` layout, "prefix" for ``text + references,
-    # target``.
+    #: Which end of the sequence the KV cache freezes: ``"suffix"`` or ``"prefix"``.
     KV_CACHED_SLICE: ClassVar[str] = "suffix"
 
     @staticmethod
@@ -172,12 +122,9 @@ class DiffusionModel(LoRASupport, ABC):
         self.text_encoder_path = config.text_encoder_path
         self.lora_dir = config.lora_dir
 
-        # Preferences implied by markers in the DiT header (see
-        # ``thenoise.utils.checkpoint``).
         self.checkpoint_prefs = detect_checkpoint_prefs(config.dit_path)
 
-        # Component placement: subclasses register ``dit`` / ``text_encoder`` /
-        # ``vae``; the pipeline controller stages them by name.
+        # Subclasses register ``dit`` / ``vae`` / ``text_encoder`` for staging by name.
         self.memory = MemoryManager(self.device, self.offload_device)
 
         apply_recompile_limit()
@@ -185,9 +132,6 @@ class DiffusionModel(LoRASupport, ABC):
 
         # Cached LoRA factors, for clean switching between requests.
         self._init_lora_state()
-
-        # Lazy latent upscaler (only built if upscale is requested).
-        self._upscaler: Optional[LatentUpscaler] = None
 
     # ------------------------------------------------------------ preferences
     @property
@@ -305,33 +249,6 @@ class DiffusionModel(LoRASupport, ABC):
         """Model-internal -> canonical 4D latent. Runs ONCE after the loop."""
         return latents
 
-    def resolve_size(self, width: int, height: int) -> tuple[int, int]:
-        """Return the effective (width, height). Override to round/validate."""
-        return width, height
-
-    #: Area an edit is sampled at when the request names no size.
-    EDIT_DEFAULT_AREA: ClassVar[int] = 1024 * 1024
-
-    def default_edit_size(self, width: int, height: int) -> Tuple[int, int]:
-        """The result size of an edit that names none, for a ``width`` x ``height`` reference.
-
-        The reference's aspect ratio at :data:`EDIT_DEFAULT_AREA`; ``resolve_size`` still
-        rounds the answer onto this model's latent cell. Override it when a model was
-        trained at particular sizes rather than at any size.
-        """
-        scale = (self.EDIT_DEFAULT_AREA / (width * height)) ** 0.5
-        return round(width * scale), round(height * scale)
-
-    def size_from_reference(self, width: int | None, height: int | None,
-                            reference) -> tuple[int, int]:
-        """What a request named, or the reference's size when it named neither.
-
-        `default_edit_size` is what turns the reference into this model's answer.
-        """
-        if width is None and height is None:
-            return self.default_edit_size(*reference.size)
-        return width, height
-
     def percent_to_sigma(self, percent: float) -> float:
         """Map a percent (0..1) to a sigma, used by the sampler's SNR offset.
 
@@ -340,27 +257,13 @@ class DiffusionModel(LoRASupport, ABC):
         """
         return 1.0 - percent
 
-    # ------------------------------------------------------------ editing
-    # How one reference is fitted for ``encode_reference``: aspect preserved, never
-    # cropped, aligned to the model's latent cell. ``prepare_reference`` must stay a
-    # pure function of the image and this struct — the pipeline caches the encoded
-    # reference on it, and on the canvas size it hands ``fit_references``.
+    # ------------------------------------------------------------ references
+    #: Fitted before anything encodes it; the pipeline caches on this struct, so stay pure.
     REFERENCE_SIZING: ClassVar[ReferenceSizing] = ReferenceSizing()
 
     def prepare_reference(self, image: Image.Image) -> Image.Image:
-        """Fit one reference image for :meth:`encode_reference`."""
+        """Fit one reference picture, for a VAE latent or a conditioner's pixels."""
         return self.REFERENCE_SIZING.apply(image)
-
-    def fit_references(self, images: List[Image.Image],
-                       target: Tuple[int, int]) -> List[Image.Image]:
-        """Every reference of one edit, fitted for :meth:`encode_reference`.
-
-        ``target`` is the size of the result. The default hands each image to
-        :meth:`prepare_reference` and ignores it, because a reference normally keeps the
-        shape it arrived in; a model whose edit lines up with its lone reference pixel
-        for pixel overrides this to put that reference on the canvas's own grid.
-        """
-        return [self.prepare_reference(img) for img in images]
 
     def conditioned_images(self, args: EncodePromptArgs) -> List[Image.Image]:
         """``args.image``, single or several, as a conditioner that reads pictures
@@ -374,34 +277,6 @@ class DiffusionModel(LoRASupport, ABC):
             return []
         images = args.image if isinstance(args.image, list) else [args.image]
         return [flatten_alpha(self.prepare_reference(image)) for image in images]
-
-    def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
-        """Encode input pixels (``[C,H,W]`` in [-1, 1]) into the canonical latent."""
-        raise NotImplementedError(f"{self.name} does not support reference editing")
-
-    def encode_references(self, pixels: list[torch.Tensor],
-                          frames: int = 1) -> list[torch.Tensor]:
-        """The latents a run conditions on, from fitted images: one per image, unless
-        the model takes its reference some other way.
-
-        `frames` is the temporal extent the run spans. A model whose reference is one
-        latent for a whole clip has to override this rather than be handed per-frame
-        latents, because the codec is causal: the later latent frames of a clip are not
-        the first one repeated.
-        """
-        return [self.encode_reference(image) for image in pixels]
-
-    def pack_reference_latent(
-        self,
-        latents: torch.Tensor,
-        method: str = "index",
-        ref_index: int = 1,
-    ) -> Optional[Tuple[torch.Tensor, torch.Tensor]]:
-        """Canonical reference latent -> model-internal (tokens, ids).
-
-        ``ref_index`` is the 1-based position among the reference images.
-        """
-        return None
 
     # ------------------------------------------------------- reference KV cache
     def start_kv_caches(
@@ -428,7 +303,7 @@ class DiffusionModel(LoRASupport, ABC):
         return None if self._kv_caches is None else self._kv_caches.get(branch)
 
     def end_kv_caches(self) -> None:
-        """Drop the run's caches. Call in ``finalize_latent``, before the VAE decode."""
+        """Drop the run's caches. Call in ``finalize_latent``, before the decode."""
         self._kv_caches = None
 
     # ------------------------------------------------------- LoRA-able components
@@ -440,37 +315,5 @@ class DiffusionModel(LoRASupport, ABC):
         step. The name is the one the component is registered for residency under.
         """
         return {DEFAULT_LORA_ROLE: self.dit}
-
-    # ------------------------------------------------------- latent upscaler
-    def get_upscaler(self) -> LatentUpscaler:
-        """This model's latent upscaler, built once on first use (under the lock)."""
-        if self._upscaler is None:
-            self._upscaler = self._create_upscaler()
-        return self._upscaler
-
-    @abstractmethod
-    def _create_upscaler(self) -> LatentUpscaler:
-        """Build this model's latent upscaler."""
-        ...
-
-    # ------------------------------------------------------------ pixel format
-    @property
-    def pixel_channels(self) -> int:
-        """Pixel channels this model's VAE consumes and emits (3 = RGB, 4 = RGBA)."""
-        return getattr(getattr(self, "vae", None), "pixel_channels", 3)
-
-    # ------------------------------------------------------------ decode
-    def decode(self, latents: torch.Tensor) -> torch.Tensor:
-        """Shared VAE decode — the final generation step.
-
-        Canonical 4D latent -> pixels ``[C, H, W]`` in [-1, 1] as an fp32 GPU tensor.
-        """
-        dev = torch.device(self.device)
-        pixels = self.vae.decode_to_pixels(latents.to(dev, dtype=self.vae.dtype))
-        if pixels.ndim == 5:  # [B, C, 1, H, W] -> [B, C, H, W]
-            pixels = pixels.squeeze(2)
-        pixels = pixels.to(torch.float32)
-        return pixels[0]  # [C, H, W] in [-1, 1]
-
 
 __all__ = ["DiffusionModel", "Conditioning", "normalize_keys"]

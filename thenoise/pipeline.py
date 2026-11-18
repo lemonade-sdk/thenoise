@@ -29,10 +29,12 @@ from PIL import Image
 
 from thenoise.inference import inference, inference_lock
 from thenoise.jobs import UNCANCELLABLE, Cancellation, Progress, idle, stepping
-from thenoise.models.base import LATENT_REF_METHODS, DiffusionModel, Conditioning
+from thenoise.models.base import LATENT_REF_METHODS, Conditioning
 from thenoise.models.config import EncodePromptArgs, GenerateRequest, SamplingParams
+from thenoise.models.pixel_base import PixelModel
 from thenoise.samplers import Step, check_sampler, create_sampler, sigma_steps
 from thenoise.samplers.euler import EulerSampler
+from thenoise.stages import Stages
 from thenoise.upscale.pixel import PixelUpscalerManager
 from thenoise.utils.pipeline_cache import PipelineCache, content_digest
 from thenoise.utils.image_tensor import (
@@ -180,7 +182,7 @@ class PipelineController:
 
     def __init__(
         self,
-        model: DiffusionModel,
+        model: PixelModel,
         pixel_upscalers: PixelUpscalerManager,
     ):
         self.model = model
@@ -235,7 +237,7 @@ class PipelineController:
         Hashes each image's normalized pixel bytes (RGBA when it carries
         transparency) in order, plus the sizing policy that decided the size each one
         was encoded at and the canvas size that policy was given: a model may fit a
-        reference to the result (``DiffusionModel.fit_references``).
+        reference to the result (``PixelModel.fit_references``).
         """
         return ("reference", self.model.REFERENCE_SIZING, target,
                 content_digest(load_image(img) for img in images))
@@ -358,6 +360,14 @@ class PipelineController:
             return list(image)
         return [image]
 
+    def _encode_references(self, target: Tuple[int, int],
+                           request: GenerateRequest) -> list[torch.Tensor]:
+        """This edit's references, fitted to the result and through the codec."""
+        model = self.model
+        fitted = model.fit_references(self._edit_images(request), target)
+        return model.encode_references(
+            [pil_to_pixels(image, model.pixel_channels) for image in fitted])
+
     def _run(
         self,
         request: GenerateRequest,
@@ -379,6 +389,7 @@ class PipelineController:
         model = self.model
         is_edit = r.is_edit
         loras = r.lora_specs
+        stages = Stages(model, self._cache)
 
         prompt_key = self._cache_key_prompt(
             request.prompt, request.negative_prompt, r.guidance_scale,
@@ -391,39 +402,30 @@ class PipelineController:
         decode_key = self._cache_key_decode(sampling_key, r.refined)
 
         with self._lock:
-            memory = model.memory
             progress("conditioning")
             token.check()
 
             # Stage 0: reference (image) latent — deterministic per image (edit).
             ref_latents: Optional[list[torch.Tensor]] = None
             if r.has_reference_latent:
-                if self._cache.reference_hit(ref_key):
-                    ref_latents = self._cache.reference_get()
-                else:
-                    with memory.stage("vae", pixels=r.width * r.height) as s:
-                        fitted = model.fit_references(self._edit_images(request),
-                                                      (r.width, r.height))
-                        ref_latents = s.run(lambda: model.encode_references(
-                            [pil_to_pixels(image, model.pixel_channels)
-                             for image in fitted]))
-                    self._cache.reference_store(ref_key, ref_latents)
+                ref_latents = stages.run(self._encode_references,
+                                         (r.width, r.height), request,
+                                         resident=("vae",), pixels=r.width * r.height,
+                                         cache="reference", key=ref_key)
 
-            # Stage 1: prompt conditioning — text encoder only.
-            if self._cache.prompt_hit(prompt_key):
-                cond = self._cache.prompt_get()
+            # Stage 1: raw prompt conditioning; the DiT fuses and stores it in stage 2.
+            if self._cache.hit("prompt", prompt_key):
+                cond = self._cache.get("prompt")
             else:
                 seen = self._edit_images(request)
-                with memory.stage(
-                    "text_encoder",
-                    pixels=sum(image.width * image.height for image in seen),
-                ) as s:
-                    cond_raw = s.run(model.encode_prompt, EncodePromptArgs(
-                        prompt=request.prompt,
-                        negative_prompt=request.negative_prompt,
-                        guidance_scale=r.guidance_scale,
-                        image=request.image if is_edit else None,
-                    ))
+                cond_raw = stages.run(
+                    model.encode_prompt,
+                    EncodePromptArgs(prompt=request.prompt,
+                                     negative_prompt=request.negative_prompt,
+                                     guidance_scale=r.guidance_scale,
+                                     image=request.image if is_edit else None),
+                    resident=("text_encoder",),
+                    pixels=sum(image.width * image.height for image in seen))
 
             params = SamplingParams(
                 height=r.height, width=r.width, steps=r.steps, seed=r.seed,
@@ -435,39 +437,39 @@ class PipelineController:
             # Stage 2: sampling — the dit block. The DiT is resident here, so
             # LoRA switching (which may requantize) and text fusion run in it too.
             progress("sampling", 0, r.steps)
-            if self._cache.sampling_hit(sampling_key):
-                latents = self._cache.sampling_get()
-            else:
-                with memory.stage("dit", pixels=r.width * r.height) as s:
-                    for role, module in model.lora_components().items():
-                        model.switch_loras(loras.get(role), module, role)
-                    if not self._cache.prompt_hit(prompt_key):
-                        cond = model.fuse_text(cond_raw)
-                        self._cache.prompt_store(prompt_key, cond)
-                    latents = s.run(
-                        self._denoise, cond, params, ref_latents,
-                        r.ref_method or "index",
-                        sigmas=r.sigmas, token=token, progress=progress,
-                    )
-                self._cache.sampling_store(sampling_key, latents)
+
+            def fuse():
+                nonlocal cond
+                for role, module in model.lora_components().items():
+                    model.switch_loras(loras.get(role), module, role)
+                if not self._cache.hit("prompt", prompt_key):
+                    cond = model.fuse_text(cond_raw)
+                    self._cache.store("prompt", prompt_key, cond)
+
+            latents = stages.run(
+                lambda: self._denoise(cond, params, ref_latents,
+                                      r.ref_method or "index",
+                                      sigmas=r.sigmas, token=token, progress=progress),
+                resident=("dit",), pixels=r.width * r.height,
+                cache="sampling", key=sampling_key, prepare=fuse)
 
             # Stage 3/4: upscale + decode (interleaved so cache hits skip upscale).
-            if self._cache.decode_hit(decode_key):
-                pixels = self._cache.decode_get()
+            if self._cache.hit("decode", decode_key):
+                pixels = self._cache.get("decode")
             else:
                 if r.refined:
                     # the upscaler builds its weights here and may round-trip the VAE;
                     # nothing moves once a stage has started, so both are held
                     progress("upscaling")
-                    with memory.stage("dit", "vae",
-                                      pixels=r.target_width * r.target_height) as s:
-                        latents = s.run(self._upscale_and_refine, latents, cond, params)
+                    latents = stages.run(self._upscale_and_refine, latents, cond, params,
+                                         resident=("dit", "vae"),
+                                         pixels=r.target_width * r.target_height)
                     token.check()
                 progress("decoding")
-                with memory.stage("vae",
-                                  pixels=r.target_width * r.target_height) as s:
-                    pixels = s.run(model.decode, latents)  # fp32 GPU [C,H,W]
-                self._cache.decode_store(decode_key, pixels)
+                pixels = stages.run(model.decode, latents,  # fp32 GPU [C,H,W]
+                                    resident=("vae",),
+                                    pixels=r.target_width * r.target_height,
+                                    cache="decode", key=decode_key)
 
             return pixels
 

@@ -34,8 +34,8 @@ class ModelPaths:
     ``lora_dir`` is model-bound: LoRAs mutate the DiT weights.
     """
     dit_path: str
-    vae_path: str
-    text_encoder_path: str
+    vae_path: str = ""
+    text_encoder_path: str = ""
     lora_dir: str = ""
     dit_low_path: str = ""
 
@@ -73,17 +73,19 @@ class Runtime:
         )
         self._controlmap = ControlMapController(self._controlmaps)
         self._pipeline = None
-        self._video = False
 
     def load(self, paths: ModelPaths) -> None:
         from .models import resolve
         from .models.config import ModelConfig
-        from .models.video_base import VideoModel
-        from .pipeline import PipelineController
-        from .video.controller import VideoPipelineController
+        from .mediums import controller_for
 
         cls = resolve(paths.dit_path)
         name = cls.name
+        # Model declares its components.
+        missing = [component.replace("_", "-") for component in cls.REQUIRED_COMPONENTS
+                   if not getattr(paths, f"{component}_path", "")]
+        if missing:
+            raise ValueError(f"{name} needs --{' and --'.join(missing)}")
         cls.validate_paths(paths.dit_paths)
 
         config = ModelConfig(
@@ -99,15 +101,12 @@ class Runtime:
         logger.info("Loading model '%s'", name)
         with inference():
             model = cls(config=config)
-        video = isinstance(model, VideoModel)
         self._model = model
         self._model_name = name
         self._paths = paths
-        self._video = video
-        # Both mediums get a controller, so `run` — the lock, the rebuild-and-retry of a
+        # Every medium gets a controller, so `run` — the lock, the rebuild-and-retry of a
         # model that reports itself unfit — is one path whatever was loaded.
-        self._pipeline = (VideoPipelineController(model) if video else
-                          PipelineController(model, self._pixel_upscalers))
+        self._pipeline = controller_for(model, self._pixel_upscalers)
 
     def reload(self) -> None:
         """Rebuild the loaded model from its checkpoints, which clears an unfit state."""
@@ -150,7 +149,6 @@ class Runtime:
         self._model.unload()  # drops the references the instance itself holds
         self._model = None
         self._model_name = None
-        self._video = False
         release_device_memory(self._settings.device)
 
     @property
@@ -165,9 +163,9 @@ class Runtime:
         return self._pipeline
 
     @property
-    def video(self) -> bool:
-        """Whether the loaded model serves video rather than images."""
-        return self._video
+    def medium(self) -> Optional[str]:
+        """Read off the model, so a swap cannot leave the replaced model's medium behind."""
+        return None if self._model is None else self._model.MEDIUM
 
     @property
     def pixel_upscalers(self):

@@ -31,10 +31,10 @@ from thenoise.models.base import (
     LATENT_REF_METHODS,
     VISION_REF_METHOD,
     Conditioning,
-    DiffusionModel,
     Step,
     normalize_keys,
 )
+from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.image_tensor import ReferenceSizing
@@ -45,12 +45,12 @@ from thenoise.vae import load_mage_family_vae
 logger = logging.getLogger(__name__)
 
 
-class MageFlowModel(DiffusionModel):
+class MageFlowModel(PixelModel):
     name = "mage_flow"
 
     # Turbo recipe. Base: --steps 30 --guidance-scale 5; RL: --steps 20.
     DEFAULT_PREFS = {
-        **DiffusionModel.DEFAULT_PREFS,
+        **PixelModel.DEFAULT_PREFS,
         "steps": 4,
         "guidance_scale": 1.0,
         "sampler": "euler",
@@ -58,8 +58,8 @@ class MageFlowModel(DiffusionModel):
 
     # The single-row timestep embedding modulates the references at ``t``, so their
     # K/V change every step.
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": False,
-                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
+    CAPABILITIES = {**PixelModel.CAPABILITIES, "kv_cache": False,
+                    "image": {**PixelModel.CAPABILITIES["image"], "i2i": True}}
     # The Qwen3-VL conditioner is multimodal already, so a reference can be read by it
     # instead of encoded: no alignment, and no reference tokens in the sequence.
     REF_METHODS = LATENT_REF_METHODS + (VISION_REF_METHOD,)

@@ -1209,7 +1209,8 @@ def test_runtime_maps_the_cli_flags_into_roles(tmp_path, monkeypatch):
 
     class StubVideo:
         name = "stub"
-        VIDEO = True
+        MEDIUM = "video"
+        REQUIRED_COMPONENTS = ("vae", "text_encoder")
         validated = []
 
         def __init__(self, *, config):

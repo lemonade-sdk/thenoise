@@ -97,13 +97,13 @@ class _FakeVideo:
 
 
 class _FakeRuntime:
-    #: What a loaded model answers for ``Runtime.video``; the clip tests flip it.
-    video_on_load = False
+    #: What a loaded model answers for ``Runtime.medium``; the clip tests flip it.
+    medium_on_load: str | None = None
 
     def __init__(self, settings):
         self.settings = settings
         self.loaded = None
-        self.video = False
+        self.medium = None
         self.pipeline = _FakePipeline()
         self.upscaler = _FakeUpscaler()
         # Weight-free and I/O-free, so options/availability stay the real ones.
@@ -113,8 +113,8 @@ class _FakeRuntime:
 
     def load(self, paths):
         self.loaded = paths
-        if self.video_on_load:
-            self.video = True
+        if self.medium_on_load:
+            self.medium = self.medium_on_load
             self.pipeline = _FakeVideo()
 
     def run(self, action):
@@ -214,9 +214,19 @@ def test_serve_without_model_does_not_load(monkeypatch, fake_runtime):
     assert rt.settings == Settings(device="cuda", upscaler_dir="")
 
 
-def test_serve_rejects_partial_model_paths(fake_runtime):
+def test_serve_loads_on_dit_alone(monkeypatch, fake_runtime):
+    monkeypatch.setattr(
+        "thenoise.api.create_app",
+        lambda runtime, *, jobs=None: object(),
+    )
+    monkeypatch.setattr("uvicorn.run", lambda app, host, port: None)
+    _serve(_parse(["serve", "--dit", "d.safetensors"]))
+    assert fake_runtime[0].loaded == ModelPaths(dit_path="d.safetensors")
+
+
+def test_serve_refuses_component_flags_without_a_dit(fake_runtime):
     with pytest.raises(SystemExit):
-        _serve(_parse(["serve", "--dit", "d.safetensors"]))
+        _serve(_parse(["serve", "--vae", "v.safetensors"]))
 
 
 # ---------------------------------------------------------------- generate
@@ -347,7 +357,7 @@ VIDEO_PATHS = ["--dit", "high", "--vae", "v", "--text-encoder", "t"]
 @pytest.fixture
 def video_runtime(fake_runtime, monkeypatch):
     """A fake runtime whose loaded model makes clips."""
-    monkeypatch.setattr(_FakeRuntime, "video_on_load", True)
+    monkeypatch.setattr(_FakeRuntime, "medium_on_load", "video")
     return fake_runtime
 
 

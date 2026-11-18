@@ -41,7 +41,7 @@ def test_cli_serve_parses_model_paths_and_defaults(parse):
     # A bare ``serve`` still parses: the server runs model-free (upscale only).
     bare = parse(["serve"])
     assert (bare.host, bare.port, bare.device) == ("127.0.0.1", 8000, "cuda")
-    assert bare.dit is None and bare.vae is None and bare.text_encoder is None
+    assert bare.dit == "" and bare.vae == "" and bare.text_encoder == ""
     assert bare.dit_low == ""
     assert bare.upscaler_dir == "" and bare.offload_device == "cpu"
     assert bare.controlmap_dir == ""

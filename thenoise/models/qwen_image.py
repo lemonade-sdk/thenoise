@@ -26,10 +26,10 @@ from thenoise.models.base import (
     LATENT_REF_METHODS,
     VISION_REF_METHOD,
     Conditioning,
-    DiffusionModel,
     Step,
     normalize_keys,
 )
+from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.latents import pack_latents, unpack_latents
@@ -45,11 +45,11 @@ from thenoise.vae import load_qwen_vae
 logger = logging.getLogger(__name__)
 
 
-class QwenImageModel(DiffusionModel):
+class QwenImageModel(PixelModel):
     name = "qwen_image"
 
     DEFAULT_PREFS = {
-        **DiffusionModel.DEFAULT_PREFS,
+        **PixelModel.DEFAULT_PREFS,
         "steps": 28,
         "guidance_scale": 2.5,
         "sampler": "euler",
@@ -57,8 +57,8 @@ class QwenImageModel(DiffusionModel):
 
     # Instruction-based editing off the Qwen-Image-Edit recipe. The KV cache is valid
     # only with ``ref_method="index_timestep_zero"``.
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": True,
-                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
+    CAPABILITIES = {**PixelModel.CAPABILITIES, "kv_cache": True,
+                    "image": {**PixelModel.CAPABILITIES["image"], "i2i": True}}
     # Qwen2.5-VL was built multimodal, so the same reference can be read by the
     # conditioner instead of encoded: a hint rather than a canvas to repaint.
     REF_METHODS = LATENT_REF_METHODS + (VISION_REF_METHOD,)

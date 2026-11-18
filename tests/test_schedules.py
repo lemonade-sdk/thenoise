@@ -34,6 +34,7 @@ from thenoise.models import (
 )
 from thenoise.models.base import (
     LATENT_REF_METHODS, VISION_REF_METHOD, DiffusionModel)
+from thenoise.models.pixel_base import PixelModel
 from thenoise.models.wan_video import VARIANTS
 from thenoise.models.config import VideoSamplingParams
 from thenoise.utils.math import round_up
@@ -226,7 +227,7 @@ def test_image_model_capabilities_describe_the_adapter(name):
     assert not kv_cache or latent  # freezing reference K/V needs a reference latent
     # ``encode_reference`` is the kernel the pipeline calls for a latent. There is no
     # matching kernel for ``vision``: the conditioner takes the picture itself.
-    assert (model_cls.encode_reference is not DiffusionModel.encode_reference) is latent
+    assert (model_cls.encode_reference is not PixelModel.encode_reference) is latent
     model.start_kv_caches(replace(_params(), kv_cache=True), True, True)
     assert (model._kv_caches is not None) is kv_cache
 

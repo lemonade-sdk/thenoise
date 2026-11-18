@@ -1,15 +1,6 @@
-"""What a video adapter shares with every image model, and what only it has.
-
-Derives from the image contract, so device residency, component placement, the preference
-chain, capabilities and LoRA switching arrive once (``DiffusionModel``). What is added here
-is temporal: a request resolved onto a frame grid, a schedule that more than one
-transformer may answer, and a codec that hands back frames instead of one image.
-
-A video adapter exposes its main transformer as ``dit``, exactly as an image adapter does,
-and any second expert under the role name its checkpoint paths use. Those names —
-``dit``, ``dit_low`` — are the same strings in ``dit_paths``, in the ``MemoryManager``
-registry and in :attr:`Segment.stage`, which is what lets the controller stage, switch and
-(one day) per-role LoRA a component without knowing what model it is driving.
+"""What a video adapter shares with every model that renders pixels, and what only it
+has: a request resolved onto a frame grid, a schedule more than one transformer may
+answer, and a codec handing back frames instead of one image.
 """
 from __future__ import annotations
 
@@ -22,7 +13,7 @@ from typing import Iterator, Optional, Sequence
 import torch
 
 from thenoise.memory import MemoryManager
-from thenoise.models.base import DiffusionModel
+from thenoise.models.pixel_base import PixelModel
 from thenoise.samplers import Step
 from thenoise.utils.image_tensor import load_image
 from thenoise.video.spec import ResolvedVideo, VideoSpec
@@ -30,33 +21,30 @@ from thenoise.video.spec import ResolvedVideo, VideoSpec
 
 @dataclass(frozen=True)
 class Segment:
-    """One span of the schedule, answered by one component that is resident for it.
+    """One span of the schedule, answered by one component resident for it.
 
-    A single-transformer model has one segment. A two-expert model splits the schedule
-    where its experts hand over, each half carrying the guidance its expert was trained
-    with. Nothing here says the two may not share a device: whether both stay resident is
-    the memory manager's, and only the split into stages is the model's.
+    A two-expert model splits the schedule where its experts hand over; whether both
+    stay resident is the memory manager's, not this struct's.
     """
 
+    #: Residency and LoRA stage name of this span's component, as in ``dit_paths``.
     stage: str
     module: torch.nn.Module
     steps: tuple[Step, ...]
     guidance_scale: float
 
 
-class VideoModel(DiffusionModel):
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "image": None,
+class VideoModel(PixelModel):
+    MEDIUM = "video"
+
+    CAPABILITIES = {**PixelModel.CAPABILITIES, "image": None,
                     "video": {"t2v": False, "i2v": False, "flf2v": False}}
 
-    #: The video preferences every adapter shares. What a release decides for itself —
-    #: frame count, frame rate, size, steps — belongs to that release and is absent here;
-    #: `tests/test_video_shared.py` asserts every released variant supplies every
-    #: preference a request can leave unset.
-    DEFAULT_PREFS = {**DiffusionModel.DEFAULT_PREFS,
+    #: Shared video prefs; ``test_video_shared.py`` checks each variant covers them all.
+    DEFAULT_PREFS = {**PixelModel.DEFAULT_PREFS,
                      "negative_prompt": "", "output_format": "webm"}
 
-    #: The segment `denoise_step` is currently answering. Like the KV caches, per-run
-    #: state set by the controller between steps, never across a swap.
+    #: Per-run state the controller sets between steps, never across a swap.
     _segment: Optional[Segment] = None
 
     # ------------------------------------------------------------ request
@@ -67,8 +55,7 @@ class VideoModel(DiffusionModel):
 
     def resolve_video(self, spec: VideoSpec) -> ResolvedVideo:
         """Resolve optional request values, then the size onto this model's grid."""
-        # A reference answers the size when the request named none, as it does for a
-        # still edit; `resolve_size` below rounds the answer onto the grid.
+        # A reference answers an unnamed size, as it does for a still edit.
         if spec.image is not None and self.capability("video")["i2v"]:
             width, height = self.size_from_reference(
                 spec.width, spec.height, load_image(io.BytesIO(spec.image)))
@@ -89,7 +76,6 @@ class VideoModel(DiffusionModel):
         the spans are.
         """
         return [Segment("dit", self.dit, tuple(schedule), guidance_scale)]
-
     def begin_segment(self, segment: Segment) -> None:
         """Tell ``denoise_step`` which segment it is inside; called before each one."""
         self._segment = segment
@@ -97,11 +83,8 @@ class VideoModel(DiffusionModel):
     # ------------------------------------------------------------ codec
     @abstractmethod
     def decode_frames(self, latents: torch.Tensor) -> Iterator[torch.Tensor]:
-        """Canonical clip latent -> pixels ``[C, H, W]`` in [-1, 1], one frame at a time.
-
-        A generator, consumed as the container takes frames, so a long clip is never live
-        all at once.
-        """
+        """Canonical clip latent -> pixels ``[C, H, W]`` in [-1, 1], yielded one frame at
+        a time so a long clip is never live all at once."""
 
     # ------------------------------------------------------------ teardown
     @abstractmethod
@@ -112,6 +95,5 @@ class VideoModel(DiffusionModel):
         """Drop both model and residency references before the device is freed."""
         self._clear_weights()
         self._init_lora_state()
-        # The old manager still references registered modules and residency state.
-        # Rebuild it so a subsequent load is not marked resident.
+        # Rebuilt so a later load is not marked resident by the old manager.
         self.memory = MemoryManager(self.device, self.offload_device)

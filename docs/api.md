@@ -18,7 +18,7 @@ Start the server with [`serve`](cli.md#serve-a-model-over-http) and TheNoise exp
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/` | Web UI |
-| `GET` | `/health` | Server status, loaded model and its capabilities (see below) |
+| `GET` | `/health` | Server status, what the loaded model produces and its capabilities (see below) |
 | `GET` | `/lora` | List available LoRA names, and the roles they can be given to |
 | `GET` | `/upscalers` | List available pixel upscaler names (works even with no model loaded) |
 | `GET` | `/postprocess` | Describe the post-decode knobs, in the order their filters run (works even with no model loaded) |
@@ -177,25 +177,26 @@ unused.
 ## `GET /health`
 
 ```json
-{"status": "ok", "models": ["qwen_image"],
+{"status": "ok", "models": ["qwen_image"], "medium": "image",
   "samplers": ["er_sde", "euler", "unipc"],
   "capabilities": {"image": {"t2i": true, "i2i": true}, "kv_cache": true,
-                   "upscale": true, "video": null,
+                   "upscale": true,
                    "ref_methods": ["index", "index_timestep_zero", "vision"]}}
 ```
 
 With a video model:
 
 ```json
-{"status": "ok", "models": ["wan22"],
+{"status": "ok", "models": ["wan22"], "medium": "video",
   "samplers": ["er_sde", "euler", "unipc"],
   "capabilities": {"image": null, "kv_cache": false, "upscale": false,
                    "video": {"t2v": true, "i2v": true, "flf2v": true}}}
 ```
 
-`models` is empty until a DiT is loaded, and `capabilities` is that adapter's own
-`CAPABILITIES` dict plus `ref_methods`, the reference methods it honours (`{}` with
-nothing loaded).
+`models` is empty until a DiT is loaded, `medium` says what the loaded model produces
+(`image` when none is loaded, so every route stays listed), and `capabilities` is that
+adapter's own `CAPABILITIES` dict plus `ref_methods`, the reference methods it honours
+(`{}` with nothing loaded).
 
 The request modes sit under their medium: `t2i` and `i2i` under `image`, `t2v`,
 `i2v` and `flf2v` under `video`. A model answers the other medium with `null`.

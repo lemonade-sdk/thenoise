@@ -11,11 +11,11 @@ from thenoise.utils.options import add_flags
 
 
 def _add_model_paths(p: argparse.ArgumentParser, required: bool = True) -> None:
-    p.add_argument("--dit", required=required, metavar="PATH",
+    p.add_argument("--dit", required=required, default="", metavar="PATH",
                    help="DiT checkpoint (.safetensors)")
-    p.add_argument("--vae", required=required, metavar="PATH",
+    p.add_argument("--vae", required=required, default="", metavar="PATH",
                    help="VAE checkpoint (.safetensors)")
-    p.add_argument("--text-encoder", required=required, metavar="PATH",
+    p.add_argument("--text-encoder", required=required, default="", metavar="PATH",
                    help="text encoder checkpoint (.safetensors)")
     p.add_argument("--lora-dir", default="", metavar="PATH",
                    help="directory containing LoRA .safetensors files "

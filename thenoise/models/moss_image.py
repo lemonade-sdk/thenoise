@@ -23,10 +23,10 @@ from thenoise.dit.moss_image.utils import detect_params, load_moss_image_dit
 from thenoise.models.base import (
     VISION_REF_METHOD,
     Conditioning,
-    DiffusionModel,
     Step,
     normalize_keys,
 )
+from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.image_tensor import ReferenceSizing
@@ -36,18 +36,18 @@ from thenoise.vae import load_flux2_vae
 logger = logging.getLogger(__name__)
 
 
-class MossImageModel(DiffusionModel):
+class MossImageModel(PixelModel):
     name = "moss_image"
 
     DEFAULT_PREFS = {
-        **DiffusionModel.DEFAULT_PREFS,
+        **PixelModel.DEFAULT_PREFS,
         "steps": 25,
         "guidance_scale": 3.0,
         "ref_method": VISION_REF_METHOD,
     }
 
-    CAPABILITIES = {**DiffusionModel.CAPABILITIES, "kv_cache": False,
-                    "image": {**DiffusionModel.CAPABILITIES["image"], "i2i": True}}
+    CAPABILITIES = {**PixelModel.CAPABILITIES, "kv_cache": False,
+                    "image": {**PixelModel.CAPABILITIES["image"], "i2i": True}}
     # There is no latent path here: the one reference goes through the Qwen3.5 vision
     # tower its conditioner already ships with, and nothing is repainted.
     REF_METHODS = (VISION_REF_METHOD,)

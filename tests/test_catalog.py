@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from conftest import CATALOG_IDS, IMAGE_CATALOG, IMAGE_CATALOG_IDS, MODEL_CATALOG
+from thenoise.mediums import MEDIUMS, controller_for
 from thenoise.models.base import DiffusionModel
 from thenoise.samplers import create_sampler
 from thenoise.upscale import (
@@ -22,6 +23,27 @@ from thenoise.upscale import (
 def test_model_defaults_are_a_usable_superset_of_the_base(model):
     """A merge that drops a base preference KeyErrors at request time."""
     assert set(DiffusionModel.DEFAULT_PREFS) <= set(model.DEFAULT_PREFS)
+
+
+def test_every_catalog_medium_is_served():
+    """An adapter naming a medium with no registry entry would fail at serve time."""
+    for cls in MODEL_CATALOG:
+        assert cls.MEDIUM in MEDIUMS, f"{cls.name} declares medium {cls.MEDIUM!r}"
+
+
+def test_the_engine_contract_asks_for_nothing_that_draws_pixels():
+    """A VAE, a latent upscaler and a size grid belong to ``PixelModel``, not the engine."""
+    assert DiffusionModel.__abstractmethods__ == frozenset(
+        {"detect", "encode_prompt", "init_latents", "schedule", "denoise_step"})
+
+
+def test_an_unregistered_medium_is_refused_by_name():
+    """The message a medium gets before its registry entry exists."""
+    class Unregistered:
+        MEDIUM = "sculpture"
+
+    with pytest.raises(ValueError, match="no medium 'sculpture' is registered"):
+        controller_for(Unregistered(), pixel_upscalers=None)
 
 
 @pytest.mark.parametrize("model", IMAGE_CATALOG, ids=IMAGE_CATALOG_IDS)

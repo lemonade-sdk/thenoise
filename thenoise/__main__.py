@@ -22,15 +22,8 @@ def _serve(args) -> None:
 
     runtime = Runtime(settings)
 
-    # Load the model only when all three checkpoints are supplied; otherwise
-    # serve model-free (upscale only).
-    model_paths = [args.dit, args.vae, args.text_encoder]
-    if any(model_paths) or args.dit_low:
-        if not all(model_paths):
-            raise SystemExit(
-                "serve: to load a model you must supply --dit, --vae and "
-                "--text-encoder together; omit all three to run without a model"
-            )
+    # --dit alone identifies a model.
+    if args.dit:
         runtime.load(
             ModelPaths(
                 dit_path=args.dit,
@@ -40,6 +33,8 @@ def _serve(args) -> None:
                 dit_low_path=args.dit_low,
             ),
         )
+    elif args.vae or args.text_encoder or args.dit_low:
+        raise SystemExit("serve: --vae, --text-encoder and --dit-low need --dit")
 
     # The queue exists whether or not there is a model to serve: a submit that finds
     # nothing loaded is refused, and an unused queue never creates its directory.
@@ -50,10 +45,12 @@ def _serve(args) -> None:
     import uvicorn
 
     app = create_app(runtime, jobs=jobs)
-    if runtime.video:
-        print(f"thenoise serving video model '{runtime.model_name}' on {settings.device}")
-    elif runtime.available():
+    medium = runtime.medium
+    if medium == "image":
         print(f"thenoise serving model '{runtime.model_name}' on {settings.device}")
+    elif medium:
+        print(f"thenoise serving {medium} model '{runtime.model_name}' "
+              f"on {settings.device}")
     else:
         print(f"thenoise serving WITHOUT a model on {settings.device} "
               f"(only upscaling and control-map extraction are available)")

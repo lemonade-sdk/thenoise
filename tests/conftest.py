@@ -49,6 +49,7 @@ from thenoise.models import (  # noqa: E402
 from thenoise.models.base import (
     LATENT_REF_METHODS, VISION_REF_METHOD, Conditioning, DiffusionModel)  # noqa: E402
 from thenoise.models.config import ModelConfig, SamplingParams  # noqa: E402
+from thenoise.models.pixel_base import PixelModel  # noqa: E402
 from thenoise.samplers import Step  # noqa: E402
 from thenoise.upscale import LatentUpscaler  # noqa: E402
 from thenoise.utils.lora_roles import DEFAULT_LORA_ROLE  # noqa: E402
@@ -815,7 +816,7 @@ KEYSET_IDS = sorted(MODEL_KEYSETS)
 CATALOG_IDS = [cls.name for cls in MODEL_CATALOG]
 # The contracts only the image medium answers to: a latent upscaler, and a sampler in
 # the class defaults (a video variant carries its own recipe, layered at resolve time).
-IMAGE_CATALOG = [cls for cls in MODEL_CATALOG if not issubclass(cls, VideoModel)]
+IMAGE_CATALOG = [cls for cls in MODEL_CATALOG if cls.MEDIUM == "image"]
 IMAGE_CATALOG_IDS = [cls.name for cls in IMAGE_CATALOG]
 
 
@@ -906,7 +907,7 @@ class StubVideo(VideoModel):
                               latents.shape[4] * self.SCALE)
 
 
-class StubModel(DiffusionModel):
+class StubModel(PixelModel):
     """A fully functional weight-free adapter for pipeline/sampler tests.
 
     Every kernel is real enough to drive the pipeline end to end on CPU fp32 and
@@ -916,7 +917,7 @@ class StubModel(DiffusionModel):
 
     name = "stub"
     DEFAULT_PREFS = {
-        **DiffusionModel.DEFAULT_PREFS,
+        **PixelModel.DEFAULT_PREFS,
         "width": 64,
         "height": 64,
         "steps": 2,
@@ -1067,9 +1068,6 @@ def stub_model_cls():
         def denoise_step(self, latents, t, cond, guidance_scale, i):
             pass
 
-        def _create_upscaler(self):
-            return StubLatentUpscaler(self.UPSCALE_SCALE)
-
     return _Stub
 
 
@@ -1122,6 +1120,8 @@ def fake_model_cls():
 
         namespace = {
             "name": name,
+            "MEDIUM": "image",
+            "REQUIRED_COMPONENTS": ("vae", "text_encoder"),
             "__init__": __init__,
             "detect": staticmethod(lambda f: False),
             # A catalog entry answers for its own DiT files and releases its own state;
