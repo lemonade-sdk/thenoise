@@ -640,7 +640,7 @@ jobs:
               echo 'CUDA Linux contains Python, CUDA PyTorch and a C/C++ compiler; an NVIDIA driver is required.'
             fi
             echo '* Linux: run `./bin/thenoise`.'
-            echo '* Windows: run `thenoise.bat` (torch.compile is disabled on Windows — Triton is Linux-only in the AMD wheel index).'
+            echo '* Windows: run `thenoise.bat`.'
             if [ "$LINUX_RESULT" != success ]; then
               echo
               echo "> [!WARNING]"

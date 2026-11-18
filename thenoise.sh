@@ -38,6 +38,18 @@ UV_HELP
   exit 1
 fi
 
+uv_version_line="$(uv --version 2>/dev/null | head -n1 || true)"
+UV_PRERELEASE_ARGS=()
+if [[ "$uv_version_line" =~ ([0-9]+)\.([0-9]+)\.([0-9]+) ]] &&
+   [ "${BASH_REMATCH[1]}" -eq 0 ] && [ "${BASH_REMATCH[2]}" -lt 12 ]; then
+  UV_PRERELEASE_ARGS=(--prerelease=allow)
+  {
+    echo "Note: $uv_version_line is older than 0.12, so the ROCm install below adds"
+    echo "      '--prerelease=allow' (older uv cannot resolve the ROCm pre-release"
+    echo "      dependency graph otherwise). Upgrade with: uv self update"
+  } >&2
+fi
+
 # ---- 2. Create the venv if it does not exist ------------------------------
 if [ ! -d "$VENV_DIR" ]; then
   echo "Creating virtual environment ($VENV_DIR) with Python 3.14 ..."
@@ -147,11 +159,16 @@ select_install_backend() {
 install_torch() {
   if [ "$INSTALL_BACKEND" = "rocm" ]; then
     echo "Installing ROCm torch for $GFX_ARCH ..."
-    uv pip install --python "$VENV_DIR/bin/python" \
+    if ! uv pip install --python "$VENV_DIR/bin/python" \
       --reinstall-package torch --reinstall-package torchvision \
       "torch[device-$GFX_ARCH]==2.14.0+rocm10.1.0rc2" \
       "torchvision[device-$GFX_ARCH]==0.29.0a0+rocm10.1.0rc2" \
-      --index-url https://rc.repo.amd.com/rocm/whl-next/
+      --index-url https://rc.repo.amd.com/rocm/whl-next/ \
+      ${UV_PRERELEASE_ARGS[@]+"${UV_PRERELEASE_ARGS[@]}"}; then
+      echo "Error: ROCm torch install failed (uv: ${uv_version_line:-unknown})." >&2
+      echo "Try upgrading uv ('uv self update') and re-running - 0.12+ resolves this graph natively." >&2
+      return 1
+    fi
   else
     echo "Installing CUDA torch ..."
     uv pip install --python "$VENV_DIR/bin/python" \
