@@ -20,6 +20,7 @@ thenoise/                  the package
   controlmap/              control-map extractors (canny, lineart, softedge, depth, pose)
   postprocess/             grain, sharpening, Qwen-VAE enhance
   ui/                      web UI served by `serve`
+  mediums.py               per-medium controllers and routes (`image`, `video`, …)
   api.py / cli.py          HTTP API and CLI entry points
 scripts/                   download.py — the unified model download helper
 build-scripts/             portable bundle build, archive, GPU qualification
@@ -175,7 +176,11 @@ PRs are welcome - especially new model support. A model addition typically
 touches:
 
 1. **`thenoise/models/<name>.py`** — the adapter: `detect()` (checkpoint
-   fingerprint), `DEFAULT_PREFS`, `CAPABILITIES`, sampling loop
+   fingerprint), `DEFAULT_PREFS`, `CAPABILITIES`, sampling loop. Derive it from
+   `PixelModel` when the model renders images or clips; a medium that renders
+   neither derives from `DiffusionModel` and says which medium it is
+   (`MEDIUM`), along with any checkpoint the CLI should stop requiring
+   (`REQUIRED_COMPONENTS`)
 2. **`thenoise/dit/<name>/`** — model weights layout, loading, tokenizer configs
 3. **`scripts/download.py`** — a `ModelSpec` entry + artifact registry for the
    Hugging Face files

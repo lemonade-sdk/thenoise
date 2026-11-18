@@ -21,11 +21,14 @@ DiT checkpoint.
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--dit` | yes | — | Path to the DiT checkpoint (`.safetensors`) |
-| `--vae` | yes | — | Path to the VAE checkpoint (`.safetensors`) |
-| `--text-encoder` | yes | — | Path to the text encoder checkpoint (`.safetensors`) |
+| `--dit` | `generate` / `edit` / `video` | — | Path to the DiT checkpoint (`.safetensors`) |
+| `--vae` | `generate` / `edit` / `video` | — | Path to the VAE checkpoint (`.safetensors`) |
+| `--text-encoder` | `generate` / `edit` / `video` | — | Path to the text encoder checkpoint (`.safetensors`) |
 | `--lora-dir` | no | — | Directory containing LoRA `.safetensors` files |
 | `--device` | no | `cuda` | Inference device (ROCm aliases `cuda` → `hip`) |
+
+`serve` requires only `--dit`. Any further checkpoint is determined by the loaded
+model, and named by flag if it is missing.
 
 ## Serve a model over HTTP
 
