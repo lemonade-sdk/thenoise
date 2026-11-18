@@ -15,9 +15,6 @@
 #     site-packages is Lib\site-packages (not bin/python3.13 +
 #     lib/pythonX/site-packages).
 #   * DLLs resolve via PATH (not LD_LIBRARY_PATH).
-#   * Triton (torch.compile) is Linux-only in the AMD wheel index, so there is
-#     no Triton hip_utils precompile step. Compilation is disabled via the
-#     torch env var TORCH_COMPILE_DISABLE in the launcher.
 #   * ROCm runtime DLLs live in _rocm_sdk_core\bin (amdhip64_7.dll, hiprtc,
 #     amd_comgr.dll, ...) and are kept on PATH by the launcher; unlike the
 #     Linux build, _rocm_sdk_core\bin must NOT be removed.
@@ -140,25 +137,17 @@ Set-Content -Path $Constraints -Value "torch==${TorchVer}`ntorchvision==${TorchV
 pip-deep install --constraint $Constraints $RepoRoot
 
 
-# --------------------------------------- 3. Triton precompile (NOT on Windows) --
-# The Linux build precompiles Triton's hip_utils glue and bundles clang so
-# torch.compile works on the target machine. Triton is Linux-only in the AMD
-# wheel index (no win_amd64 wheels), so on Windows there is no Triton to
-# precompile; compilation is disabled via TORCH_COMPILE_DISABLE in the
-# launcher. The bundled clang in _rocm_sdk_core is kept (used by cpp_extension
-# / hipcc if ever needed).
-
-# -------------------------------------------------------------- 4. launcher --
+# -------------------------------------------------------------- 3. launcher --
 say "Creating launcher"
 $LauncherSrc = Join-Path (Split-Path -Parent $PSCommandPath) "thenoise-launcher.bat"
 Copy-Item $LauncherSrc "$Root\thenoise.bat"
 
-# --------------------------------------------------------------- 5. trim ----
+# --------------------------------------------------------------- 4. trim ----
 say "Trimming bundle size"
 Set-Location $Root
 
 # pip/wheel are not needed at runtime (keep setuptools - torch's
-# cpp_extension/Triton may need it).
+# cpp_extension may need it).
 Get-ChildItem $SPDir -Directory -ErrorAction SilentlyContinue |
   Where-Object { $_.Name -match '^(pip|wheel)[-.].*$' } |
   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
@@ -188,7 +177,7 @@ foreach ($d in @("test", "tkinter", "idlelib", "turtledemo", "ensurepip")) {
 
 # Do NOT strip DLLs/PYDs - AMD ROCm wheels rely on their exact layout.
 
-# ------------------------------------------------------------- 6. verify ----
+# ------------------------------------------------------------- 5. verify ----
 say "Verifying bundle"
 # DLL resolution on Windows is PATH-based.
 $env:PATH = "$SPDir\_rocm_sdk_core\bin;$SPDir\torch\lib;$Root;${Root}\Scripts;$env:PATH"

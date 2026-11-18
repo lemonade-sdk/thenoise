@@ -14,11 +14,18 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[1] / "thenoise.sh"
 CUDA_SCRIPT = Path(__file__).resolve().parents[1] / "thenoise_cuda.sh"
 
+# The bootstrap adds '--prerelease=allow' only below 0.12; these are both sides
+# of that threshold.
+MODERN_UV_VERSION = "uv 0.12.11 (7ce44e8b3 2026-07-14 x86_64-unknown-linux-gnu)"
+OLD_UV_VERSION = "uv 0.11.13 (a1b2c3d45 2025-06-01 x86_64-unknown-linux-gnu)"
+
 FAKE_UV = r"""#!/usr/bin/env python3
 import os
 from pathlib import Path
 import subprocess
 import sys
+
+MODERN_UV_VERSION = "uv 0.12.11 (7ce44e8b3 2026-07-14 x86_64-unknown-linux-gnu)"
 
 
 def wheel(python, backend, broken_tv=False):
@@ -63,6 +70,9 @@ cuda = SimpleNamespace(is_available=lambda: os.environ.get("FAKE_GPU_AVAILABLE",
 
 
 args = sys.argv[1:]
+if args == ["--version"]:
+    print(os.environ.get("FAKE_UV_VERSION", MODERN_UV_VERSION))
+    sys.exit(0)
 with open(os.environ["FAKE_UV_LOG"], "a") as out:
     out.write(" ".join(args) + "\n")
 
@@ -114,6 +124,7 @@ def sandbox(tmp_path: Path):
     env = os.environ.copy()
     env.pop("GFX_ARCH", None)
     env.pop("THENOISE_BACKEND", None)
+    env.pop("FAKE_UV_VERSION", None)
     env.update({
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "FAKE_UV_LOG": str(log),
@@ -196,6 +207,33 @@ def test_second_run_does_not_reinstall_torch(sandbox):
     check_run(run(GFX_ARCH="gfx1151"))
     assert len(lines(log)) == 1
     assert "-e" in lines(log)[0]
+
+
+def rocm_install_line(log: Path) -> str:
+    return next(x for x in lines(log) if "torch[device-" in x)
+
+
+def test_old_uv_adds_prerelease_allow_to_rocm_install(sandbox):
+    _, _, log, _, run, _ = sandbox
+    result = run(GFX_ARCH="gfx1151", FAKE_UV_VERSION=OLD_UV_VERSION)
+    check_run(result)
+    assert "--prerelease=allow" in rocm_install_line(log)
+    assert "older than 0.12" in result.stderr
+
+
+def test_modern_uv_does_not_add_prerelease_allow(sandbox):
+    _, _, log, _, run, _ = sandbox
+    check_run(run(GFX_ARCH="gfx1151", FAKE_UV_VERSION=MODERN_UV_VERSION))
+    assert "--prerelease=allow" not in rocm_install_line(log)
+
+
+def test_old_uv_leaves_cuda_and_project_installs_alone(sandbox):
+    _, fake_bin, log, _, run, _ = sandbox
+    add_mock_nvidia(fake_bin)
+    check_run(run(GFX_ARCH="gfx1151", THENOISE_BACKEND="cuda",
+                  FAKE_UV_VERSION=OLD_UV_VERSION))
+    assert all("--prerelease=allow" not in x for x in lines(log))
+    assert any("cu132" in x for x in lines(log))
 
 
 @requires_no_amd_gpu

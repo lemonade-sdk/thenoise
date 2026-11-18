@@ -3,8 +3,7 @@
 #
 # Runs on a real Strix Halo / Strix Point box (gfx1151) or NVIDIA GPU. Verifies
 # the bundle imports, sees the GPU, downloads the Anima model, and runs one real
-# generation end-to-end (including a first-run torch.compile). Writes a small
-# JSON report.
+# generation end-to-end. Writes a small JSON report.
 #
 # Usage: qualify_thenoise.sh --root <bundle_root> --model-dir <dir>
 #                           [--out <report.json>] [--variant <anima-variant>]
@@ -88,8 +87,7 @@ for f in "$DIT" "$VAE" "$TE"; do
   [ -f "$f" ] || { echo "missing checkpoint: $f"; report "$FAIL" "missing checkpoint $f"; exit 1; }
 done
 
-echo "=== run one generation (first run compiles via torch.compile) ==="
-# Give the first-run compile a generous timeout (it traces + compiles kernels).
+echo "=== run one generation ==="
 if ! timeout 1800 "$ROOT/bin/thenoise" generate \
     --dit "$DIT" --vae "$VAE" --text-encoder "$TE" \
     --prompt "a fox walking in the snow" --steps 8 --guidance-scale 1 \
