@@ -214,9 +214,19 @@ def test_serve_without_model_does_not_load(monkeypatch, fake_runtime):
     assert rt.settings == Settings(device="cuda", upscaler_dir="")
 
 
-def test_serve_rejects_partial_model_paths(fake_runtime):
+def test_serve_loads_on_dit_alone(monkeypatch, fake_runtime):
+    monkeypatch.setattr(
+        "thenoise.api.create_app",
+        lambda runtime, *, jobs=None: object(),
+    )
+    monkeypatch.setattr("uvicorn.run", lambda app, host, port: None)
+    _serve(_parse(["serve", "--dit", "d.safetensors"]))
+    assert fake_runtime[0].loaded == ModelPaths(dit_path="d.safetensors")
+
+
+def test_serve_refuses_component_flags_without_a_dit(fake_runtime):
     with pytest.raises(SystemExit):
-        _serve(_parse(["serve", "--dit", "d.safetensors"]))
+        _serve(_parse(["serve", "--vae", "v.safetensors"]))
 
 
 # ---------------------------------------------------------------- generate

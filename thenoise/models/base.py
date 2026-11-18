@@ -87,6 +87,9 @@ class DiffusionModel(LoRASupport, ABC):
     #: What this adapter produces; ``thenoise.mediums`` maps it to a controller and routes.
     MEDIUM: ClassVar[str] = "image"
 
+    #: Required components; ``()`` when embedded.
+    REQUIRED_COMPONENTS: ClassVar[Tuple[str, ...]] = ("vae", "text_encoder")
+
     # Generation preferences and their model default; ``pref`` resolves the
     # precedence. Adapters override only the entries they differ on, merging so a
     # preference added later keeps its base default:

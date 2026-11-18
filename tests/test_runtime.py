@@ -38,6 +38,21 @@ def test_empty_runtime(catalog):
     assert runtime.pipeline is None
 
 
+def test_a_model_refuses_a_component_it_was_not_given(catalog):
+    """The missing checkpoint is named by its flag before anything is built."""
+    catalog(name="embedder")
+    runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
+    with pytest.raises(ValueError, match="embedder needs --vae and --text-encoder"):
+        runtime.load(ModelPaths("dit"))
+
+
+def test_a_model_that_needs_no_further_component_loads_on_the_dit(catalog):
+    catalog(name="embedder", REQUIRED_COMPONENTS=())
+    runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
+    runtime.load(ModelPaths("dit"))
+    assert runtime.model_name == "embedder"
+
+
 def test_video_weights_are_ready_when_runtime_load_returns(catalog, monkeypatch):
     import thenoise.models as model_catalog
 
@@ -128,6 +143,7 @@ def _counting_model(events: list):
     class Fake:
         name = "fake"
         MEDIUM = "image"
+        REQUIRED_COMPONENTS = ("vae", "text_encoder")
         CAPABILITIES: dict = {}
         detect = staticmethod(lambda path: False)
         validate_paths = classmethod(lambda cls, dit_paths: None)

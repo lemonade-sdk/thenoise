@@ -1123,6 +1123,7 @@ def fake_model_cls():
         namespace = {
             "name": name,
             "MEDIUM": "image",
+            "REQUIRED_COMPONENTS": ("vae", "text_encoder"),
             "__init__": __init__,
             "detect": staticmethod(lambda f: False),
             # A catalog entry answers for its own DiT files and releases its own state;

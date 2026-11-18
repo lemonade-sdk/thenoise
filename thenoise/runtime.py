@@ -34,8 +34,8 @@ class ModelPaths:
     ``lora_dir`` is model-bound: LoRAs mutate the DiT weights.
     """
     dit_path: str
-    vae_path: str
-    text_encoder_path: str
+    vae_path: str = ""
+    text_encoder_path: str = ""
     lora_dir: str = ""
     dit_low_path: str = ""
 
@@ -81,6 +81,11 @@ class Runtime:
 
         cls = resolve(paths.dit_path)
         name = cls.name
+        # Model declares its components.
+        missing = [component.replace("_", "-") for component in cls.REQUIRED_COMPONENTS
+                   if not getattr(paths, f"{component}_path", "")]
+        if missing:
+            raise ValueError(f"{name} needs --{' and --'.join(missing)}")
         cls.validate_paths(paths.dit_paths)
 
         config = ModelConfig(
