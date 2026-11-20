@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+from typing import Union
+
 import torch
 import torch.nn as nn
-from accelerate import init_empty_weights
 
 from thenoise.dit.feed_forward import FeedForward
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import attention, interleaved_heads
 from thenoise.utils.fourier import fourier_dim, fourier_features
-from thenoise.utils.loader import load_dit
+from thenoise.utils.loader import build_dit
 from thenoise.utils.qk_norm import QKNorm
+from thenoise.utils.safetensors import Header
 
 from .keys import (
     CODEC_PREFIX,
@@ -158,16 +160,14 @@ class Hunyuan3DShapeCodec(nn.Module):
         return self.sdf(self.tokens(latents), points)
 
 
-def load_hunyuan3d_shape_codec(codec_path: str, params: Hunyuan3DCodecParams, device,
-                               dtype: torch.dtype) -> Hunyuan3DShapeCodec:
+def load_hunyuan3d_shape_codec(checkpoint: Union[str, Header],
+                               params: Hunyuan3DCodecParams,
+                               device, dtype: torch.dtype) -> Hunyuan3DShapeCodec:
     """Build on meta from the header's geometry, then load the codec's decode half."""
-    with init_empty_weights():
-        model = Hunyuan3DShapeCodec(params)
-    load_dit(model, codec_path, device=device, dtype=None,
-             drop_keys=(CODEC_PREFIX + "encoder.", CODEC_PREFIX + "pre_kl."),
-             state_map=take_prefix(CODEC_PREFIX), key_map=codec_key_map)
-    model.to(dtype=dtype)
-    return model
+    model = build_dit(lambda: Hunyuan3DShapeCodec(params), checkpoint, device=device,
+                      dtype=None, drop_keys=(CODEC_PREFIX + "encoder.", CODEC_PREFIX + "pre_kl."),
+                      state_map=take_prefix(CODEC_PREFIX), key_map=codec_key_map)
+    return model.to(dtype=dtype)
 
 
 __all__ = [

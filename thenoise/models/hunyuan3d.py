@@ -10,7 +10,6 @@ from thenoise.dit.hunyuan3d import (
     Hunyuan3DCodecParams,
     Hunyuan3DConditionerParams,
     Hunyuan3DShapeParams,
-    checkpoint_shapes,
     codec_params,
     conditioner_params,
     is_hunyuan3d_shape,
@@ -26,7 +25,6 @@ from thenoise.models.base import (
     DiffusionModel,
     Step,
     VISION_REF_METHOD,
-    normalize_keys,
 )
 from thenoise.models.config import (
     EncodePromptArgs,
@@ -36,6 +34,7 @@ from thenoise.models.config import (
 )
 from thenoise.samplers import sigma_steps
 from thenoise.utils.image_tensor import cover_crop
+from thenoise.utils.safetensors import Header
 
 logger = logging.getLogger(__name__)
 
@@ -81,28 +80,29 @@ class Hunyuan3DShapeModel(DiffusionModel):
         stretched or forces its position grid to interpolate."""
         return cover_crop(image, REFERENCE_SIDE, REFERENCE_SIDE)
 
-    @staticmethod
-    def detect(f) -> bool:
+    @classmethod
+    def detect(cls, header: Header) -> bool:
         """True for the one-file 2.1 shape checkpoint."""
-        return is_hunyuan3d_shape(normalize_keys(f.keys()))
+        return is_hunyuan3d_shape(header.names)
 
     def __init__(self, *, config: ModelConfig):
         super().__init__(config=config)
-        shapes = checkpoint_shapes(config.dit_path)
+        header = config.header()
+        shapes = header.shapes
         self.shape_params: Hunyuan3DShapeParams = shape_params(shapes)
         self.conditioner_params: Hunyuan3DConditionerParams = conditioner_params(shapes)
         self.codec_params: Hunyuan3DCodecParams = codec_params(shapes)
 
         target = self._load_target(config.dit_path)
-        logger.info("Loading Hunyuan3D shape DiT from %s", config.dit_path)
-        self.dit = load_hunyuan3d_shape_dit(config.dit_path, self.shape_params,
+        logger.info("Loading Hunyuan3D shape DiT from %s", header.path)
+        self.dit = load_hunyuan3d_shape_dit(header, self.shape_params,
                                             device=target, dtype=config.dtype)
         logger.info("Loading its DINOv2 conditioner (%d positions)",
                     self.conditioner_params.num_tokens)
         self.conditioner = load_hunyuan3d_image_encoder(
-            config.dit_path, self.conditioner_params, device=target, dtype=config.dtype)
+            header, self.conditioner_params, device=target, dtype=config.dtype)
         logger.info("Loading its shape codec (%d latent layers)", self.codec_params.layers)
-        self.codec = load_hunyuan3d_shape_codec(config.dit_path, self.codec_params,
+        self.codec = load_hunyuan3d_shape_codec(header, self.codec_params,
                                                 device=target, dtype=config.dtype)
 
         self.memory.register("dit", self.dit)

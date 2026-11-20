@@ -10,9 +10,9 @@ from thenoise.dit.hunyuan3d import (
     Hunyuan3DShapeCodec,
     Hunyuan3DShapeDiT,
     Hunyuan3DShapeParams,
-    checkpoint_shapes,
     codec_key_map,
     codec_params,
+    detect_codec_params,
     detect_params,
     is_hunyuan3d_shape,
     load_hunyuan3d_shape_codec,
@@ -376,7 +376,7 @@ def test_the_encode_half_is_left_where_it_is(tmp_path):
     tensors["model.x_embedder.weight"] = torch.ones(4, 4)
     path = write_safetensors(tmp_path / "codec.safetensors", tensors)
 
-    loaded = load_hunyuan3d_shape_codec(path, codec_params(checkpoint_shapes(path)),
+    loaded = load_hunyuan3d_shape_codec(path, detect_codec_params(path),
                                         device="cpu", dtype=torch.float32)
 
     assert torch.equal(loaded.post_kl.weight, codec.post_kl.weight)
@@ -388,7 +388,8 @@ def test_the_encode_half_is_left_where_it_is(tmp_path):
 # ---------------------------------------------------------------------- conditioner
 
 from thenoise.dit.hunyuan3d import CONDITIONER_PREFIX, Hunyuan3DConditionerParams
-from thenoise.dit.hunyuan3d import conditioner_key_map, conditioner_params
+from thenoise.dit.hunyuan3d import (conditioner_key_map, conditioner_params,
+                                    detect_conditioner_params)
 from thenoise.dit.hunyuan3d.conditioner import (
     IMAGENET_MEAN,
     IMAGENET_STD,
@@ -500,7 +501,7 @@ def test_the_conditioner_loads_under_its_own_prefix(tmp_path):
     tensors["model.x_embedder.weight"] = torch.ones(4, 4)
     path = write_safetensors(tmp_path / "cond.safetensors", tensors)
 
-    loaded = load_hunyuan3d_image_encoder(path, conditioner_params(checkpoint_shapes(path)),
+    loaded = load_hunyuan3d_image_encoder(path, detect_conditioner_params(path),
                                           device="cpu", dtype=torch.float32)
 
     assert torch.equal(loaded.embeddings.cls_token, encoder.embeddings.cls_token)
