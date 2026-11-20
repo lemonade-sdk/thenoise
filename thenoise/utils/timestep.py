@@ -11,11 +11,13 @@ def timestep_embedding(
     dim: int,
     max_period: float = 10000.0,
     time_factor: float = 1000.0,
+    sin_first: bool = False,
 ) -> torch.Tensor:
-    """Sinusoidal timestep features ``[cos, sin]``, computed in fp32.
+    """Sinusoidal timestep features, computed in fp32.
 
     ``t`` is the flow timestep in ``[0, 1]``, scaled by ``time_factor`` before the
-    sinusoid. Leading dims are preserved: ``(B,) -> (B, dim)``.
+    sinusoid. Leading dims are preserved: ``(B,) -> (B, dim)``. ``sin_first`` puts the
+    sine half first, as the checkpoints that saved it that way expect.
     """
     t_f = t.float() * time_factor
     half = dim // 2
@@ -23,7 +25,8 @@ def timestep_embedding(
         -math.log(max_period) * torch.arange(half, dtype=torch.float32, device=t_f.device) / half
     )
     args = t_f[..., None] * freqs
-    features = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    halves = (torch.sin(args), torch.cos(args)) if sin_first else (torch.cos(args), torch.sin(args))
+    features = torch.cat(halves, dim=-1)
     if dim % 2:
         features = torch.cat([features, torch.zeros_like(features[..., :1])], dim=-1)
     if torch.is_floating_point(t):
