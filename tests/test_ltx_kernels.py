@@ -5,6 +5,7 @@ migration-time reference model is required.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 import pytest
 import torch
 
@@ -16,6 +17,33 @@ from thenoise.vae.ltx_video import LTXVideoVAE
 
 
 
+
+
+def test_ltx_gemma_sdpa_fallback_is_scoped_and_overridable(monkeypatch):
+    from thenoise.text_encoders.ltx_video import _use_math_gemma_attention
+
+    monkeypatch.delenv("THENOISE_LTX_GEMMA_SDPA", raising=False)
+    assert not _use_math_gemma_attention(torch.device("cpu"))
+
+    # Fake ROCm attributes to test the architecture check on CPU-only CI.
+    monkeypatch.setattr(torch.version, "hip", "test-rocm", raising=False)
+    monkeypatch.setattr(torch.cuda, "get_device_properties",
+                        lambda device: SimpleNamespace(gcnArchName="gfx1151:sramecc-"))
+    assert _use_math_gemma_attention(torch.device("cuda:0"))
+    monkeypatch.setattr(torch.cuda, "get_device_properties",
+                        lambda device: SimpleNamespace(gcnArchName="gfx1100"))
+    assert _use_math_gemma_attention(torch.device("cuda:0"))
+    monkeypatch.setattr(torch.cuda, "get_device_properties",
+                        lambda device: SimpleNamespace(gcnArchName="gfx1201"))
+    assert not _use_math_gemma_attention(torch.device("cuda:0"))
+
+    monkeypatch.setenv("THENOISE_LTX_GEMMA_SDPA", "math")
+    assert _use_math_gemma_attention(torch.device("cpu"))
+    monkeypatch.setenv("THENOISE_LTX_GEMMA_SDPA", "default")
+    assert not _use_math_gemma_attention(torch.device("cuda:0"))
+    monkeypatch.setenv("THENOISE_LTX_GEMMA_SDPA", "invalid")
+    with pytest.raises(ValueError, match="THENOISE_LTX_GEMMA_SDPA"):
+        _use_math_gemma_attention(torch.device("cuda:0"))
 
 
 @pytest.mark.parametrize("ltx25", [False, True])

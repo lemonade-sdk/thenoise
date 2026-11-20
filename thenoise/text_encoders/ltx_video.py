@@ -6,7 +6,9 @@ with its model-specific LTX projection weights.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
+import os
 from pathlib import Path
 
 import torch
@@ -19,6 +21,27 @@ from thenoise.utils.loader import load_text_encoder_weights
 
 
 
+def _use_math_gemma_attention(device: torch.device) -> bool:
+    """Avoid broken masked Gemma SDPA on confirmed ROCm GPU architectures.
+
+    Selection is scoped to Gemma inference, never global or DiT-wide.
+    `THENOISE_LTX_GEMMA_SDPA=math|default` permits A/B validation of an
+    affected driver/PyTorch combination without changing installed packages.
+    """
+    mode = os.environ.get("THENOISE_LTX_GEMMA_SDPA", "auto").strip().lower()
+    if mode not in ("auto", "math", "default"):
+        raise ValueError("THENOISE_LTX_GEMMA_SDPA must be auto, math or default")
+    if mode != "auto":
+        return mode == "math"
+    if not torch.version.hip or device.type != "cuda":
+        return False
+    try:
+        arch = torch.cuda.get_device_properties(device).gcnArchName.split(":", 1)[0]
+    except (AttributeError, RuntimeError):
+        return False
+    return arch in ("gfx1100", "gfx1151")
+
+
 class GemmaFeatures(nn.Module):
     """Module wrapper so the standard TheNoise MemoryManager owns residency."""
 
@@ -27,11 +50,18 @@ class GemmaFeatures(nn.Module):
         self.model = model
 
     def forward(self, ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        # Transformers owns the Gemma attention backend, and the existing model
-        # exposes all hidden states; no global/architecture-specific SDPA override.
+        # Calling the inner model avoids the 250K-token LM-head logits, exactly
+        # as the official Lightricks text-encoder implementation does.
         inner = getattr(self.model, "model", self.model)
-        features = inner(input_ids=ids, attention_mask=mask,
-                         output_hidden_states=True).hidden_states
+        if _use_math_gemma_attention(ids.device):
+            from torch.nn.attention import SDPBackend, sdpa_kernel
+            attention_context = sdpa_kernel([SDPBackend.MATH])
+        else:
+            attention_context = nullcontext()
+        with attention_context:
+            features = inner(
+                input_ids=ids, attention_mask=mask, output_hidden_states=True,
+            ).hidden_states
         if features is None:
             raise RuntimeError("Gemma text model returned no hidden states")
         return torch.stack(features, dim=-1).flatten(2, 3)
