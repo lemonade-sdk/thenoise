@@ -351,3 +351,10 @@ def test_denoise_step_fills_then_reads(tiny_qwen):
         v1 = model.denoise_step(inp["x"], 0.4, cond, 1.0, 1)
     assert v0.shape == (1, inp["num_img_tokens"], 8)
     assert not torch.allclose(v0, v1)  # different t -> different velocity
+
+
+def test_the_shared_feed_forward_defaults_to_the_gelu_weights_were_trained_with():
+    from thenoise.dit.feed_forward import FeedForward
+
+    assert FeedForward(4).net[0].gelu.approximate == "tanh"
+    assert FeedForward(4, approximate="none").net[0].gelu.approximate == "none"
