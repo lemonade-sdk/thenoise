@@ -8,7 +8,7 @@ takes a shape anywhere it would otherwise not go.
 |---|---|
 | Modes | image-to-shape (`i2d`) only; text-to-shape does not exist |
 | Checkpoint | **one file** (`--dit`): transformer + DINOv2 image conditioner + shape codec |
-| Conditioning | the reference picture's DINOv2-L/14 patches, whole and aspect-preserved |
+| Conditioning | the reference picture reframed to a 518² square, as its whole DINOv2-L/14 patch grid |
 | Latents | 4096 unstructured tokens of 64 channels, no positional embedding |
 | Output | `.glb` (binary glTF), `.obj` or `.stl` — positions and triangles, no material |
 | Defaults | 4096 tokens, 30 steps, CFG 5.0, Euler, 384³ octree, seed random |
@@ -42,7 +42,15 @@ curl -s -X POST localhost:8000/mesh \
 ```
 
 A picture is the whole request: a request without one is refused rather than answered with
-a blob, since nothing else conditions this model.
+a blob, since nothing else conditions this model. In the web UI the Generate tab becomes
+the shape form — a dropzone and the knobs below, and no prompt field, because there is
+nothing to type.
+
+Before the tower sees the picture it is framed the way the tower's own preprocessing
+frames it: the short side is scaled to 518 and the overhang is cropped off the long sides,
+so nothing is stretched and the canvas is always 37×37 patches — the 1370 conditioning
+tokens the checkpoint's config declares. Transparency is composited onto white, the
+surface the cutouts it was trained on sat on.
 
 ## The knobs
 
@@ -55,7 +63,7 @@ a blob, since nothing else conditions this model.
 | `--sampler` | `sampler` | `euler` | solver |
 | `--octree-resolution` | `octree_resolution` | 384 | finest voxel grid the surface is cut from |
 | `--bounds` | `bounds` | 1.01 | half-width of the sampled volume in latent units |
-| `--mc-level` | `mc_level` | 0.0 | the SDF value the surface is cut at |
+| `--mc-level` | `mc_level` | 1/512 | the field value the surface is cut at; the reference pipeline's cut, in this field's sign |
 | `--output-format` | `output_format` | `glb` | `glb`, `obj` or `stl`; `--out`'s extension decides if unset |
 
 STL is the one format that stores no shared vertices: every triangle carries its own three
@@ -63,11 +71,10 @@ corners and its own normal, which is exactly what comes out of the cut — a sli
 them to its own tolerance, so nothing is committed here that it would have to undo.
 
 `--octree-resolution` is the one that costs both memory and time: sampling is a narrow
-band, not a dense grid, so only cells near the surface are ever queried — 384 on a
-centred object asks for around 2.5 M points where a dense grid would ask for 57 M. The
-band is built by halving down from the resolution you asked for until 48, so 384 walks
-48 → 96 → 192 → 384 and 300 walks 75 → 150 → 300; anything at or below 48 is a single
-level.
+band, not a dense grid, so only cells near the surface are ever queried — a centred object
+at 384 asks for a few million points where a dense grid would ask for 57 M. The band is
+built by halving down from the resolution you asked for until 63, so 384 walks
+96 → 192 → 384 and 300 walks 75 → 150 → 300; anything at or below 63 is a single level.
 
 `--bounds` slightly above 1 matters: an object that touches the edge of the sampled volume
 gets its surface clipped there, and nothing downstream can tell you it happened.
@@ -75,7 +82,7 @@ gets its surface clipped there, and nothing downstream can tell you it happened.
 ## What it is
 
 The latents are tokens, not an image: the DiT denoises 4096 of them, and the codec turns
-them into a signed-distance field. Three components live in the one file:
+them into the field the surface is cut from. Three components live in the one file:
 
 * a `HunYuanDiTPlain`-style transformer — 21 blocks, 16 heads, a time token prepended to
   the sequence and dropped again by the output layer, LIFO skips from the first ten blocks
@@ -84,14 +91,30 @@ them into a signed-distance field. Three components live in the one file:
 * a DINOv2-L/14 @518 image encoder, whose whole patch grid every block cross-attends to.
   A `null` context is zeros, not an empty text sequence;
 * a shape codec whose 16-layer transformer refines the tokens once, and whose geometry
-  decoder then answers SDF queries against them.
+  decoder then answers field queries against them.
 
-The SDF is sampled in a **narrow band**: an octree is refined only where the field could
-cross the cut level, so the queries that would land in the middle of solid matter or in
-empty space are never made. The surface is cut out of that band with tetrahedral marching
-cubes, which needs no invented sign outside the sampled cells and produces a watertight,
-consistently wound mesh. Nothing is welded, decimated or smoothed — what comes out is the
-raw cut, at the resolution you asked for.
+The DiT counts the other way round: its clock runs up from noise
+(`x_t = t · latents + (1 - t) · noise`) and it predicts `latents - noise`, so the adapter
+hands it `1 - sigma` and negates what comes back, which is the flow `noise - latents` the
+solver integrates.
+
+Its attention also reads heads the way the release does, which is not how a textbook split
+does: self-attention concatenates the three projections and takes `q`, `k`, `v` three
+blocks to a head — head 0's key is `to_q`'s second block of features — while cross-attention
+splits its query plainly and interleaves only the fused key-value pair. Both give tensors of
+exactly the usual shapes; the trained weights answer to these readings and nothing else.
+
+The field is sampled in a **narrow band**: the octree starts at the coarsest level of the
+reference's 63-halving ladder (96 for a 384 target) and refines the cells holding a sign
+change, the one-cell shell around them, and any cell whose corners come within 0.95 of the
+cut. That last term is the reference decoder's own, and it only earns its keep because the
+codec answers in logits that run out at about ±1: a corner that close to the level is worth
+subdividing even when no corner crossed it, whereas on a plain distance field the same rule
+would keep the whole volume. Tetrahedral marching cubes cut the surface out of the band,
+needing no invented sign outside the sampled cells and giving a watertight, consistently
+wound mesh. The codec's logit is positive inside, so the adapter negates it before the cut:
+triangles face outward, and an inside-out glb is not something this engine hands back.
+Nothing is welded, decimated or smoothed — the raw cut, at the resolution you asked for.
 
 ## Not supported
 
@@ -103,6 +126,8 @@ raw cut, at the resolution you asked for.
   different transformer — Flux-style, guidance-distilled — and are not detected. Only the
   2.1 shape file is.
 
-Nothing here has been compared against a reference implementation's output numerically;
-the kernels are covered by weight-free tests, and the first real GPU run is the check on
-the schedule's shape and the defaults above.
+Every stage of the port has been diffed against Tencent's own implementation with the real
+checkpoint on CPU: same weights, same inputs, per-block outputs equal to within bf16
+rounding. The weight-free tests hold that shape in place; none of them could have caught
+the conventions that were wrong at first — the Fourier `include_pi`, the clock and flow
+sign, the head interleave — so each is pinned by a test that fails in the other reading.

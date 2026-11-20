@@ -180,8 +180,9 @@ def _add_mesh_args(p: argparse.ArgumentParser) -> None:
                    help="finest voxel grid the surface is cut from (default: the model's)")
     p.add_argument("--bounds", type=float, metavar="R",
                    help="half-width of the volume sampled, in latent units")
-    p.add_argument("--mc-level", dest="mc_level", type=float, metavar="SDF",
-                   help="the SDF value the surface is cut at (default: 0, the skin)")
+    p.add_argument("--mc-level", dest="mc_level", type=float, metavar="LEVEL",
+                   help="the field value the surface is cut at "
+                        "(default: 1/512, the reference pipeline's own cut)")
     p.add_argument("--output-format", choices=["glb", "obj", "stl"],
                    help="container; --out's extension is taken when this is left out")
     p.add_argument("--lora", action="append", default=[], metavar="FILE[:WEIGHT]",

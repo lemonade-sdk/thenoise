@@ -182,7 +182,7 @@ that model's three parts live in one checkpoint, so `--dit` is the only path fla
 | `--steps`, `--guidance-scale`, `--sampler`, `--seed` | no | model default | Sampling parameters, as for `generate` |
 | `--octree-resolution` | no | model default | Finest voxel grid the surface is cut from; the costliest knob |
 | `--bounds` | no | model default | Half-width of the sampled volume, in latent units |
-| `--mc-level` | no | `0.0` | The SDF value the surface is cut at |
+| `--mc-level` | no | `1/512` | The field value the surface is cut at |
 | `--lora` | no | — | LoRA for the shape transformer; repeatable, `file:weight` |
 | `--output-format` | no | model default | `glb`, `obj` or `stl`; `--out`'s extension answers when this is left out |
 | `--out` | no | `out.glb` | Output mesh path; with no extension, the container the mesh was written in |

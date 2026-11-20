@@ -50,8 +50,10 @@ class Hunyuan3DImageEncoder(Dinov2Model):
         sizes = {image.size for image in images}
         if len(sizes) > 1:
             raise ValueError(f"the tower batches one picture size at a time, got {sorted(sizes)}")
+        # Residency moves this module between devices, so its device is read per call.
+        device = next(self.parameters()).device
         batch = torch.stack([pil_to_pixels(image) for image in images])
-        return dino_normalize(batch.to(dtype))
+        return dino_normalize(batch.to(device, dtype=dtype))
 
     def forward(self, images: Sequence[Image.Image], dtype: torch.dtype) -> torch.Tensor:
         """``[B, tokens, hidden]``: the reference as cross-attention context."""

@@ -463,6 +463,112 @@
 </main>
 </div><!-- /view-video -->
 
+<div class="view hidden" id="view-mesh">
+<aside class="sidebar">
+  <div class="field">
+    <label class="label" for="mesh_file">Picture <span class="hint">required</span></label>
+    <div class="dropzone" id="mesh_dropzone">
+      <input type="file" id="mesh_file" accept="image/*" hidden>
+      <div class="dz-hint" id="mesh_dz_hint">Drag &amp; drop an image here or <span class="kbd">click to browse</span></div>
+      <div class="dz-name" id="mesh_dz_name" style="display:none"></div>
+    </div>
+    <div class="ref-thumbs" id="mesh_refs"></div>
+    <div class="hint">A shape is conditioned on the picture alone; no prompt is read.</div>
+  </div>
+
+  <div class="row">
+    <div class="field">
+      <label class="label" for="mesh_latents">Tokens</label>
+      <input type="number" id="mesh_latents" placeholder="auto" min="1">
+    </div>
+    <div class="field">
+      <label class="label" for="mesh_steps">Steps</label>
+      <input type="number" id="mesh_steps" placeholder="auto" min="1">
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="field">
+      <label class="label" for="mesh_guidance_scale">Guidance</label>
+      <input type="number" id="mesh_guidance_scale" step="0.1" placeholder="auto" min="0">
+    </div>
+    <div class="field">
+      <label class="label" for="mesh_sampler">Sampler</label>
+      <select id="mesh_sampler">
+        <option value="">auto</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="field">
+    <label class="label" for="mesh_octree_resolution">Octree <span class="hint">voxel grid the surface is cut from</span></label>
+    <input type="number" id="mesh_octree_resolution" placeholder="auto" min="8">
+  </div>
+
+  <div class="row">
+    <div class="field">
+      <label class="label" for="mesh_bounds">Bounds</label>
+      <input type="number" id="mesh_bounds" placeholder="auto" min="0" step="any">
+    </div>
+    <div class="field">
+      <label class="label" for="mesh_mc_level">Cut level <span class="hint">field value the surface is cut at</span></label>
+      <input type="number" id="mesh_mc_level" placeholder="auto" step="any">
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="field">
+      <label class="label" for="mesh_seed">Seed</label>
+      <input type="number" id="mesh_seed" placeholder="random" min="0">
+    </div>
+    <div class="field">
+      <label class="label" for="mesh_output_format">Output</label>
+      <select id="mesh_output_format">
+        <option value="">auto</option>
+        <option value="glb">glb</option>
+        <option value="obj">obj</option>
+        <option value="stl">stl</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="field lora-field">
+    <label class="label" for="mesh_lora_specs">LoRA specs <span class="hint">type to autocomplete</span></label>
+    <textarea id="mesh_lora_specs" rows="2" placeholder="e.g. style:0.8, one per line"></textarea>
+    <div class="lora-ac" id="mesh_lora_ac"></div>
+  </div>
+
+  <button class="btn" id="mesh_generate">Generate shape</button>
+</aside>
+
+<main class="main">
+  <div class="stage" id="mesh_stage">
+    <div class="placeholder" id="meshplaceholder">Drop a picture and click <span class="kbd">Generate shape</span></div>
+    <div class="stage-file" id="mesh_out">
+      <div class="stage-file-name" id="mesh_out_name"></div>
+      <div class="stage-file-note" id="mesh_out_note"></div>
+    </div>
+    <div class="actions">
+      <button class="dl ctrl" id="mesh_download" disabled title="Download the mesh">&#8595; Download</button>
+      <button class="dl ctrl" id="mesh_cancel" disabled title="Cancel the running job">&#10005; Cancel</button>
+      <button class="info ctrl" id="mesh_info_btn" disabled title="Shape info" aria-label="Shape info">&#9432;</button>
+    </div>
+    <div class="overlay hidden" id="mesh_overlay"><div class="spinner"></div></div>
+  </div>
+
+  <div class="job-progress hidden" id="mesh_progress">
+    <span class="job-progress-label" id="mesh_progress_label"></span>
+    <div class="job-track"><div class="job-bar" id="mesh_bar"></div></div>
+  </div>
+
+  <div class="timer" id="mesh_timer"><span class="dot"></span><span id="mesh_timer_text">idle</span></div>
+</main>
+</div><!-- /view-mesh -->
+
 <div class="view hidden" id="view-upscale">
 <div class="no-model hidden" id="no_upscaler">
   <div class="no-model-title">Upscaling is not available</div>
@@ -583,5 +689,6 @@
 <script src="static/js/app.js"></script>
 <script src="static/js/controlmap.js"></script>
 <script src="static/js/video.js"></script>
+<script src="static/js/mesh.js"></script>
 </body>
 </html>

@@ -8,18 +8,12 @@ from accelerate import init_empty_weights
 
 from thenoise.dit.feed_forward import FeedForward
 from thenoise.dit.quantized import QuantizedLinear
-from thenoise.utils.attention import attention
+from thenoise.utils.attention import attention, interleaved_heads
 from thenoise.utils.loader import load_dit
 from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.timestep import timestep_embedding
 
 from .keys import DIT_PREFIX, Hunyuan3DShapeParams, shape_key_map, take_prefix
-
-
-def _heads(value: torch.Tensor, num_heads: int) -> torch.Tensor:
-    """``[B, L, H*D]`` -> ``[B, H, L, D]``, the layout SDPA wants."""
-    batches, tokens, _ = value.shape
-    return value.view(batches, tokens, num_heads, -1).transpose(1, 2)
 
 
 class Attention(nn.Module):
@@ -36,10 +30,18 @@ class Attention(nn.Module):
         self.out_proj = QuantizedLinear(dim, dim, bias=True)
 
     def forward(self, x: torch.Tensor, context: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Self-attention reads q, k and v out of one interleave; cross-attention splits its
+        query plainly and interleaves only the key and value drawn from the picture. Two
+        layouts, neither recoverable from the parameter shapes: :func:`interleaved_heads`.
+        """
         source = x if context is None else context
-        q = _heads(self.to_q(x), self.num_heads)
-        k = _heads(self.to_k(source), self.num_heads)
-        v = _heads(self.to_v(source), self.num_heads)
+        query, key, value = self.to_q(x), self.to_k(source), self.to_v(source)
+        if context is None:
+            q, k, v = interleaved_heads(torch.cat((query, key, value), dim=-1),
+                                        self.num_heads, 3)
+        else:
+            (q,) = interleaved_heads(query, self.num_heads, 1)
+            k, v = interleaved_heads(torch.cat((key, value), dim=-1), self.num_heads, 2)
         q, k = self.qk_norm(q, k)
         return self.out_proj(attention(q, k=k, v=v))
 

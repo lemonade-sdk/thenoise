@@ -19,8 +19,9 @@ def write_obj(mesh: Mesh, path: str | Path) -> None:
     """``v`` lines then ``f`` lines, 1-based as OBJ counts."""
     if mesh.is_empty:
         raise ValueError("there is no mesh to write")
-    vertices = mesh.vertices.detach().cpu().tolist()
-    faces = mesh.faces.detach().cpu().tolist()
+    local = mesh.cpu()
+    vertices = local.vertices.tolist()
+    faces = local.faces.tolist()
     lines = [f"v {x:.6f} {y:.6f} {z:.6f}" for x, y, z in vertices]
     lines += [f"f {a + 1} {b + 1} {c + 1}" for a, b, c in faces]
     Path(path).write_text("\n".join(lines) + "\n")
@@ -28,8 +29,9 @@ def write_obj(mesh: Mesh, path: str | Path) -> None:
 
 def _glb(mesh: Mesh) -> bytes:
     """One mesh, one primitive, no materials; glTF demands a POSITION min and max."""
-    positions = mesh.vertices.detach().cpu().to(torch.float32).contiguous()
-    indices = mesh.faces.detach().cpu().to(torch.int32).contiguous().reshape(-1)
+    local = mesh.cpu()
+    positions = local.vertices.to(torch.float32).contiguous()
+    indices = local.faces.to(torch.int32).contiguous().reshape(-1)
     blob = positions.numpy().tobytes() + indices.numpy().tobytes()
     index_offset = positions.numel() * 4
     bounds = positions.amin(dim=0).tolist()
@@ -76,7 +78,8 @@ def write_stl(mesh: Mesh, path: str | Path) -> None:
     Units are whatever the model's space means to whoever opens it."""
     if mesh.is_empty:
         raise ValueError("there is no mesh to write")
-    corners = mesh.vertices.detach().cpu().to(torch.float32)[mesh.faces]
+    local = mesh.cpu()
+    corners = local.vertices.to(torch.float32)[local.faces]
     span = corners[:, 1] - corners[:, 0]
     reach = corners[:, 2] - corners[:, 0]
     faces = corners.shape[0]

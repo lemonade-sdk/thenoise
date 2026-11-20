@@ -118,3 +118,21 @@ def test_a_degenerate_triangle_gets_no_normal_rather_than_a_nan(tmp_path):
 def test_stl_is_written_by_the_extension_too(tmp_path):
     write_mesh(triangle(), tmp_path / "a.stl")
     assert (tmp_path / "a.stl").read_bytes()[80:84] == struct.pack("<I", 1)
+
+
+def test_the_writers_move_the_faces_with_the_vertices(monkeypatch, tmp_path):
+    """A writer that moves the vertices but leaves the faces fails the moment the two are
+    indexed together, so both go to the host."""
+    mesh = triangle()
+    moved = set()
+    real = torch.Tensor.cpu
+
+    def spy(self, *args, **kwargs):
+        moved.add(tuple(self.shape))
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "cpu", spy)
+    for write, suffix in ((write_obj, "obj"), (write_glb, "glb"), (write_stl, "stl")):
+        moved.clear()
+        write(mesh, tmp_path / f"mesh.{suffix}")
+        assert moved == {(3, 3), (1, 3)}, suffix
