@@ -141,7 +141,7 @@ class CodecTransformer(nn.Module):
 
 
 class Hunyuan3DShapeCodec(nn.Module):
-    """Latent tokens to an SDF at any point; the encode half is absent, as it is in 2.0."""
+    """Latent tokens to an SDF at any point; nothing in generation encodes, so there is no encode half."""
 
     def __init__(self, params: Hunyuan3DCodecParams):
         super().__init__()
@@ -152,7 +152,7 @@ class Hunyuan3DShapeCodec(nn.Module):
         self.geo_decoder = GeoDecoder(params)
 
     def tokens(self, latents: torch.Tensor) -> torch.Tensor:
-        """``[B, N, embed_dim]`` -> ``[B, N, width]``: the half every query chunk shares, the tokens having no positions of their own."""
+        """``[B, N, embed_dim]`` -> ``[B, N, width]``, shared by every query chunk because the tokens are unpositioned."""
         return self.transformer(self.post_kl(latents))
 
     def sdf(self, tokens: torch.Tensor, points: torch.Tensor) -> torch.Tensor:

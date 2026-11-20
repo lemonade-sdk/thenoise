@@ -393,7 +393,7 @@ def test_the_tower_gives_one_token_per_patch_plus_the_cls():
 
 
 def test_the_tower_takes_any_whole_number_of_patches():
-    # The engine fits a reference by area and never crops, so the tower interpolates positions.
+    # References are fitted by area and never cropped, so the tower sees non-square pictures.
     encoder = tiny_dino()
     with torch.no_grad():
         assert encoder([picture(70, 42)], torch.float32).shape == (1, 16, 64)
