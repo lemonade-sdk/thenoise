@@ -241,7 +241,22 @@ def test_the_codec_returns_one_logit_per_queried_point():
     queries = torch.zeros(2, 7, 3)
     with torch.no_grad():
         out = codec(latents, queries)
-    assert out.shape == (2, 7, 1)
+    assert out.shape == (2, 7)
+    assert torch.equal(out, codec.sdf(codec.tokens(latents), queries))
+
+
+def test_the_codec_drives_the_octree_through_one_point_to_one_sdf():
+    from thenoise.mesh.octree import sample_sdf
+
+    codec = tiny_codec()
+    with torch.no_grad():
+        tokens = codec.tokens(torch.randn(1, 6, TINY_CODEC["embed_dim"]))
+        volume = sample_sdf(
+            lambda points: codec.sdf(tokens, points[None])[0],
+            32, device="cpu", bounds=1.0, start=4, chunk=97)
+    assert volume.queries > 0
+    assert volume.values.shape == (33, 33, 33)
+    assert volume.cells.shape == (32, 32, 32)
 
 
 def test_the_codec_norms_heads_with_layernorm_not_rmsnorm():

@@ -151,9 +151,17 @@ class Hunyuan3DShapeCodec(nn.Module):
         self.transformer = CodecTransformer(params)
         self.geo_decoder = GeoDecoder(params)
 
-    def forward(self, latents: torch.Tensor, queries: torch.Tensor) -> torch.Tensor:
-        """``latents`` ``[B, N, embed_dim]``, ``queries`` ``[B, M, 3]`` -> ``[B, M, 1]``."""
-        return self.geo_decoder(self.transformer(self.post_kl(latents)), queries)
+    def tokens(self, latents: torch.Tensor) -> torch.Tensor:
+        """``[B, N, embed_dim]`` -> ``[B, N, width]``: the half every query chunk shares, the tokens having no positions of their own."""
+        return self.transformer(self.post_kl(latents))
+
+    def sdf(self, tokens: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
+        """``tokens`` ``[B, N, width]``, ``points`` ``[B, M, 3]`` -> ``[B, M]`` SDF."""
+        return self.geo_decoder(tokens, points).squeeze(-1)
+
+    def forward(self, latents: torch.Tensor, points: torch.Tensor) -> torch.Tensor:
+        """``latents`` ``[B, N, embed_dim]``, ``points`` ``[B, M, 3]`` -> ``[B, M]`` SDF."""
+        return self.sdf(self.tokens(latents), points)
 
 
 def load_hunyuan3d_shape_codec(codec_path: str, params: Hunyuan3DCodecParams, device,
