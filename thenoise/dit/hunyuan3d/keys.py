@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping, Tuple
 
@@ -199,6 +200,79 @@ def _expert_count(shapes: Mapping[str, Tuple[int, ...]], prefix: str) -> int:
     return 0
 
 
+#: DINOv2 splits every width into 64-wide heads; the checkpoint cannot say so itself.
+DINO_HEAD_DIM = 64
+
+
+@dataclass(frozen=True)
+class Hunyuan3DConditionerParams:
+    """The DINOv2 tower, as read out of the checkpoint header."""
+
+    hidden_size: int
+    layers: int
+    num_heads: int
+    mlp_dim: int
+    patch_size: int
+    image_size: int
+    qkv_bias: bool = True
+    use_cls_token: bool = True
+    norm_eps: float = 1e-6
+
+    @property
+    def num_tokens(self) -> int:
+        """Tokens for a picture of ``image_size``, the CLS token included or not."""
+        side = self.image_size // self.patch_size
+        return side * side + (1 if self.use_cls_token else 0)
+
+
+def conditioner_params(shapes: Mapping[str, Tuple[int, ...]]) -> Hunyuan3DConditionerParams:
+    """The tower's geometry out of a name -> shape mapping."""
+    p = CONDITIONER_PREFIX
+    _, _, patch_size, _ = shapes[p + "embeddings.patch_embeddings.projection.weight"]
+    hidden = shapes[p + "embeddings.patch_embeddings.projection.weight"][0]
+    positions = shapes[p + "embeddings.position_embeddings"][1]
+    side = math.isqrt(positions - 1)
+    if side * side + 1 != positions:
+        raise ValueError(f"{positions} positions are not a square grid plus one")
+    return Hunyuan3DConditionerParams(
+        hidden_size=hidden,
+        layers=_layer_count(shapes, p + "encoder.layer."),
+        num_heads=hidden // DINO_HEAD_DIM,
+        mlp_dim=shapes[p + "encoder.layer.0.mlp.fc1.weight"][0],
+        patch_size=patch_size,
+        image_size=side * patch_size,
+        qkv_bias=p + "encoder.layer.0.attention.attention.query.bias" in shapes,
+    )
+
+
+def detect_conditioner_params(dit_path: str) -> Hunyuan3DConditionerParams:
+    """Read the tower geometry from a checkpoint's header, without loading tensors."""
+    return conditioner_params(checkpoint_shapes(dit_path))
+
+
+def conditioner_key_map(key: str) -> str:
+    """The saved attention names onto the ``transformers`` ``Dinov2Model`` slots."""
+    for saved, ours in ((".attention.attention.query.", ".attention.q_proj."),
+                        (".attention.attention.key.", ".attention.k_proj."),
+                        (".attention.attention.value.", ".attention.v_proj."),
+                        (".attention.output.dense.", ".attention.o_proj.")):
+        key = key.replace(saved, ours)
+    return key
+
+
+def _layer_count(shapes: Mapping[str, Tuple[int, ...]], prefix: str) -> int:
+    indices = set()
+    for key in shapes:
+        if not key.startswith(prefix):
+            continue
+        index = key[len(prefix):].split(".", 1)[0]
+        if index.isdigit():
+            indices.add(int(index))
+    if indices != set(range(len(indices))):
+        raise ValueError(f"encoder layers are not contiguous under {prefix}")
+    return len(indices)
+
+
 def _resblock_count(shapes: Mapping[str, Tuple[int, ...]], prefix: str) -> int:
     indices = set()
     for key in shapes:
@@ -230,12 +304,17 @@ __all__ = [
     "CONDITIONER_PREFIX",
     "DIT_PREFIX",
     "SHAPE_SCALE_FACTOR",
+    "DINO_HEAD_DIM",
+    "Hunyuan3DConditionerParams",
     "Hunyuan3DCodecParams",
     "Hunyuan3DShapeParams",
     "checkpoint_shapes",
+    "conditioner_key_map",
+    "conditioner_params",
     "codec_key_map",
     "codec_params",
     "detect_codec_params",
+    "detect_conditioner_params",
     "detect_params",
     "is_hunyuan3d_shape",
     "shape_key_map",
