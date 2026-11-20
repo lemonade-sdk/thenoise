@@ -205,5 +205,11 @@ General rules:
 - Anything a request/checkpoint/model can set goes through the
   `request → checkpoint marker → model default` preference chain
   (`DiffusionModel.pref`).
+- Weights land on a module through `load_module_state`, never a bare
+  `load_state_dict`: a checkpoint that does not line up gets both halves of the
+  difference named, instead of a forward pass that answers with plausible
+  nonsense. A codec loads one level up, through `load_codec`, which adds the
+  signature, the geometry read off the same header and the checkpoint's own key
+  layout.
 - Don't add `torch` to `pyproject.toml`.
 - Verify with `.venv/bin/python -m pytest tests/ -q` before opening the PR.

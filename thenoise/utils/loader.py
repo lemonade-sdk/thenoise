@@ -22,10 +22,11 @@ from comfy_kitchen.tensor.fp8 import TensorCoreFP8Layout
 from thenoise.utils.checkpoint import CHECKPOINT_MARKER_KEYS
 from thenoise.utils.safetensors import (
     Header,
+    Signature,
     MemoryEfficientSafeOpen,
     as_header,
-    load_dit_safetensors,
     load_safetensors,
+    strip_wrap_prefixes,
     unwrap_key,
 )
 from thenoise.utils.setup_logging import setup_logging
@@ -154,55 +155,102 @@ def _map_keys(state_dict: dict, key_map: Callable[[str], str], path: str) -> dic
     return mapped
 
 
-def load_text_encoder_weights(
+def load_module_state(
+    model: torch.nn.Module,
+    state_dict: dict,
+    path: str,
+    *,
+    what: str = "checkpoint",
+    allow_missing: tuple[str, ...] = (),
+) -> None:
+    """Load ``state_dict`` into ``model``, or name the keys that did not line up.
+
+    ``allow_missing`` lists substrings of the module paths no checkpoint carries
+    (model-internal buffers); everything else has to match in both directions. A
+    plain ``strict=False`` swallows the difference until a forward pass answers with
+    nonsense, and a bare ``strict=True`` names only the first half of it, so every
+    component loader — DiT, encoder, codec, upscaler — checks here.
+    """
+    info = model.load_state_dict(state_dict, strict=False, assign=True)
+    missing = [k for k in info.missing_keys
+               if not any(allowed in k for allowed in allow_missing)]
+    if missing or info.unexpected_keys:
+        raise RuntimeError(
+            f"{what} checkpoint {path!r} did not match the model: "
+            f"missing={missing[:10]}, unexpected={info.unexpected_keys[:10]}"
+        )
+
+
+def _load_into(
     model: torch.nn.Module,
     checkpoint: Union[str, Header],
     *,
     device: Union[str, torch.device],
-    dtype: Optional[torch.dtype] = None,
+    dtype: Optional[torch.dtype],
+    what: str,
     key_map: Optional[Callable[[str], str]] = None,
-    drop_keys: Optional[tuple[str, ...]] = None,
+    value_map: Optional[Callable[[str, torch.Tensor], tuple[str, torch.Tensor]]] = None,
+    state_map: Optional[Callable[[dict], dict]] = None,
+    drop_prefixes: tuple[str, ...] = (),
+    strip_wrappers: bool = False,
+    allow_missing: tuple[str, ...] = (),
+    quantized_restore: bool = False,
 ) -> torch.nn.Module:
-    """Load a text-encoder checkpoint (single safetensors file), auto-selecting
-    quantized vs BF16. No sharded-file support.
+    """Read one safetensors file into a module built on meta.
 
-    Each low-bit ``.weight`` + ``.weight_scale`` pair goes to its module's
-    ``load_quantized``; every other leaf parameter/buffer is cast to ``dtype``.
+    The half every component shares: the file is read once, in its own dtype, with
+    the runtime state and the checkpoint's own markers dropped before anything is
+    compared; ``strip_wrappers`` folds a repackaging's ``model.diffusion_model.`` or
+    ``net.`` prefix onto this repo's module names; ``key_map`` then renames what the
+    checkpoint spells differently from the tree, ``value_map`` rewrites single
+    tensors, and ``state_map`` folds the whole dict, for the case where ONE parameter
+    is several checkpoint tensors (e.g. stacking ``to_q/to_k/to_v`` into a fused
+    ``qkv``). A fold must keep every ``.weight_scale``/``.comfy_quant`` sibling with
+    the weight it belongs to.
 
-    The whole ``lm_head.`` subtree is dropped: encoders remove their ``lm_head``
-    module before calling, and no LM head is ever run. ``key_map`` normalizes the
-    checkpoint's key layout, and ``drop_keys`` drops key PREFIXES on BOTH paths — a
-    multimodal file ships an image tower the text-to-image conditioner does not
-    build, and some store their tokenizer as a U8 payload tensor; dropping keeps the
-    load strict.
+    Quantized and plain files take the same route up to that point, then diverge:
+    the quantization profile is baked into the weights and scales at export and the
+    ``comfy_quant`` markers reconstruct the ``QuantizedTensor`` layout, while a plain
+    file is cast to ``dtype`` and loaded strictly.
+
+    ``dtype`` stays the caller's to resolve. Some checkpoints must be read with their
+    own dtypes and moved afterwards, because that move is where a model's FP32 islands
+    pin themselves and quantized weights stay quantized; casting on the way in would
+    round the modulation factors those islands produce.
     """
     device = torch.device(device)
     header = as_header(checkpoint)
 
     sd = load_safetensors(header.path, device=device, dtype=None)
-    sd = {k: v for k, v in sd.items() if k != "lm_head" and not k.startswith("lm_head.")}
+    if strip_wrappers:
+        sd = strip_wrap_prefixes(sd)
     sd = drop_runtime_state(sd)
     sd = drop_checkpoint_markers(sd)
-    if drop_keys:
-        sd = {k: v for k, v in sd.items() if not k.startswith(drop_keys)}
+    if drop_prefixes:
+        sd = {k: v for k, v in sd.items() if not k.startswith(drop_prefixes)}
     if key_map is not None:
         sd = _map_keys(sd, key_map, header.path)
+    if value_map is not None:
+        sd = {nk: nv for nk, nv in (value_map(k, v) for k, v in sd.items())}
+    if state_map is not None:
+        sd = state_map(sd)
 
     if is_quantized_checkpoint(header):
         load_quantized_state_dict(model, sd, dtype=dtype)
-        logger.info("Loaded quantized text encoder from %s", header.path)
+        if quantized_restore:
+            # Raw checkpoint key per quantized layer, and the file to read it back
+            # from: a LoRA undo reads the component's own, since two experts share
+            # every key name.
+            model._quantized_restore_map = build_quantized_restore_map(header, key_map)
+            model._quantized_restore_path = header.path
+        logger.info("Loaded quantized %s from %s", what, header.path)
     else:
         if dtype is not None:
             sd = {k: v.to(dtype=dtype) for k, v in sd.items()}
-        info = model.load_state_dict(sd, strict=True, assign=True)
-        if info.unexpected_keys or info.missing_keys:
-            raise RuntimeError(
-                f"text encoder checkpoint {header.path!r} did not match the model: "
-                f"missing={info.missing_keys[:10]}, "
-                f"unexpected={info.unexpected_keys[:10]}"
-            )
-        logger.info("Loaded BF16 text encoder from %s", header.path)
+        load_module_state(model, sd, header.path, what=what, allow_missing=allow_missing)
+        logger.info("Loaded %s from %s", what, header.path)
 
+    # Includes buffers (e.g. RoPE) not present in the checkpoint.
     model.to(device)
     return model
 
@@ -219,53 +267,97 @@ def load_dit(
     value_map: Optional[Callable[[str, torch.Tensor], tuple[str, torch.Tensor]]] = None,
     state_map: Optional[Callable[[dict], dict]] = None,
 ) -> torch.nn.Module:
-    """Load a DiT checkpoint into ``model`` (constructed on meta), selecting
-    quantized vs BF16 automatically.
+    """Load a DiT checkpoint into ``model`` (constructed on meta)."""
+    return _load_into(
+        model,
+        checkpoint,
+        device=device,
+        dtype=dtype,
+        what="DiT",
+        key_map=key_map,
+        value_map=value_map,
+        state_map=state_map,
+        drop_prefixes=tuple(drop_keys or ()),
+        strip_wrappers=True,
+        allow_missing=expected_missing,
+        quantized_restore=True,
+    )
 
-    ``expected_missing`` lists substrings allowed to be absent from the checkpoint
-    (model-internal buffers); with it non-empty the load is non-strict and only
-    those are tolerated. ``key_map`` and ``value_map`` transform checkpoint keys and
-    values, in that order.
 
-    ``state_map`` is a whole-state-dict fold, for the case where ONE parameter is
-    several checkpoint tensors (e.g. stacking ``to_q/to_k/to_v`` into a fused
-    ``qkv``). A fold must keep every ``.weight_scale``/``.comfy_quant`` sibling with
-    the weight it belongs to. Caveat: it renames module paths while the LoRA-undo
-    restore map is keyed on the checkpoint's own names, so folding a QUANTIZED
-    checkpoint breaks baked-LoRA undo on the folded layers.
+def load_text_encoder_weights(
+    model: torch.nn.Module,
+    checkpoint: Union[str, Header],
+    *,
+    device: Union[str, torch.device],
+    dtype: Optional[torch.dtype] = None,
+    key_map: Optional[Callable[[str], str]] = None,
+    drop_keys: Optional[tuple[str, ...]] = None,
+) -> torch.nn.Module:
+    """Load a text-encoder checkpoint (single safetensors file).
+
+    The whole ``lm_head.`` subtree is dropped: encoders remove their ``lm_head``
+    module before calling, and no LM head is ever run. ``drop_keys`` drops further key
+    PREFIXES — a multimodal file ships an image tower the text-to-image conditioner
+    does not build, and some store their tokenizer as a U8 payload tensor; dropping
+    keeps the load strict.
+    """
+    return _load_into(
+        model,
+        checkpoint,
+        device=device,
+        dtype=dtype,
+        what="text encoder",
+        key_map=key_map,
+        drop_prefixes=("lm_head", *tuple(drop_keys or ())),
+    )
+
+
+def load_codec(
+    vae_path: str,
+    device: Union[str, torch.device],
+    *,
+    what: str,
+    construct: Callable[[Header], torch.nn.Module],
+    dtype: Optional[torch.dtype] = None,
+    signature: Optional["Signature"] = None,
+    key_map: Optional[Callable[[str], str]] = None,
+    state_map: Optional[Callable[[dict, torch.nn.Module], dict]] = None,
+) -> torch.nn.Module:
+    """Read one codec file: geometry out of the header, weights out of the same file.
+
+    ``construct`` is handed the parsed header, because a codec's widths and depth are
+    what the file says they are — reading them there is what answers a wrong checkpoint
+    here rather than on a shape halfway through the first encode. ``signature`` is the
+    same claim the catalog makes of a DiT: names the file has to carry to be this codec
+    at all.
+
+    ``key_map`` renames the checkpoint's layout onto this repo's module tree (it is
+    applied to the header too, so geometry and weights are read under one set of
+    names); ``state_map`` then rewrites the dict — dropping a half the model does not
+    build, restoring weights the export left out — with the module in hand, since a
+    restore needs the module's own shapes.
+
+    The module keeps its own :attr:`compute_dtype` unless ``dtype`` overrides it.
+    Anything the codec does after the load — FP32 islands, fused attention, freezing —
+    is the caller's, on the returned module.
     """
     device = torch.device(device)
-    header = as_header(checkpoint)
-
-    # Load once and prepare before branching so both paths see the same dict.
-    sd = load_dit_safetensors(header.path, device=device, dtype=None)
-    sd = drop_runtime_state(sd)
-    sd = drop_checkpoint_markers(sd)
-    if drop_keys:
-        sd = {k: v for k, v in sd.items() if not k.startswith(drop_keys)}
+    header = as_header(vae_path)
     if key_map is not None:
-        sd = _map_keys(sd, key_map, header.path)
-    if value_map is not None:
-        sd = {nk: nv for nk, nv in (value_map(k, v) for k, v in sd.items())}
+        header = header.relabel(key_map)
+    if signature is not None:
+        header.require(signature)
+    logger.info("Loading %s from %s", what, header.path)
+
+    model = construct(header)
+    state_dict = strip_wrap_prefixes(load_safetensors(header.path, device=device, dtype=None))
+    if key_map is not None:
+        state_dict = _map_keys(state_dict, key_map, header.path)
     if state_map is not None:
-        sd = state_map(sd)
-
-    if is_quantized_checkpoint(header):
-        # The quantization profile is baked into the weights and scales at export;
-        # the ``comfy_quant`` markers reconstruct the ``QuantizedTensor`` layout.
-        load_quantized_state_dict(model, sd, dtype=dtype)
-        # Raw checkpoint key per quantized layer, and the file to read it back from: a
-        # LoRA undo reads the component's own, since two experts share every key name.
-        model._quantized_restore_map = build_quantized_restore_map(header, key_map)
-        model._quantized_restore_path = header.path
-        logger.info("Loaded quantized checkpoint from %s", header.path)
-    else:
-        if dtype is not None:
-            sd = {k: v.to(dtype=dtype) for k, v in sd.items()}
-        _load_bf16(model, sd, expected_missing, header.path)
-
-    # Includes buffers (e.g. RoPE) not present in the checkpoint.
-    model.to(device)
+        state_dict = state_map(state_dict, model)
+    load_module_state(model, state_dict, header.path, what=what)
+    model.to(device, dtype if dtype is not None else model.compute_dtype)
+    logger.info("Loaded %s from %s", what, header.path)
     return model
 
 
@@ -294,30 +386,6 @@ def build_dit(
     with init_empty_weights():
         model = construct()
     return load_dit(model, header, device=device, dtype=dtype, **load_kwargs)
-
-
-def _load_bf16(
-    model: torch.nn.Module,
-    sd: dict[str, torch.Tensor],
-    expected_missing: tuple[str, ...],
-    path: str,
-) -> None:
-    """Load a plain/BF16 state dict, strict unless ``expected_missing`` is set."""
-    if expected_missing:
-        info = model.load_state_dict(sd, strict=False, assign=True)
-        missing = [
-            k for k in info.missing_keys
-            if not any(buf in k for buf in expected_missing)
-        ]
-        if missing or info.unexpected_keys:
-            raise RuntimeError(
-                f"checkpoint {path!r} did not match the model: "
-                f"missing={missing[:10]}, "
-                f"unexpected={info.unexpected_keys[:10]}"
-            )
-    else:
-        model.load_state_dict(sd, strict=True, assign=True)
-    logger.info("Loaded BF16 checkpoint from %s", path)
 
 
 # --------------------------------------------------------------------------- quantized checkpoint helpers
@@ -590,6 +658,8 @@ def restore_quantized_layer(
 __all__ = [
     "load_dit",
     "build_dit",
+    "load_codec",
+    "load_module_state",
     "load_text_encoder_weights",
     "is_quantized_checkpoint",
     "load_quantized_state_dict",

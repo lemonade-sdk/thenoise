@@ -24,7 +24,8 @@ from .fused import (
     region,
     strip_conv,
 )
-from thenoise.utils.safetensors import load_safetensors
+from thenoise.utils.loader import load_codec
+from thenoise.utils.safetensors import Signature
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -280,6 +281,10 @@ class AutoencoderKLFlux(nn.Module):
         return image.clamp(-1.0, 1.0)
 
 
+#: The AE ships whole; this engine reads only its decoder half.
+FLUX_AE_SIGNATURE = Signature("Flux AE", prefixes=("decoder.",))
+
+
 def load_flux_vae(
     vae_path: str,
     device: Union[str, torch.device],
@@ -290,21 +295,14 @@ def load_flux_vae(
     The AE runs in its own :attr:`AutoencoderKLFlux.compute_dtype`; ``dtype`` is an
     override, not a request for FP32.
     """
-    device = torch.device(device)
-    if dtype is None:
-        dtype = COMPUTE_DTYPE
-    logger.info("Loading Flux VAE from %s", vae_path)
-    state_dict = load_safetensors(vae_path, device=device, dtype=dtype)
-
-    vae = AutoencoderKLFlux()
-    # Strip the ``decoder.`` prefix so keys line up with the model's bare names.
-    decoder_sd = {
-        k[len("decoder."):]: v for k, v in state_dict.items() if k.startswith("decoder.")
-    }
-    if not decoder_sd:
-        raise ValueError(f"No 'decoder.*' keys found in {vae_path} (not a Flux/AutoencoderKL VAE?)")
-    info = vae.load_state_dict(decoder_sd, strict=True, assign=True)
-    logger.info("Loaded Flux VAE decoder: %s", info)
-
-    vae.to(device, dtype)
-    return vae
+    return load_codec(
+        vae_path, device,
+        what="Flux VAE decoder",
+        signature=FLUX_AE_SIGNATURE,
+        construct=lambda header: AutoencoderKLFlux(),
+        # The ``decoder.`` prefix is stripped so keys line up with the model's bare names.
+        state_map=lambda sd, vae: {
+            k[len("decoder."):]: v for k, v in sd.items() if k.startswith("decoder.")
+        },
+        dtype=dtype,
+    )

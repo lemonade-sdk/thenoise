@@ -731,13 +731,15 @@ def test_load_rejects_a_file_that_is_not_the_codec(tmp_path, monkeypatch):
     monkeypatch.setattr(mage_vae, "AutoencoderKLMageFlow", _tiny_vae)
 
     # A key outside the two branches is not this codec, and is not quietly dropped.
-    mixed = {"pipeline.decoder_model.conv_in.weight": torch.zeros(4), "img_in.weight": torch.zeros(4)}
+    mixed = {"student.dconv_encoder.conv_in.weight": torch.zeros(4),
+             "pipeline.decoder_model.conv_in.weight": torch.zeros(4),
+             "img_in.weight": torch.zeros(4)}
     with pytest.raises(ValueError, match="unexpected Mage-VAE key"):
         mage_vae.load_mage_vae(write_safetensors(tmp_path / "mixed.safetensors", mixed), device="cpu")
 
-    # The anchor encoder on its own leaves nothing behind.
+    # The anchor encoder on its own is not a Mage-VAE: it has no encoder of its own.
     anchor = {"pipeline.y_embedder.encoder.conv_in.weight": torch.zeros(4)}
-    with pytest.raises(ValueError, match="not a Mage-VAE"):
+    with pytest.raises(ValueError, match="does not match the Mage-VAE signature"):
         mage_vae.load_mage_vae(write_safetensors(tmp_path / "anchor.safetensors", anchor), device="cpu")
 
     # Half a file is an error, not a zero-filled decoder.

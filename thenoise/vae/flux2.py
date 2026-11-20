@@ -32,7 +32,8 @@ from .fused import (
     strip_down,
 )
 
-from thenoise.utils.safetensors import load_safetensors
+from thenoise.utils.loader import load_codec
+from thenoise.utils.safetensors import Header, Signature
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -461,8 +462,8 @@ class AutoencoderKLFlux2(nn.Module):
 _HALF_WIDTHS = {"encoder": (1, _PIXEL_CHANNELS), "decoder": (_CH_MULT[-1], _Z_CHANNELS)}
 
 
-def _half_width(state_dict: dict, half: str, vae_path: str) -> int:
-    """Base channel width of one half of ``state_dict`` — 96 for a small decoder, 128 otherwise.
+def _half_width(header: Header, half: str, vae_path: str) -> int:
+    """Base channel width of one half of the file — 96 for a small decoder, 128 otherwise.
 
     Each half's ``conv_in`` states it, so no config file is needed and the strict load
     right after checks the rest of the layout. Requiring the input channels — 3 pixels,
@@ -471,18 +472,18 @@ def _half_width(state_dict: dict, half: str, vae_path: str) -> int:
     """
     scale, in_channels = _HALF_WIDTHS[half]
     key = f"{half}.conv_in.weight"
-    weight = state_dict.get(key)
-    if weight is None or weight.dim() != 4 or weight.shape[1] != in_channels:
+    shape = header.shapes.get(key)
+    if shape is None or len(shape) != 4 or shape[1] != in_channels:
         raise ValueError(
             f"'{key}' taking {in_channels} channels on its input is missing from "
             f"{vae_path} (not a Flux.2 VAE?)"
         )
-    if weight.shape[0] % scale:
+    if shape[0] % scale:
         raise ValueError(
-            f"{vae_path}: a {weight.shape[0]}-channel {half} input is not a scaled "
+            f"{vae_path}: a {shape[0]}-channel {half} input is not a scaled "
             f"{list(_CH_MULT)} stage layout (not a Flux.2 {half}?)"
         )
-    return weight.shape[0] // scale
+    return shape[0] // scale
 
 
 #: ``quant_conv`` and ``post_quant_conv``, which diffusers keeps at the top level instead
@@ -548,6 +549,11 @@ def _restore_1x1_convs(state_dict: dict, tree: dict) -> dict:
     return restored
 
 
+#: The three subtrees a Flux.2 AE is made of. The same names tell a Mage-Flow run
+#: which of its two codecs it was pointed at.
+FLUX2_AE_SIGNATURE = Signature("Flux.2 AE", prefixes=("encoder.", "decoder.", "bn."))
+
+
 def load_flux2_vae(
     vae_path: str,
     device: Union[str, torch.device],
@@ -558,34 +564,28 @@ def load_flux2_vae(
     The AE runs in its own :attr:`AutoencoderKLFlux2.compute_dtype`; ``dtype`` is an
     override, not a request for FP32.
     """
-    device = torch.device(device)
-    if dtype is None:
-        dtype = COMPUTE_DTYPE
-    logger.info("Loading Flux.2 VAE from %s", vae_path)
-    state_dict = load_safetensors(vae_path, device=device)
 
-    keep = {}
-    for key, tensor in state_dict.items():
-        key = _musubi_key(key)
-        if key.startswith(("encoder.", "decoder.", "bn.")):
-            keep[key] = tensor
-    if not keep:
-        raise ValueError(f"No 'encoder.*'/'decoder.*'/'bn.*' keys found in {vae_path} (not a Flux.2 VAE?)")
+    def construct(header: Header) -> AutoencoderKLFlux2:
+        encoder_ch = _half_width(header, "encoder", vae_path)
+        decoder_ch = _half_width(header, "decoder", vae_path)
+        logger.info("Flux.2 AE: %s, %d-channel decoder",
+                    _DECODER_VARIANTS.get(decoder_ch, "unknown"), decoder_ch)
+        return AutoencoderKLFlux2(encoder_ch=encoder_ch, decoder_ch=decoder_ch)
 
-    encoder_ch = _half_width(keep, "encoder", vae_path)
-    decoder_ch = _half_width(keep, "decoder", vae_path)
-    vae = AutoencoderKLFlux2(encoder_ch=encoder_ch, decoder_ch=decoder_ch)
-    keep = _restore_1x1_convs(keep, vae.state_dict())
-    info = vae.load_state_dict(keep, strict=True, assign=True)
-    logger.info(
-        "Loaded Flux.2 VAE (%s %d-channel decoder): %s",
-        _DECODER_VARIANTS.get(decoder_ch, "unknown"),
-        decoder_ch,
-        info,
+    def keep_ae(state_dict: dict, vae: AutoencoderKLFlux2) -> dict:
+        keep = {k: v for k, v in state_dict.items()
+                if k.startswith(("encoder.", "decoder.", "bn."))}
+        return _restore_1x1_convs(keep, vae.state_dict())
+
+    return load_codec(
+        vae_path, device,
+        what="Flux.2 VAE",
+        signature=FLUX2_AE_SIGNATURE,
+        construct=construct,
+        key_map=_musubi_key,
+        state_map=keep_ae,
+        dtype=dtype,
     )
-
-    vae.to(device, dtype)
-    return vae
 
 
 __all__ = [

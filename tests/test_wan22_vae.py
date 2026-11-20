@@ -562,7 +562,7 @@ def test_load_wan22_vae_without_temporal_flags(tmp_path):
 
 def test_load_wan22_vae_rejects_a_wrong_file(tmp_path):
     path = write_safetensors(tmp_path / "wrong.safetensors", {"unet.weight": torch.zeros(1)})
-    with pytest.raises(ValueError, match="not a Wan 2\\.2 VAE"):
+    with pytest.raises(ValueError, match="does not match the Wan 2\\.2 VAE signature"):
         load_wan22_vae(path, device="cpu")
 
 

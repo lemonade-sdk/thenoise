@@ -12,7 +12,6 @@ from conftest import int8_tensors, write_safetensors
 from thenoise.utils.safetensors import (
     WRAP_PREFIXES,
     MemoryEfficientSafeOpen,
-    load_dit_safetensors,
     load_safetensors,
     strip_wrap_prefixes,
 )
@@ -104,23 +103,3 @@ def test_load_safetensors(tmp_path):
 
     cast = load_safetensors(path, device="cpu", dtype=torch.bfloat16)
     assert all(t.dtype == torch.bfloat16 for t in cast.values())
-
-
-@pytest.mark.parametrize("prefix", ["", "model.diffusion_model.", "net."])
-def test_load_dit_safetensors_strips_the_wrapper_then_drops_keys(tmp_path, prefix):
-    """Names come back bare, and ``drop_keys`` is matched against the stripped name
-    (so a wrapped ``last.down`` still drops) on a quantized file too.
-    """
-    tensors = int8_tensors(
-        prefix=prefix,
-        extra={
-            f"{prefix}last.down.w": torch.ones(1),
-            f"{prefix}last.other": torch.ones(1),
-        },
-    )
-    path = write_safetensors(tmp_path / "dit.safetensors", tensors)
-
-    kept = load_dit_safetensors(path, device="cpu", drop_keys=("last.down",))
-
-    assert {"q.weight", "plain.weight", "last.other"} <= set(kept)
-    assert not any("last.down" in key for key in kept)

@@ -442,7 +442,7 @@ def test_bf16_umt5_gated_ffn_avoids_fp16_overflow():
 
 def test_text_missing_weights_rejected(tmp_path):
     _, path = small_checkpoint(tmp_path, missing=True)
-    with pytest.raises(RuntimeError, match="Missing key"):
+    with pytest.raises(RuntimeError, match="did not match the model"):
         load_wan_text_encoder(str(path), "cpu", params=CFG)
 
 
@@ -573,7 +573,8 @@ def test_comfy_fp16_checkpoint_loads_at_the_compute_dtype(tmp_path):
     assert result.shape == (1, 3, 5, 16, 16)
 
 
-@pytest.mark.parametrize("damage,raises", [("missing", "Missing key"), ("shape", "size mismatch")])
+@pytest.mark.parametrize("damage,raises",
+                     [("missing", "did not match the model"), ("shape", "size mismatch")])
 def test_comfy_checkpoint_rejects_invalid_weights(tmp_path, damage, raises):
     path, _ = _write_vae(tmp_path, missing=damage == "missing", wrong_shape=damage == "shape")
     with pytest.raises(RuntimeError, match=raises):

@@ -326,22 +326,6 @@ def require_divisible(value: int, divisor: int, what: str, by: str) -> None:
         raise ValueError(f"{what} {value} is not a multiple of {by} {divisor}")
 
 
-def load_dit_safetensors(
-    path: str,
-    device: Union[str, torch.device],
-    dtype: Optional[torch.dtype] = None,
-    drop_keys: Optional[tuple[str, ...]] = None,
-) -> dict[str, torch.Tensor]:
-    """Load a DiT checkpoint state dict, stripping generic repackaging wrapper
-    prefixes so raw and repackaged checkpoints load identically.
-    """
-    sd = load_safetensors(path, device=device, dtype=dtype)
-    sd = strip_wrap_prefixes(sd)
-    if drop_keys:
-        sd = {k: v for k, v in sd.items() if not k.startswith(drop_keys)}
-    return sd
-
-
 def load_safetensors(
     path: str,
     device: Union[str, torch.device],
