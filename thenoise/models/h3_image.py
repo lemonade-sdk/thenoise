@@ -20,11 +20,15 @@ import torch
 from thenoise.dit.h3_image import sampling as h3_sampling
 from thenoise.dit.h3_image.encoder import load_h3_image_text_encoder
 from thenoise.dit.h3_image.layout import PATCH_SIZE, Layout, pad_to_patch
-from thenoise.dit.h3_image.models import H3ImageParams, detect_params, load_h3_image_dit
+from thenoise.dit.h3_image.models import H3ImageParams
+from thenoise.dit.h3_image.utils import (
+    H3_IMAGE_SIGNATURE,
+    detect_params,
+    load_h3_image_dit,
+)
 from thenoise.models.base import (
     VISION_REF_METHOD,
     Conditioning,
-    normalize_keys,
 )
 from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
@@ -79,24 +83,15 @@ class H3ImageModel(PixelModel):
 
     REF_METHODS = ("index_timestep_zero", VISION_REF_METHOD)
 
-    @staticmethod
-    def detect(f) -> bool:
-        """The packed H3 DiT without an audio stream: no ``audio_patch_proj``."""
-        keys = set(normalize_keys(f.keys()))
-        return (
-            "video_patch_proj.weight" in keys
-            and "condition_proj.weight" in keys
-            and "audio_patch_proj.weight" not in keys
-        )
+    SIGNATURE = H3_IMAGE_SIGNATURE
 
     def __init__(self, *, config: ModelConfig):
         super().__init__(config=config)
 
-        self.params: H3ImageParams = detect_params(config.dit_path)
-        logger.info("Loading H3-Image DiT from %s", config.dit_path)
+        self.params: H3ImageParams = detect_params(self.header)
         self.dit = load_h3_image_dit(
-            config.dit_path, self.params,
-            device=self._load_target(config.dit_path), dtype=config.dtype,
+            self.header, self.params,
+            device=self._load_target(self.dit_path), dtype=config.dtype,
         )
 
         logger.info("Loading H3-Image text encoder from %s", config.text_encoder_path)

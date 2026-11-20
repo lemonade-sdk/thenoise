@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 from contextlib import nullcontext
 from dataclasses import dataclass
+from typing import Union
 
 import torch
 from comfy_kitchen.tensor import QuantizedTensor
@@ -16,7 +17,12 @@ from thenoise.utils.dynamo import mark_token_axis
 from thenoise.utils.positions import grid_positions
 from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
-from thenoise.utils.safetensors import MemoryEfficientSafeOpen, unwrap_key
+from thenoise.utils.safetensors import (
+    Header,
+    Signature,
+    as_header,
+    require_divisible,
+)
 from thenoise.utils.timestep import timestep_embedding
 
 #: Wan's released transformers are 128-wide-headed with a 1e-6 norm epsilon. Neither is
@@ -26,6 +32,20 @@ NORM_EPS = 1e-6
 
 #: Latent channels per variant, as they appear in the patch embedding.
 CHANNELS = {"ti2v_5b": 48, "t2v_14b": 16, "i2v_14b": 36}
+
+#: Every released Wan 2.2 transformer, whatever its variant. The patch embedding's shape
+#: is what says which one, so the names only have to rule out everything else.
+SIGNATURE = Signature(
+    "Wan 2.2 transformer",
+    keys=(
+        "patch_embedding.weight",
+        "blocks.0.self_attn.q.weight",
+        "blocks.0.ffn.0.weight",
+        "head.head.weight",
+        "time_embedding.0.weight",
+        "text_embedding.0.weight",
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -53,16 +73,7 @@ class Wan22Params:
         return math.prod(self.patch_size)
 
 
-def _block_count(shapes: dict, prefix: str = "blocks.") -> int:
-    count = 0
-    while any(key.startswith(f"{prefix}{count}.") for key in shapes):
-        count += 1
-    if not count:
-        raise ValueError(f"no '{prefix}0.*' keys in the checkpoint")
-    return count
-
-
-def detect_params(dit_path: str) -> Wan22Params:
+def detect_params(checkpoint: Union[str, Header]) -> Wan22Params:
     """Read the transformer's geometry out of the checkpoint header.
 
     5B and the two 14B experts share one key layout, so the variant is a shape: the
@@ -70,41 +81,37 @@ def detect_params(dit_path: str) -> Wan22Params:
     its width says ``dim``, and the block count says how deep it goes. Reading it here
     rather than from a per-model config is what lets one adapter take any of them.
     """
-    with MemoryEfficientSafeOpen(dit_path) as f:
-        shapes = {unwrap_key(key): tuple(f.header[key]["shape"]) for key in f.keys()}
+    header = as_header(checkpoint)
+    header.require(SIGNATURE)
 
-    patch = shapes.get("patch_embedding.weight")
-    if patch is None or len(patch) != 5:
-        raise ValueError(f"{dit_path}: expected a Wan transformer with a 5D "
-                         "'patch_embedding.weight', found none")
+    patch = header.shape("patch_embedding.weight")
+    if len(patch) != 5:
+        raise ValueError(
+            f"{header.path}: a Wan transformer's 'patch_embedding.weight' is 5D, found "
+            f"{len(patch)}D")
     dim, in_channels, pt, ph, pw = patch
     if in_channels not in CHANNELS.values():
         raise ValueError(
-            f"{dit_path}: patch embedding takes {in_channels} latent channels, which is "
+            f"{header.path}: patch embedding takes {in_channels} latent channels, which is "
             f"no Wan variant (expected one of {sorted(CHANNELS.values())})"
         )
-    required = ("blocks.0.ffn.0.weight", "head.head.weight",
-                "time_embedding.0.weight", "text_embedding.0.weight")
-    if absent := [key for key in required if key not in shapes]:
-        raise ValueError(f"{dit_path}: has a Wan patch embedding but is missing {absent}")
-    ffn_in = shapes["blocks.0.ffn.0.weight"]
+    ffn_in = header.shape("blocks.0.ffn.0.weight")
     if ffn_in[1] != dim:
-        raise ValueError(f"{dit_path}: FFN takes {ffn_in[1]} but the transformer is {dim} wide")
-    head = shapes["head.head.weight"]
+        raise ValueError(
+            f"{header.path}: FFN takes {ffn_in[1]} but the transformer is {dim} wide")
+    head = header.shape("head.head.weight")
     if head[0] % (pt * ph * pw):
-        raise ValueError(f"{dit_path}: head output {head[0]} is not a whole number of "
+        raise ValueError(f"{header.path}: head output {head[0]} is not a whole number of "
                          f"patch cells ({pt}x{ph}x{pw})")
-    if dim % HEAD_DIM:
-        raise ValueError(f"{dit_path}: {dim} wide transformer cannot split into "
-                         f"{HEAD_DIM}-wide heads")
+    require_divisible(dim, HEAD_DIM, "transformer width", "head dim")
     return Wan22Params(
         in_channels=in_channels,
         out_channels=head[0] // (pt * ph * pw),
         dim=dim,
-        num_layers=_block_count(shapes),
+        num_layers=header.block_count("blocks."),
         ffn_dim=ffn_in[0],
-        freq_dim=shapes["time_embedding.0.weight"][1],
-        text_dim=shapes["text_embedding.0.weight"][1],
+        freq_dim=header.shape("time_embedding.0.weight")[1],
+        text_dim=header.shape("text_embedding.0.weight")[1],
         patch_size=(pt, ph, pw),
     )
 

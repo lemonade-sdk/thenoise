@@ -26,7 +26,6 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from accelerate import init_empty_weights
 
 from thenoise.dit.qwen_image.models import (
     AdaLayerNormContinuous,
@@ -36,9 +35,10 @@ from thenoise.dit.qwen_image.models import (
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.dynamo import mark_token_axis
 from thenoise.utils.fp32_linear import Fp32Linear
-from thenoise.utils.loader import load_dit
+from thenoise.utils.loader import build_dit
 from thenoise.utils.rope import RopeCache, matrix_rope
 from thenoise.utils.rms_norm import RMSNorm
+from thenoise.utils.safetensors import Header
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -228,7 +228,7 @@ class MageFlowTransformer2DModel(nn.Module):
 
 
 def load_mage_flow_dit(
-    dit_path: str,
+    checkpoint: Union[str, Header],
     params: MageFlowParams,
     device: Union[str, torch.device],
     dtype: torch.dtype,
@@ -241,16 +241,12 @@ def load_mage_flow_dit(
     A low-rank export loads with ``dtype=None``: it is a full-precision file and a
     bulk cast would round the FP32 modulation factors.
     """
-    with init_empty_weights():
-        model = MageFlowTransformer2DModel(params, compute_dtype=dtype)
-    load_dit(
-        model,
-        dit_path,
+    return build_dit(
+        lambda: MageFlowTransformer2DModel(params, compute_dtype=dtype),
+        checkpoint,
         device=device,
         dtype=None if params.modulation_rank is not None else dtype,
     )
-    logger.info("Loaded Mage-Flow DiT from %s", dit_path)
-    return model
 
 
 __all__ = [

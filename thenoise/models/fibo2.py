@@ -26,12 +26,11 @@ from thenoise.dit.fibo2.encoder import load_fibo2_text_encoder
 from thenoise.dit.fibo2.models import Fibo2Params, gist_count, sequence_positions
 from thenoise.dit.fibo2.sampling import get_sigmas, shift
 from thenoise.dit.fibo2.sizes import trained_size
-from thenoise.dit.fibo2.utils import detect_params, is_fibo2, load_fibo2_dit
+from thenoise.dit.fibo2.utils import FIBO2_SIGNATURE, detect_params, load_fibo2_dit
 from thenoise.models.base import (
     VISION_REF_METHOD,
     Conditioning,
     Step,
-    normalize_keys,
 )
 from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
@@ -73,19 +72,16 @@ class Fibo2Model(PixelModel):
         "w13": ("w1", "w3"),
     }
 
-    @staticmethod
-    def detect(f) -> bool:
-        """The Perceiver's queries, over a single-stream block and a bare head."""
-        return is_fibo2(normalize_keys(f.keys()))
+    #: The Perceiver's queries, over a single-stream block and a bare head.
+    SIGNATURE = FIBO2_SIGNATURE
 
     def __init__(self, *, config: ModelConfig):
         super().__init__(config=config)
 
-        self.params: Fibo2Params = detect_params(config.dit_path)
+        self.params: Fibo2Params = detect_params(self.header)
 
-        logger.info("Loading Fibo 2.0 DiT from %s", config.dit_path)
         self.dit = load_fibo2_dit(
-            config.dit_path, self.params, device=self._load_target(config.dit_path), dtype=config.dtype
+            self.header, self.params, device=self._load_target(self.dit_path), dtype=config.dtype
         )
 
         logger.info("Loading Fibo 2.0 text encoder (Qwen3-VL-4B) from %s", config.text_encoder_path)

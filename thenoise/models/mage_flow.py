@@ -16,7 +16,7 @@ from typing import List, Optional, Tuple
 
 import torch
 
-from thenoise.dit.mage_flow.keys import MAGE_LAYERS, dit_block_count, is_qwen_image_family
+from thenoise.dit.mage_flow.keys import MAGE_FLOW_SIGNATURE, MAGE_LAYERS
 from thenoise.dit.mage_flow.models import (
     MageFlowParams,
     latent_to_tokens,
@@ -32,7 +32,6 @@ from thenoise.models.base import (
     VISION_REF_METHOD,
     Conditioning,
     Step,
-    normalize_keys,
 )
 from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
@@ -40,6 +39,7 @@ from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.image_tensor import ReferenceSizing
 from thenoise.utils.math import round_up
 from thenoise.utils.positions import grid_positions
+from thenoise.utils.safetensors import Header
 from thenoise.vae import load_mage_family_vae
 
 logger = logging.getLogger(__name__)
@@ -67,19 +67,20 @@ class MageFlowModel(PixelModel):
     # Upstream caps a reference's longest side instead of normalising its area.
     REFERENCE_SIZING = ReferenceSizing(fit="long_edge", cap=1024, align=16)
 
-    @staticmethod
-    def detect(f) -> bool:
+    SIGNATURE = MAGE_FLOW_SIGNATURE
+
+    @classmethod
+    def detect(cls, header: Header) -> bool:
         """The Qwen-Image block layout at Mage-Flow's depth (``dit/mage_flow/keys``)."""
-        keys = list(normalize_keys(f.keys()))
-        return is_qwen_image_family(keys) and dit_block_count(keys) == MAGE_LAYERS
+        return (header.identifies(MAGE_FLOW_SIGNATURE)
+                and header.block_count("transformer_blocks.") == MAGE_LAYERS)
 
     def __init__(self, *, config: ModelConfig):
         super().__init__(config=config)
 
-        self.params: MageFlowParams = detect_params(config.dit_path)
-        logger.info("Loading Mage-Flow DiT from %s", config.dit_path)
+        self.params: MageFlowParams = detect_params(self.header)
         self.dit = load_mage_flow_dit(
-            config.dit_path, self.params, device=self._load_target(config.dit_path), dtype=config.dtype
+            self.header, self.params, device=self._load_target(self.dit_path), dtype=config.dtype
         )
 
         logger.info("Loading Mage-Flow text encoder (Qwen3-VL-4B) from %s", config.text_encoder_path)

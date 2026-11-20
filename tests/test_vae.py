@@ -206,7 +206,10 @@ def test_a_flux2_decoder_of_the_wrong_shape_is_refused(tmp_path):
     Qwen-Image VAE has those keys too, and guessing from them would build a nonsense
     Flux.2 half instead of saying the file is not one.
     """
-    encoder = {"encoder.conv_in.weight": torch.zeros(128, 3, 3, 3)}
+    encoder = {"encoder.conv_in.weight": torch.zeros(128, 3, 3, 3),
+               # The third subtree a Flux.2 AE is made of, so the file reaches the
+               # width checks below instead of being refused as not-one at the door.
+               "bn.weight": torch.zeros(1)}
 
     qwen = write_safetensors(
         tmp_path / "qwen_image_vae.safetensors",

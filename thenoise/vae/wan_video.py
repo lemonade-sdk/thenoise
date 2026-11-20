@@ -14,7 +14,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from thenoise.utils.loader import load_dit
-from thenoise.utils.safetensors import MemoryEfficientSafeOpen, unwrap_key
+from thenoise.utils.safetensors import read_header
 from thenoise.utils.wan_weights import wan_vae_key, wan_vae21_key
 from thenoise.vae.wan22 import (
     COMPUTE_DTYPE as WAN22_COMPUTE_DTYPE,
@@ -407,21 +407,42 @@ def _vae_release(z_dim: int) -> tuple[dict, Callable[[str], str]]:
             f"{sorted(_RELEASES)}") from None
 
 
-def detect_latent_width(vae_path: str) -> int:
-    """The latent width a video VAE file was built for, from its header alone.
+#: The pair that states a Wan codec's latent width, per layout a Wan VAE ships in: the
+#: ComfyUI repackaging, and the diffusers release whose names the module tree uses.
+#: The encoder tail emits both DiagonalGaussian moments, so twice the width; the quant
+#: conv beside it states the width once.
+_CODEC_WIDTH_NAMES = (
+    ("encoder.head.2.weight", "conv2.weight"),
+    ("encoder.conv_out.weight", "post_quant_conv.weight"),
+)
 
-    The encoder ends in the moments of the latent, so twice the width. Both the
-    ComfyUI (``head.2``) and diffusers (``conv_out``) spellings are read, with or
-    without the ``vae.`` wrapper, because a release ships both.
+
+def detect_latent_width(vae_path: str) -> int:
+    """The latent width a Wan VAE was written with, from its header alone.
+
+    Which release the file is — and so which key map reads it and which statistics
+    normalize its latent — comes off this number, since the released codecs share
+    these names and differ in layout. Both names must be present and agree: another
+    family's encoder tail halves to a width a Wan release could have.
     """
-    with MemoryEfficientSafeOpen(vae_path) as f:
-        header = {k[len("vae."):] if k.startswith("vae.") else unwrap_key(k): v
-                  for k, v in f.header.items() if k != "__metadata__"}
-        for key in ("encoder.head.2.weight", "encoder.conv_out.weight"):
-            meta = header.get(key)
-            if meta is not None:
-                return meta["shape"][0] // 2
-    raise ValueError(f"{vae_path}: no Wan VAE encoder output conv in the header")
+    header = read_header(vae_path, key_map=lambda key: key.removeprefix("vae."))
+    for tail, quant in _CODEC_WIDTH_NAMES:
+        if tail not in header:
+            continue
+        z_dim = header.shape(tail)[0] // 2
+        if quant not in header:
+            raise ValueError(
+                f"{header.path}: '{tail}' without the quant conv '{quant}' is not a "
+                "Wan VAE")
+        stated = header.shape(quant)[0]
+        if stated != z_dim:
+            raise ValueError(
+                f"{header.path}: '{tail}' says a {z_dim}-channel latent, '{quant}' "
+                f"says {stated}")
+        return z_dim
+    raise ValueError(
+        f"{header.path}: no Wan VAE encoder output conv in the header "
+        f"(one of {_CODEC_WIDTH_NAMES[0][0]!r}/{_CODEC_WIDTH_NAMES[1][0]!r})")
 
 
 class AutoencoderKLWanVideo(nn.Module):

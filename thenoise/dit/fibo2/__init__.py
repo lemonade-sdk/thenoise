@@ -10,15 +10,15 @@ from .models import (
     scale_tokens,
     sequence_positions,
 )
-from .utils import detect_params, fibo2_key_map, is_fibo2, load_fibo2_dit
+from .utils import FIBO2_SIGNATURE, detect_params, fibo2_key_map, load_fibo2_dit
 
 __all__ = [
+    "FIBO2_SIGNATURE",
     "Fibo2Params",
     "Fibo2Transformer2DModel",
     "detect_params",
     "fibo2_key_map",
     "gist_count",
-    "is_fibo2",
     "load_fibo2_dit",
     "scale_tokens",
     "sequence_positions",

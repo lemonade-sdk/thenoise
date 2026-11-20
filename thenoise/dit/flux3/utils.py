@@ -12,28 +12,23 @@ block depths) plus two exports the released checkpoints disagree on:
 from __future__ import annotations
 
 import logging
-from typing import Dict, Mapping, Optional, Tuple
+from typing import Dict, Optional, Union
 
 import torch
-from accelerate import init_empty_weights
 
 from thenoise.dit.flux3.models import Flux3, Flux3Params
-from thenoise.utils.loader import load_dit
-from thenoise.utils.safetensors import MemoryEfficientSafeOpen, unwrap_key
+from thenoise.utils.loader import build_dit
+from thenoise.utils.safetensors import (
+    Header,
+    Signature,
+    as_header,
+    require_divisible,
+)
 
 logger = logging.getLogger(__name__)
 
-#: Tensor names a Flux.3 DiT file must carry, whatever wrapper it was repackaged in.
-_SIGNATURE_KEYS = (
-    "content_mode_blocks.image.0.attn_out.weight",
-    "single_stream_modulations.txt.lin.weight",
-    "emb_in.image.weight",
-    "txt_in.weight",
-    "final_layer.image.linear.weight",
-)
-
-# The QK-norm scale names the head dim; exports disagree on the leaf name, which is
-# exactly what ``_flux3_key_map`` papers over.
+#: The QK-norm scale names the head dim; exports disagree on the leaf name, which is
+#: exactly what ``_flux3_key_map`` papers over.
 _HEAD_DIM_KEY = "content_mode_blocks.image.0.norm.query_norm"
 
 #: The checkpoint's QK-norm parameters are named ``scale``; the shared ``RMSNorm``
@@ -43,6 +38,19 @@ _NORM_SCALE_SUFFIXES = (".norm.key_norm.scale", ".norm.query_norm.scale")
 _SCALE = ".weight_scale"
 _MARKER = ".comfy_quant"
 
+FLUX3_SIGNATURE = Signature(
+    "Flux.3 DiT",
+    keys=(
+        "content_mode_blocks.image.0.attn_out.weight",
+        "single_stream_modulations.txt.lin.weight",
+        "emb_in.image.weight",
+        "txt_in.weight",
+        "final_layer.image.linear.weight",
+    ),
+    #: The two block depths, which is what the block count is taken over.
+    prefixes=("txt_mode_blocks.", "single_blocks."),
+)
+
 
 def _flux3_key_map(key: str) -> str:
     for suffix in _NORM_SCALE_SUFFIXES:
@@ -51,69 +59,43 @@ def _flux3_key_map(key: str) -> str:
     return key
 
 
-def _header(path: str) -> Tuple[Dict[str, Tuple[int, ...]], Dict[str, str]]:
-    """Unwrapped checkpoint key -> (shape, header dtype), reading the header only."""
-    with MemoryEfficientSafeOpen(path) as f:
-        shapes = {unwrap_key(k): tuple(f.header[k]["shape"]) for k in f.keys()}
-        dtypes = {unwrap_key(k): f.header[k]["dtype"] for k in f.keys()}
-    return shapes, dtypes
-
-
-def _block_count(shapes: Mapping[str, Tuple[int, ...]], prefix: str) -> int:
-    """Highest ``<prefix><i>.`` block index the key-set contains, plus one (0 if none)."""
-    indices = []
-    for key in shapes:
-        if not key.startswith(prefix):
-            continue
-        parts = key[len(prefix):].split(".")
-        if parts and parts[0].isdigit():
-            indices.append(int(parts[0]))
-    return max(indices) + 1 if indices else 0
-
-
-def _head_dim(shapes: Mapping[str, Tuple[int, ...]]) -> int:
+def _head_dim(header: Header) -> int:
     """Head dim, read off the QK-norm scale under either leaf name."""
     for leaf in ("scale", "weight"):
-        found = shapes.get(f"{_HEAD_DIM_KEY}.{leaf}")
+        found = header.shapes.get(f"{_HEAD_DIM_KEY}.{leaf}")
         if found is not None:
             return found[0]
-    raise ValueError(f"no {_HEAD_DIM_KEY}.<scale|weight> in the checkpoint header")
+    raise ValueError(f"{header.path}: no {_HEAD_DIM_KEY}.<scale|weight> in the header")
 
 
-def detect_params(dit_path: str) -> Flux3Params:
+def detect_params(checkpoint: Union[str, Header]) -> Flux3Params:
     """Read the Flux.3 architecture knobs out of a checkpoint header."""
-    shapes, _ = _header(dit_path)
-    missing = [k for k in _SIGNATURE_KEYS if k not in shapes]
-    if missing:
-        raise ValueError(f"{dit_path} is not a Flux.3 DiT (missing {missing})")
+    header = as_header(checkpoint)
+    header.require(FLUX3_SIGNATURE)
 
-    hidden = shapes["content_mode_blocks.image.0.attn_out.weight"][0]
-    head_dim = _head_dim(shapes)
-    if hidden % head_dim:
-        raise ValueError(f"hidden_size {hidden} is not a multiple of head dim {head_dim}")
-    if hidden != shapes["emb_in.image.weight"][0]:
+    hidden = header.shape("content_mode_blocks.image.0.attn_out.weight")[0]
+    head_dim = _head_dim(header)
+    require_divisible(hidden, head_dim, "hidden_size", "head dim")
+    emb_in = header.shape("emb_in.image.weight")
+    if hidden != emb_in[0]:
         raise ValueError(
-            f"attn_out width {hidden} does not match emb_in width "
-            f"{shapes['emb_in.image.weight'][0]}"
+            f"{header.path}: attn_out width {hidden} does not match emb_in width {emb_in[0]}"
         )
     if head_dim % 4:
-        raise ValueError(f"Flux.3 splits the head dim into 4 RoPE axes, got {head_dim}")
-
-    depth = _block_count(shapes, "txt_mode_blocks.")
-    depth_single = _block_count(shapes, "single_blocks.")
-    if not depth or not depth_single:
-        raise ValueError(f"{dit_path} has no txt_mode_blocks / single_blocks")
+        raise ValueError(
+            f"{header.path}: Flux.3 splits the head dim into 4 RoPE axes, got {head_dim}"
+        )
 
     params = Flux3Params(
-        in_channels=shapes["emb_in.image.weight"][1],
-        context_in_dim=shapes["txt_in.weight"][1],
+        in_channels=emb_in[1],
+        context_in_dim=header.shape("txt_in.weight")[1],
         hidden_size=hidden,
         num_heads=hidden // head_dim,
-        depth=depth,
-        depth_single_blocks=depth_single,
+        depth=header.block_count("txt_mode_blocks."),
+        depth_single_blocks=header.block_count("single_blocks."),
         axes_dim=[head_dim // 4] * 4,
-        flow_map="ref_time_in.in_layer.weight" in shapes,
-        fused_qkv="single_blocks.0.qkv.weight" in shapes,
+        flow_map="ref_time_in.in_layer.weight" in header,
+        fused_qkv="single_blocks.0.qkv.weight" in header,
     )
     logger.info(
         "Flux.3 DiT: %d early + %d joint blocks, %dx%d, in %d, context %d%s%s",
@@ -180,17 +162,15 @@ def _stack_scales(tensors: list[torch.Tensor]) -> torch.Tensor:
 
 
 def load_flux3_dit(
-    dit_path: str,
+    checkpoint: Union[str, Header],
     params: Flux3Params,
     device: str | torch.device,
     dtype: Optional[torch.dtype],
 ) -> Flux3:
     """Build the DiT on meta from the checkpoint's own geometry, then load its weights."""
-    with init_empty_weights():
-        model = Flux3(params)
-    return load_dit(
-        model,
-        dit_path,
+    return build_dit(
+        lambda: Flux3(params),
+        checkpoint,
         device=device,
         dtype=dtype,
         key_map=_flux3_key_map,
@@ -199,6 +179,7 @@ def load_flux3_dit(
 
 
 __all__ = [
+    "FLUX3_SIGNATURE",
     "detect_params",
     "fuse_qkv_state",
     "load_flux3_dit",

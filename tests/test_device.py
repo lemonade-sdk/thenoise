@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from conftest import StubModel, stub_room
+from conftest import StubModel, header_of, stub_room
 from thenoise.models.config import ModelConfig
 from thenoise.utils import device as device_mod
 from thenoise.utils.device import (
@@ -98,6 +98,8 @@ def _config(tmp_path, *, offload_device="cpu"):
         dit_paths={"": str(tmp_path / "dit.safetensors")},
         vae_path=str(tmp_path / "vae.safetensors"),
         text_encoder_path=str(tmp_path / "te"),
+        # No file behind the path, so the header the adapter reads is stated here.
+        headers={"": header_of(["weight"])},
     )
 
 

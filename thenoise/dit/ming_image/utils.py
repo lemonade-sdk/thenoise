@@ -9,17 +9,17 @@ import logging
 from typing import Optional, Union
 
 import torch
-from accelerate import init_empty_weights
 
 from thenoise.dit.lumina.keys import lumina_key_map, lumina_state_map
 from thenoise.dit.ming_image.models import MING_IMAGE_DIT_CONFIG, MingImageTransformer2DModel
-from thenoise.utils.loader import load_dit
+from thenoise.utils.loader import build_dit
+from thenoise.utils.safetensors import Header
 
 logger = logging.getLogger(__name__)
 
 
 def load_ming_dit(
-    dit_path: str,
+    checkpoint: Union[str, Header],
     device: Union[str, torch.device],
     dtype: torch.dtype,
     config: Optional[dict] = None,
@@ -28,18 +28,13 @@ def load_ming_dit(
 
     A file this loader cannot fill is an error.
     """
-    device = torch.device(device)
     cfg = dict(MING_IMAGE_DIT_CONFIG)
     if config:
         cfg.update(config)
 
-    logger.info("Loading Ming-Image DiT weights from %s", dit_path)
-    with init_empty_weights():
-        dit = MingImageTransformer2DModel(**cfg)
-
-    return load_dit(
-        dit,
-        dit_path,
+    return build_dit(
+        lambda: MingImageTransformer2DModel(**cfg),
+        checkpoint,
         device=device,
         dtype=dtype,
         key_map=lumina_key_map,

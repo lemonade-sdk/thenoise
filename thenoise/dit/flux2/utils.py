@@ -12,12 +12,11 @@ from typing import Optional, Union
 
 import torch
 from einops import rearrange
-from accelerate import init_empty_weights
 
 from thenoise.dit.flux2.models import Flux2, Flux2Params, Klein4BParams, Klein9BParams
-from thenoise.utils.loader import load_dit
+from thenoise.utils.loader import build_dit
 from thenoise.utils.qwen_configs import QWEN3_4B_CONFIG, QWEN3_8B_CONFIG
-from thenoise.utils.safetensors import WRAP_PREFIXES, MemoryEfficientSafeOpen
+from thenoise.utils.safetensors import Header, Signature, as_header
 from thenoise.utils.text_encoder import (
     QWEN25_TOKENIZER_CONFIG_DIR,
     load_qwen3_model,
@@ -39,6 +38,18 @@ _KLEIN_VARIANTS = {3072: Klein4BParams, 4096: Klein9BParams}
 _NORM_SCALE_SUFFIXES = (".norm.key_norm.scale", ".norm.query_norm.scale")
 
 
+#: Its double- and single-stream modulations, which no other model here carries.
+SIGNATURE = Signature(
+    "Flux Klein DiT",
+    keys=("img_in.weight",),
+    prefixes=(
+        "double_stream_modulation_img.",
+        "double_stream_modulation_txt.",
+        "single_stream_modulation.",
+    ),
+)
+
+
 def _flux2_key_map(key: str) -> str:
     for suffix in _NORM_SCALE_SUFFIXES:
         if key.endswith(suffix):
@@ -46,43 +57,30 @@ def _flux2_key_map(key: str) -> str:
     return key
 
 
-def detect_klein_params(dit_path: str) -> Flux2Params:
+def detect_klein_params(checkpoint: Union[str, Header]) -> Flux2Params:
     """Return the Klein variant params (4B / 9B) from the DiT's ``img_in`` width."""
-    with MemoryEfficientSafeOpen(dit_path) as f:
-        for key in f.keys():
-            k = key
-            for prefix in WRAP_PREFIXES:
-                if k.startswith(prefix):
-                    k = k[len(prefix):]
-                    break
-            if k == "img_in.weight":
-                hidden = f.header[key]["shape"][0]
-                cls = _KLEIN_VARIANTS.get(hidden)
-                if cls is None:
-                    raise ValueError(
-                        f"Flux Klein img_in width {hidden} is not a known variant "
-                        "(expected 3072 for 4B or 4096 for 9B)"
-                    )
-                return cls()
-    raise ValueError(
-        f"could not determine Flux Klein variant from {dit_path} (no img_in.weight key)"
-    )
+    header = as_header(checkpoint)
+    header.require(SIGNATURE)
+    hidden = header.shape("img_in.weight")[0]
+    cls = _KLEIN_VARIANTS.get(hidden)
+    if cls is None:
+        raise ValueError(
+            f"{header.path}: Flux Klein img_in width {hidden} is not a known variant "
+            "(expected 3072 for 4B or 4096 for 9B)"
+        )
+    return cls()
 
 
 def load_flux2_dit(
-    dit_path: str,
+    checkpoint: Union[str, Header],
     params: Flux2Params,
     device: Union[str, torch.device],
     dtype: torch.dtype,
 ) -> Flux2:
     """Build the Flux2 DiT on meta and load the checkpoint weights."""
-    device = torch.device(device)
-    logger.info(f"Loading Flux Klein DiT weights from {dit_path}")
-    with init_empty_weights():
-        dit = Flux2(params)
-    return load_dit(
-        dit,
-        dit_path,
+    return build_dit(
+        lambda: Flux2(params),
+        checkpoint,
         device=device,
         dtype=dtype,
         key_map=_flux2_key_map,
@@ -169,6 +167,7 @@ def load_qwen3_embedder(
 
 
 __all__ = [
+    "SIGNATURE",
     "detect_klein_params",
     "load_flux2_dit",
     "load_qwen3_embedder",

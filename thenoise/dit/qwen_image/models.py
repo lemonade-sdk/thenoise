@@ -6,19 +6,20 @@ via ``load_dit`` (BF16 and int8_convrot checkpoints).
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
-from accelerate import init_empty_weights
 
-from thenoise.utils.loader import load_dit
+from thenoise.utils.loader import build_dit
 from thenoise.dit.kvcache import KVBuffers, KVCache, attend, cache_mode
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.dynamo import mark_token_axis
 from thenoise.utils.positions import broadcast_positions, grid_positions
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.rms_norm import RMSNorm
+from thenoise.dit.qwen_image.keys import QWEN_IMAGE_FAMILY_SIGNATURE
+from thenoise.utils.safetensors import Header, as_header
 from thenoise.utils.setup_logging import setup_logging
 from thenoise.utils.timestep import timestep_embedding
 
@@ -425,11 +426,9 @@ class QwenImageTransformer2DModel(nn.Module):
         return self.proj_out(hidden_states)
 
 
-def create_model(
-    dtype: Optional[torch.dtype] = None,
-    num_layers: int = 60,
-) -> QwenImageTransformer2DModel:
-    model = QwenImageTransformer2DModel(
+def create_model(num_layers: int) -> QwenImageTransformer2DModel:
+    """The family's trunk at ``num_layers`` deep — the depth is the file's to say."""
+    return QwenImageTransformer2DModel(
         patch_size=2,
         in_channels=64,
         out_channels=16,
@@ -439,23 +438,24 @@ def create_model(
         joint_attention_dim=3584,
         axes_dims_rope=(16, 56, 56),
     )
-    if dtype is not None:
-        model.to(dtype)
-    return model
 
 
 def load_qwen_image_dit(
-    dit_path: str,
+    checkpoint: Union[str, Header],
     device: str,
     dtype: torch.dtype,
-    num_layers: int = 60,
 ) -> QwenImageTransformer2DModel:
-    """Load the Qwen-Image DiT via the central quant-aware loader."""
-    with init_empty_weights():
-        model = create_model(num_layers=num_layers)
-    load_dit(model, dit_path, device=device, dtype=dtype)
-    logger.info("Loaded Qwen-Image DiT from %s", dit_path)
-    return model
+    """Load the Qwen-Image DiT via the central quant-aware loader.
+
+    Depth is read off the file rather than assumed, because it is also what separates a
+    Qwen-Image checkpoint from the shallower member of its family: building a depth the
+    file does not have would fail the strict load with a pageful of missing keys.
+    """
+    header = as_header(checkpoint)
+    header.require(QWEN_IMAGE_FAMILY_SIGNATURE)
+    num_layers = header.block_count("transformer_blocks.")
+    logger.info("Qwen-Image DiT: %d layers", num_layers)
+    return build_dit(lambda: create_model(num_layers), header, device=device, dtype=dtype)
 
 
 __all__ = ["QwenImageTransformer2DModel", "load_qwen_image_dit", "create_model", "build_video_positions", "build_txt_positions"]

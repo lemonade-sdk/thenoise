@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple
+from typing import TYPE_CHECKING, ClassVar, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -133,4 +133,24 @@ class PixelModel(DiffusionModel):
         return pixels[0]  # [C, H, W] in [-1, 1]
 
 
-__all__ = ["PixelModel"]
+def expect_latent_width(dit_channels: int, codec_channels: int,
+                        *, also: Sequence[int] = ()) -> None:
+    """Refuse a codec whose latent this DiT cannot read: they arrive as two files.
+
+    ``also`` lists the widths that pair as well, for a model that widens its trunk on
+    purpose — Wan 2.2's I2V takes a reference concatenated onto the noise, and a codec
+    and a transformer from two different releases otherwise meet only in an error about
+    tensor shapes, halfway into a run.
+    """
+    if dit_channels in (codec_channels, *also):
+        return
+    pairs = f"{codec_channels} channels"
+    if also:
+        pairs += (", or " + " or ".join(str(width) for width in also)
+                  + " for a reference concatenated onto the noise")
+    raise ValueError(
+        f"the --vae codec writes a {codec_channels}-channel latent, which this DiT "
+        f"cannot read: it denoises a {dit_channels}-channel one. The two pair at {pairs}.")
+
+
+__all__ = ["PixelModel", "expect_latent_width"]

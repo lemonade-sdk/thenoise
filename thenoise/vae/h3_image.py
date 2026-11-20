@@ -23,7 +23,8 @@ import torch.nn.functional as F
 from thenoise.utils.attention import eager_attention
 from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.rope import apply_rope_split_half, split_half_rope_axes
-from thenoise.utils.safetensors import MemoryEfficientSafeOpen, load_safetensors
+from thenoise.utils.loader import load_codec
+from thenoise.utils.safetensors import Header, Signature
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -539,32 +540,32 @@ class AutoencoderKLH3Image(nn.Module):
         return pixels.clamp(-1.0, 1.0)
 
 
-def _geometry(vae_path: str) -> dict:
-    """The widths and the decoder depth ``vae_path`` was written with, out of its header.
+#: The pair no other codec here has: the latent embedding on the decoder side, the
+#: pixel conv on the encoder's. Their widths are the geometry below.
+H3_CODEC_SIGNATURE = Signature("H3-Image codec",
+                               keys=("decoder.x_embedder.weight", "encoder.conv_in.weight"))
 
-    A wrong checkpoint then says so instead of failing on a shape halfway through the
-    load. The encoder's stage *strides* are not in the header, so they stay the release's
-    (:data:`SPACE_DOWN`, :data:`TIME_DOWN`) and the strict load checks the rest.
+
+def _geometry(header: Header) -> dict:
+    """The widths and the decoder depth the header states.
+
+    The encoder's stage *strides* are not in the header, so they stay the release's
+    (:data:`SPACE_DOWN`, :data:`TIME_DOWN`).
     """
-    with MemoryEfficientSafeOpen(vae_path) as f:
-        header = f.header
-        embed = header.get("decoder.x_embedder.weight")
-        conv_in = header.get("encoder.conv_in.weight")
-        if embed is None or embed["shape"][1] != Z_CHANNELS:
-            raise ValueError(
-                f"'decoder.x_embedder.weight' taking {Z_CHANNELS} latent channels is "
-                f"missing from {vae_path} (not a H3-Image VAE?)"
-            )
-        if conv_in is None or conv_in["shape"][1:] != [3, 3, 3, 3]:
-            raise ValueError(
-                f"'encoder.conv_in.weight' taking 3 pixel channels is missing from "
-                f"{vae_path} (not a H3-Image VAE?)"
-            )
-        depth = 1 + max(
-            int(key.split(".")[2]) for key in header
-            if key.startswith("decoder.transformer_blocks.")
+    embed = header.shapes.get("decoder.x_embedder.weight")
+    conv_in = header.shapes.get("encoder.conv_in.weight")
+    if embed is None or embed[1] != Z_CHANNELS:
+        raise ValueError(
+            f"{header.path}: 'decoder.x_embedder.weight' taking {Z_CHANNELS} latent "
+            "channels is missing (not a H3-Image VAE?)"
         )
-        return {"ch": conv_in["shape"][0], "dim": embed["shape"][0], "num_layers": depth}
+    if conv_in is None or conv_in[1:] != (3, 3, 3, 3):
+        raise ValueError(
+            f"{header.path}: 'encoder.conv_in.weight' taking 3 pixel channels is "
+            "missing (not a H3-Image VAE?)"
+        )
+    return {"ch": conv_in[0], "dim": embed[0],
+            "num_layers": header.block_count("decoder.transformer_blocks.")}
 
 
 def load_h3_image_vae(
@@ -577,22 +578,18 @@ def load_h3_image_vae(
     The codec runs in its own :attr:`AutoencoderKLH3Image.compute_dtype`;
     ``dtype`` is an override, not a request for FP32.
     """
-    device = torch.device(device)
-    if dtype is None:
-        dtype = COMPUTE_DTYPE
-    logger.info("Loading H3-Image VAE from %s", vae_path)
 
-    geometry = _geometry(vae_path)
-    state_dict = load_safetensors(vae_path, device=device)
-    vae = AutoencoderKLH3Image(**geometry)
-    info = vae.load_state_dict(state_dict, strict=True, assign=True)
-    logger.info(
-        "Loaded H3-Image VAE (encoder %d, %d-wide %d-layer decoder): %s",
-        geometry["ch"], geometry["dim"], geometry["num_layers"], info,
-    )
+    def construct(header: Header) -> AutoencoderKLH3Image:
+        geometry = _geometry(header)
+        logger.info("H3-Image VAE: encoder %d channels, %d-wide %d-layer decoder",
+                    geometry["ch"], geometry["dim"], geometry["num_layers"])
+        return AutoencoderKLH3Image(**geometry)
 
-    vae.to(device, dtype)
-    return vae
+    return load_codec(vae_path, device,
+                      what="H3-Image VAE",
+                      signature=H3_CODEC_SIGNATURE,
+                      construct=construct,
+                      dtype=dtype)
 
 
 __all__ = [

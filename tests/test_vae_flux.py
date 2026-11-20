@@ -107,5 +107,5 @@ def test_the_flux_ae_picks_its_own_compute_dtype(tmp_path, monkeypatch):
 def test_load_flux_vae_rejects_a_file_without_decoder_keys(tmp_path, monkeypatch):
     path = write_safetensors(tmp_path / "wrong.safetensors", {"unet.weight": torch.zeros(1)})
     monkeypatch.setattr("thenoise.vae.flux.AutoencoderKLFlux", _tiny_vae)
-    with pytest.raises(ValueError, match="No 'decoder\\.\\*' keys found"):
+    with pytest.raises(ValueError, match="does not match the Flux AE signature"):
         load_flux_vae(path, device="cpu")

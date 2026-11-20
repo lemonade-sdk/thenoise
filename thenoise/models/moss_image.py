@@ -19,12 +19,11 @@ import torch
 from thenoise.dit.moss_image.encoder import load_moss_image_text_encoder
 from thenoise.dit.moss_image.models import MossImageParams, joint_positions
 from thenoise.dit.moss_image.sampling import get_schedule
-from thenoise.dit.moss_image.utils import detect_params, load_moss_image_dit
+from thenoise.dit.moss_image.utils import MOSS_SIGNATURE, detect_params, load_moss_image_dit
 from thenoise.models.base import (
     VISION_REF_METHOD,
     Conditioning,
     Step,
-    normalize_keys,
 )
 from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
@@ -66,29 +65,21 @@ class MossImageModel(PixelModel):
     UNCOND_SKIP_BLOCKS = frozenset({22})
 
     #: Shared modulation plus fused up/gate FFN: together, on their own here.
-    _FINGERPRINT = ("shared_block_modulation.", "layers.0.proj.ffn_up_gate.")
+    SIGNATURE = MOSS_SIGNATURE
 
     #: Per CFG branch: the joint ``[image, text]`` table, then the text-only one the
     #: front-end reads. Branches cannot share one because the image sits after the
     #: text on the rope ``f`` axis.
     _BRANCH_TABLES = {"cond": ("joint", "txt"), "uncond": ("joint_uncond", "txt_uncond")}
 
-    @staticmethod
-    def detect(f) -> bool:
-        """True if this handle is a MOSS-Image DiT."""
-        keys = list(normalize_keys(f.keys()))
-        return all(
-            any(key.startswith(prefix) for key in keys) for prefix in MossImageModel._FINGERPRINT
-        )
 
     def __init__(self, *, config: ModelConfig):
         super().__init__(config=config)
 
-        self.params: MossImageParams = detect_params(config.dit_path)
+        self.params: MossImageParams = detect_params(self.header)
 
-        logger.info("Loading MOSS-Image DiT from %s", config.dit_path)
         self.dit = load_moss_image_dit(
-            config.dit_path, self.params, device=self._load_target(config.dit_path), dtype=config.dtype
+            self.header, self.params, device=self._load_target(self.dit_path), dtype=config.dtype
         )
 
         logger.info(

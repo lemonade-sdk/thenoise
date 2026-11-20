@@ -6,7 +6,7 @@ import threading
 import pytest
 
 import thenoise.models as model_catalog
-from conftest import StubVideo
+from conftest import StubVideo, resolves_to
 from thenoise.errors import ModelReloadNeeded
 from thenoise.inference import inference_lock
 from thenoise.runtime import ModelPaths, NotLoadedError, Runtime, Settings
@@ -20,7 +20,7 @@ def catalog(monkeypatch, fake_model_cls):
         constructed: list = []
         cls = fake_model_cls(constructed=constructed, **attrs)
         monkeypatch.setattr(model_catalog, "MODEL_CATALOG", [cls])
-        monkeypatch.setattr(model_catalog, "resolve", lambda path: cls)
+        monkeypatch.setattr(model_catalog, "resolve", resolves_to(cls))
         return constructed
 
     return install
@@ -70,7 +70,7 @@ def test_video_weights_are_ready_when_runtime_load_returns(catalog, monkeypatch)
             events.append("loaded")
 
     catalog()
-    monkeypatch.setattr(model_catalog, "resolve", lambda _path: FakeVideo)
+    monkeypatch.setattr(model_catalog, "resolve", resolves_to(FakeVideo))
     rt = Runtime(Settings(device="cpu", offload_device="cpu"))
     rt.load(ModelPaths("dit", "vae", "te"))
     assert events == ["loaded"]
@@ -82,7 +82,7 @@ def test_video_weights_are_ready_when_runtime_load_returns(catalog, monkeypatch)
         def __init__(self, *, config):
             raise RuntimeError("corrupt video checkpoint")
 
-    monkeypatch.setattr(model_catalog, "resolve", lambda _path: FailingVideo)
+    monkeypatch.setattr(model_catalog, "resolve", resolves_to(FailingVideo))
     with pytest.raises(RuntimeError, match="corrupt video checkpoint"):
         rt.load(ModelPaths("dit", "vae", "te"))
     assert rt.available() == []  # never publish an incompletely loaded adapter
@@ -128,7 +128,7 @@ def test_a_video_model_reports_inside_its_own_group(monkeypatch, catalog):
             return True
 
     catalog()
-    monkeypatch.setattr(model_catalog, "resolve", lambda _path: FakeVideo)
+    monkeypatch.setattr(model_catalog, "resolve", resolves_to(FakeVideo))
     runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
     runtime.load(ModelPaths("dit", "vae", "te"))
     caps = runtime.model_capabilities()
@@ -160,7 +160,7 @@ def _counting_model(events: list):
 
 def _install(monkeypatch, cls) -> Runtime:
     monkeypatch.setattr(model_catalog, "MODEL_CATALOG", [cls])
-    monkeypatch.setattr(model_catalog, "resolve", lambda path: cls)
+    monkeypatch.setattr(model_catalog, "resolve", resolves_to(cls))
     runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
     runtime.load(ModelPaths("dit", "vae", "te"))
     return runtime

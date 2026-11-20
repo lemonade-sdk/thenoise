@@ -18,13 +18,13 @@ from thenoise.text_encoders.ming_image import encode_ming_prompt, load_ming_text
 from thenoise.models.base import (
     Conditioning,
     Step,
-    normalize_keys,
 )
 from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, VAEPixelUpscaler
 from thenoise.utils.lora import FUSE_QKV
 from thenoise.utils.math import round_up
+from thenoise.utils.safetensors import Header
 from thenoise.vae import load_ming_vae
 
 logger = logging.getLogger(__name__)
@@ -63,19 +63,17 @@ class MingImageModel(PixelModel):
         this tree's ``out``/``q_norm``)."""
         return lumina_key_map(key)
 
-    @staticmethod
-    def detect(f) -> bool:
+    @classmethod
+    def detect(cls, header: Header) -> bool:
         """S3-DiT signature; Ming-Image zero-fills and masks its padding, so it ships
         no learned pad tokens."""
-        keys = list(normalize_keys(f.keys()))
-        return is_s3dit(keys) and not has_learned_pad_tokens(keys)
+        return is_s3dit(header.names) and not has_learned_pad_tokens(header.names)
 
     def __init__(self, *, config: ModelConfig):
         super().__init__(config=config)
 
-        logger.info("Loading Ming-Image DiT from %s", config.dit_path)
-        self.dit = load_ming_dit(config.dit_path,
-                                 device=self._load_target(config.dit_path),
+        self.dit = load_ming_dit(self.header,
+                                 device=self._load_target(self.dit_path),
                                  dtype=config.dtype)
 
         # The BailingMM2 conditioner; its tokenizer travels inside the file.

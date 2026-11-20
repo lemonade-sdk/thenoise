@@ -22,6 +22,7 @@ import torch
 from .base import LatentUpscaler
 from .transcode_net import LatentTranscodeNet
 from thenoise.inference import freeze
+from thenoise.utils.loader import load_module_state
 from thenoise.utils.safetensors import load_safetensors, upscale_weight_path
 
 logger = logging.getLogger(__name__)
@@ -33,13 +34,13 @@ WEIGHTS = "upscaler_qwen21_transcode_2x.safetensors"
 def _load_net(
     device: Union[str, torch.device], dtype: torch.dtype
 ) -> LatentTranscodeNet:
-    """Load the transcode bridge from its committed weights (strictly)."""
+    """Load the transcode bridge from its committed weights."""
     path = upscale_weight_path(WEIGHTS)
     logger.info("Loading Qwen-Image 2.1 latent transcoder from %s", path)
     state_dict = load_safetensors(path, device=device)
 
     net = LatentTranscodeNet()
-    net.load_state_dict(state_dict, strict=True)
+    load_module_state(net, state_dict, path, what="Qwen-Image 2.1 transcoder")
     net.to(device=device, dtype=dtype)
     freeze(net)
 

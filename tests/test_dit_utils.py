@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from conftest import write_key_checkpoint, write_safetensors
-from thenoise.dit.anima.utils import _count_anima_blocks
+from thenoise.dit.anima.utils import load_anima_model
 from thenoise.utils.text_encoder import (
     QWEN_VL_DROP_IDX,
     compute_drop_idx,
@@ -126,24 +126,12 @@ def test_a_reference_is_encoded_into_both_branches():
 # ------------------------------------------------------------------ anima utils
 
 
-def test_count_anima_blocks_reads_the_header(tmp_path):
-    keys = [f"blocks.{i}.mlp.weight" for i in range(28)] + ["x_embedder.weight"]
-    path = write_safetensors(tmp_path / "anima.safetensors", {k: torch.zeros(1) for k in keys})
-    assert _count_anima_blocks(path) == 28
-
-
-@pytest.mark.parametrize("prefix", ["", "net.", "model.diffusion_model."])
-def test_count_anima_blocks_ignores_the_wrapper_prefix(tmp_path, prefix):
-    """Raw and repackaged checkpoints must count identically."""
-    keys = [f"{prefix}blocks.{i}.mlp.weight" for i in range(3)]
-    path = write_safetensors(tmp_path / "anima.safetensors", {k: torch.zeros(1) for k in keys})
-    assert _count_anima_blocks(path) == 3
-
-
-def test_count_anima_blocks_requires_block_keys(tmp_path):
+def test_anima_refuses_a_file_it_was_not_trained_for(tmp_path):
+    """The loader honours the same signature the catalog claims on, so a foreign file is
+    refused by name rather than as a DiT with no depth."""
     path = write_safetensors(tmp_path / "other.safetensors", {"attn.weight": torch.zeros(1)})
-    with pytest.raises(ValueError, match=r"could not find any 'blocks\.\*' keys"):
-        _count_anima_blocks(path)
+    with pytest.raises(ValueError, match="does not match the Anima DiT signature"):
+        load_anima_model("cpu", path)
 
 
 # ------------------------------------------------------------------ timestep embedding

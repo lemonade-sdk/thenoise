@@ -2,7 +2,7 @@
 
 One family, three homes: ``wan22.py`` (2D, the 2.2 releases), ``qwen_image.py`` (2D,
 the 2.1 family, which is the same architecture at one frame) and ``wan_video.py`` (3D,
-both). Only math that is *identical* in all three belongs here.
+both). Only math and state-dict folds that are *identical* in all three belong here.
 
 What stays per codec, on purpose:
 
@@ -81,3 +81,20 @@ class RmsNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return F.normalize(x, dim=1).mul_(self.scale * self.gamma)
+
+
+def collapse_temporal(state_dict: dict) -> dict:
+    """The video layout read as one frame: the fold both 2D codecs need.
+
+    The causal ``time_conv`` layers run only on a reference frame an image codec never
+    has; a 5D conv's single frame lives in its LAST time slice, because that is where
+    the causal padding puts it; and a norm that spans channels only stores a 4D
+    ``gamma``, which the 2D norm reads as ``(C, 1, 1)``.
+    """
+    folded = {k: v for k, v in state_dict.items() if ".time_conv." not in k}
+    for key, value in folded.items():
+        if value.dim() == 5:
+            folded[key] = value[:, :, -1]
+        elif key.endswith(".gamma") and value.dim() == 4:
+            folded[key] = value.reshape(value.shape[0], 1, 1)
+    return folded

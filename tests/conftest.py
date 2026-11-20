@@ -1,7 +1,7 @@
 """Shared fixtures and helpers for the test-suite.
 
 Everything here is weight-free, GPU-free and working-directory independent.
-Import the plain helpers directly (``from conftest import FakeHandle``); use the
+Import the plain helpers directly (``from conftest import header_of``); use the
 ``@pytest.fixture`` ones as usual.
 """
 from __future__ import annotations
@@ -29,6 +29,7 @@ os.environ["TORCHDYNAMO_DISABLE"] = "1"
 import pytest  # noqa: E402
 
 from thenoise.dit.quantized import QuantizedLinear  # noqa: E402
+from thenoise.utils.safetensors import Header  # noqa: E402
 from thenoise.models import (  # noqa: E402
     MODEL_CATALOG,
     AnimaModel,
@@ -59,21 +60,27 @@ from thenoise.vae import AutoencoderKLFlux2  # noqa: E402
 # --------------------------------------------------------------- safetensors helpers
 
 
-class FakeHandle:
-    """Mimics ``safetensors.safe_open``'s ``keys()`` for detection tests."""
+def header_of(names, path: str = "synthetic.safetensors",
+              model_cls: type | None = None) -> Header:
+    """A header over bare tensor names, for detection tests that have no file.
 
-    def __init__(self, keys):
-        self._keys = list(keys)
+    A ``Signature`` matches names only, so no shape is needed; the wrapper prefixes are
+    stripped here exactly as ``read_header`` strips them, so a repackaged key-set
+    answers like the file it stands for.
+    """
+    from thenoise.utils.safetensors import unwrap_key
 
-    def keys(self):
-        return self._keys
+    header = Header(path, {unwrap_key(name): () for name in names},
+                    {unwrap_key(name): "F32" for name in names}, {}, {})
+    header.model_cls = model_cls
+    return header
 
 
-def write_safetensors(path, tensors: dict) -> str:
-    """Write ``tensors`` as a safetensors file; return the path as ``str``."""
+def write_safetensors(path, tensors: dict, metadata: dict | None = None) -> str:
+    """Write ``tensors`` (and any ``__metadata__`` section) as a safetensors file."""
     from safetensors.torch import save_file
 
-    save_file(tensors, str(path))
+    save_file(tensors, str(path), metadata=metadata)
     return str(path)
 
 
@@ -171,11 +178,12 @@ def write_wan_dit(path, *, channels: int = 48) -> str:
 def write_wan_vae(path, *, channels: int = 48) -> str:
     """Write a file whose header claims a Wan codec of that latent width.
 
-    The encoder output conv is the only entry in it, because that is all
-    `detect_latent_width` reads; the codec itself is stubbed by whoever points here.
+    The encoder output conv and the quant conv are the only entries, because those are
+    all `detect_latent_width` reads; the codec itself is stubbed by whoever points here.
     """
     return write_safetensors(path, {
         "encoder.head.2.weight": torch.zeros(2 * channels, 1, 1, 1, 1),
+        "conv2.weight": torch.zeros(channels, channels, 1, 1, 1),
     })
 
 
@@ -614,6 +622,8 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "model.diffusion_model.single_stream_modulations.txt.lin.weight",
             "model.diffusion_model.emb_in.image.weight",
             "model.diffusion_model.final_layer.image.linear.weight",
+            "model.diffusion_model.txt_in.weight",
+            "model.diffusion_model.txt_mode_blocks.0.mlp_in.weight",
         ],
     ),
     # MOSS-Image runs one joint stream, so its shared block modulation and its fused
@@ -629,6 +639,7 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "layers.0.proj.qkv.weight",
             "layers.0.proj.ffn_up_gate.weight",
             "layers.41.proj.ffn_down.weight",
+            "layers.0.q_norm.weight",
             "final_norm_video.weight",
             "final_linear_video.weight",
             "video_head_modulation.weight",
@@ -642,6 +653,10 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "model.diffusion_model.layers.0.proj.ffn_up_gate.weight",
             "model.diffusion_model.layers.41.proj.qkv.weight",
             "model.diffusion_model.final_linear_video.weight",
+            "model.diffusion_model.text_embedder.proj.weight",
+            "model.diffusion_model.video_head_modulation.weight",
+            "model.diffusion_model.layers.0.q_norm.weight",
+            "model.diffusion_model.time_embedding.0.weight",
         ],
     ),
     "qwen_image": (
@@ -673,7 +688,7 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
         ],
     ),
     # Mage-Flow IS the Qwen-Image block, at 12 layers instead of 60: the depth in the
-    # key-set is the only thing that separates the two (see dit/mage_flow/keys.py).
+    # key-set is the only thing that separates the two (see dit/qwen_image/keys.py).
     "mage_flow": (
         MageFlowModel,
         [
@@ -684,6 +699,7 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "transformer_blocks.0.attn.add_q_proj.weight",
             "transformer_blocks.0.img_mlp.net.2.weight",
             "transformer_blocks.11.attn.to_q.weight",
+            "transformer_blocks.0.attn.norm_q.weight",
             "norm_out.linear.weight",
             "proj_out.weight",
         ],
@@ -698,6 +714,7 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "model.diffusion_model.transformer_blocks.0.attn.add_q_proj.weight",
             "model.diffusion_model.transformer_blocks.0.img_mlp.net.2.weight",
             "model.diffusion_model.transformer_blocks.11.attn.to_q.weight",
+            "model.diffusion_model.transformer_blocks.0.attn.norm_q.weight",
             "model.diffusion_model.norm_out.linear.weight",
             "model.diffusion_model.proj_out.weight",
         ],
@@ -758,6 +775,7 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "model.diffusion_model.perceiver.layers.0.cross_attention.norm_q.weight",
             "model.diffusion_model.t_embedder.mlp.0.weight",
             "model.diffusion_model.final_layer.linear.weight",
+            "model.diffusion_model.perceiver.layers.0.cross_attention.to_kv.weight",
         ],
     ),
     # The un-fused SwiGLU spelling is the same model: an export that stores w1/w3
@@ -770,6 +788,7 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "layers.0.adaLN_modulation.0.weight",
             "layers.0.feed_forward.w1.weight",
             "layers.0.feed_forward.w3.weight",
+            "perceiver.layers.0.cross_attention.to_kv.weight",
             "t_embedder.mlp.0.weight",
             "final_layer.linear.weight",
         ],
@@ -784,6 +803,9 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "blocks.0.attn.qkv_proj.weight",
             "final_layer.video_out.weight",
             "adaln_t_table",
+            "rope.inv_freq",
+            "blocks.0.attn.q_norm.weight",
+            "blocks.0.mlp.fc2.weight",
         ],
     ),
     "h3_image_wrapped": (
@@ -792,6 +814,11 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "model.diffusion_model.video_patch_proj.weight",
             "model.diffusion_model.condition_proj.weight",
             "model.diffusion_model.blocks.0.attn.qkv_proj.weight",
+            "model.diffusion_model.final_layer.video_out.weight",
+            "model.diffusion_model.adaln_t_table",
+            "model.diffusion_model.rope.inv_freq",
+            "model.diffusion_model.blocks.0.attn.q_norm.weight",
+            "model.diffusion_model.blocks.0.mlp.fc2.weight",
         ],
     ),
     "h3_video": (
@@ -809,6 +836,9 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "patch_embedding.weight",
             "blocks.0.self_attn.q.weight",
             "text_embedding.0.weight",
+            "blocks.0.ffn.0.weight",
+            "head.head.weight",
+            "time_embedding.0.weight",
         ],
     ),
     "unknown": (None, ["some.random.key", "blocks.0.attn.gate.weight"]),
@@ -947,6 +977,8 @@ class StubModel(PixelModel):
             or ModelConfig(
                 dit_paths={"": "dit"}, vae_path="vae", text_encoder_path="te",
                 offload_device="cpu", device="cpu", dtype=torch.float32, lora_dir=lora_dir,
+                # No file behind the path: the header the adapter reads is stated here.
+                headers={"": header_of(["weight"])},
             )
         )
         if capabilities is not None:
@@ -959,10 +991,6 @@ class StubModel(PixelModel):
         self.prepared: list[dict] = []
         self.lora_switches: list[Optional[list]] = []
         self.encode_prompt_args = None
-
-    @staticmethod
-    def detect(f) -> bool:
-        return False
 
     # ---------------------------------------------------------------- kernels
     def encode_prompt(self, args) -> Conditioning:
@@ -1054,10 +1082,6 @@ def stub_model_cls():
     class _Stub(DiffusionModel):
         name = "test"
 
-        @staticmethod
-        def detect(f):
-            return False
-
         def encode_prompt(self, args):
             pass
 
@@ -1107,6 +1131,15 @@ def tiny_qwen_config():
     return config
 
 
+def resolves_to(cls):
+    """A stand-in for ``models.resolve``: a header saying ``cls`` claimed the file.
+
+    Tests that install a fake catalog answer the lookup itself, since the real one
+    would need the file to exist.
+    """
+    return lambda path: header_of(["weight"], path=path, model_cls=cls)
+
+
 @pytest.fixture
 def fake_model_cls():
     """Factory for stand-in entries of ``thenoise.models.MODEL_CATALOG``.
@@ -1125,7 +1158,7 @@ def fake_model_cls():
             "MEDIUM": "image",
             "REQUIRED_COMPONENTS": ("vae", "text_encoder"),
             "__init__": __init__,
-            "detect": staticmethod(lambda f: False),
+            "detect": classmethod(lambda cls, header: False),
             # A catalog entry answers for its own DiT files and releases its own state;
             # these stand-ins have no opinions, and the adapter tests cover the real hooks.
             "validate_paths": classmethod(lambda cls, dit_paths: None),

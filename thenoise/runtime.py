@@ -78,24 +78,27 @@ class Runtime:
         from .models import resolve
         from .models.config import ModelConfig
         from .mediums import controller_for
-
-        cls = resolve(paths.dit_path)
+        # The catalog parse is the header the adapter and the loader go on to use, so a
+        # checkpoint is opened once however many parts of a load want its geometry.
+        header = resolve(paths.dit_path)
+        cls = header.model_cls
         name = cls.name
         # Model declares its components.
         missing = [component.replace("_", "-") for component in cls.REQUIRED_COMPONENTS
                    if not getattr(paths, f"{component}_path", "")]
         if missing:
             raise ValueError(f"{name} needs --{' and --'.join(missing)}")
-        cls.validate_paths(paths.dit_paths)
 
         config = ModelConfig(
             dit_paths=paths.dit_paths,
+            headers={"": header},
             vae_path=paths.vae_path,
             text_encoder_path=paths.text_encoder_path,
             device=self._settings.device,
             offload_device=self._settings.offload_device,
             lora_dir=paths.lora_dir or None,
         )
+        cls.validate_paths(config.all_headers())
 
         self._unload()  # swap: only one model resident at a time
         logger.info("Loading model '%s'", name)

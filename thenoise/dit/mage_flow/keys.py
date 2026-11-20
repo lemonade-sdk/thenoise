@@ -1,47 +1,31 @@
-"""Checkpoint-name helpers for the Qwen-Image family: the block layout its members
-share, and the depth that separates them.
+"""Checkpoint names for Mage-Flow: the 12-layer member of the Qwen-Image family.
 
-Detection only ever sees names, so each detector is a predicate on the family plus
-its own depth window. ``keys`` arguments are expected wrapper-prefix free.
+The layout it shares with the family is stated once in
+``thenoise.dit.qwen_image.keys``; the depth is what separates the members, so this file
+adds it to the shared layout rather than repeating the names.
 """
 from __future__ import annotations
 
-from typing import Iterable
+from thenoise.dit.qwen_image.keys import FAMILY_PREFIXES, QWEN_IMAGE_FAMILY_SIGNATURE
+from thenoise.utils.safetensors import Signature
 
 #: Layer count of the released Mage-Flow DiTs.
 MAGE_LAYERS = 12
 
-#: Module prefixes every member of the family carries. ``add_q_proj`` is what rules out
-#: the single-stream members that share the top-level projections.
-_FAMILY_PREFIXES: tuple[str, ...] = (
-    "img_in.",
-    "txt_in.",
-    "time_text_embed.",
-    "transformer_blocks.0.attn.add_q_proj.",
-    "transformer_blocks.0.img_mlp.net.2.",
-    "norm_out.linear.",
-    "proj_out.",
+#: The 12-layer member. The keys are the ones its geometry is read from, so the loader
+#: cannot be handed a file the catalog claimed and it cannot build.
+MAGE_FLOW_SIGNATURE = Signature(
+    "Mage-Flow DiT",
+    keys=(
+        "img_in.weight",
+        "txt_in.weight",
+        "txt_norm.weight",
+        "time_text_embed.timestep_embedder.linear_1.weight",
+        "transformer_blocks.0.attn.norm_q.weight",
+        "norm_out.linear.weight",
+        "proj_out.weight",
+    ),
+    prefixes=FAMILY_PREFIXES,
 )
 
-
-def is_qwen_image_family(keys: Iterable[str]) -> bool:
-    """True for any DiT with the shared block layout; depth says which member."""
-    names = list(keys)
-    return all(
-        any(key.startswith(prefix) for key in names) for prefix in _FAMILY_PREFIXES
-    )
-
-
-def dit_block_count(keys: Iterable[str]) -> int:
-    """Number of ``transformer_blocks.<i>.`` blocks a key-set contains (0 if none)."""
-    indices = []
-    for key in keys:
-        if not key.startswith("transformer_blocks."):
-            continue
-        parts = key.split(".")
-        if len(parts) > 1 and parts[1].isdigit():
-            indices.append(int(parts[1]))
-    return max(indices) + 1 if indices else 0
-
-
-__all__ = ["MAGE_LAYERS", "dit_block_count", "is_qwen_image_family"]
+__all__ = ["MAGE_FLOW_SIGNATURE", "MAGE_LAYERS", "QWEN_IMAGE_FAMILY_SIGNATURE"]  # re-exported: the family layout is imported from here by both members

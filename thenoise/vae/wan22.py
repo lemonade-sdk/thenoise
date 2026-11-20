@@ -25,9 +25,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from thenoise.utils.attention import single_head_attention
-from thenoise.utils.safetensors import load_safetensors
+from thenoise.utils.loader import load_codec
+from thenoise.utils.safetensors import Header, Signature
 from .fused import image_elems, strip_apply
-from .wan_common import RmsNorm, downsample2d, patchify, unpatchify, upsample2d
+from .wan_common import (RmsNorm, collapse_temporal, downsample2d, patchify,
+                        unpatchify, upsample2d)
 from .qwen_image import QWEN_IMAGE_LATENTS_MEAN, QWEN_IMAGE_LATENTS_STD
 
 from thenoise.utils.setup_logging import setup_logging
@@ -555,24 +557,24 @@ class AutoencoderKLWan22(nn.Module):
 # --------------------------------------------------------------------------- the loader
 
 
-def _infer_arch(state_dict: dict, vae_path: str) -> dict:
+def _infer_arch(header: Header, vae_path: str) -> dict:
     """Recover the architecture knobs a Wan 2.2 family checkpoint was built with.
 
-    Only the names and shapes are read: stage widths from the residual blocks, the
-    number of residual blocks by counting them, the pixel patch from the 16x
-    compression the family always delivers, and the per-stage temporal flags from
-    the video-only ``time_conv`` layers.
+    Names and shapes only: stage widths from the residual blocks, the number of
+    residual blocks by counting them, the pixel patch from the 16x compression the
+    family always delivers, and the per-stage temporal flags from the video-only
+    ``time_conv`` layers.
     """
-    enc_conv = state_dict["encoder.conv1.weight"]
-    if enc_conv.dim() != 5:
-        raise ValueError(f"{vae_path}: expected the 5D video layout, got {tuple(enc_conv.shape)}")
-    dim = enc_conv.shape[0]
-    dec_dim = state_dict["decoder.head.0.gamma"].shape[0]
-    z_dim = state_dict["conv2.weight"].shape[0]
+    enc_conv = header.shape("encoder.conv1.weight")
+    if len(enc_conv) != 5:
+        raise ValueError(f"{vae_path}: expected the 5D video layout, got {tuple(enc_conv)}")
+    dim = enc_conv[0]
+    dec_dim = header.shape("decoder.head.0.gamma")[0]
+    z_dim = header.shape("conv2.weight")[0]
 
     # The reference puts the same residual-block count in every stage.
     num_res_blocks = 0
-    while f"encoder.downsamples.0.downsamples.{num_res_blocks}.residual.2.weight" in state_dict:
+    while f"encoder.downsamples.0.downsamples.{num_res_blocks}.residual.2.weight" in header:
         num_res_blocks += 1
     if num_res_blocks == 0:
         raise ValueError(f"'encoder.downsamples.0.downsamples.0.residual.2.weight' not found in {vae_path}")
@@ -580,8 +582,8 @@ def _infer_arch(state_dict: dict, vae_path: str) -> dict:
     # A stage's last residual block ends on that stage's output width.
     widths = []
     i = 0
-    while f"encoder.downsamples.{i}.downsamples.{num_res_blocks - 1}.residual.2.weight" in state_dict:
-        w = state_dict[f"encoder.downsamples.{i}.downsamples.{num_res_blocks - 1}.residual.2.weight"].shape[0]
+    while f"encoder.downsamples.{i}.downsamples.{num_res_blocks - 1}.residual.2.weight" in header:
+        w = header.shape(f"encoder.downsamples.{i}.downsamples.{num_res_blocks - 1}.residual.2.weight")[0]
         if w % dim:
             raise ValueError(f"stage width {w} is not a multiple of dim {dim} in {vae_path}")
         widths.append(w // dim)
@@ -596,8 +598,8 @@ def _infer_arch(state_dict: dict, vae_path: str) -> dict:
         raise ValueError(f"{vae_path}: {stages} downsample stages cannot make a 16x compression")
     patch_size = PIXEL_COMPRESSION // 2**stages
 
-    in_channels = enc_conv.shape[1]
-    out_channels = state_dict["decoder.head.2.weight"].shape[0]
+    in_channels = enc_conv[1]
+    out_channels = header.shape("decoder.head.2.weight")[0]
     if in_channels != out_channels or in_channels % (patch_size * patch_size):
         raise ValueError(
             f"unexpected in/out channels {in_channels}/{out_channels} with patch_size={patch_size} in {vae_path}"
@@ -606,26 +608,26 @@ def _infer_arch(state_dict: dict, vae_path: str) -> dict:
 
     # Per-stage temporal flags: recorded by each resample's video-only time_conv.
     enc_flags = [
-        f"encoder.downsamples.{i}.downsamples.{num_res_blocks}.time_conv.weight" in state_dict
+        f"encoder.downsamples.{i}.downsamples.{num_res_blocks}.time_conv.weight" in header
         for i in range(stages)
     ]
     dec_flags = [
-        f"decoder.upsamples.{i}.upsamples.{num_res_blocks + 1}.time_conv.weight" in state_dict
+        f"decoder.upsamples.{i}.upsamples.{num_res_blocks + 1}.time_conv.weight" in header
         for i in range(stages)
     ]
     if dec_flags != enc_flags[::-1]:
         raise ValueError(f"inconsistent temporal flags in {vae_path}: encoder {enc_flags}, decoder {dec_flags}")
 
-    if state_dict["encoder.head.0.gamma"].shape[0] != dim * dim_mult[-1]:
+    if header.shape("encoder.head.0.gamma")[0] != dim * dim_mult[-1]:
         raise ValueError(
-            f"encoder width {state_dict['encoder.head.0.gamma'].shape[0]} != dim*mult[-1] {dim * dim_mult[-1]}"
+            f"encoder width {header.shape('encoder.head.0.gamma')[0]} != dim*mult[-1] {dim * dim_mult[-1]}"
         )
-    if state_dict["decoder.conv1.weight"].shape[0] != dec_dim * dim_mult[-1]:
+    if header.shape("decoder.conv1.weight")[0] != dec_dim * dim_mult[-1]:
         raise ValueError(
-            f"decoder width {state_dict['decoder.conv1.weight'].shape[0]} != dec_dim*mult[-1] {dec_dim * dim_mult[-1]}"
+            f"decoder width {header.shape('decoder.conv1.weight')[0]} != dec_dim*mult[-1] {dec_dim * dim_mult[-1]}"
         )
-    if tuple(state_dict["conv1.weight"].shape) != (z_dim * 2, z_dim * 2, 1, 1, 1):
-        raise ValueError(f"unexpected conv1 shape {tuple(state_dict['conv1.weight'].shape)}")
+    if tuple(header.shape("conv1.weight")) != (z_dim * 2, z_dim * 2, 1, 1, 1):
+        raise ValueError(f"unexpected conv1 shape {tuple(header.shape('conv1.weight'))}")
 
     return {
         "dim": dim,
@@ -639,6 +641,21 @@ def _infer_arch(state_dict: dict, vae_path: str) -> dict:
     }
 
 
+#: What :func:`_infer_arch` reads: both halves and both quant convolutions, which is
+#: what separates this family's codec from every other here.
+WAN22_CODEC_SIGNATURE = Signature("Wan 2.2 VAE", keys=(
+    "encoder.conv1.weight",
+    "decoder.conv1.weight",
+    "conv1.weight",
+    "conv2.weight",
+    "encoder.head.0.gamma",
+    "encoder.head.2.weight",
+    "decoder.middle.0.residual.0.gamma",
+    "decoder.head.0.gamma",
+    "decoder.head.2.weight",
+))
+
+
 def load_wan22_vae(
     vae_path: str,
     device: str | torch.device,
@@ -648,52 +665,22 @@ def load_wan22_vae(
 ) -> AutoencoderKLWan22:
     """Load a Wan 2.2 family VAE (ComfyUI ``vae2_2`` layout) for single-frame use.
 
-    The architecture is inferred from the checkpoint (see :func:`_infer_arch`) and
-    the latent statistics picked from its ``z_dim`` unless passed explicitly, so
-    both the 48ch Wan 2.2 and the 64ch RGBA Qwen-Image 2.1 file load through here.
-    The video weights are then collapsed to 2D: drop ``time_conv``, keep the last
-    time slice of 5D convs (causal padding puts the single frame at the end),
-    squeeze 4D gammas.
+    The architecture is inferred from the checkpoint (see :func:`_infer_arch`) and the
+    latent statistics picked from its ``z_dim`` unless passed explicitly, so both the
+    48ch Wan 2.2 and the 64ch RGBA Qwen-Image 2.1 file load through here. The video
+    weights are folded to 2D by :func:`collapse_temporal`.
     """
-    if dtype is None:
-        dtype = COMPUTE_DTYPE
-    logger.info("Loading Wan 2.2 family VAE from %s", vae_path)
-    state_dict = load_safetensors(vae_path, device=device, dtype=dtype)
+    def construct(header: Header) -> AutoencoderKLWan22:
+        arch = _infer_arch(header, vae_path)
+        logger.info("Wan 2.2 family VAE: %s",
+                    " ".join(f"{k}={v}" for k, v in arch.items()))
+        return AutoencoderKLWan22(latents_mean=latents_mean, latents_std=latents_std, **arch)
 
-    required = (
-        "encoder.conv1.weight",
-        "decoder.conv1.weight",
-        "conv1.weight",
-        "conv2.weight",
-        "encoder.head.0.gamma",
-        "encoder.head.2.weight",
-        "decoder.middle.0.residual.0.gamma",
-        "decoder.head.0.gamma",
-        "decoder.head.2.weight",
+    return load_codec(
+        vae_path, device,
+        what="Wan 2.2 family VAE",
+        signature=WAN22_CODEC_SIGNATURE,
+        construct=construct,
+        state_map=lambda state_dict, vae: collapse_temporal(state_dict),
+        dtype=dtype,
     )
-    for key in required:
-        if key not in state_dict:
-            raise ValueError(f"'{key}' not found in {vae_path} (not a Wan 2.2 VAE?)")
-
-    arch = _infer_arch(state_dict, vae_path)
-
-    vae = AutoencoderKLWan22(
-        latents_mean=latents_mean, latents_std=latents_std, **arch
-    )
-
-    # Collapse the video layout to 2D (see docstring).
-    state_dict = {k: v for k, v in state_dict.items() if ".time_conv." not in k}
-    for key, val in state_dict.items():
-        if val.dim() == 5:
-            state_dict[key] = val[:, :, -1]
-        elif key.endswith(".gamma") and val.dim() == 4:
-            state_dict[key] = val.reshape(val.shape[0], 1, 1)
-
-    vae.load_state_dict(state_dict, assign=True)
-    logger.info(
-        "Loaded VAE from %s (%s)",
-        vae_path,
-        " ".join(f"{k}={v}" for k, v in arch.items()),
-    )
-    vae.to(device, dtype)
-    return vae

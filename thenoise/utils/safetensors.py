@@ -2,8 +2,9 @@ import numpy as np
 import torch
 import json
 import struct
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Union, Optional
+from typing import Callable, Dict, Union, Optional
 
 from thenoise.utils.setup_logging import setup_logging
 from thenoise.utils.device import synchronize_device
@@ -134,30 +135,192 @@ def strip_wrap_prefixes(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.
     return {unwrap_key(key): value for key, value in state_dict.items()}
 
 
-def checkpoint_keys(path: str) -> set[str]:
-    """The tensor names in the safetensors header of ``path``, wrapper-normalized.
+#: A model's identity, in tensor names.
+@dataclass(frozen=True)
+class Signature:
+    """What makes a checkpoint this model's, stated in names rather than in code.
 
-    Reads the header only (no tensor data), so it is cheap enough to run at load
-    time.
+    ``keys`` are exact tensor names, ``prefixes`` need at least one key beneath each,
+    and ``absent`` names must not appear — the last is how a file that is a superset of
+    this model (a sibling stream, a layout this loader cannot build) is refused instead
+    of half-loaded. All three are wrapper-normalized.
+
+    One declaration answers both the catalog's ``detect`` and the geometry read, so a
+    file cannot be claimed by a loader that would then fail to build it.
+    """
+
+    name: str
+    keys: Tuple[str, ...] = ()
+    prefixes: Tuple[str, ...] = ()
+    absent: Tuple[str, ...] = ()
+
+
+class Header:
+    """One checkpoint's header — names, shapes, dtypes, metadata — parsed exactly once.
+
+    Names come out wrapper-normalized (see :func:`unwrap_key`), so a repackaged file is
+    read in the same names as the module tree it loads onto. The file's own spelling is
+    kept in ``raw_entries`` for the one caller that has to read a tensor back by raw
+    key: a quantized layer's LoRA undo.
+
+    Build one with :func:`read_header`; carry it to everything that would otherwise open
+    the file again.
+    """
+
+    def __init__(
+        self,
+        path: str,
+        shapes: Dict[str, Tuple[int, ...]],
+        dtypes: Dict[str, str],
+        raw_entries: Dict[str, dict],
+        metadata: Dict[str, str],
+    ):
+        self.path = path
+        self.shapes = shapes
+        self.dtypes = dtypes
+        self.raw_entries = raw_entries
+        self.metadata = metadata
+        # The catalog entry that claimed this file, set by `thenoise.models.resolve`: the
+        # parse that identified the checkpoint travels with it instead of being redone.
+        self.model_cls: Optional[type] = None
+
+    def __contains__(self, name: str) -> bool:
+        return name in self.shapes
+
+    @property
+    def names(self) -> Tuple[str, ...]:
+        """Every tensor name, wrapper-normalized, in the file's own order."""
+        return tuple(self.shapes)
+
+    def shape(self, name: str) -> Tuple[int, ...]:
+        """The shape stored under ``name``, with the file named when it is not there.
+
+        A signature check is what normally rules that out; this is the one that catches
+        a geometry key no signature mentioned.
+        """
+        try:
+            return self.shapes[name]
+        except KeyError:
+            raise KeyError(f"{self.path} carries no '{name}'") from None
+
+    def metadata_json(self, section: str) -> dict:
+        """One JSON section of the file's ``__metadata__``, empty when absent or broken.
+
+        A foreign or hand-repacked file can carry anything under ``config``, and a
+        section that will not parse only means the geometry has to come from shapes.
+        """
+        raw = self.metadata.get(section)
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            logger.warning("Could not parse the checkpoint's %r metadata", section)
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def block_count(self, prefix: str) -> int:
+        """How many ``<prefix><i>.`` blocks the file spans (0 when it has none).
+
+        Depth is the one architectural knob no released checkpoint stores as a number.
+        """
+        indices = [
+            int(head)
+            for name in self.shapes
+            if name.startswith(prefix)
+            and (head := name[len(prefix):].split(".", 1)[0]).isdigit()
+        ]
+        return max(indices) + 1 if indices else 0
+
+    def identifies(self, signature: Signature) -> bool:
+        """Whether this file is ``signature``'s model, without explaining itself.
+
+        An empty signature claims nothing: a model that declared no names and wrote no
+        ``detect`` must not swallow every checkpoint in the catalog.
+        """
+        if not (signature.keys or signature.prefixes):
+            return False
+        return not self.missing(signature) and not self.unwanted(signature)
+
+    def require(self, signature: Signature) -> None:
+        """Refuse a file that is not ``signature``'s model, naming what gave it away.
+
+        Geometry read out of a header is only as good as the claim that the file is
+        what it says.
+        """
+        if missing := self.missing(signature):
+            raise ValueError(
+                f"{self.path} does not match the {signature.name} signature "
+                f"(missing {missing})")
+        if unwanted := self.unwanted(signature):
+            raise ValueError(
+                f"{self.path} does not match the {signature.name} signature: "
+                f"it carries {unwanted}")
+
+    def missing(self, signature: Signature) -> list[str]:
+        """The names ``signature`` asks for that this file does not carry."""
+        gone = [key for key in signature.keys if key not in self.shapes]
+        return gone + [prefix for prefix in signature.prefixes
+                       if not any(name.startswith(prefix) for name in self.shapes)]
+
+    def unwanted(self, signature: Signature) -> list[str]:
+        """The names ``signature`` rules out that this file does carry."""
+        return [key for key in signature.absent if key in self.shapes]
+
+
+    def relabel(self, key_map: Callable[[str], str]) -> "Header":
+        """A view of this header under renamed names, without reading the file again.
+
+        For a loader whose geometry lives under the names the model uses where the
+        checkpoint spells a leaf differently.
+        """
+        shapes: Dict[str, Tuple[int, ...]] = {}
+        dtypes: Dict[str, str] = {}
+        for name, shape in self.shapes.items():
+            renamed = key_map(name)
+            if renamed in shapes:
+                raise RuntimeError(f"{self.path}: two checkpoint names resolve to {renamed!r}")
+            shapes[renamed] = shape
+            dtypes[renamed] = self.dtypes[name]
+        return Header(self.path, shapes, dtypes, self.raw_entries, self.metadata)
+
+
+def read_header(path: str, key_map: Optional[Callable[[str], str]] = None) -> Header:
+    """Parse ``path``'s header once. The only place a checkpoint header is opened.
+
+    ``key_map`` renames on top of the wrapper stripping, for a loader whose geometry is
+    read under the names the model uses instead of the checkpoint's.
     """
     with MemoryEfficientSafeOpen(path) as f:
-        return {unwrap_key(k) for k in f.keys()}
+        raw_entries = {k: f.header[k] for k in f.keys()}
+        metadata = f.metadata()
+    header = Header(
+        path,
+        {unwrap_key(raw): tuple(entry["shape"]) for raw, entry in raw_entries.items()},
+        {unwrap_key(raw): entry["dtype"] for raw, entry in raw_entries.items()},
+        raw_entries,
+        metadata,
+    )
+    return header if key_map is None else header.relabel(key_map)
 
 
-def load_dit_safetensors(
-    path: str,
-    device: Union[str, torch.device],
-    dtype: Optional[torch.dtype] = None,
-    drop_keys: Optional[tuple[str, ...]] = None,
-) -> dict[str, torch.Tensor]:
-    """Load a DiT checkpoint state dict, stripping generic repackaging wrapper
-    prefixes so raw and repackaged checkpoints load identically.
+def as_header(checkpoint: Union[str, Header]) -> Header:
+    """``checkpoint``, read if it is still a path.
+
+    Lets a helper answer either a caller that already parsed the file and one that only
+    has a name, without either of them knowing which it got.
     """
-    sd = load_safetensors(path, device=device, dtype=dtype)
-    sd = strip_wrap_prefixes(sd)
-    if drop_keys:
-        sd = {k: v for k, v in sd.items() if not k.startswith(drop_keys)}
-    return sd
+    return checkpoint if isinstance(checkpoint, Header) else read_header(checkpoint)
+
+
+def require_divisible(value: int, divisor: int, what: str, by: str) -> None:
+    """Refuse a width that does not divide, in the same words every time.
+
+    A trunk that is not a whole number of heads predicts a plausible-but-wrong
+    velocity rather than failing.
+    """
+    if value % divisor:
+        raise ValueError(f"{what} {value} is not a multiple of {by} {divisor}")
 
 
 def load_safetensors(

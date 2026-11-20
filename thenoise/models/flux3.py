@@ -28,12 +28,11 @@ from thenoise.dit.flux3.models import (
     tokens_to_latent,
 )
 from thenoise.dit.flux3.sampling import get_schedule, target_times
-from thenoise.dit.flux3.utils import detect_params, load_flux3_dit
+from thenoise.dit.flux3.utils import FLUX3_SIGNATURE, detect_params, load_flux3_dit
 from thenoise.models.base import (
     LATENT_REF_METHODS,
     Conditioning,
     Step,
-    normalize_keys,
 )
 from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
@@ -72,26 +71,18 @@ class Flux3Model(PixelModel):
 
     #: Flux.3's mode routing is unique among the models here: per-mode blocks and
     #: per-mode joint modulations. (The same fingerprint ComfyUI detects on.)
-    _FINGERPRINT = ("content_mode_blocks.image.0.attn_out.", "single_stream_modulations.txt.")
-
-    @staticmethod
-    def detect(f) -> bool:
-        """True if this handle is a Flux.3 DiT: its per-mode blocks and modulations."""
-        keys = list(normalize_keys(f.keys()))
-        return all(
-            any(key.startswith(prefix) for key in keys) for prefix in Flux3Model._FINGERPRINT
-        )
+    SIGNATURE = FLUX3_SIGNATURE
 
     def __init__(self, *, config: ModelConfig):
         super().__init__(config=config)
 
-        self.params: Flux3Params = detect_params(config.dit_path)
+        self.params: Flux3Params = detect_params(self.header)
         # A flow map modulates every stream with the timestep each step jumps to.
         self.flow_map = self.params.flow_map
 
-        logger.info("Loading Flux.3 DiT from %s", config.dit_path)
+        logger.info("Loading Flux.3 DiT from %s", self.dit_path)
         self.dit = load_flux3_dit(
-            config.dit_path, self.params, device=self._load_target(config.dit_path), dtype=config.dtype
+            self.header, self.params, device=self._load_target(self.dit_path), dtype=config.dtype
         )
 
         logger.info(

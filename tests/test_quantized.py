@@ -693,15 +693,19 @@ def test_load_dit_installs_the_fp8_activation_scale(tmp_path):
     assert model.q.input_scale.item() == pytest.approx(0.5)
 
 
+@pytest.mark.parametrize("prefix", ["", "net."])
 @pytest.mark.parametrize("quantized", [False, True], ids=["bf16", "int8"])
-def test_load_dit_drop_keys_applies_on_both_paths(tmp_path, quantized):
-    """Unexpected leftover keys (e.g. Krea2's unused ``last.*``) are dropped."""
+def test_load_dit_drop_keys_applies_on_both_paths(tmp_path, quantized, prefix):
+    """Unexpected leftover keys (e.g. Krea2's unused ``last.*``) are dropped, matched
+    against the wrapper-stripped name.
+    """
     extra = {
         "last.down.residual": torch.randn(16, dtype=torch.bfloat16),
         "last.up.residual": torch.randn(16, dtype=torch.bfloat16),
     }
     tensors = (
-        int8_tensors(extra=extra) if quantized else bf16_tensors(extra=extra)
+        int8_tensors(extra=extra, prefix=prefix) if quantized
+        else bf16_tensors(extra=extra, prefix=prefix)
     )
     path = write_safetensors(tmp_path / "dit.safetensors", tensors)
 

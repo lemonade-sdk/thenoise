@@ -2,12 +2,11 @@
 
 from typing import Optional, Union
 import torch
-from accelerate import init_empty_weights
 
 from thenoise.dit.anima import models as anima_models
-from thenoise.utils.loader import load_dit
+from thenoise.utils.loader import build_dit
 from thenoise.utils.qk_norm import qk_norm_key_map
-from thenoise.utils.safetensors import WRAP_PREFIXES
+from thenoise.utils.safetensors import Header, Signature, as_header
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -16,41 +15,23 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def _count_anima_blocks(dit_path: str) -> int:
-    """Count the main transformer blocks in an Anima checkpoint.
-
-    Anima ships variants with different depths on the same architecture, so the
-    count comes from the ``blocks.{i}.`` keys of the safetensors header, with wrap
-    prefixes stripped so raw and repackaged files count identically.
-    """
-    from thenoise.utils.safetensors import MemoryEfficientSafeOpen
-
-    indices = set()
-    with MemoryEfficientSafeOpen(dit_path) as f:
-        for key in f.keys():
-            for prefix in WRAP_PREFIXES:
-                if key.startswith(prefix):
-                    key = key[len(prefix):]
-                    break
-            if key.startswith("blocks."):
-                try:
-                    indices.add(int(key.split(".")[1]))
-                except (ValueError, IndexError):
-                    pass
-    if not indices:
-        raise ValueError(f"could not find any 'blocks.*' keys in {dit_path}; is this an Anima DiT?")
-    return max(indices) + 1
+#: Its LLM adapter over a Lumina trunk: the Cosmos releases share the trunk with the
+#: models here, the adapter is Anima's alone.
+ANIMA_SIGNATURE = Signature("Anima DiT",
+                            prefixes=("llm_adapter.", "blocks.0.adaln_modulation"))
 
 
 def load_anima_model(
     device: Union[str, torch.device],
-    dit_path: str,
+    checkpoint: Union[str, Header],
     dit_weight_dtype: Optional[torch.dtype] = None,
 ) -> anima_models.Anima:
-    """Load the Anima DiT, deriving its block count from the checkpoint."""
-    device = torch.device(device)
-
-    num_blocks = _count_anima_blocks(dit_path)
+    """Load the Anima DiT, deriving its depth from the checkpoint."""
+    header = as_header(checkpoint)
+    header.require(ANIMA_SIGNATURE)
+    # Anima ships variants of different depths on one architecture, and the depth is the
+    # one number no released file states.
+    num_blocks = header.block_count("blocks.")
     logger.info("Detected Anima DiT with %d transformer blocks", num_blocks)
 
     # Fixed DiT config for all Anima checkpoints
@@ -78,22 +59,13 @@ def load_anima_model(
         "rope_t_extrapolation_ratio": 1.0,
         "extra_h_extrapolation_ratio": 1.0,
         "extra_w_extrapolation_ratio": 1.0,
-        "extra_t_extrapolation_ratio": 1.0,
         "use_llm_adapter": True,
     }
-    with init_empty_weights():
-        model = anima_models.Anima(**dit_config)
-
-    logger.info(f"Loading DiT model from {dit_path}, device={device}")
-
-    load_dit(
-        model,
-        dit_path,
+    return build_dit(
+        lambda: anima_models.Anima(**dit_config),
+        header,
         device=device,
         dtype=dit_weight_dtype,
         key_map=qk_norm_key_map,
         expected_missing=("seq", "dim_spatial_range", "dim_temporal_range", "inv_freq"),
     )
-    logger.info("Loaded DiT model from %s", dit_path)
-
-    return model

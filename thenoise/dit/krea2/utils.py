@@ -4,7 +4,6 @@ import logging
 from typing import Optional, Union
 
 import torch
-from accelerate import init_empty_weights
 
 from thenoise.dit.krea2.encoder import (
     QWEN3_VL_4B_INSTRUCT_REPO_ID,
@@ -13,8 +12,9 @@ from thenoise.dit.krea2.encoder import (
     load_qwen3_vl_conditioner,
 )
 from thenoise.dit.krea2.mmdit import SingleMMDiTConfig, SingleStreamDiT
-from thenoise.utils.loader import load_dit
+from thenoise.utils.loader import build_dit
 from thenoise.utils.qk_norm import qk_norm_key_map
+from thenoise.utils.safetensors import Header
 from thenoise.utils.text_encoder import find_tokenizer_dir
 
 logger = logging.getLogger(__name__)
@@ -50,21 +50,15 @@ def _krea2_rms_map(key: str, tensor):
 
 
 def load_krea2_dit(
-    dit_path: str,
+    checkpoint: Union[str, Header],
     device: Union[str, torch.device],
     dtype: torch.dtype,
     config: SingleMMDiTConfig = single_mmdit_large_wide,
 ) -> SingleStreamDiT:
     """Build the K2 single-stream MMDiT on meta and load weights."""
-    device = torch.device(device)
-
-    logger.info(f"Loading Krea 2 DiT weights from {dit_path}")
-    with init_empty_weights():
-        dit = SingleStreamDiT(config)
-
-    return load_dit(
-        dit,
-        dit_path,
+    return build_dit(
+        lambda: SingleStreamDiT(config),
+        checkpoint,
         device=device,
         dtype=dtype,
         key_map=lambda k: qk_norm_key_map(k, "qknorm.qnorm", "qknorm.knorm"),

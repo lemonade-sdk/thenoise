@@ -28,6 +28,14 @@ import torch.nn.functional as F
 from torch import Tensor
 
 from thenoise.inference import freeze
+from thenoise.utils.loader import load_module_state
+from thenoise.utils.safetensors import (
+    Header,
+    as_header,
+    load_safetensors,
+    read_header,
+    strip_wrap_prefixes,
+)
 
 
 class ResidualDenseBlock(nn.Module):
@@ -170,47 +178,42 @@ class RRDBNet(nn.Module):
         return out[:, :, :out_h, :out_w]
 
 
-def detect_esrgan_scheme(path: str) -> str:
-    """Detect the weight naming scheme from the safetensors header.
+def detect_esrgan_scheme(checkpoint: Union[str, Header]) -> str:
+    """The weight naming scheme: ``"comfy"`` or ``"original"``.
 
     ``"comfy"`` for the ComfyUI repackaged naming (``body.*`` / ``conv_first``),
     ``"original"`` for the original-ESRGAN ``nn.Sequential`` naming (``model.*``),
-    whose keys are remapped on load. Reads only the header.
+    whose keys :func:`_remap_original_esrgan` converts. A header is accepted so a
+    caller that already parsed the file does not parse it twice.
     """
-    from safetensors import safe_open
-
-    with safe_open(path, framework="pt") as f:
-        keys = f.keys()
-    if "conv_first.weight" in keys:
+    header = as_header(checkpoint)
+    if "conv_first.weight" in header:
         return "comfy"
-    if "model.0.weight" in keys:
+    if "model.0.weight" in header:
         return "original"
     raise ValueError(
-        f"could not detect ESRGAN scheme from {path}: expected ComfyUI "
+        f"could not detect ESRGAN scheme from {header.path}: expected ComfyUI "
         f"('conv_first.weight') or original-ESRGAN ('model.0.weight') naming"
     )
 
 
-def detect_esrgan_scale(path: str) -> int:
+def detect_esrgan_scale(checkpoint: Union[str, Header]) -> int:
     """Detect an ESRGAN model's upscale scale (2 or 4) from its safetensors header.
 
     The scale is the first conv's input channel count: 12 means the input is
     pixel-unshuffled by 2 (scale 2), 3 means RGB in (scale 4). Handles both the
     ComfyUI (``conv_first``) and original-ESRGAN (``model.0``) naming schemes.
     """
-    from safetensors import safe_open
-
-    with safe_open(path, framework="pt") as f:
-        if "conv_first.weight" in f.keys():
-            in_ch = f.get_slice("conv_first.weight").get_shape()[1]
-        else:
-            in_ch = f.get_slice("model.0.weight").get_shape()[1]
+    header = as_header(checkpoint)
+    first = ("conv_first.weight" if detect_esrgan_scheme(header) == "comfy"
+             else "model.0.weight")
+    in_ch = header.shape(first)[1]
     if in_ch == 12:
         return 2
     if in_ch == 3:
         return 4
     raise ValueError(
-        f"could not detect ESRGAN scale from {path}: first conv takes "
+        f"could not detect ESRGAN scale from {header.path}: first conv takes "
         f"{in_ch} input channels (expected 12 for 2x or 3 for 4x)"
     )
 
@@ -256,15 +259,13 @@ def load_esrgan(path: str, device: Union[str, torch.device]) -> tuple[RRDBNet, i
     Both weight namings are supported (see :func:`detect_esrgan_scheme`) and the
     scale is auto-detected. Returns ``(model, scale)`` in fp32.
     """
-    from safetensors.torch import load_file
-
-    state_dict = load_file(path, device="cpu")
-    scheme = detect_esrgan_scheme(path)
-    if scheme == "original":
+    header = read_header(path)
+    state_dict = strip_wrap_prefixes(load_safetensors(path, device="cpu"))
+    if detect_esrgan_scheme(header) == "original":
         state_dict = _remap_original_esrgan(state_dict)
-    scale = detect_esrgan_scale(path)
+    scale = detect_esrgan_scale(header)
     model = RRDBNet(scale=scale)
-    model.load_state_dict(state_dict)
+    load_module_state(model, state_dict, path, what="ESRGAN")
     model.to(device=device)
     freeze(model)
     return model, scale

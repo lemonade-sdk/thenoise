@@ -25,6 +25,7 @@ from .inference_adaptors import (
 )
 from .sesqui_net import SesquiLSRNet
 from thenoise.inference import freeze
+from thenoise.utils.loader import load_module_state
 from thenoise.utils.safetensors import load_safetensors, upscale_weight_path
 
 logger = logging.getLogger(__name__)
@@ -61,7 +62,7 @@ def _load_net(
     state_dict = load_safetensors(path, device=device)
 
     net = SesquiLSRNet(in_channels=channels)
-    net.load_state_dict(state_dict)
+    load_module_state(net, state_dict, path, what="Sesqui latent upscaler")
     net.to(device=device, dtype=dtype)
     freeze(net)
 

@@ -11,7 +11,6 @@ from thenoise.dit.anima.strategy import AnimaTextEncodingStrategy, AnimaTokenize
 from thenoise.models.base import (
     Conditioning,
     Step,
-    normalize_keys,
 )
 from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
@@ -34,13 +33,7 @@ class AnimaModel(PixelModel):
     }
     DEFAULT_FLOW_SHIFT = 3.0
 
-    @staticmethod
-    def detect(f) -> bool:
-        """True if this handle is the Anima DiT: LLM adapter + adaln modulation."""
-        keys = list(normalize_keys(f.keys()))
-        has_llm_adapter = any("llm_adapter" in k for k in keys)
-        has_adaln = any("adaln_modulation" in k for k in keys)
-        return has_llm_adapter and has_adaln
+    SIGNATURE = anima_utils.ANIMA_SIGNATURE
 
     def __init__(
         self,
@@ -49,10 +42,9 @@ class AnimaModel(PixelModel):
     ):
         super().__init__(config=config)
 
-        logger.info("Loading Anima DiT from %s", config.dit_path)
         self.dit = anima_utils.load_anima_model(
-            self._load_target(config.dit_path),
-            config.dit_path,
+            self._load_target(self.dit_path),
+            self.header,
             dit_weight_dtype=config.dtype,
         )
 

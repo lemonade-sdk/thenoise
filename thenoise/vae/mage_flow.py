@@ -30,9 +30,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from thenoise.utils.attention import single_head_attention
-from thenoise.utils.safetensors import MemoryEfficientSafeOpen, load_safetensors
+from thenoise.utils.loader import load_codec
+from thenoise.utils.safetensors import Signature, read_header
 from thenoise.utils.setup_logging import setup_logging
-from .flux2 import AutoencoderKLFlux2, load_flux2_vae
+from .flux2 import FLUX2_AE_SIGNATURE, AutoencoderKLFlux2, load_flux2_vae
 
 setup_logging()
 import logging
@@ -542,6 +543,10 @@ class AutoencoderKLMageFlow(nn.Module):
         return self.decoder_model(noise, t, cond).clamp(-1.0, 1.0)
 
 
+#: The export's two halves: their names, not the module tree's, so the loader remaps.
+MAGE_VAE_SIGNATURE = Signature("Mage-VAE", prefixes=("student.", "pipeline."))
+
+
 def load_mage_vae(
     vae_path: str,
     device: Union[str, torch.device],
@@ -552,39 +557,30 @@ def load_mage_vae(
     The file is a training artifact: the encoder lives under ``student.dconv_encoder.*``
     and the denoiser under ``pipeline.*``.
     """
-    device = torch.device(device)
-    if dtype is None:
-        dtype = COMPUTE_DTYPE
-    logger.info("Loading Mage-VAE from %s", vae_path)
-    state_dict = load_safetensors(vae_path, device=device, dtype=dtype)
 
-    remapped = {}
-    for key, tensor in state_dict.items():
-        if key.startswith("student.dconv_encoder."):
-            remapped[key[len("student.") :]] = tensor
-        elif key.startswith("pipeline.y_embedder.encoder."):
-            continue  # the anchor Flux.2 encoder
-        elif key.startswith("pipeline."):
-            remapped["decoder_model." + key[len("pipeline.") :]] = tensor
-        else:
-            raise ValueError(f"unexpected Mage-VAE key in {vae_path}: {key!r}")
-    if not remapped:
-        raise ValueError(f"No 'student.dconv_encoder.*'/'pipeline.*' keys in {vae_path} (not a Mage-VAE?)")
+    def remap(state_dict: dict, vae: AutoencoderKLMageFlow) -> dict:
+        remapped = {}
+        for key, tensor in state_dict.items():
+            if key.startswith("student.dconv_encoder."):
+                remapped[key[len("student.") :]] = tensor
+            elif key.startswith("pipeline.y_embedder.encoder."):
+                continue  # the anchor Flux.2 encoder
+            elif key.startswith("pipeline."):
+                remapped["decoder_model." + key[len("pipeline.") :]] = tensor
+            else:
+                raise ValueError(f"unexpected Mage-VAE key in {vae_path}: {key!r}")
+        return remapped
 
-    vae = AutoencoderKLMageFlow()
-    info = vae.load_state_dict(remapped, strict=True, assign=True)
-    logger.info("Loaded Mage-VAE: %s", info)
-
-    vae.to(device, dtype)
-    return vae
+    return load_codec(vae_path, device,
+                      what="Mage-VAE",
+                      signature=MAGE_VAE_SIGNATURE,
+                      construct=lambda header: AutoencoderKLMageFlow(),
+                      state_map=remap,
+                      dtype=dtype)
 
 
-#: The key prefixes of the two codecs a Mage-Flow run can be pointed at. Both latents
-#: are 128 channels at 16x, so only the file says which one is in use.
-_MAGE_PREFIXES = ("student.", "pipeline.")
-_FLUX2_PREFIXES = ("encoder.", "decoder.", "bn.")
-
-
+#: Both latents are 128 channels at 16x, so only the file says which codec a
+#: Mage-Flow run is pointed at; each states itself under its own names.
 def load_mage_family_vae(
     vae_path: str,
     device: Union[str, torch.device],
@@ -595,17 +591,15 @@ def load_mage_family_vae(
     Each runs in its own ``compute_dtype``; ``dtype`` overrides whichever one it turns out
     to be, not a request for the file's.
     """
-    with MemoryEfficientSafeOpen(vae_path) as f:
-        keys = list(f.keys())
-
-    if any(key.startswith(_MAGE_PREFIXES) for key in keys):
+    header = read_header(vae_path)
+    if header.identifies(MAGE_VAE_SIGNATURE):
         return load_mage_vae(vae_path, device, dtype=dtype)
-    if any(key.startswith(_FLUX2_PREFIXES) for key in keys):
+    if header.identifies(FLUX2_AE_SIGNATURE):
         logger.info("Mage-Flow codec: the Flux.2 AE rather than the Mage-VAE (%s)", vae_path)
         return load_flux2_vae(vae_path, device, dtype=dtype)
     raise ValueError(
-        f"{vae_path} is neither a Mage-VAE (no 'student.*'/'pipeline.*' keys) nor a "
-        "Flux.2 AE (no 'encoder.*'/'decoder.*'/'bn.*' keys)"
+        f"{vae_path} is neither a {MAGE_VAE_SIGNATURE.name} nor a "
+        f"{FLUX2_AE_SIGNATURE.name}"
     )
 
 

@@ -187,7 +187,7 @@ def test_loader_lands_on_the_codec_dtype(tmp_path, tiny_vae):
 
 def test_loader_refuses_a_foreign_checkpoint(tmp_path):
     path = write_safetensors(tmp_path / "other.safetensors", {"decoder.conv_in.weight": torch.zeros(3, 3)})
-    with pytest.raises(ValueError, match="not a H3-Image VAE"):
+    with pytest.raises(ValueError, match="does not match the H3-Image codec signature"):
         load_h3_image_vae(path, device="cpu")
 
 
