@@ -13,7 +13,7 @@ import pytest
 import torch
 from PIL import Image
 
-from conftest import FakeHandle, comfy_quant, write_safetensors
+from conftest import comfy_quant, header_of, write_safetensors
 from thenoise.dit.mage_flow import sampling as mage_sampling
 from thenoise.dit.mage_flow.encoder import (
     MAGE_EDIT_TEMPLATE,
@@ -22,7 +22,8 @@ from thenoise.dit.mage_flow.encoder import (
     MageFlowTextEncoder,
     prompt_template,
 )
-from thenoise.dit.mage_flow.keys import MAGE_LAYERS, dit_block_count, is_qwen_image_family
+from thenoise.dit.mage_flow.keys import MAGE_FLOW_SIGNATURE, MAGE_LAYERS
+from thenoise.dit.qwen_image.keys import QWEN_IMAGE_FAMILY_SIGNATURE
 from thenoise.dit.mage_flow.models import (
     MageFlowParams,
     MageFlowTransformer2DModel,
@@ -36,6 +37,8 @@ from thenoise.dit.qwen_image.models import build_video_positions
 from thenoise.models.base import Conditioning
 from thenoise.models.config import EncodePromptArgs, SamplingParams
 from thenoise.models.mage_flow import MageFlowModel
+from thenoise.models.qwen_image import QwenImageModel
+from thenoise.models.qwen_image21 import QWEN_IMAGE21_SIGNATURE
 from thenoise.samplers import EulerSampler
 from thenoise.upscale import SesquiLSRUpscaler
 from thenoise.utils.rope import apply_rope
@@ -92,15 +95,6 @@ def _params(**overrides) -> SamplingParams:
 # ------------------------------------------------------------- family detection
 
 
-def test_block_count_is_the_highest_index_plus_one():
-    keys = ["img_in.weight", "transformer_blocks.0.attn.to_q.weight", "proj_out.weight"]
-    assert dit_block_count(keys) == 1
-    assert dit_block_count(keys + [f"transformer_blocks.{MAGE_LAYERS - 1}.attn.to_q.weight"]) == MAGE_LAYERS
-    assert dit_block_count(keys + ["transformer_blocks.59.attn.to_q.weight"]) == 60
-    assert dit_block_count(["x_embedder.weight"]) == 0
-    assert dit_block_count(["transformer_blocks.ln.weight"]) == 0  # not an index
-
-
 def test_names_are_the_family_and_depth_is_the_separator():
     """``add_q_proj`` says "Qwen-Image family", the depth says which member: the
     low-rank AdaLN export must not change either answer.
@@ -116,14 +110,26 @@ def test_names_are_the_family_and_depth_is_the_separator():
         "transformer_blocks.0.img_mod.1.weight",
         "modulation_down.weight",
     ]
-    assert is_qwen_image_family(names)
-    assert dit_block_count(names) < MAGE_LAYERS  # names alone cannot tell the members apart
+    assert header_of(names).identifies(QWEN_IMAGE_FAMILY_SIGNATURE)
+    assert not header_of(names).identifies(MAGE_FLOW_SIGNATURE)
 
-    # The single-stream Qwen-Image 2.1 shares the projections but has no text stream.
-    assert not is_qwen_image_family([n for n in names if "add_q_proj" not in n])
+    # Qwen-Image 2.1 shares the image stream but has no second attention stream.
+    shallow = [n for n in names if "add_q_proj" not in n]
+    assert not header_of(shallow).identifies(QWEN_IMAGE_FAMILY_SIGNATURE)
+    assert header_of(shallow + [
+        "txt_in.text_norm.weight", "modulation.1.weight",
+        "transformer_blocks.0.attn.norm_q.weight"]).identifies(QWEN_IMAGE21_SIGNATURE)
 
-    names.append(f"transformer_blocks.{MAGE_LAYERS - 1}.attn.to_q.weight")
-    assert MageFlowModel.detect(FakeHandle(names)) is True
+    # Mage-Flow is the family at a fixed depth, so it needs the block at index 11.
+    deep = names + ["txt_norm.weight", "transformer_blocks.0.attn.norm_q.weight",
+                    f"transformer_blocks.{MAGE_LAYERS - 1}.attn.to_q.weight"]
+    assert MageFlowModel.detect(header_of(deep)) is True
+    assert QwenImageModel.detect(header_of(deep)) is False
+
+    # Qwen-Image is the same layout far deeper, and each states its own depth bound.
+    deeper = deep + [f"transformer_blocks.{i}.attn.to_q.weight" for i in range(20, 60)]
+    assert QwenImageModel.detect(header_of(deeper)) is True
+    assert MageFlowModel.detect(header_of(deeper)) is False
 
 
 # ---------------------------------------------------------------- token layout
@@ -298,7 +304,7 @@ def test_detect_params_reads_the_geometry_from_the_header(tmp_path):
 
 def test_detect_params_refuses_a_foreign_checkpoint(tmp_path):
     path = write_safetensors(tmp_path / "other.safetensors", {"img_in.weight": torch.zeros(4, 4)})
-    with pytest.raises(ValueError, match="not a Mage-Flow DiT"):
+    with pytest.raises(ValueError, match="does not match the Mage-Flow DiT signature"):
         detect_params(path)
 
 

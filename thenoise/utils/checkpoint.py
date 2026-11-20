@@ -15,9 +15,9 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, FrozenSet, Tuple
+from typing import Any, Dict, FrozenSet, Tuple, Union
 
-from thenoise.utils.safetensors import checkpoint_keys
+from thenoise.utils.safetensors import Header, as_header
 
 logger = logging.getLogger(__name__)
 
@@ -62,24 +62,24 @@ def checkpoint_bytes(path: str) -> int:
                    if e.is_file() and os.path.splitext(e.name)[1] in _WEIGHT_SUFFIXES)
 
 
-def detect_checkpoint_prefs(dit_path: str) -> Dict[str, Any]:
-    """Preferences implied by the markers in ``dit_path`` (``{}`` when none apply).
+def detect_checkpoint_prefs(checkpoint: Union[str, Header]) -> Dict[str, Any]:
+    """Preferences implied by the markers in ``checkpoint`` (``{}`` when none apply).
 
-    An unreadable path yields ``{}`` rather than raising: the runtime must not fail
-    to load weights over a header it could not parse.
+    An unreadable file yields ``{}`` rather than raising: the runtime must not fail to
+    load weights over a header it could not parse.
     """
     try:
-        keys = checkpoint_keys(dit_path)
+        header = as_header(checkpoint)
     except FileNotFoundError:
-        logger.debug("No checkpoint markers: %s not readable", dit_path)
+        logger.debug("No checkpoint markers: %s not readable", checkpoint)
         return {}
     except Exception as exc:  # not a safetensors file / truncated header
-        logger.warning("Could not read checkpoint markers from %s (%s)", dit_path, exc)
+        logger.warning("Could not read checkpoint markers from %s (%s)", checkpoint, exc)
         return {}
 
     prefs: Dict[str, Any] = {}
     for marker in CHECKPOINT_MARKERS:
-        if marker.key not in keys:
+        if marker.key not in header:
             continue
         if marker.pref in prefs:
             logger.debug("Ignoring marker %s: %s already set", marker.key, marker.pref)

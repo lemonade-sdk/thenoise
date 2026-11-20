@@ -17,7 +17,7 @@ from transformers import Qwen3VLForConditionalGeneration
 
 from thenoise.dit.quantized import replace_linears
 from thenoise.utils.qwen_configs import QWEN3_VL_32B_H3_CONFIG
-from thenoise.utils.safetensors import MemoryEfficientSafeOpen, unwrap_key
+from thenoise.utils.safetensors import read_header
 from thenoise.utils.text_encoder import (
     QWEN25_TOKENIZER_CONFIG_DIR,
     QWEN3_VL_TOKENIZER_OVERRIDES,
@@ -80,15 +80,10 @@ def _truncate_qwen3_vl(config, layers: int) -> nn.Module:
 
 def layer_count(path: str) -> int:
     """How many decoder layers a text-encoder file holds, from its header."""
-    with MemoryEfficientSafeOpen(path) as f:
-        indices = {
-            int(k.split(".")[2])
-            for k in map(unwrap_key, f.keys())
-            if k.startswith("model.layers.") and k.split(".")[2].isdigit()
-        }
-    if not indices:
+    layers = read_header(path).block_count("model.layers.")
+    if not layers:
         raise ValueError(f"{path} has no Qwen3-VL decoder layers")
-    return max(indices) + 1
+    return layers
 
 
 class H3ImageTextEncoder(nn.Module):

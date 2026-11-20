@@ -349,7 +349,7 @@ def test_detect_params_reads_the_unfused_export(tmp_path):
 
 def test_detect_params_refuses_a_foreign_checkpoint(tmp_path):
     path = write_safetensors(tmp_path / "other.safetensors", {"img_in.weight": torch.zeros(4, 4)})
-    with pytest.raises(ValueError, match="not a Fibo 2.0 DiT"):
+    with pytest.raises(ValueError, match="does not match the Fibo 2.0 DiT signature"):
         detect_params(path)
 
 

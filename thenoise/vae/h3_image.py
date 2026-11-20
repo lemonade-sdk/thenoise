@@ -23,7 +23,7 @@ import torch.nn.functional as F
 from thenoise.utils.attention import eager_attention
 from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.rope import apply_rope_split_half, split_half_rope_axes
-from thenoise.utils.safetensors import MemoryEfficientSafeOpen, load_safetensors
+from thenoise.utils.safetensors import load_safetensors, read_header
 from thenoise.utils.setup_logging import setup_logging
 
 setup_logging()
@@ -546,25 +546,21 @@ def _geometry(vae_path: str) -> dict:
     load. The encoder's stage *strides* are not in the header, so they stay the release's
     (:data:`SPACE_DOWN`, :data:`TIME_DOWN`) and the strict load checks the rest.
     """
-    with MemoryEfficientSafeOpen(vae_path) as f:
-        header = f.header
-        embed = header.get("decoder.x_embedder.weight")
-        conv_in = header.get("encoder.conv_in.weight")
-        if embed is None or embed["shape"][1] != Z_CHANNELS:
-            raise ValueError(
-                f"'decoder.x_embedder.weight' taking {Z_CHANNELS} latent channels is "
-                f"missing from {vae_path} (not a H3-Image VAE?)"
-            )
-        if conv_in is None or conv_in["shape"][1:] != [3, 3, 3, 3]:
-            raise ValueError(
-                f"'encoder.conv_in.weight' taking 3 pixel channels is missing from "
-                f"{vae_path} (not a H3-Image VAE?)"
-            )
-        depth = 1 + max(
-            int(key.split(".")[2]) for key in header
-            if key.startswith("decoder.transformer_blocks.")
+    header = read_header(vae_path)
+    embed = header.shapes.get("decoder.x_embedder.weight")
+    conv_in = header.shapes.get("encoder.conv_in.weight")
+    if embed is None or embed[1] != Z_CHANNELS:
+        raise ValueError(
+            f"'decoder.x_embedder.weight' taking {Z_CHANNELS} latent channels is "
+            f"missing from {vae_path} (not a H3-Image VAE?)"
         )
-        return {"ch": conv_in["shape"][0], "dim": embed["shape"][0], "num_layers": depth}
+    if conv_in is None or conv_in[1:] != (3, 3, 3, 3):
+        raise ValueError(
+            f"'encoder.conv_in.weight' taking 3 pixel channels is missing from "
+            f"{vae_path} (not a H3-Image VAE?)"
+        )
+    return {"ch": conv_in[0], "dim": embed[0],
+            "num_layers": header.block_count("decoder.transformer_blocks.")}
 
 
 def load_h3_image_vae(

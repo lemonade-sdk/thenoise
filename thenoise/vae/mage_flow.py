@@ -30,7 +30,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from thenoise.utils.attention import single_head_attention
-from thenoise.utils.safetensors import MemoryEfficientSafeOpen, load_safetensors
+from thenoise.utils.safetensors import load_safetensors, read_header
 from thenoise.utils.setup_logging import setup_logging
 from .flux2 import AutoencoderKLFlux2, load_flux2_vae
 
@@ -595,12 +595,11 @@ def load_mage_family_vae(
     Each runs in its own ``compute_dtype``; ``dtype`` overrides whichever one it turns out
     to be, not a request for the file's.
     """
-    with MemoryEfficientSafeOpen(vae_path) as f:
-        keys = list(f.keys())
+    names = read_header(vae_path).names
 
-    if any(key.startswith(_MAGE_PREFIXES) for key in keys):
+    if any(name.startswith(_MAGE_PREFIXES) for name in names):
         return load_mage_vae(vae_path, device, dtype=dtype)
-    if any(key.startswith(_FLUX2_PREFIXES) for key in keys):
+    if any(name.startswith(_FLUX2_PREFIXES) for name in names):
         logger.info("Mage-Flow codec: the Flux.2 AE rather than the Mage-VAE (%s)", vae_path)
         return load_flux2_vae(vae_path, device, dtype=dtype)
     raise ValueError(

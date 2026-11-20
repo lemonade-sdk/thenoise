@@ -24,7 +24,7 @@ if TYPE_CHECKING:  # pragma: no cover - only for annotations
     from PIL import Image
 from thenoise.utils.checkpoint import checkpoint_bytes, detect_checkpoint_prefs
 from thenoise.utils.lora_roles import DEFAULT_LORA_ROLE
-from thenoise.utils.safetensors import unwrap_key
+from thenoise.utils.safetensors import Header, Signature
 
 logger = logging.getLogger(__name__)
 
@@ -40,18 +40,6 @@ class Conditioning:
     cond_mask: Optional[torch.Tensor] = None
     null: Optional[torch.Tensor] = None
     null_mask: Optional[torch.Tensor] = None
-
-
-def normalize_keys(keys):
-    """Yield tensor names with any generic wrapper prefix stripped.
-
-    Repackaged checkpoints prefix every key with a wrapper such as
-    ``model.diffusion_model.`` or ``net.``; stripping it lets each ``detect`` match on
-    the model's own distinctive key paths. Uses ``safetensors.unwrap_key`` so
-    detection and loading cannot drift apart.
-    """
-    for k in keys:
-        yield unwrap_key(k)
 
 
 #: How a reference picture enters a run. The latent paths append VAE-encoded tokens
@@ -97,20 +85,38 @@ class DiffusionModel(LoRASupport, ABC):
     #: Which end of the sequence the KV cache freezes: ``"suffix"`` or ``"prefix"``.
     KV_CACHED_SLICE: ClassVar[str] = "suffix"
 
-    @staticmethod
-    @abstractmethod
-    def detect(f) -> bool:
-        """Return True if the open safetensors handle ``f`` is this model's DiT."""
+    #: The tensor names that make a checkpoint this adapter's DiT. The same declaration
+    #: answers the catalog's ``detect`` and the loader's geometry read, so a file cannot
+    #: be claimed by a loader that would then fail to build it. An adapter whose claim
+    #: is not a plain name test — a depth window, a substring, a family its sibling also
+    #: claims — overrides :meth:`detect` instead.
+    SIGNATURE: ClassVar[Signature] = Signature("")
 
     @classmethod
-    def validate_paths(cls, dit_paths: dict[str, str]) -> None:
+    def detect(cls, header: Header) -> bool:
+        """Whether this file is this model's DiT, as :attr:`SIGNATURE` states it."""
+        return header.identifies(cls.SIGNATURE)
+
+    @classmethod
+    def validate_paths(cls, checkpoints: dict[str, Header]) -> None:
         """Reject a set of DiT files this model cannot use, before anything loads.
 
-        Adapters that need more than the primary checkpoint override this; the role
-        names are theirs, so the runtime never has to know them.
+        Every role the request named arrives as a parsed header, so an extra file is
+        identified here rather than discovered halfway through its load. Adapters that
+        need more than the primary checkpoint override this; the role names are theirs,
+        so the runtime never has to know them.
         """
-        if len(dit_paths) > 1:
+        if len(checkpoints) > 1:
             raise ValueError(f"{cls.name} takes one DiT checkpoint")
+
+    @classmethod
+    def require_same_model(cls, checkpoints: dict[str, Header]) -> None:
+        """Refuse an extra DiT file this adapter would not have claimed on its own."""
+        for role, header in checkpoints.items():
+            if role and not cls.detect(header):
+                raise ValueError(
+                    f"{header.path} does not match the {cls.SIGNATURE.name} signature: "
+                    "every DiT file one model loads has to be that model's")
 
     def __init__(self, *, config: ModelConfig):
         self.device = config.device
@@ -122,7 +128,10 @@ class DiffusionModel(LoRASupport, ABC):
         self.text_encoder_path = config.text_encoder_path
         self.lora_dir = config.lora_dir
 
-        self.checkpoint_prefs = detect_checkpoint_prefs(config.dit_path)
+        #: The primary DiT's header, read once for the whole load: geometry, markers
+        #: and the weight load all ask the same parsed copy.
+        self.header = config.header()
+        self.checkpoint_prefs = detect_checkpoint_prefs(self.header)
 
         # Subclasses register ``dit`` / ``vae`` / ``text_encoder`` for staging by name.
         self.memory = MemoryManager(self.device, self.offload_device)
@@ -316,4 +325,4 @@ class DiffusionModel(LoRASupport, ABC):
         """
         return {DEFAULT_LORA_ROLE: self.dit}
 
-__all__ = ["DiffusionModel", "Conditioning", "normalize_keys"]
+__all__ = ["DiffusionModel", "Conditioning"]

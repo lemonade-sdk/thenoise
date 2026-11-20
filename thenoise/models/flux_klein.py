@@ -18,6 +18,7 @@ import torch
 from thenoise.dit.flux2.models import Flux2Params
 from thenoise.dit.flux2.sampling import get_schedule, prc_img, prc_txt, scatter_ids
 from thenoise.dit.flux2.utils import (
+    SIGNATURE as FLUX2_SIGNATURE,
     detect_klein_params,
     load_flux2_dit,
     load_qwen3_embedder,
@@ -28,7 +29,6 @@ from thenoise.models.base import (
     LATENT_REF_METHODS,
     Conditioning,
     Step,
-    normalize_keys,
 )
 from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
@@ -71,24 +71,17 @@ class FluxKleinModel(PixelModel):
         key = key.replace(".to_out.0", ".proj")
         return key
 
-    @staticmethod
-    def detect(f) -> bool:
-        """True if this handle is a Flux.2 DiT: its double/single stream modulations."""
-        keys = list(normalize_keys(f.keys()))
-        has_img = any(k.startswith("double_stream_modulation_img.") for k in keys)
-        has_txt = any(k.startswith("double_stream_modulation_txt.") for k in keys)
-        has_single = any(k.startswith("single_stream_modulation.") for k in keys)
-        return has_img and has_txt and has_single
+    SIGNATURE = FLUX2_SIGNATURE
 
     def __init__(self, *, config: ModelConfig):
         super().__init__(config=config)
 
         # Klein variant (4B / 9B) from the DiT checkpoint; selects the Qwen3 size.
-        self.params: Flux2Params = detect_klein_params(config.dit_path)
+        self.params: Flux2Params = detect_klein_params(self.header)
         self.is_8b = self.params.context_in_dim == 12288
-        logger.info("Loading Flux Klein DiT (%s) from %s", self.variant_label, config.dit_path)
-        self.dit = load_flux2_dit(config.dit_path, self.params,
-                                  device=self._load_target(config.dit_path),
+        logger.info("Loading Flux Klein DiT (%s) from %s", self.variant_label, self.dit_path)
+        self.dit = load_flux2_dit(self.header, self.params,
+                                  device=self._load_target(self.dit_path),
                                   dtype=config.dtype)
 
         logger.info("Loading Flux Klein text encoder (Qwen3-%s) from %s", self.text_label, config.text_encoder_path)

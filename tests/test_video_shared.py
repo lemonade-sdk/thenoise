@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from conftest import StubVideo, wan_adapter
+from conftest import StubVideo, header_of, wan_adapter
 from thenoise.models.config import ModelConfig
 from thenoise.models.video_base import Segment, VideoModel
 from thenoise.models.wan_video import VARIANTS, Wan22Model
@@ -38,11 +38,10 @@ def test_video_base_is_usable_without_wan(tmp_path):
         def _clear_weights(self):
             self.extra_component = None
 
-    # No checkpoint exists here, and none is read: the markers a header could carry
-    # are absent, which is the same answer an unreadable path gives.
     model = AnotherVideo(config=ModelConfig(
         dit_paths={"": str(tmp_path / "dit")}, vae_path=str(tmp_path / "vae"),
-        text_encoder_path=str(tmp_path / "text"), device="cpu", offload_device="cpu"))
+        text_encoder_path=str(tmp_path / "text"), device="cpu", offload_device="cpu",
+        headers={"": header_of(["weight"])}))
     model.extra_component = object()
     resolved = model.resolve_video(VideoSpec(prompt="another model", width=800))
     assert (resolved.width, resolved.height, resolved.steps, resolved.frame_count) == (
@@ -104,7 +103,8 @@ def test_every_variant_answers_the_video_vocabulary():
 
 def _stub_config(tmp_path):
     return ModelConfig(dit_paths={"": str(tmp_path / "dit")}, vae_path="vae",
-                       text_encoder_path="te", device="cpu", offload_device="cpu")
+                       text_encoder_path="te", device="cpu", offload_device="cpu",
+                       headers={"": header_of(["weight"])})
 
 
 def test_a_model_with_two_segments_gets_one_progress_clock(tmp_path, monkeypatch):

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from conftest import CATALOG_IDS, MODEL_KEYSETS, FakeHandle, write_key_checkpoint
+from conftest import CATALOG_IDS, MODEL_KEYSETS, header_of, write_key_checkpoint
 from thenoise.models import MODEL_CATALOG, resolve
 
 
@@ -19,7 +19,7 @@ def test_detection_matrix(model, keyset):
     the prefix stripping and the Anima false-positive guard stay covered.
     """
     owner, keys = MODEL_KEYSETS[keyset]
-    assert model.detect(FakeHandle(keys)) is (model is owner)
+    assert model.detect(header_of(keys)) is (model is owner)
 
 
 @pytest.mark.parametrize("keyset", ["zimage", "unknown"])
@@ -31,4 +31,4 @@ def test_resolve(keyset, tmp_path):
         with pytest.raises(ValueError, match="could not determine model type"):
             resolve(path)
     else:
-        assert resolve(path) is owner
+        assert resolve(path).model_cls is owner

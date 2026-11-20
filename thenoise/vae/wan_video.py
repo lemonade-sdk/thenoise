@@ -14,7 +14,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from thenoise.utils.loader import load_dit
-from thenoise.utils.safetensors import MemoryEfficientSafeOpen, unwrap_key
+from thenoise.utils.safetensors import read_header
 from thenoise.utils.wan_weights import wan_vae_key, wan_vae21_key
 from thenoise.vae.wan22 import (
     COMPUTE_DTYPE as WAN22_COMPUTE_DTYPE,
@@ -414,13 +414,11 @@ def detect_latent_width(vae_path: str) -> int:
     ComfyUI (``head.2``) and diffusers (``conv_out``) spellings are read, with or
     without the ``vae.`` wrapper, because a release ships both.
     """
-    with MemoryEfficientSafeOpen(vae_path) as f:
-        header = {k[len("vae."):] if k.startswith("vae.") else unwrap_key(k): v
-                  for k, v in f.header.items() if k != "__metadata__"}
-        for key in ("encoder.head.2.weight", "encoder.conv_out.weight"):
-            meta = header.get(key)
-            if meta is not None:
-                return meta["shape"][0] // 2
+    header = read_header(vae_path, key_map=lambda key: key.removeprefix("vae."))
+    for key in ("encoder.head.2.weight", "encoder.conv_out.weight"):
+        shape = header.shapes.get(key)
+        if shape is not None:
+            return shape[0] // 2
     raise ValueError(f"{vae_path}: no Wan VAE encoder output conv in the header")
 
 

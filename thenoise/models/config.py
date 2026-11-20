@@ -8,10 +8,11 @@ the denoise-stage geometry.
 from __future__ import annotations
 
 import torch
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Optional, Union
 
 from thenoise.utils.lora_roles import LoraSpecs
+from thenoise.utils.safetensors import Header, read_header
 
 from thenoise.postprocess.options import PostprocessOptions, options_from
 from thenoise.utils.options import declared_knobs
@@ -27,6 +28,10 @@ class ModelConfig:
     ``dit_paths`` holds the DiT checkpoint(s) by role: ``""`` is the primary one every
     model takes, and any further role (``"low"`` for a two-expert model) belongs to the
     adapter that asked for it.
+
+    ``headers`` is those same files already parsed, which is what the runtime does to
+    pick the model: handing them down is what keeps one checkpoint from being opened
+    again by every layer that wants to know its geometry.
     """
 
     dit_paths: dict[str, str]
@@ -36,11 +41,25 @@ class ModelConfig:
     device: str = "cuda"
     dtype: torch.dtype = torch.bfloat16
     lora_dir: Optional[str] = None
+    #: Headers handed in already parsed, by role. The runtime passes the one it read to
+    #: pick the model; anything a role has here is never opened again.
+    headers: Optional[dict[str, Header]] = None
+    _read: dict = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def dit_path(self) -> str:
         """The primary DiT."""
         return self.dit_paths[""]
+
+    def header(self, role: str = "") -> Header:
+        """Role ``role``'s parsed header, read once however many parts ask for it."""
+        if role not in self._read:
+            self._read[role] = (self.headers or {}).get(role) or read_header(self.dit_paths[role])
+        return self._read[role]
+
+    def all_headers(self) -> dict[str, Header]:
+        """Every DiT role's header, keyed as ``dit_paths`` is."""
+        return {role: self.header(role) for role in self.dit_paths}
 
 
 @dataclass

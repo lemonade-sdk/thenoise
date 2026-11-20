@@ -5,8 +5,6 @@ stays FP32; the output head is one head per interval of the checkpoint's sigma g
 """
 from __future__ import annotations
 
-import json
-import logging
 import math
 from dataclasses import dataclass
 from typing import NamedTuple, Optional, Sequence, Tuple
@@ -14,20 +12,14 @@ from typing import NamedTuple, Optional, Sequence, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from accelerate import init_empty_weights
-
 from thenoise.dit.h3_image.layout import MODALITIES, PATCH_SIZE, Layout, pad_to_patch
 from thenoise.dit.kvcache import KVBuffers, KVCache, attend, cache_mode
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.dynamo import mark_token_axis
 from thenoise.utils.fp32_linear import Fp32Linear
-from thenoise.utils.loader import load_dit
-from thenoise.utils.qk_norm import QKNorm, qk_norm_key_map
+from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.rope import RopeCache, apply_rope_split_half, split_half_rope_axes
-from thenoise.utils.safetensors import MemoryEfficientSafeOpen, unwrap_key
-
-logger = logging.getLogger(__name__)
 
 #: A reference row's timestep label; its noise is mixed to match that label.
 COND_TIMESTEP = 0.999
@@ -477,102 +469,8 @@ class H3ImageDiT(nn.Module):
         return -out[:, :, :orig_h, :orig_w].to(latent.dtype)
 
 
-def detect_params(dit_path: str) -> H3ImageParams:
-    """Read the architecture, the head-bank rows and its sigma grid out of a file.
-
-    The grid is only in the file's ``config`` metadata and the head count is a shape, and
-    the two must agree: a bank indexed by a grid it does not span predicts a
-    plausible-but-wrong velocity rather than failing.
-    """
-    with MemoryEfficientSafeOpen(dit_path) as f:
-        shapes = {unwrap_key(k): tuple(f.header[k]["shape"]) for k in f.keys()}
-        metadata = f.metadata()
-
-    video_out = shapes["final_layer.video_out.weight"]
-    patch_proj = shapes["video_patch_proj.weight"]
-    adaln_t_table = shapes["adaln_t_table"]
-    qkv = shapes["blocks.0.attn.qkv_proj.weight"]
-    head_dim = shapes["blocks.0.attn.q_norm.weight"][0]
-
-    config = _transformer_config(metadata)
-    pdd_steps = video_out[0] // patch_proj[1]
-    pdd_sigmas = tuple(config.get("pdd_sigmas", (1.0, 0.0)))
-    if len(pdd_sigmas) != pdd_steps + 1:
-        raise ValueError(
-            f"{dit_path}: the head bank is {pdd_steps} rows but the distilled sigma "
-            f"grid has {len(pdd_sigmas)} points ({pdd_sigmas}); expected grid length "
-            f"{pdd_steps + 1}"
-        )
-
-    return H3ImageParams(
-        hidden_size=patch_proj[0],
-        num_layers=_block_count(shapes),
-        token_refiner_layers=_block_count(shapes, "token_refiner.blocks."),
-        num_heads=qkv[0] // (3 * head_dim),
-        head_dim=head_dim,
-        ffn_hidden_size=shapes["blocks.0.mlp.fc2.weight"][1],
-        latents_dim=patch_proj[1] // math.prod(PATCH_SIZE),
-        text_dim=shapes["condition_proj.weight"][1],
-        rope_inv_freq=shapes["rope.inv_freq"][0],
-        adaln_grid=adaln_t_table[0],
-        adaln_dim=adaln_t_table[1],
-        pdd_steps=pdd_steps,
-        pdd_sigmas=pdd_sigmas,
-    )
-
-
-def _transformer_config(metadata: dict) -> dict:
-    """The ``config`` metadata blob's ``transformer`` section, empty when absent."""
-    raw = metadata.get("config")
-    if not raw:
-        return {}
-    try:
-        return json.loads(raw).get("transformer", {})
-    except (TypeError, ValueError):
-        logger.warning("Could not parse the checkpoint's transformer config metadata")
-        return {}
-
-
-def _block_count(shapes: dict, prefix: str = "blocks.") -> int:
-    """How many ``<prefix><i>.`` blocks a key-set contains."""
-    indices = []
-    for key in shapes:
-        if not key.startswith(prefix):
-            continue
-        index = key[len(prefix):].split(".", 1)[0]
-        if index.isdigit():
-            indices.append(int(index))
-    return max(indices) + 1 if indices else 0
-
-
-def load_h3_image_dit(
-    dit_path: str,
-    params: H3ImageParams,
-    device,
-    dtype: torch.dtype,
-) -> H3ImageDiT:
-    """Build the DiT on meta from the checkpoint's own geometry, then load its weights.
-
-    The file is read with its own dtypes (``dtype=None``) and only then moved to
-    ``dtype``: that move is where the FP32 islands pin themselves and quantized weights
-    stay quantized, where casting the state dict would round the modulation factors.
-    ``attn.q_norm`` / ``attn.k_norm`` are remapped by ``qk_norm_key_map``.
-    """
-    with init_empty_weights():
-        model = H3ImageDiT(params, compute_dtype=dtype)
-    load_dit(model, dit_path, device=device, dtype=None, key_map=qk_norm_key_map)
-    model.to(dtype=dtype)
-    logger.info(
-        "Loaded H3-Image DiT (%d layers, %dx%d heads, %d-step PDD head bank) from %s",
-        params.num_layers, params.num_heads, params.head_dim, params.pdd_steps, dit_path,
-    )
-    return model
-
-
 __all__ = [
     "COND_TIMESTEP",
     "H3ImageDiT",
     "H3ImageParams",
-    "detect_params",
-    "load_h3_image_dit",
 ]

@@ -5,7 +5,7 @@ from torch import nn
 from PIL import Image
 
 import thenoise.models as model_catalog
-from conftest import StubLatentUpscaler, StubModel
+from conftest import StubLatentUpscaler, StubModel, resolves_to
 from thenoise.inference import freeze, inference, inference_lock
 from thenoise.memory import MemoryManager
 from thenoise.models.config import GenerateRequest
@@ -174,7 +174,7 @@ def test_model_load_runs_in_inference_mode(monkeypatch, fake_model_cls, tmp_path
 
     cls = fake_model_cls(name="fake", __init__=__init__)
     monkeypatch.setattr(model_catalog, "MODEL_CATALOG", [cls])
-    monkeypatch.setattr(model_catalog, "resolve", lambda path: cls)
+    monkeypatch.setattr(model_catalog, "resolve", resolves_to(cls))
 
     runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
     runtime.load(

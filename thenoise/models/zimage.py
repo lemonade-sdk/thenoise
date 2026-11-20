@@ -20,13 +20,13 @@ from thenoise.utils.text_encoder import find_tokenizer_dir
 from thenoise.models.base import (
     Conditioning,
     Step,
-    normalize_keys,
 )
 from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.lora import FUSE_QKV
 from thenoise.utils.math import round_up
+from thenoise.utils.safetensors import Header
 from thenoise.vae import load_flux_vae
 
 logger = logging.getLogger(__name__)
@@ -52,12 +52,11 @@ class ZImageModel(PixelModel):
         ``out``."""
         return key.replace(".to_out.0", ".out")
 
-    @staticmethod
-    def detect(f) -> bool:
-        """True if this handle is the Z-Image S3-DiT: the family signature plus its
+    @classmethod
+    def detect(cls, header: Header) -> bool:
+        """True if this file is the Z-Image S3-DiT: the family signature plus its
         learned padding."""
-        keys = list(normalize_keys(f.keys()))
-        return is_s3dit(keys) and has_learned_pad_tokens(keys)
+        return is_s3dit(header.names) and has_learned_pad_tokens(header.names)
 
     def __init__(
         self,
@@ -66,9 +65,8 @@ class ZImageModel(PixelModel):
     ):
         super().__init__(config=config)
 
-        logger.info("Loading Z-Image DiT from %s", config.dit_path)
-        self.dit = load_zimage_dit(config.dit_path,
-                                   device=self._load_target(config.dit_path),
+        self.dit = load_zimage_dit(self.header,
+                                   device=self._load_target(self.dit_path),
                                    dtype=config.dtype)
 
         logger.info("Loading Z-Image text encoder from %s", config.text_encoder_path)

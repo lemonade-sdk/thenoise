@@ -29,17 +29,19 @@ from thenoise.dit.qwen_image21.encoder import (
     QwenImage21TextEncoder,
     load_qwen_image21_text_encoder,
 )
-from thenoise.dit.qwen_image21.models import QwenImage21Sequence
-from thenoise.dit.qwen_image21.utils import is_qwen_image21_key
-from thenoise.dit.qwen_image21.utils import load_qwen_image21_dit
+from thenoise.dit.qwen_image21.models import QwenImage21Params, QwenImage21Sequence
+from thenoise.dit.qwen_image21.utils import (
+    QWEN_IMAGE21_SIGNATURE,
+    detect_params,
+    load_qwen_image21_dit,
+)
 from thenoise.models.base import (
     LATENT_REF_METHODS,
     VISION_REF_METHOD,
     Conditioning,
     Step,
-    normalize_keys,
 )
-from thenoise.models.pixel_base import PixelModel
+from thenoise.models.pixel_base import PixelModel, expect_latent_width
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, Qwen21TranscodeUpscaler
 from thenoise.utils.image_tensor import ReferenceSizing
@@ -87,22 +89,21 @@ class QwenImage21Model(PixelModel):
     # 32 px: a reference latent replaces whole 32x32 vision tokens, as in ``resolve_size``.
     REFERENCE_SIZING = ReferenceSizing(align=32)
 
-    @staticmethod
-    def detect(f) -> bool:
-        """True if this handle is a Qwen-Image 2.1 DiT: its per-run ``modulation``
-        and zero-centred ``txt_in.text_norm``."""
-        keys = set(normalize_keys(f.keys()))
-        return is_qwen_image21_key(keys)
+    #: Its per-run ``modulation`` and zero-centred ``txt_in.text_norm``, over the
+    #: family's projections.
+    SIGNATURE = QWEN_IMAGE21_SIGNATURE
 
     def __init__(self, *, config: ModelConfig):
         super().__init__(config=config)
 
+        self.params: QwenImage21Params = detect_params(self.header)
         self.dit = load_qwen_image21_dit(
-            config.dit_path, device=self._load_target(config.dit_path), dtype=config.dtype
+            self.header, self.params,
+            device=self._load_target(self.dit_path), dtype=config.dtype
         )
 
         # A fused-MLP checkpoint needs a LoRA's split SwiGLU names fused onto gate_up.
-        self.lora_fusions = FUSE_GATE_UP if self.dit.params.fused_mlp else {}
+        self.lora_fusions = FUSE_GATE_UP if self.params.fused_mlp else {}
 
         # Per-run state, filled in by ``prepare_latent``.
         self._seqs: dict[str, QwenImage21Sequence] = {}
@@ -113,11 +114,7 @@ class QwenImage21Model(PixelModel):
         )
 
         self.vae = load_wan22_vae(self.vae_path, device=self._load_target(self.vae_path))
-        if self.vae.z_dim != self.dit.in_channels:
-            raise ValueError(
-                f"the VAE's {self.vae.z_dim}ch latent does not feed this DiT's "
-                f"{self.dit.in_channels}ch input"
-            )
+        expect_latent_width(self.params.in_channels, self.vae.z_dim)
 
         self.memory.register("dit", self.dit)
         self.memory.register("text_encoder", self.text_encoder)

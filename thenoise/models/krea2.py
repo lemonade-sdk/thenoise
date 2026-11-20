@@ -13,13 +13,13 @@ from thenoise.models.base import (
     VISION_REF_METHOD,
     Conditioning,
     Step,
-    normalize_keys,
 )
 from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.image_tensor import ReferenceSizing
 from thenoise.utils.math import round_up
+from thenoise.utils.safetensors import Signature
 from thenoise.vae import load_qwen_vae
 
 logger = logging.getLogger(__name__)
@@ -53,13 +53,8 @@ class Krea2Model(PixelModel):
     DEFAULT_MINRES = 256
     DEFAULT_MAXRES = 1280
 
-    @staticmethod
-    def detect(f) -> bool:
-        """True if this handle is the Krea2 DiT: ``txtfusion.`` + ``txtmlp.`` blocks."""
-        keys = list(normalize_keys(f.keys()))
-        has_txtfusion = any(k.startswith("txtfusion.") for k in keys)
-        has_txtmlp = any(k.startswith("txtmlp.") for k in keys)
-        return has_txtfusion and has_txtmlp
+    #: The prompt's own two streams, which nothing else here has.
+    SIGNATURE = Signature("Krea2 DiT", prefixes=("txtfusion.", "txtmlp."))
 
     def __init__(
         self,
@@ -68,10 +63,9 @@ class Krea2Model(PixelModel):
     ):
         super().__init__(config=config)
 
-        logger.info("Loading Krea 2 DiT from %s", config.dit_path)
         self.dit = krea2_utils.load_krea2_dit(
-            config.dit_path,
-            device=self._load_target(config.dit_path),
+            self.header,
+            device=self._load_target(self.dit_path),
             dtype=config.dtype,
         )
 

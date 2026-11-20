@@ -33,8 +33,10 @@ def test_every_catalog_medium_is_served():
 
 def test_the_engine_contract_asks_for_nothing_that_draws_pixels():
     """A VAE, a latent upscaler and a size grid belong to ``PixelModel``, not the engine."""
+    # `detect` is not among these: a model states its claim in `SIGNATURE`, and only
+    # writes the method when the claim is not a plain name test.
     assert DiffusionModel.__abstractmethods__ == frozenset(
-        {"detect", "encode_prompt", "init_latents", "schedule", "denoise_step"})
+        {"encode_prompt", "init_latents", "schedule", "denoise_step"})
 
 
 def test_an_unregistered_medium_is_refused_by_name():

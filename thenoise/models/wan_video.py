@@ -12,13 +12,20 @@ import torch
 
 from thenoise.dit.wan_video import sampling as wan_sampling
 from thenoise.dit.wan_video.checkpoint import load_wan_native_transformer
-from thenoise.dit.wan_video.model import CHANNELS, Wan22Params, detect_params
+from thenoise.dit.wan_video.model import (
+    CHANNELS,
+    SIGNATURE as WAN_SIGNATURE,
+    Wan22Params,
+    detect_params,
+)
 from thenoise.models.base import Conditioning
 from thenoise.models.config import EncodePromptArgs
+from thenoise.models.pixel_base import expect_latent_width
 from thenoise.models.video_base import Segment, VideoModel
 from thenoise.samplers import Step, sigma_steps
 from thenoise.text_encoders.wan_video import load_wan_text_encoder
 from thenoise.utils.image_tensor import cover_crop
+from thenoise.utils.safetensors import Header
 from thenoise.utils.wan_weights import wan_dit_key
 from thenoise.vae.wan_video import detect_latent_width, load_wan_video_vae, TEMPORAL_COMPRESSION
 from thenoise.video.spec import ResolvedVideo, VideoSpec
@@ -72,6 +79,10 @@ class Variant:
         return self.ref_method == "concat_channels"
 
 
+#: The channels of a concatenated reference that say which latent frames are given.
+REFERENCE_MASK_CHANNELS = 4
+
+
 #: One entry per released transformer, keyed by the variant name `CHANNELS` gives the
 #: shape `detect_params` reads. `DEFAULT_PREFS` covers what the variants share; these
 #: cover what a variant decides.
@@ -112,8 +123,8 @@ def _given_mask(reference: torch.Tensor, ends: int) -> torch.Tensor:
     """The 4 channels naming which latent frames of ``reference`` are given. Upstream's
     layout: both ends given marks all four channels of the first latent frame, and of the
     last only the sub-channel its final pixel frame lands in."""
-    mask = torch.zeros((1, 4, *reference.shape[2:]), device=reference.device,
-                       dtype=reference.dtype)
+    mask = torch.zeros((1, REFERENCE_MASK_CHANNELS, *reference.shape[2:]),
+                       device=reference.device, dtype=reference.dtype)
     mask[:, :, 0] = 1.0
     if ends > 1:
         mask[:, 3, -1] = 1.0
@@ -147,32 +158,26 @@ class Wan22Model(VideoModel):
             return self.variant.ref_method
         return super().pref(name, request_value)
 
-    @staticmethod
-    def detect(f) -> bool:
-        """Any Wan 2.2 transformer: which variant it is comes from its shapes, later."""
-        from thenoise.utils.safetensors import unwrap_key
-        keys = {unwrap_key(k) for k in f.keys()}
-        return {"patch_embedding.weight", "blocks.0.self_attn.q.weight",
-                "text_embedding.0.weight"}.issubset(keys)
+    #: Any Wan 2.2 transformer: which variant it is comes from its shapes, later.
+    SIGNATURE = WAN_SIGNATURE
 
     @classmethod
-    def validate_paths(cls, dit_paths: dict[str, str]) -> None:
+    def validate_paths(cls, checkpoints: dict[str, Header]) -> None:
         """A two-expert model is two files, so its second one is not optional."""
-        experts = variant_for(detect_params(dit_paths[""])).experts
+        cls.require_same_model(checkpoints)
+        primary = checkpoints[""]
+        experts = variant_for(detect_params(primary)).experts
         if experts is None:
-            if len(dit_paths) > 1:
+            if len(checkpoints) > 1:
                 raise ValueError(
                     "--dit-low carries the low-noise half of a two-expert transformer; "
-                    f"{dit_paths['']} has one expert")
+                    f"{primary.path} has one expert")
             return
-        if "low" not in dit_paths:
-            raise ValueError(f"{dit_paths['']} is one expert of a two-expert "
+        if "low" not in checkpoints:
+            raise ValueError(f"{primary.path} is one expert of a two-expert "
                              "transformer: give the other with --dit-low")
-        low = Path(dit_paths["low"]).resolve()
-        if low == Path(dit_paths[""]).resolve():
+        if Path(checkpoints["low"].path).resolve() == Path(primary.path).resolve():
             raise ValueError("--dit and --dit-low must be different checkpoints")
-        if not low.is_file():
-            raise FileNotFoundError(f"low-noise DiT checkpoint not found: {low}")
 
     def _lora_key_map(self, key: str) -> str:
         """Map native ComfyUI Wan LoRA projection names to our DiT module paths."""
@@ -198,7 +203,7 @@ class Wan22Model(VideoModel):
 
     def __init__(self, *, config):
         super().__init__(config=config)
-        self.params: Wan22Params = detect_params(self.dit_path)
+        self.params: Wan22Params = detect_params(self.header)
         self.variant = variant_for(self.params)
         # `i2v` and `flf2v` are the capabilities a variant, rather than the model, decides.
         self.CAPABILITIES = {**self.CAPABILITIES,
@@ -209,23 +214,17 @@ class Wan22Model(VideoModel):
         # only thing that crosses between them and the normalization table is keyed by
         # its width, so a mismatched `--vae` is refused here rather than mid-run.
         codec_width = detect_latent_width(self.vae_path)
-        transformer_width = self.params.in_channels
         # A transformer whose reference is concatenated is wider than the codec by the
         # mask and the reference latent itself: noise + 4 + reference.
-        if transformer_width not in (codec_width, 2 * codec_width + 4):
-            raise ValueError(
-                f"--vae is a {codec_width}-channel codec, and {self.dit_path} denoises a "
-                f"{transformer_width}-channel latent. The two pair only at "
-                f"{codec_width} channels, or at {2 * codec_width + 4} for a reference "
-                "concatenated onto the noise: these checkpoints are from different "
-                "Wan releases")
+        expect_latent_width(self.params.in_channels, codec_width,
+                            also=(2 * codec_width + REFERENCE_MASK_CHANNELS,))
 
         self._clip: ClipReference | None = None
-        self.dit = load_wan_native_transformer(self.dit_path, self._load_target(self.dit_path))
+        self.dit = load_wan_native_transformer(self.header, self._load_target(self.dit_path))
         self.low_dit = None
         if self.variant.experts is not None:
-            low_path = self.dit_paths["low"]
-            self.low_dit = load_wan_native_transformer(low_path, self._load_target(low_path))
+            low = config.header("low")
+            self.low_dit = load_wan_native_transformer(low, self._load_target(low.path))
         self.text_encoder, self.tokenizer = load_wan_text_encoder(
             self.text_encoder_path, self._load_target(self.text_encoder_path))
         self.vae = load_wan_video_vae(self.vae_path, self._load_target(self.vae_path))

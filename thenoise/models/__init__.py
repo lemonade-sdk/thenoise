@@ -1,6 +1,10 @@
 """Checkpoint-detected model catalog for image and video models."""
 from __future__ import annotations
 
+from typing import Union
+
+from thenoise.utils.safetensors import Header, as_header
+
 from .base import DiffusionModel
 from .video_base import VideoModel
 from .anima import AnimaModel
@@ -34,16 +38,19 @@ MODEL_CATALOG: list[type] = [
 ]
 
 
-def resolve(dit_path: str) -> type:
-    """Determine the model class from a DiT checkpoint."""
-    from safetensors import safe_open
+def resolve(checkpoint: Union[str, Header]) -> Header:
+    """The header of a DiT checkpoint, with the catalog entry that claimed it attached.
 
-    with safe_open(dit_path, framework="pt") as f:
-        for cls in MODEL_CATALOG:
-            if cls.detect(f):
-                return cls
+    The header is what every later reader wants — geometry, markers, the weight load —
+    so the lookup that had to parse it hands it on instead of making them parse it again.
+    """
+    header = as_header(checkpoint)
+    for cls in MODEL_CATALOG:
+        if cls.detect(header):
+            header.model_cls = cls
+            return header
     names = ", ".join(cls.name for cls in MODEL_CATALOG)
-    raise ValueError(f"could not determine model type from {dit_path} (known: {names})")
+    raise ValueError(f"could not determine model type from {header.path} (known: {names})")
 
 
 __all__ = ["MODEL_CATALOG", "DiffusionModel", "VideoModel", "resolve"]

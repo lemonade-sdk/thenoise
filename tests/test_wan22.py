@@ -13,10 +13,11 @@ from pathlib import Path
 import pytest
 import sentencepiece as spm
 import torch
-from conftest import (stub_wan_components, video_pipeline, wan_adapter, wan_raw_key,
-                      wan_tiny_params, write_wan_dit, write_wan_vae)
+from conftest import (resolves_to, stub_wan_components, video_pipeline, wan_adapter,
+                      wan_raw_key, wan_tiny_params, write_wan_dit, write_wan_vae)
 from PIL import Image
 from safetensors.torch import save_file
+from thenoise.utils.safetensors import read_header
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.dit.wan_video.checkpoint import load_wan_native_transformer
@@ -323,9 +324,10 @@ def test_the_file_it_is_given_is_the_file_it_reads(tmp_path):
 
 
 def test_checkpoint_rejects_missing_and_wrong_shapes(tmp_path):
-    # Not patch_embedding: a structural key is refused earlier, by detect_params.
+    # A structural key missing is a foreign file, refused by the signature before any
+    # module is built; a key of the wrong shape is a half-built model, refused by the load.
     _write_dit(tmp_path, missing="blocks.0.self_attn.q.weight")
-    with pytest.raises(RuntimeError, match="Missing key"):
+    with pytest.raises(ValueError, match=r"does not match the Wan 2\.2 transformer signature"):
         load_wan_native_transformer(str(_checkpoint(tmp_path)), "cpu")
     _write_dit(tmp_path, wrong_shape="blocks.0.self_attn.q.weight")
     with pytest.raises(RuntimeError, match="size mismatch"):
@@ -1123,7 +1125,7 @@ def test_one_adapter_claims_every_transformer(tmp_path):
     """Detection stops at "a Wan 2.2 DiT": the variant is a shape read afterwards."""
     for channels, name in ((48, "ti2v_5b"), (16, "t2v_14b"), (36, "i2v_14b")):
         path = write_wan_dit(tmp_path / f"dit{channels}.safetensors", channels=channels)
-        assert resolve(path) is Wan22Model
+        assert resolve(path).model_cls is Wan22Model
         assert variant_for(detect_params(path)) is VARIANTS[name]
 
 
@@ -1134,15 +1136,13 @@ def test_the_model_name_is_one_machine_string():
 
 
 def test_a_two_expert_transformer_demands_its_second_file(tmp_path):
-    high = write_wan_dit(tmp_path / "high.safetensors", channels=16)
+    high = read_header(write_wan_dit(tmp_path / "high.safetensors", channels=16))
     with pytest.raises(ValueError, match="--dit-low"):
         Wan22Model.validate_paths({"": high})
-    with pytest.raises(FileNotFoundError, match="low-noise"):
-        Wan22Model.validate_paths({"": high, "low": str(tmp_path / "gone.safetensors")})
     with pytest.raises(ValueError, match="different checkpoints"):
         Wan22Model.validate_paths({"": high, "low": high})
-    Wan22Model.validate_paths(
-        {"": high, "low": write_wan_dit(tmp_path / "low.safetensors", channels=16)})
+    Wan22Model.validate_paths({"": high, "low": read_header(
+        write_wan_dit(tmp_path / "low.safetensors", channels=16))})
 
 
 def test_a_codec_from_the_other_release_is_refused_from_the_headers(tmp_path):
@@ -1154,15 +1154,15 @@ def test_a_codec_from_the_other_release_is_refused_from_the_headers(tmp_path):
         dit_paths={"": write_wan_dit(tmp_path / "dit.safetensors", channels=48)},
         vae_path=str(write_wan_vae(tmp_path / "vae.safetensors", channels=16)),
         text_encoder_path="", device="cpu", offload_device="cpu")
-    with pytest.raises(ValueError, match="different Wan releases"):
+    with pytest.raises(ValueError, match=r"cannot read: it denoises a 48-channel one"):
         Wan22Model(config=config)
 
 
 def test_a_single_expert_transformer_refuses_a_second_file(tmp_path):
     with pytest.raises(ValueError, match="one expert"):
         Wan22Model.validate_paths({
-            "": write_wan_dit(tmp_path / "a.safetensors"),
-            "low": write_wan_dit(tmp_path / "b.safetensors"),
+            "": read_header(write_wan_dit(tmp_path / "a.safetensors")),
+            "low": read_header(write_wan_dit(tmp_path / "b.safetensors")),
         })
 
 
@@ -1180,14 +1180,14 @@ def test_runtime_maps_the_cli_flags_into_roles(tmp_path, monkeypatch):
             self.config = config
 
         @classmethod
-        def validate_paths(cls, dit_paths):
-            cls.validated.append(dict(dit_paths))
+        def validate_paths(cls, checkpoints):
+            cls.validated.append({role: h.path for role, h in checkpoints.items()})
 
-    monkeypatch.setattr(catalog, "resolve", lambda path: StubVideo)
+    monkeypatch.setattr(catalog, "resolve", resolves_to(StubVideo))
     rt = Runtime(Settings(device="cpu", offload_device="cpu"))
-    high, low = str(tmp_path / "high.safetensors"), str(tmp_path / "low.safetensors")
-    Path(high).write_bytes(b"high")
-    Path(low).write_bytes(b"low")
+    # Real files, because the runtime reads each one's header to identify it.
+    high = write_wan_dit(tmp_path / "high.safetensors")
+    low = write_wan_dit(tmp_path / "low.safetensors")
     rt.load(ModelPaths(high, "vae", "te", dit_low_path=low))
     assert StubVideo.validated == [{"": high, "low": low}]
     assert rt.model.config.dit_paths == {"": high, "low": low}
@@ -1364,6 +1364,7 @@ def test_a_36_channel_transformer_is_refused_the_5b_codec(tmp_path):
                                        channels=codec_channels)),
             text_encoder_path="", device="cpu", offload_device="cpu")
 
+
     for codec, ok in ((16, True), (48, False)):
         vae, text = stub_wan_components(codec)
         with patch("thenoise.models.wan_video.load_wan_video_vae", vae), \
@@ -1371,7 +1372,7 @@ def test_a_36_channel_transformer_is_refused_the_5b_codec(tmp_path):
             if ok:
                 assert Wan22Model(config=config(codec)).variant is VARIANTS["i2v_14b"]
             else:
-                with pytest.raises(ValueError, match="different Wan releases"):
+                with pytest.raises(ValueError, match=r"cannot read: it denoises a 36-channel one"):
                     Wan22Model(config=config(codec))
 
 

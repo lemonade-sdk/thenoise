@@ -175,13 +175,21 @@ wheels do not vendor (`libgomp1`, `libatomic1`).
 PRs are welcome - especially new model support. A model addition typically
 touches:
 
-1. **`thenoise/models/<name>.py`** — the adapter: `detect()` (checkpoint
-   fingerprint), `DEFAULT_PREFS`, `CAPABILITIES`, sampling loop. Derive it from
+1. **`thenoise/models/<name>.py`** — the adapter: `SIGNATURE` (the tensor names that
+   make a checkpoint this model's), `DEFAULT_PREFS`, `CAPABILITIES`, sampling loop.
+   Derive it from
    `PixelModel` when the model renders images or clips; a medium that renders
    neither derives from `DiffusionModel` and says which medium it is
    (`MEDIUM`), along with any checkpoint the CLI should stop requiring
    (`REQUIRED_COMPONENTS`)
-2. **`thenoise/dit/<name>/`** — model weights layout, loading, tokenizer configs
+2. **`thenoise/dit/<name>/`** — model weights layout, loading, tokenizer configs.
+   Put the `Signature` next to the loader that reads the geometry, and start that
+   read with `header.require(SIGNATURE)`: the catalog and the loader then agree on
+   one claim, so a file cannot be selected by a loader that cannot build it.
+   Nothing below `dit/` opens a checkpoint header itself — it is handed a
+   `Header`, parsed once per checkpoint for the whole load (`read_header` is the
+   only place a file is opened), and renames it with `relabel` when the module
+   tree spells a leaf differently.
 3. **`scripts/download.py`** — a `ModelSpec` entry + artifact registry for the
    Hugging Face files
 4. **`docs/models/<name>.md`** — presentation, specs, examples, download and

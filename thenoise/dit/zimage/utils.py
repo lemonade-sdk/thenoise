@@ -9,12 +9,12 @@ import os
 from typing import Optional, Union
 
 import torch
-from accelerate import init_empty_weights
 
 from thenoise.dit.lumina.keys import lumina_key_map
 from thenoise.dit.zimage.models import ZImageTransformer2DModel
-from thenoise.utils.loader import load_dit
+from thenoise.utils.loader import build_dit
 from thenoise.utils.qwen_configs import QWEN3_4B_CONFIG
+from thenoise.utils.safetensors import Header
 from thenoise.utils.text_encoder import (
     QWEN25_TOKENIZER_CONFIG_DIR,
     load_qwen3_model,
@@ -41,23 +41,24 @@ ZIMAGE_DIT_CONFIG = dict(
 
 
 def load_zimage_dit(
-    dit_path: str,
+    checkpoint: Union[str, Header],
     device: Union[str, torch.device],
     dtype: torch.dtype,
     config: Optional[dict] = None,
 ) -> ZImageTransformer2DModel:
     """Build the Z-Image S3-DiT on meta and load weights."""
-    device = torch.device(device)
     cfg = dict(ZIMAGE_DIT_CONFIG)
     if config:
         cfg.update(config)
 
-    logger.info(f"Loading Z-Image DiT weights from {dit_path}")
-    with init_empty_weights():
-        dit = ZImageTransformer2DModel(**cfg)
-
     # Z-Image ships the fused attention layout already; the map only renames QK norms.
-    return load_dit(dit, dit_path, device=device, dtype=dtype, key_map=lumina_key_map)
+    return build_dit(
+        lambda: ZImageTransformer2DModel(**cfg),
+        checkpoint,
+        device=device,
+        dtype=dtype,
+        key_map=lumina_key_map,
+    )
 
 
 def load_zimage_text_encoder(

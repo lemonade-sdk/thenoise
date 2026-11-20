@@ -6,7 +6,7 @@ import io
 import pytest
 from PIL import Image
 
-from conftest import StubVideo
+from conftest import StubVideo, header_of
 from thenoise.jobs import Cancellation
 from thenoise.models.config import ModelConfig
 from thenoise.video.controller import VideoPipelineController
@@ -19,7 +19,8 @@ STEPS = StubVideo.DEFAULT_PREFS["steps"]
 def video(tmp_path) -> StubVideo:
     return StubVideo(config=ModelConfig(
         dit_paths={"": str(tmp_path / "dit")}, vae_path=str(tmp_path / "vae"),
-        text_encoder_path=str(tmp_path / "te"), device="cpu", offload_device="cpu"))
+        text_encoder_path=str(tmp_path / "te"), device="cpu", offload_device="cpu",
+        headers={"": header_of(["weight"])}))
 
 
 @pytest.fixture

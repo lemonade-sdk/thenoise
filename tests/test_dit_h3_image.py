@@ -11,7 +11,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from conftest import TINY_HIDDEN, TINY_LAYERS, tiny_qwen_config, write_safetensors
+from conftest import TINY_HIDDEN, tiny_qwen_config, write_safetensors
 from thenoise.dit.h3_image import sampling
 from thenoise.dit.kvcache import KVCache
 from thenoise.dit.h3_image.encoder import (
@@ -20,14 +20,8 @@ from thenoise.dit.h3_image.encoder import (
     vision_token_tags,
 )
 from thenoise.dit.h3_image.layout import Layout, frame_grid, pad_to_patch
-from thenoise.dit.h3_image.models import (
-    COND_TIMESTEP,
-    H3ImageDiT,
-    H3ImageParams,
-    _spans,
-    detect_params,
-    load_h3_image_dit,
-)
+from thenoise.dit.h3_image.models import COND_TIMESTEP, H3ImageDiT, H3ImageParams, _spans
+from thenoise.dit.h3_image.utils import detect_params, load_h3_image_dit
 
 TINY_SIGMAS = (1.0, 0.5, 0.0)
 

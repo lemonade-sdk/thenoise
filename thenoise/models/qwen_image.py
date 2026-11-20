@@ -17,7 +17,8 @@ import logging
 
 import torch
 
-from thenoise.dit.mage_flow.keys import MAGE_LAYERS, dit_block_count, is_qwen_image_family
+from thenoise.dit.mage_flow.keys import MAGE_LAYERS
+from thenoise.dit.qwen_image.keys import QWEN_IMAGE_FAMILY_SIGNATURE
 from thenoise.dit.qwen_image import models as qwen_models
 from thenoise.dit.qwen_image import sampling as qwen_sampling
 from thenoise.dit.qwen_image import utils as qwen_utils
@@ -27,13 +28,13 @@ from thenoise.models.base import (
     VISION_REF_METHOD,
     Conditioning,
     Step,
-    normalize_keys,
 )
 from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.upscale import LatentUpscaler, SesquiLSRUpscaler
 from thenoise.utils.latents import pack_latents, unpack_latents
 from thenoise.utils.math import round_up
+from thenoise.utils.safetensors import Header
 from thenoise.utils.text_encoder import (
     QWEN25_TOKENIZER_CONFIG_DIR,
     load_qwen2_5_vl_model,
@@ -63,23 +64,24 @@ class QwenImageModel(PixelModel):
     # conditioner instead of encoded: a hint rather than a canvas to repaint.
     REF_METHODS = LATENT_REF_METHODS + (VISION_REF_METHOD,)
 
-    @staticmethod
-    def detect(f) -> bool:
-        """True if this handle is a Qwen-Image DiT: the family block layout, deep.
+    SIGNATURE = QWEN_IMAGE_FAMILY_SIGNATURE
+
+    @classmethod
+    def detect(cls, header: Header) -> bool:
+        """True if this file is a Qwen-Image DiT: the family block layout, deep.
 
         Mage-Flow shares the tensor names, so depth is the separator: 60 blocks here.
         Each detector states its own depth condition, so neither depends on catalog
         order.
         """
-        keys = list(normalize_keys(f.keys()))
-        return is_qwen_image_family(keys) and dit_block_count(keys) > MAGE_LAYERS
+        return (header.identifies(QWEN_IMAGE_FAMILY_SIGNATURE)
+                and header.block_count("transformer_blocks.") > MAGE_LAYERS)
 
     def __init__(self, *, config: ModelConfig):
         super().__init__(config=config)
 
-        logger.info("Loading Qwen-Image DiT from %s", config.dit_path)
         self.dit = qwen_models.load_qwen_image_dit(
-            config.dit_path, device=self._load_target(config.dit_path), dtype=config.dtype
+            self.header, device=self._load_target(self.dit_path), dtype=config.dtype
         )
 
         tokenizer_dir = QWEN25_TOKENIZER_CONFIG_DIR
