@@ -1,6 +1,7 @@
 import pytest
 import torch
 from PIL import Image, ImageDraw
+from conftest import header_of
 from test_dit_hunyuan3d import TINY
 from thenoise.dit.hunyuan3d import Hunyuan3DShapeParams
 
@@ -239,21 +240,13 @@ def test_a_small_reference_is_enlarged_to_the_towers_canvas():
     assert bare().prepare_reference(Image.new("RGB", (120, 90))).size == (518, 518)
 
 
-class Handle:
-    def __init__(self, *keys):
-        self._keys = list(keys)
-
-    def keys(self):
-        return self._keys
-
-
 def test_detection_uses_the_dits_own_fingerprint():
-    assert Hunyuan3DShapeModel.detect(Handle(
-        "model.t_embedder.mlp.2.weight", "model.blocks.0.attn1.k_norm.weight"))
-    assert not Hunyuan3DShapeModel.detect(Handle(
-        "model.t_embedder.mlp.0.weight", "model.blocks.0.attn1.k_norm.weight"))
-    assert Hunyuan3DShapeModel.detect(Handle(
+    assert Hunyuan3DShapeModel.detect(header_of([
+        "model.t_embedder.mlp.2.weight", "model.blocks.0.attn1.k_norm.weight"]))
+    assert not Hunyuan3DShapeModel.detect(header_of([
+        "model.t_embedder.mlp.0.weight", "model.blocks.0.attn1.k_norm.weight"]))
+    assert Hunyuan3DShapeModel.detect(header_of([
         "model.diffusion_model.model.t_embedder.mlp.2.weight",
-        "model.diffusion_model.model.blocks.0.attn1.k_norm.weight"))
-    assert not Hunyuan3DShapeModel.detect(Handle(
-        "model.diffusion_model.txt_in.weight", "model.diffusion_model.img_in.weight"))
+        "model.diffusion_model.model.blocks.0.attn1.k_norm.weight"]))
+    assert not Hunyuan3DShapeModel.detect(header_of([
+        "model.diffusion_model.txt_in.weight", "model.diffusion_model.img_in.weight"]))

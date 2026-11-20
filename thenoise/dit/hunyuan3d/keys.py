@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Callable, Iterable, Mapping, Tuple
+from typing import Callable, Iterable, Mapping, Tuple, Union
 
 from thenoise.utils.qk_norm import qk_norm_key_map
-from thenoise.utils.safetensors import MemoryEfficientSafeOpen, unwrap_key
+from thenoise.utils.safetensors import Header, as_header
 
 #: One Hunyuan3D shape file carries the DiT, the image conditioner and the shape codec.
 DIT_PREFIX = "model."
@@ -109,9 +109,9 @@ def shape_params(shapes: Mapping[str, Tuple[int, ...]]) -> Hunyuan3DShapeParams:
     )
 
 
-def detect_params(dit_path: str) -> Hunyuan3DShapeParams:
+def detect_params(checkpoint: Union[str, Header]) -> Hunyuan3DShapeParams:
     """Read the DiT geometry from a checkpoint's header, without loading tensors."""
-    return shape_params(checkpoint_shapes(dit_path))
+    return shape_params(as_header(checkpoint).shapes)
 
 
 def codec_params(shapes: Mapping[str, Tuple[int, ...]]) -> Hunyuan3DCodecParams:
@@ -140,9 +140,9 @@ def codec_params(shapes: Mapping[str, Tuple[int, ...]]) -> Hunyuan3DCodecParams:
     )
 
 
-def detect_codec_params(dit_path: str) -> Hunyuan3DCodecParams:
+def detect_codec_params(checkpoint: Union[str, Header]) -> Hunyuan3DCodecParams:
     """Read the codec geometry from a checkpoint's header, without loading tensors."""
-    return codec_params(checkpoint_shapes(dit_path))
+    return codec_params(as_header(checkpoint).shapes)
 
 
 def codec_key_map(key: str) -> str:
@@ -170,12 +170,6 @@ def shape_key_map(key: str) -> str:
         key = key.replace(".mlp.fc1.", ".mlp.net.0.proj.")
         key = key.replace(".mlp.fc2.", ".mlp.net.2.")
     return qk_norm_key_map(key)
-
-
-def checkpoint_shapes(path: str) -> Mapping[str, Tuple[int, ...]]:
-    """Every tensor name in a file, wrapper-normalized, with its shape."""
-    with MemoryEfficientSafeOpen(path) as f:
-        return {unwrap_key(k): tuple(f.header[k]["shape"]) for k in f.keys()}
 
 
 def _block_count(shapes: Mapping[str, Tuple[int, ...]], prefix: str) -> int:
@@ -245,9 +239,9 @@ def conditioner_params(shapes: Mapping[str, Tuple[int, ...]]) -> Hunyuan3DCondit
     )
 
 
-def detect_conditioner_params(dit_path: str) -> Hunyuan3DConditionerParams:
+def detect_conditioner_params(checkpoint: Union[str, Header]) -> Hunyuan3DConditionerParams:
     """Read the tower geometry from a checkpoint's header, without loading tensors."""
-    return conditioner_params(checkpoint_shapes(dit_path))
+    return conditioner_params(as_header(checkpoint).shapes)
 
 
 def conditioner_key_map(key: str) -> str:
@@ -308,7 +302,6 @@ __all__ = [
     "Hunyuan3DConditionerParams",
     "Hunyuan3DCodecParams",
     "Hunyuan3DShapeParams",
-    "checkpoint_shapes",
     "conditioner_key_map",
     "conditioner_params",
     "codec_key_map",

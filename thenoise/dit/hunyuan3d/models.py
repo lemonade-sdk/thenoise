@@ -1,16 +1,16 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Union
 
 import torch
 import torch.nn as nn
-from accelerate import init_empty_weights
 
 from thenoise.dit.feed_forward import FeedForward
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import attention, interleaved_heads
-from thenoise.utils.loader import load_dit
+from thenoise.utils.loader import build_dit
 from thenoise.utils.qk_norm import QKNorm
+from thenoise.utils.safetensors import Header
 from thenoise.utils.timestep import timestep_embedding
 
 from .keys import DIT_PREFIX, Hunyuan3DShapeParams, shape_key_map, take_prefix
@@ -155,15 +155,13 @@ class Hunyuan3DShapeDiT(nn.Module):
         return self.final_layer(x)
 
 
-def load_hunyuan3d_shape_dit(dit_path: str, params: Hunyuan3DShapeParams, device,
-                            dtype: torch.dtype) -> Hunyuan3DShapeDiT:
+def load_hunyuan3d_shape_dit(checkpoint: Union[str, Header],
+                             params: Hunyuan3DShapeParams,
+                             device, dtype: torch.dtype) -> Hunyuan3DShapeDiT:
     """Build on meta from the header's geometry, then load the ``model.`` subtree."""
-    with init_empty_weights():
-        model = Hunyuan3DShapeDiT(params)
-    load_dit(model, dit_path, device=device, dtype=None,
-             state_map=take_prefix(DIT_PREFIX), key_map=shape_key_map)
-    model.to(dtype=dtype)
-    return model
+    model = build_dit(lambda: Hunyuan3DShapeDiT(params), checkpoint, device=device, dtype=None,
+                      state_map=take_prefix(DIT_PREFIX), key_map=shape_key_map)
+    return model.to(dtype=dtype)
 
 
 __all__ = [

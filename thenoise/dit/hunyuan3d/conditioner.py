@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Sequence, Union
 
 import torch
-from accelerate import init_empty_weights
 from PIL import Image
 from transformers import Dinov2Config, Dinov2Model
 
 from thenoise.utils.image_tensor import pil_to_pixels
-from thenoise.utils.loader import load_dit
+from thenoise.utils.loader import build_dit
+from thenoise.utils.safetensors import Header
 
 from .keys import CONDITIONER_PREFIX, Hunyuan3DConditionerParams, conditioner_key_map, take_prefix
 
@@ -65,14 +65,13 @@ class Hunyuan3DImageEncoder(Dinov2Model):
         return torch.zeros_like(like)
 
 
-def load_hunyuan3d_image_encoder(conditioner_path: str,
-                                 params: Hunyuan3DConditionerParams, device,
-                                 dtype: torch.dtype) -> Hunyuan3DImageEncoder:
+def load_hunyuan3d_image_encoder(checkpoint: Union[str, Header],
+                                 params: Hunyuan3DConditionerParams,
+                                 device, dtype: torch.dtype) -> Hunyuan3DImageEncoder:
     """Build on meta from the header's geometry, then load the conditioner."""
-    with init_empty_weights():
-        model = Hunyuan3DImageEncoder(params)
-    load_dit(model, conditioner_path, device=device, dtype=None,
-             state_map=take_prefix(CONDITIONER_PREFIX), key_map=conditioner_key_map)
+    model = build_dit(lambda: Hunyuan3DImageEncoder(params), checkpoint, device=device,
+                      dtype=None, state_map=take_prefix(CONDITIONER_PREFIX),
+                      key_map=conditioner_key_map)
     model.to(dtype=dtype)
     model.eval()
     for parameter in model.parameters():
