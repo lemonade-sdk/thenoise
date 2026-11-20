@@ -1,5 +1,6 @@
 from .codec import Hunyuan3DShapeCodec, load_hunyuan3d_shape_codec
 from .conditioner import (
+    VIEW_SLOTS,
     Hunyuan3DImageEncoder,
     dino_normalize,
     load_hunyuan3d_image_encoder,
@@ -40,6 +41,7 @@ __all__ = [
     "Hunyuan3DShapeDiT",
     "MOE_TOP_K",
     "SHAPE_SCALE_FACTOR",
+    "VIEW_SLOTS",
     "codec_key_map",
     "codec_params",
     "conditioner_key_map",

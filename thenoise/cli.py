@@ -184,9 +184,10 @@ def _add_mesh_args(p: argparse.ArgumentParser) -> None:
     """The shape knobs: tokens and the volume its surface is cut from. Nothing defaults
     but the output path and the device: what a release ships is the model's to answer
     for."""
-    p.add_argument("--image", required=True, metavar="PATH",
-                   help="the picture whose shape to reconstruct; the only conditioning "
-                        "this medium reads")
+    p.add_argument("--image", required=True, action="append", metavar="PATH",
+                   help="the picture whose shape to reconstruct; repeat once per view of "
+                        "one object, in front, left, back, right order (the only "
+                        "conditioning this medium reads)")
     p.add_argument("--prompt", default="",
                    help="text a shape model does not read, kept so a request travels "
                         "between media unchanged")

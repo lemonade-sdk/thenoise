@@ -72,7 +72,7 @@ class FakeShapeModel:
         self.token = None
 
     def capability(self, medium):
-        return {"i2d": True, "t2d": False}
+        return {"i2d": True, "mv2d": 4, "t2d": False}
 
     def lora_components(self):
         return ("dit",)
@@ -140,11 +140,25 @@ def test_a_resolved_request_reaches_the_volume_knobs():
     assert model.decode_params[0].mc_level == 0.01
 
 
-def test_the_picture_reaches_the_conditioner_whole():
+def test_the_pictures_reach_the_conditioner_as_one_request():
     model = FakeShapeModel()
     render(model)
     args = model.seen_args[0]
-    assert args.image is not None and args.image.width == 24
+    assert [image.width for image in args.image] == [24]
+
+
+def test_views_reach_the_conditioner_in_the_order_they_were_sent():
+    model = FakeShapeModel()
+    render(model, image=[PNG, OTHER])
+    assert [tuple(image.getpixel((0, 0))) for image in model.seen_args[0].image] \
+        == [(3, 4, 5), (9, 9, 9)]
+
+
+def test_more_views_than_the_model_numbers_are_refused():
+    model = FakeShapeModel()
+    with pytest.raises(ValueError, match="at most 4 views"):
+        MeshPipelineController(model).resolve(
+            MeshSpec(image=[PNG] * 5))
 
 
 def test_the_file_is_the_container_the_request_asked_for(tmp_path):

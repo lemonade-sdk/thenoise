@@ -181,7 +181,7 @@ that model's three parts live in one checkpoint, so `--dit` is the only path fla
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--image` | yes | — | The picture whose shape to reconstruct; the only conditioning this medium reads |
+| `--image` | yes | — | The picture whose shape to reconstruct; repeat once per view of one object, in front, left, back, right order |
 | `--prompt` | no | `""` | Text a shape model does not read, accepted so a request travels between media |
 | `--latents` | no | model default | Latent tokens to denoise |
 | `--steps`, `--guidance-scale`, `--sampler`, `--seed` | no | model default | Sampling parameters, as for `generate` |

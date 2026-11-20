@@ -29,4 +29,21 @@ def fourier_dim(dim: int, num_freqs: int, *, include_input: bool = True) -> int:
     return dim * (2 * num_freqs + (1 if include_input else 0))
 
 
-__all__ = ["fourier_dim", "fourier_features", "fourier_frequencies"]
+def sinusoidal_positions(embed_dim: int, positions: Tensor) -> Tensor:
+    """``[M]`` positions -> ``[M, embed_dim]``: sines then cosines of ``pos / 10000**(2i/D)``.
+
+    Unlike :func:`fourier_features` the input is not part of the output, because what is
+    being identified is the position itself -- Hunyuan3D's multi-view conditioner marks
+    each view of a picture this way and adds the result to that view's tokens. Device comes
+    from ``positions``, the only place it is known.
+    """
+    # fp32 rather than the release's float64: the widest step is still ~1e-4 and the result
+    # is added to bf16 tokens, and fp64 is not something to spend on an inference path.
+    steps = torch.arange(embed_dim // 2, dtype=torch.float32, device=positions.device)
+    omega = 1.0 / 10000.0 ** (steps / (embed_dim // 2))
+    angles = positions.reshape(-1).to(torch.float32)[:, None] * omega
+    return torch.cat((angles.sin(), angles.cos()), dim=-1)
+
+
+__all__ = ["fourier_dim", "fourier_features", "fourier_frequencies",
+           "sinusoidal_positions"]

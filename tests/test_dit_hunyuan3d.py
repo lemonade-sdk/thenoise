@@ -23,7 +23,8 @@ from thenoise.dit.hunyuan3d import (
 )
 from thenoise.dit.hunyuan3d.models import Attention, MoE
 from thenoise.utils.attention import interleaved_heads
-from thenoise.utils.fourier import fourier_dim, fourier_features, fourier_frequencies
+from thenoise.utils.fourier import (fourier_dim, fourier_features, fourier_frequencies,
+                                    sinusoidal_positions)
 
 TINY = dict(
     hidden_size=32,
@@ -461,6 +462,41 @@ def test_the_tower_gives_one_token_per_patch_plus_the_cls():
         assert tiny_dino()([picture()], torch.float32).shape == (1, 17, TINY_DINO["hidden_size"])
         no_cls = tiny_dino(use_cls_token=False)([picture()], torch.float32)
         assert no_cls.shape == (1, 16, TINY_DINO["hidden_size"])
+
+
+def test_positions_are_answered_on_the_device_their_owner_is_on():
+    """There is no GPU here, so ``meta`` stands in for one: offsets built on the host meet
+    the tower's activations on the compute device and raise there, not here."""
+    offsets = sinusoidal_positions(8, torch.arange(4, device="meta"))
+    assert offsets.device == torch.device("meta")
+    assert offsets.shape == (4, 8)
+
+
+def test_a_view_offset_is_the_release_s_closed_form():
+    """``10000 ** (2i/D)`` is easy to write one exponent off, and the shapes stay right."""
+    dim, view = 8, 3
+    got = sinusoidal_positions(dim, torch.tensor([float(view)]))[0]
+    angles = torch.tensor([view / 10000.0 ** (i / (dim // 2)) for i in range(dim // 2)])
+    assert torch.allclose(got, torch.cat((angles.sin(), angles.cos())), atol=1e-7)
+
+
+def test_views_are_one_context_with_their_own_offset_each():
+    """The release's multi-view recipe: view ``i``'s tokens take the ``i``-th sincos row and
+    the views flatten into one context, because one request is one shape."""
+    encoder = tiny_dino()
+    hidden = TINY_DINO["hidden_size"]
+    offsets = sinusoidal_positions(hidden, torch.arange(2))
+    assert torch.equal(offsets[0][: hidden // 2], torch.zeros(hidden // 2)), "sin(0)"
+    assert torch.equal(offsets[0][hidden // 2:], torch.ones(hidden // 2)), "cos(0)"
+    one_picture, two_views = picture(), picture()
+    with torch.no_grad():
+        plain = encoder([one_picture], torch.float32)
+        fused = encoder([two_views, two_views], torch.float32, views=True)
+    assert plain.shape == (1, 17, hidden)
+    assert fused.shape == (1, 34, hidden)
+    assert torch.allclose(fused[:, :17] - plain, offsets[0].expand(1, 17, hidden), atol=1e-5)
+    assert torch.allclose(fused[:, 17:] - fused[:, :17],
+                          (offsets[1] - offsets[0]).expand(1, 17, hidden), atol=1e-5)
 
 
 def test_the_picture_is_handed_to_the_device_the_weights_are_on():

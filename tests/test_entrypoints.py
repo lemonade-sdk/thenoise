@@ -483,12 +483,21 @@ def test_mesh_wires_the_picture_the_tokens_and_the_volume(mesh_runtime, tmp_path
                                    dit_low_path="")
     rendered = rt.pipeline.rendered
     spec = rendered["spec"]
-    assert spec.image == b"png bytes"
+    assert spec.images == (b"png bytes",)
     assert (spec.latents, spec.steps, spec.octree_resolution) == (1024, 6, 96)
     assert (spec.bounds, spec.mc_level, spec.seed) == (1.2, 0.01, 7)
     assert spec.lora_specs == {"dit": ["style:0.7"]}
     assert rendered["output"].suffix == ".glb"
     assert rendered["output"].read_bytes() == b"glTF"
+
+
+def test_repeated_images_are_the_views_of_one_shape(mesh_runtime, tmp_path):
+    front, left = tmp_path / "front.png", tmp_path / "left.png"
+    front.write_bytes(b"front")
+    left.write_bytes(b"left")
+    run_mesh(_parse(["mesh", *MESH_PATHS, "--image", str(front), "--image", str(left),
+                     "--out", str(tmp_path / "chair")]))
+    assert mesh_runtime[0].pipeline.rendered["spec"].images == (b"front", b"left")
 
 
 def test_mesh_takes_its_container_from_the_output_name(mesh_runtime, tmp_path):

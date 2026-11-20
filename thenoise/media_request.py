@@ -18,7 +18,9 @@ class MediaRequest:
         data = self.model_dump(exclude={"model", *self.MEDIA_FIELDS})
         for name in self.MEDIA_FIELDS:
             encoded = getattr(self, name)
-            if encoded is not None:
+            if isinstance(encoded, list):
+                data[name] = [verified_picture(name, one) for one in encoded]
+            elif encoded is not None:
                 data[name] = verified_picture(name, encoded)
         return self.SPEC(**data)
 

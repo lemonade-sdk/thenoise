@@ -13,21 +13,24 @@ from thenoise.utils.lora_roles import LoraSpecs, lora_specs_by_role
 
 _Positive = Annotated[int, Field(gt=0)]
 _PositiveFinite = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+_Picture = Annotated[bytes, Field(min_length=1)]
 
 #: The containers a mesh is written into.
 OUTPUT_FORMATS = ("glb", "obj", "stl")
 
 
-def mode_of(image: bytes | None) -> str:
-    """``i2d`` or ``t2d``, from the picture a request carries."""
-    return "i2d" if image is not None else "t2d"
+def mode_of(images: tuple[bytes, ...]) -> str:
+    """``t2d``, ``i2d`` or ``mv2d``, from how many pictures a request carries."""
+    if not images:
+        return "t2d"
+    return "i2d" if len(images) == 1 else "mv2d"
 
 
 @dataclass(frozen=True)
 class ResolvedMesh:
     prompt: str
     negative_prompt: str
-    image: bytes | None
+    images: tuple[bytes, ...]
     latents: int
     steps: int
     guidance_scale: float
@@ -41,7 +44,7 @@ class ResolvedMesh:
 
     @property
     def mode(self) -> str:
-        return mode_of(self.image)
+        return mode_of(self.images)
 
     def public(self) -> dict:
         return {
@@ -60,7 +63,7 @@ class MeshSpec(BaseModel):
 
     prompt: str = ""
     negative_prompt: str | None = None
-    image: Annotated[bytes, Field(min_length=1)] | None = None
+    image: _Picture | list[_Picture] | None = None
     latents: _Positive | None = None
     steps: _Positive | None = None
     guidance_scale: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None = None
@@ -73,8 +76,15 @@ class MeshSpec(BaseModel):
     lora_specs: LoraSpecs = None
 
     @property
+    def images(self) -> tuple[bytes, ...]:
+        """The pictures as a tuple, however many the request sent."""
+        if self.image is None:
+            return ()
+        return tuple(self.image) if isinstance(self.image, list) else (self.image,)
+
+    @property
     def mode(self) -> str:
-        return mode_of(self.image)
+        return mode_of(self.images)
 
     @field_validator("seed")
     @classmethod
@@ -110,7 +120,7 @@ class MeshSpec(BaseModel):
             raise ValueError("mc_level must be finite")
         return ResolvedMesh(
             prompt=self.prompt, negative_prompt=pref("negative_prompt"),
-            image=self.image, latents=latents, steps=steps,
+            images=self.images, latents=latents, steps=steps,
             guidance_scale=guidance_scale, sampler=sampler,
             seed=secrets.randbits(32) if self.seed is None or self.seed == -1 else self.seed,
             output_format=output_format, octree_resolution=octree_resolution,

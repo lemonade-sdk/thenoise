@@ -10,6 +10,7 @@ from thenoise.dit.hunyuan3d import (
     Hunyuan3DCodecParams,
     Hunyuan3DConditionerParams,
     Hunyuan3DShapeParams,
+    VIEW_SLOTS,
     codec_params,
     conditioner_params,
     is_hunyuan3d_shape,
@@ -57,7 +58,7 @@ class Hunyuan3DShapeModel(DiffusionModel):
     REF_METHODS = (VISION_REF_METHOD,)
 
     CAPABILITIES = {**DiffusionModel.CAPABILITIES,
-                    "mesh": {"i2d": True, "t2d": False}}
+                    "mesh": {"i2d": True, "mv2d": len(VIEW_SLOTS), "t2d": False}}
 
     DEFAULT_PREFS = {
         **DiffusionModel.DEFAULT_PREFS,
@@ -112,11 +113,15 @@ class Hunyuan3DShapeModel(DiffusionModel):
 
     # ------------------------------------------------------------ kernels
     def encode_prompt(self, args: EncodePromptArgs) -> Conditioning:
-        """The reference picture through the tower; this model reads no text at all."""
+        """The reference pictures through the tower; this model reads no text at all.
+
+        Several pictures are views of one object, so they condition one shape together
+        rather than one shape each.
+        """
         images = self.conditioned_images(args)
         if not images:
             raise ValueError(f"{self.name} conditions on a picture: an image is required")
-        cond = self.conditioner(images, self.dtype)
+        cond = self.conditioner(images, self.dtype, views=len(images) > 1)
         null = (self.conditioner.unconditional(cond) if args.guidance_scale > 1.0
                 else None)
         return Conditioning(cond=cond, null=null)

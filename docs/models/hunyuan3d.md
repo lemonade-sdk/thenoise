@@ -6,9 +6,9 @@ takes a shape anywhere it would otherwise not go.
 
 | | Hunyuan3D 2.1 shape |
 |---|---|
-| Modes | image-to-shape (`i2d`) only; text-to-shape does not exist |
+| Modes | image-to-shape (`i2d`); views-to-shape (`mv2d`) when several pictures are sent; text-to-shape does not exist |
 | Checkpoint | **one file** (`--dit`): transformer + DINOv2 image conditioner + shape codec |
-| Conditioning | the reference picture reframed to a 518² square, as its whole DINOv2-L/14 patch grid |
+| Conditioning | the reference reframed to a 518² square, as its whole DINOv2-L/14 patch grid; one grid per picture, concatenated into one context |
 | Latents | 4096 unstructured tokens of 64 channels, no positional embedding |
 | Output | `.glb` (binary glTF), `.obj` or `.stl` — positions and triangles, no material |
 | Defaults | 4096 tokens, 30 steps, CFG 5.0, Euler, 384³ octree, seed random |
@@ -51,6 +51,15 @@ frames it: the short side is scaled to 518 and the overhang is cropped off the l
 so nothing is stretched and the canvas is always 37×37 patches — the 1370 conditioning
 tokens the checkpoint's config declares. Transparency is composited onto white, the
 surface the cutouts it was trained on sat on.
+
+Several pictures are views of **one** object, not several objects: each 1370-token grid is
+marked with the sincos offset of its slot — front, left, back, right, in the order sent —
+and the marked grids are concatenated into a single conditioning, which is what both the
+release's `DinoImageEncoderMV` and ComfyUI's multi-view node do. Four is the ceiling
+because four is how many slots are numbered. A single picture never takes an offset, so
+the verified single-view path is untouched; and note what that leaves unproven — the
+offsets mean something to a model trained with them, and the 2.1 shape file is configured
+as a single-view model. Views on it run, and what they produce is yours to judge.
 
 ## The knobs
 
@@ -120,8 +129,9 @@ Nothing is welded, decimated or smoothed — the raw cut, at the resolution you 
 
 * **Text.** `prompt` is accepted so a request travels between media unchanged, and is
   otherwise ignored. `negative_prompt` too, though CFG still runs against a zeroed context.
-* **Image media other than the reference.** No inpainting a shape, no combining views:
-  one picture, one shape.
+* **Image media other than the reference.** No inpainting a shape and no half-built
+  views: a slot is either a picture or absent, and every picture sent is one view of the
+  one shape being built.
 * **Other checkpoints in the family.** The 2.0 releases (`hunyuan3d-dit-v2*`) are a
   different transformer — Flux-style, guidance-distilled — and are not detected. Only the
   2.1 shape file is.

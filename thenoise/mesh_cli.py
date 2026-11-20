@@ -32,7 +32,7 @@ def run_mesh(args) -> None:
     try:
         spec = MeshSpec(
             prompt=args.prompt, negative_prompt=args.negative_prompt,
-            image=read_media(args.image, "mesh"), latents=args.latents,
+            image=[read_media(path, "mesh") for path in args.image], latents=args.latents,
             steps=args.steps, guidance_scale=args.guidance_scale, sampler=args.sampler,
             seed=args.seed,
             output_format=container_of(args.out, args.output_format, OUTPUT_FORMATS),

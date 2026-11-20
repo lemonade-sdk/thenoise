@@ -6,11 +6,15 @@ import torch
 from PIL import Image
 from transformers import Dinov2Config, Dinov2Model
 
+from thenoise.utils.fourier import sinusoidal_positions
 from thenoise.utils.image_tensor import pil_to_pixels
 from thenoise.utils.loader import build_dit
 from thenoise.utils.safetensors import Header
 
 from .keys import CONDITIONER_PREFIX, Hunyuan3DConditionerParams, conditioner_key_map, take_prefix
+
+#: The views a multi-view request's pictures fill, in the order the view embeddings number them.
+VIEW_SLOTS = ("front", "left", "back", "right")
 
 #: DINOv2's pretraining statistics.
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
@@ -55,10 +59,24 @@ class Hunyuan3DImageEncoder(Dinov2Model):
         batch = torch.stack([pil_to_pixels(image) for image in images])
         return dino_normalize(batch.to(device, dtype=dtype))
 
-    def forward(self, images: Sequence[Image.Image], dtype: torch.dtype) -> torch.Tensor:
-        """``[B, tokens, hidden]``: the reference as cross-attention context."""
+    def forward(self, images: Sequence[Image.Image], dtype: torch.dtype,
+                views: bool = False) -> torch.Tensor:
+        """The reference as cross-attention context: ``[B, tokens, hidden]``, or one
+        ``[1, V * tokens, hidden]`` context when ``views`` says the pictures are views of
+        one object.
+
+        View ``i`` gets the ``i``-th sincos offset added to all of its tokens, which is how
+        the release tells a left view from a front one; a model that never saw those
+        offsets has no use for them, so a single picture never takes them.
+        """
         state = super().forward(self.pixels(images, dtype)).last_hidden_state
-        return state if self.params.use_cls_token else state[:, 1:]
+        if not self.params.use_cls_token:
+            state = state[:, 1:]
+        if not views:
+            return state
+        offsets = sinusoidal_positions(state.shape[-1],
+                                       torch.arange(len(images), device=state.device))
+        return (state + offsets.to(state.dtype)[:, None]).reshape(1, -1, state.shape[-1])
 
     def unconditional(self, like: torch.Tensor) -> torch.Tensor:
         """The null context: zeros shaped like the conditioned one, since the picture decides its width."""
@@ -79,5 +97,5 @@ def load_hunyuan3d_image_encoder(checkpoint: Union[str, Header],
     return model
 
 
-__all__ = ["IMAGENET_MEAN", "IMAGENET_STD", "Hunyuan3DImageEncoder", "dino_normalize",
-           "load_hunyuan3d_image_encoder"]
+__all__ = ["IMAGENET_MEAN", "IMAGENET_STD", "Hunyuan3DImageEncoder", "VIEW_SLOTS",
+           "dino_normalize", "load_hunyuan3d_image_encoder"]

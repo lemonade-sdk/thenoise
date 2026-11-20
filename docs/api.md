@@ -181,11 +181,12 @@ unused.
 When a mesh model is loaded, it is served through the synchronous `POST /mesh` (mesh bytes
 directly) or `POST /jobs/mesh`, which queues the same body — see
 [Asynchronous jobs](#asynchronous-jobs). A shape is conditioned on a picture, so `image` is
-required: there is no text-to-shape to fall back to.
+required: there is no text-to-shape to fall back to. Several pictures are views of one
+object, and the resolved mode says so: `i2d` for one, `mv2d` for more.
 
 | Field | Type | Description |
 |---|---|---|
-| `image` | string | Required base64-encoded picture to reconstruct |
+| `image` | string \| string[] | Required base64-encoded picture, or up to four of one object as an array, in front, left, back, right order |
 | `model` | string | Optional loaded model name, checked if provided |
 | `prompt`, `negative_prompt` | string | Accepted and not read: a shape model has no text encoder |
 | `latents` | integer | Latent tokens to denoise; the model's release count is its default |
@@ -227,7 +228,7 @@ With a mesh model:
 ```json
 {"status": "ok", "models": ["hunyuan3d-shape"], "medium": "mesh",
   "samplers": ["er_sde", "euler", "unipc"],
-  "capabilities": {"kv_cache": false, "mesh": {"i2d": true, "t2d": false}}}
+  "capabilities": {"kv_cache": false, "mesh": {"i2d": true, "mv2d": 4, "t2d": false}}}
 ```
 
 `models` is empty until a DiT is loaded, `medium` says what the loaded model produces

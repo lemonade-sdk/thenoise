@@ -22,9 +22,16 @@ def resolve(**overrides):
 
 
 def test_a_picture_makes_it_an_image_to_shape_request():
-    assert mode_of(None) == "t2d"
-    assert mode_of(b"png") == "i2d"
+    assert mode_of(()) == "t2d"
+    assert mode_of((b"png",)) == "i2d"
     assert resolve(image=b"png").mode == "i2d"
+    assert resolve(image=b"png").images == (b"png",)
+
+
+def test_several_pictures_are_views_of_the_one_shape_asked_for():
+    assert mode_of((b"front", b"left")) == "mv2d"
+    resolved = resolve(image=[b"front", b"left", b"back"])
+    assert (resolved.mode, resolved.images) == ("mv2d", (b"front", b"left", b"back"))
 
 
 def test_an_unset_prompt_is_allowed_because_the_shape_is_not_described_in_words():

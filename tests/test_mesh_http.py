@@ -189,3 +189,29 @@ def test_a_field_nobody_offers_is_refused_rather_than_ignored(tmp_path):
             assert answer.status_code == 422
     finally:
         queue.close()
+
+
+def test_several_pictures_are_queued_as_the_views_of_one_shape(tmp_path):
+    queue = JobQueue(tmp_path)
+    try:
+        with _client(_controller(), queue) as client:
+            answer = client.post("/jobs/mesh",
+                                 json={"model": MODEL, "image": [_b64("red"), _b64("blue")]})
+            assert answer.status_code == 202
+            ident = answer.json()["id"]
+            until(lambda: client.get(f"/jobs/{ident}").json()["status"] == "completed")
+            assert client.get(f"/jobs/{ident}").json()["resolved"]["mode"] == "mv2d"
+    finally:
+        queue.close()
+
+
+def test_views_past_the_ones_the_model_numbers_are_refused_before_the_job(tmp_path):
+    queue = JobQueue(tmp_path)
+    try:
+        with _client(_controller(), queue) as client:
+            answer = client.post("/jobs/mesh",
+                                 json={"model": MODEL, "image": [_b64()] * 5})
+            assert answer.status_code == 400
+            assert "at most 4 views" in answer.text
+    finally:
+        queue.close()

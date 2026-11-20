@@ -1,42 +1,57 @@
-/* mesh.js — one picture in, POST /jobs/mesh, a mesh file out. Loaded after helpers.js. */
+/* mesh.js — pictures in, POST /jobs/mesh, a mesh file out. Loaded after helpers.js. */
 
 let meshOutUrl = null;
 let meshOutMeta = null;
 
 const meshJob = { id: null };
 const MESH_PROGRESS = { root: 'mesh_progress', label: 'mesh_progress_label', bar: 'mesh_bar' };
-const MESH_MODES = {i2d: 'image-to-shape', t2d: 'text-to-shape'};
+const MESH_MODES = {i2d: 'image-to-shape', mv2d: 'views-to-shape', t2d: 'text-to-shape'};
 const MESH_FORMATS = { glb: 'model/gltf-binary', obj: 'text/plain', stl: 'model/stl' };
-const meshPicture = { b64: null, dataUrl: null, name: null };
+// The server refuses past its own count, which /health calls caps.mesh.mv2d; this only
+// stops the form collecting pictures it cannot send.
+const MESH_MAX_VIEWS = 4;
+const meshViews = [];   // {b64, dataUrl, name}, in view order
 
-function renderMeshPicture() {
+function meshFail(message) {
+  setTimer('mesh_timer', 'mesh_timer_text', 'error', 'error: ' + message);
+  return false;
+}
+
+function renderMeshViews() {
   const box = $('mesh_refs');
   box.innerHTML = '';
-  $('mesh_dz_hint').style.display = meshPicture.b64 ? 'none' : '';
-  const nameEl = $('mesh_dz_name');
-  nameEl.textContent = meshPicture.name || '';
-  nameEl.style.display = meshPicture.name ? 'block' : 'none';
-  if (!meshPicture.b64) return;
-  addThumb(box, {
-    src: meshPicture.dataUrl, alt: 'the picture', cls: 'first',
-    title: 'the picture the shape is reconstructed from',
+  meshViews.forEach((view, i) => addThumb(box, {
+    src: view.dataUrl, alt: 'view ' + (i + 1), cls: i === 0 ? 'first' : '',
+    title: 'view ' + (i + 1) + (view.name ? ': ' + view.name : ''),
     onRemove: () => {
-      Object.assign(meshPicture, { b64: null, dataUrl: null, name: null });
-      renderMeshPicture();
+      meshViews.splice(i, 1);
+      renderMeshViews();
       resetMeshResult();
     },
-  });
+  }));
+  $('mesh_dz_hint').style.display = meshViews.length ? 'none' : '';
+  const nameEl = $('mesh_dz_name');
+  const names = meshViews.map(view => view.name).filter(Boolean).join(', ');
+  nameEl.textContent = names
+    ? meshViews.length + (meshViews.length > 1 ? ' views' : ' view') + ': ' + names
+    : '';
+  nameEl.style.display = nameEl.textContent ? 'block' : 'none';
 }
 
 async function loadMeshPicture(file) {
+  if (meshViews.length >= MESH_MAX_VIEWS) {
+    return meshFail('a shape takes at most ' + MESH_MAX_VIEWS + ' views');
+  }
   const image = await readImageFile(file);
   if (!image) return;
-  Object.assign(meshPicture, { dataUrl: image.dataUrl, b64: image.b64, name: file.name });
-  renderMeshPicture();
+  meshViews.push({ dataUrl: image.dataUrl, b64: image.b64, name: file.name });
+  renderMeshViews();
   resetMeshResult();
 }
 
-bindDropzone('mesh_dropzone', 'mesh_file', files => loadMeshPicture(files[0]));
+bindDropzone('mesh_dropzone', 'mesh_file', async files => {
+  for (const file of files) await loadMeshPicture(file);
+});
 initLora('mesh_');
 
 function collectMeshSettings() {
@@ -49,20 +64,17 @@ function collectMeshSettings() {
   }
   const lora_specs = parseLora($('mesh_lora_specs').value);
   if (lora_specs) body.lora_specs = lora_specs;
-  body.image = meshPicture.b64;
+  body.image = meshViews.length === 1 ? meshViews[0].b64
+                                      : meshViews.map(view => view.b64);
   return body;
 }
 
 function validateMeshInputs() {
-  const fail = (message) => {
-    setTimer('mesh_timer', 'mesh_timer_text', 'error', 'error: ' + message);
-    return false;
-  };
-  if (!meshPicture.b64) return fail('a shape needs a picture');
+  if (!meshViews.length) return meshFail('a shape needs a picture');
   const check = (fields, ok, message) => {
     for (const f of fields) {
       const v = $('mesh_' + f).value;
-      if (v !== '' && !ok(Number(v))) return fail(message);
+      if (v !== '' && !ok(Number(v))) return meshFail(message);
     }
     return true;
   };
@@ -115,7 +127,7 @@ $('mesh_generate').addEventListener('click', () => {
       if (meshOutUrl) URL.revokeObjectURL(meshOutUrl);
       const { image, ...sent } = body;
       meshOutMeta = { ...sent, ...status.resolved, model: status.model,
-                         picture: meshPicture.name };
+                         picture: meshViews.map(view => view.name).join(', ') };
       meshOutUrl = URL.createObjectURL(new Blob([blob], {
         type: MESH_FORMATS[meshOutMeta.output_format] || 'application/octet-stream',
       }));

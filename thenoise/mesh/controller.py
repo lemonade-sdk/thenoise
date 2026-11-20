@@ -34,8 +34,12 @@ class MeshPipelineController:
     def resolve(self, spec: MeshSpec) -> ResolvedMesh:
         """Refuse what this model cannot serve, then apply its defaults."""
         model = self.model
-        if not model.capability("mesh")[spec.mode]:
+        capacity = model.capability("mesh")[spec.mode]
+        if not capacity:
             raise ValueError(f"model '{model.name}' does not support {spec.mode}")
+        if len(spec.images) > 1 and len(spec.images) > capacity:
+            raise ValueError(f"{model.name} takes at most {capacity} views, "
+                             f"got {len(spec.images)}")
         resolved = spec.resolve(model.default_prefs)
         check_sampler(resolved.sampler)
         check_lora_roles(resolved.lora_specs, model.lora_components())
@@ -45,7 +49,7 @@ class MeshPipelineController:
                progress: Callable[[str, int, int], None], output: Path) -> None:
         """Condition -> denoise -> volume -> file, checking ``token`` throughout."""
         model = self.model
-        image = load_image(io.BytesIO(spec.image)) if spec.image else None
+        images = [load_image(io.BytesIO(one)) for one in spec.images]
         with inference():
             if spec.lora_specs and not model.lora_dir:
                 raise ValueError("mesh LoRAs require --lora-dir")
@@ -61,9 +65,9 @@ class MeshPipelineController:
             cond = stages.run(
                 model.encode_prompt,
                 EncodePromptArgs(prompt=spec.prompt, negative_prompt=spec.negative_prompt,
-                                 guidance_scale=spec.guidance_scale, image=image),
+                                 guidance_scale=spec.guidance_scale, image=images or None),
                 resident=("conditioner",),
-                pixels=image.width * image.height if image else work,
+                pixels=sum(image.width * image.height for image in images) or work,
                 cache="prompt", key=self._cache_key(spec),
             )
             token.check()
@@ -86,10 +90,10 @@ class MeshPipelineController:
 
     @staticmethod
     def _cache_key(spec: ResolvedMesh) -> tuple:
-        """The conditioning is the picture's, so the picture and the guidance are the key."""
-        image = load_image(io.BytesIO(spec.image)) if spec.image else None
+        """The conditioning is the pictures' and their count's, so both and the guidance are
+        the key: a second view changes the shape, not just the prompt."""
         return ("prompt", spec.prompt, spec.negative_prompt, spec.guidance_scale,
-                content_digest([image] if image else []))
+                content_digest(load_image(io.BytesIO(one)) for one in spec.images))
 
     def _denoise(self, latents, cond, params, spec: ResolvedMesh, token: Cancellation,
                  progress):

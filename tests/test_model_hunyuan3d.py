@@ -24,9 +24,10 @@ class StubConditioner:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, images, dtype):
-        self.calls.append(len(images))
-        return torch.zeros(len(images), 5, 8, dtype=dtype)
+    def __call__(self, images, dtype, views=False):
+        self.calls.append((len(images), views))
+        tokens = 5 * len(images) if views else 5
+        return torch.zeros(1, tokens, 8, dtype=dtype)
 
     def unconditional(self, like):
         return torch.full_like(like, 7.0)
@@ -153,7 +154,17 @@ def test_the_picture_is_the_conditioning_and_the_null_branch_is_zeros_like_it():
                                                   image=[Image.new("RGB", (32, 32))]))
     assert out.cond.shape == (1, 5, 8)
     assert torch.equal(out.null, torch.full(out.cond.shape, 7.0))
-    assert model.conditioner.calls == [1]
+    assert model.conditioner.calls == [(1, False)]
+
+
+def test_several_pictures_condition_one_shape_rather_than_several():
+    model = bare()
+    out = model.encode_prompt(EncodePromptArgs(
+        prompt="a chair", guidance_scale=5.0,
+        image=[Image.new("RGB", (32, 32)), Image.new("RGB", (32, 32), (9, 9, 9))]))
+    assert out.cond.shape == (1, 10, 8), "the two views share one context"
+    assert out.null.shape == (1, 10, 8), "the null branch is as blind to every view"
+    assert model.conditioner.calls == [(2, True)]
 
 
 def test_a_prompt_without_a_picture_is_refused():
