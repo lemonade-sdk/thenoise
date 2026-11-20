@@ -28,9 +28,11 @@ Start the server with [`serve`](cli.md#serve-a-model-over-http) and TheNoise exp
 | `POST` | `/text2image` | Generate an image |
 | `POST` | `/edit` | Edit an image from an instruction (image + prompt → edited image); requires an editing-capable model |
 | `POST` | `/video` | Generate a video synchronously, returning MP4 or WebM bytes |
+| `POST` | `/mesh` | Generate a shape synchronously, returning GLB, OBJ or STL bytes |
 | `POST` | `/jobs/text2image` | Queue a generation (202) |
 | `POST` | `/jobs/edit` | Queue an edit (202) |
 | `POST` | `/jobs/video` | Queue a video generation (202) |
+| `POST` | `/jobs/mesh` | Queue a shape generation (202) |
 | `GET` | `/jobs` | List the jobs the queue still remembers |
 | `GET` | `/jobs/{id}` | Job status, progress, and what the request resolved to |
 | `GET` | `/jobs/{id}/content` | Download a finished job's image or clip |
@@ -174,6 +176,33 @@ model does not have is refused at submit. Only LoRA factors matching the
 transformer's supported layers are applied; unsupported targets are logged as
 unused.
 
+## Mesh generation
+
+When a mesh model is loaded, it is served through the synchronous `POST /mesh` (mesh bytes
+directly) or `POST /jobs/mesh`, which queues the same body — see
+[Asynchronous jobs](#asynchronous-jobs). A shape is conditioned on a picture, so `image` is
+required: there is no text-to-shape to fall back to.
+
+| Field | Type | Description |
+|---|---|---|
+| `image` | string | Required base64-encoded picture to reconstruct |
+| `model` | string | Optional loaded model name, checked if provided |
+| `prompt`, `negative_prompt` | string | Accepted and not read: a shape model has no text encoder |
+| `latents` | integer | Latent tokens to denoise; the model's release count is its default |
+| `steps`, `guidance_scale`, `seed` | number | Sampling parameters |
+| `sampler` | string | Denoising solver — one of `GET /health`'s `samplers` |
+| `octree_resolution` | integer | Finest voxel grid the surface is cut from |
+| `bounds` | number | Half-width of the sampled volume, in latent units |
+| `mc_level` | number | The SDF value the surface is cut at |
+| `lora_specs` | string[] \| object | Optional LoRAs, as `name:weight`, looked up in `--lora-dir`; a shape model's components are `dit`, `conditioner` and `codec` |
+| `output_format` | string | `glb`, `obj` or `stl` (model default when omitted) |
+
+```bash
+curl -fS http://127.0.0.1:8000/mesh -H 'content-type: application/json' \
+  -d "{\"image\": \"$(base64 -w0 chair.png)\", \"octree_resolution\": 256}" \
+  -o chair.glb
+```
+
 ## `GET /health`
 
 ```json
@@ -191,6 +220,14 @@ With a video model:
   "samplers": ["er_sde", "euler", "unipc"],
   "capabilities": {"image": null, "kv_cache": false, "upscale": false,
                    "video": {"t2v": true, "i2v": true, "flf2v": true}}}
+```
+
+With a mesh model:
+
+```json
+{"status": "ok", "models": ["hunyuan3d-shape"], "medium": "mesh",
+  "samplers": ["er_sde", "euler", "unipc"],
+  "capabilities": {"kv_cache": false, "mesh": {"i2d": true, "t2d": false}}}
 ```
 
 `models` is empty until a DiT is loaded, `medium` says what the loaded model produces
