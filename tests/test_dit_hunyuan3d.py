@@ -1,5 +1,6 @@
 import pytest
 import torch
+from PIL import Image
 from conftest import write_safetensors
 
 from thenoise.dit.hunyuan3d import (
@@ -297,3 +298,119 @@ def test_the_encode_half_is_left_where_it_is(tmp_path):
     assert torch.equal(loaded.geo_decoder.output_proj.weight,
                        codec.geo_decoder.output_proj.weight)
     assert not hasattr(loaded, "encoder")
+
+
+# ---------------------------------------------------------------------- conditioner
+
+from thenoise.dit.hunyuan3d import CONDITIONER_PREFIX, Hunyuan3DConditionerParams
+from thenoise.dit.hunyuan3d import conditioner_key_map, conditioner_params
+from thenoise.dit.hunyuan3d.conditioner import (
+    IMAGENET_MEAN,
+    IMAGENET_STD,
+    Hunyuan3DImageEncoder,
+    dino_normalize,
+    load_hunyuan3d_image_encoder,
+)
+
+TINY_DINO = dict(hidden_size=64, layers=2, num_heads=1, mlp_dim=128, patch_size=14,
+                 image_size=56)
+
+
+def tiny_dino(**overrides) -> Hunyuan3DImageEncoder:
+    params = Hunyuan3DConditionerParams(**{**TINY_DINO, **overrides})
+    model = Hunyuan3DImageEncoder(params)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            torch.nn.init.normal_(parameter, std=0.02)
+    return model.eval()
+
+
+def picture(width=56, height=56, grey=128) -> Image.Image:
+    return Image.new("RGB", (width, height), (grey, grey, grey))
+
+
+def test_the_tower_geometry_is_read_out_of_the_header():
+    shapes = {
+        "conditioner.main_image_encoder.model.embeddings.patch_embeddings.projection.weight":
+            (1024, 3, 14, 14),
+        "conditioner.main_image_encoder.model.embeddings.position_embeddings": (1, 1370, 1024),
+        "conditioner.main_image_encoder.model.encoder.layer.0.mlp.fc1.weight": (4096, 1024),
+    }
+    params = conditioner_params(shapes)
+    assert params.hidden_size == 1024 and params.layers == 1
+    assert params.patch_size == 14 and params.image_size == 518
+    assert params.mlp_dim == 4096 and params.num_heads == 16
+    assert params.num_tokens == 1370
+    assert params.qkv_bias is False
+
+
+def test_a_position_count_that_is_no_grid_is_refused():
+    shapes = {
+        "conditioner.main_image_encoder.model.embeddings.patch_embeddings.projection.weight":
+            (1024, 3, 14, 14),
+        "conditioner.main_image_encoder.model.embeddings.position_embeddings": (1, 1000, 1024),
+        "conditioner.main_image_encoder.model.encoder.layer.0.mlp.fc1.weight": (4096, 1024),
+    }
+    with pytest.raises(ValueError, match="square grid"):
+        conditioner_params(shapes)
+
+
+def test_the_saved_attention_names_find_the_transformers_slots():
+    assert conditioner_key_map(
+        "encoder.layer.0.attention.attention.value.bias").endswith("attention.v_proj.bias")
+    assert conditioner_key_map(
+        "encoder.layer.0.attention.output.dense.weight").endswith("attention.o_proj.weight")
+
+
+def test_dino_normalize_uses_the_pretraining_statistics():
+    out = dino_normalize(torch.zeros(3, 2, 2))
+    assert torch.allclose(out.mean(dim=(1, 2)),
+                          (torch.tensor(0.5) - torch.tensor(IMAGENET_MEAN))
+                          / torch.tensor(IMAGENET_STD))
+    assert dino_normalize(torch.zeros(2, 3, 4, 4)).shape == (2, 3, 4, 4)
+
+
+def test_the_tower_gives_one_token_per_patch_plus_the_cls():
+    with torch.no_grad():
+        assert tiny_dino()([picture()], torch.float32).shape == (1, 17, TINY_DINO["hidden_size"])
+        no_cls = tiny_dino(use_cls_token=False)([picture()], torch.float32)
+        assert no_cls.shape == (1, 16, TINY_DINO["hidden_size"])
+
+
+def test_the_tower_takes_any_whole_number_of_patches():
+    # The engine fits a reference by area and never crops, so the tower interpolates positions.
+    encoder = tiny_dino()
+    with torch.no_grad():
+        assert encoder([picture(70, 42)], torch.float32).shape == (1, 16, 64)
+        assert encoder([picture(), picture()], torch.float32).shape == (2, 17, 64)
+    with pytest.raises(ValueError, match="one picture size"):
+        encoder.pixels([picture(), picture(70, 42)], torch.float32)
+
+
+def test_the_unconditional_context_is_zeros_like_the_conditioned_one():
+    like = torch.ones(2, 17, 64)
+    null = tiny_dino().unconditional(like)
+    assert null.shape == like.shape and torch.equal(null, torch.zeros_like(like))
+
+
+def test_the_conditioner_loads_under_its_own_prefix(tmp_path):
+    encoder = tiny_dino()
+    tensors = {}
+    for key, value in encoder.state_dict().items():
+        for ours, saved in ((".attention.q_proj.", ".attention.attention.query."),
+                            (".attention.k_proj.", ".attention.attention.key."),
+                            (".attention.v_proj.", ".attention.attention.value."),
+                            (".attention.o_proj.", ".attention.output.dense.")):
+            key = key.replace(ours, saved)
+        tensors[CONDITIONER_PREFIX + key] = value
+    tensors["model.x_embedder.weight"] = torch.ones(4, 4)
+    path = write_safetensors(tmp_path / "cond.safetensors", tensors)
+
+    loaded = load_hunyuan3d_image_encoder(path, conditioner_params(checkpoint_shapes(path)),
+                                          device="cpu", dtype=torch.float32)
+
+    assert torch.equal(loaded.embeddings.cls_token, encoder.embeddings.cls_token)
+    assert torch.equal(loaded.encoder.layer[1].mlp.fc2.weight,
+                       encoder.encoder.layer[1].mlp.fc2.weight)
+    assert not any(p.requires_grad for p in loaded.parameters())
+    assert not loaded.training
