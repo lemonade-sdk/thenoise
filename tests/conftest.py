@@ -178,11 +178,12 @@ def write_wan_dit(path, *, channels: int = 48) -> str:
 def write_wan_vae(path, *, channels: int = 48) -> str:
     """Write a file whose header claims a Wan codec of that latent width.
 
-    The encoder output conv is the only entry in it, because that is all
-    `detect_latent_width` reads; the codec itself is stubbed by whoever points here.
+    The encoder output conv and the quant conv are the only entries, because those are
+    all `detect_latent_width` reads; the codec itself is stubbed by whoever points here.
     """
     return write_safetensors(path, {
         "encoder.head.2.weight": torch.zeros(2 * channels, 1, 1, 1, 1),
+        "conv2.weight": torch.zeros(channels, channels, 1, 1, 1),
     })
 
 

@@ -245,9 +245,8 @@ class Header:
     def require(self, signature: Signature) -> None:
         """Refuse a file that is not ``signature``'s model, naming what gave it away.
 
-        Geometry read out of a header is only as good as the claim that the file is what
-        it says: checked here, a foreign checkpoint is a message about the file rather
-        than a shape error halfway through the load.
+        Geometry read out of a header is only as good as the claim that the file is
+        what it says.
         """
         if missing := self.missing(signature):
             raise ValueError(
@@ -273,8 +272,7 @@ class Header:
         """A view of this header under renamed names, without reading the file again.
 
         For a loader whose geometry lives under the names the model uses where the
-        checkpoint spells a leaf differently. The file's own spelling is kept, because
-        that is what a quantized layer is read back by.
+        checkpoint spells a leaf differently.
         """
         shapes: Dict[str, Tuple[int, ...]] = {}
         dtypes: Dict[str, str] = {}
@@ -318,9 +316,8 @@ def as_header(checkpoint: Union[str, Header]) -> Header:
 def require_divisible(value: int, divisor: int, what: str, by: str) -> None:
     """Refuse a width that does not divide, in the same words every time.
 
-    A trunk that is not a whole number of heads predicts a plausible-but-wrong velocity
-    rather than failing, so every loader checks it; the numbers come from different
-    names per model, which is all this normalizes.
+    A trunk that is not a whole number of heads predicts a plausible-but-wrong
+    velocity rather than failing.
     """
     if value % divisor:
         raise ValueError(f"{what} {value} is not a multiple of {by} {divisor}")

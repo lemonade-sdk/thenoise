@@ -166,10 +166,8 @@ def load_module_state(
     """Load ``state_dict`` into ``model``, or name the keys that did not line up.
 
     ``allow_missing`` lists substrings of the module paths no checkpoint carries
-    (model-internal buffers); everything else has to match in both directions. A
-    plain ``strict=False`` swallows the difference until a forward pass answers with
-    nonsense, and a bare ``strict=True`` names only the first half of it, so every
-    component loader — DiT, encoder, codec, upscaler — checks here.
+    (model-internal buffers); everything else has to match in both directions, which
+    is what ``strict=True`` does not report.
     """
     info = model.load_state_dict(state_dict, strict=False, assign=True)
     missing = [k for k in info.missing_keys
@@ -325,21 +323,17 @@ def load_codec(
 ) -> torch.nn.Module:
     """Read one codec file: geometry out of the header, weights out of the same file.
 
-    ``construct`` is handed the parsed header, because a codec's widths and depth are
-    what the file says they are — reading them there is what answers a wrong checkpoint
-    here rather than on a shape halfway through the first encode. ``signature`` is the
-    same claim the catalog makes of a DiT: names the file has to carry to be this codec
-    at all.
+    ``construct`` gets the parsed header, since a codec's widths and depth are what the
+    file says they are, and ``signature`` is the claim the catalog makes too.
 
-    ``key_map`` renames the checkpoint's layout onto this repo's module tree (it is
-    applied to the header too, so geometry and weights are read under one set of
-    names); ``state_map`` then rewrites the dict — dropping a half the model does not
-    build, restoring weights the export left out — with the module in hand, since a
-    restore needs the module's own shapes.
+    ``key_map`` renames the checkpoint's layout onto the module tree, on the header as
+    well as the tensors, so geometry and weights are read under one set of names.
+    ``state_map`` then rewrites the dict — dropping a half the model does not build,
+    restoring weights the export left out — and needs the module for its shapes.
 
     The module keeps its own :attr:`compute_dtype` unless ``dtype`` overrides it.
-    Anything the codec does after the load — FP32 islands, fused attention, freezing —
-    is the caller's, on the returned module.
+    Anything after the load — FP32 islands, fused attention, freezing — is the
+    caller's, on the returned module.
     """
     device = torch.device(device)
     header = as_header(vae_path)

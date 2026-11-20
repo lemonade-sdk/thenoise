@@ -641,8 +641,8 @@ def _infer_arch(header: Header, vae_path: str) -> dict:
     }
 
 
-#: The keys whose names and shapes the geometry above is read from: enough of both
-#: halves and both quant convolutions to tell this family's codec from anything else.
+#: What :func:`_infer_arch` reads: both halves and both quant convolutions, which is
+#: what separates this family's codec from every other here.
 WAN22_CODEC_SIGNATURE = Signature("Wan 2.2 VAE", keys=(
     "encoder.conv1.weight",
     "decoder.conv1.weight",
@@ -665,12 +665,10 @@ def load_wan22_vae(
 ) -> AutoencoderKLWan22:
     """Load a Wan 2.2 family VAE (ComfyUI ``vae2_2`` layout) for single-frame use.
 
-    The architecture is inferred from the checkpoint (see :func:`_infer_arch`) and
-    the latent statistics picked from its ``z_dim`` unless passed explicitly, so
-    both the 48ch Wan 2.2 and the 64ch RGBA Qwen-Image 2.1 file load through here.
-    The video weights are then collapsed to 2D: drop ``time_conv``, keep the last
-    time slice of 5D convs (causal padding puts the single frame at the end),
-    squeeze 4D gammas.
+    The architecture is inferred from the checkpoint (see :func:`_infer_arch`) and the
+    latent statistics picked from its ``z_dim`` unless passed explicitly, so both the
+    48ch Wan 2.2 and the 64ch RGBA Qwen-Image 2.1 file load through here. The video
+    weights are folded to 2D by :func:`collapse_temporal`.
     """
     def construct(header: Header) -> AutoencoderKLWan22:
         arch = _infer_arch(header, vae_path)

@@ -14,7 +14,8 @@ import pytest
 import sentencepiece as spm
 import torch
 from conftest import (resolves_to, stub_wan_components, video_pipeline, wan_adapter,
-                      wan_raw_key, wan_tiny_params, write_wan_dit, write_wan_vae)
+                      wan_raw_key, wan_tiny_params, write_safetensors, write_wan_dit,
+                      write_wan_vae)
 from PIL import Image
 from safetensors.torch import save_file
 from thenoise.utils.safetensors import read_header
@@ -585,6 +586,29 @@ def test_the_release_is_read_off_the_file_not_from_the_model(tmp_path):
     """Which codec a file is comes from its header, since a request cannot say it."""
     path, _ = _write_vae(tmp_path)
     assert detect_latent_width(str(path)) == 48
+
+
+def test_a_codec_that_only_half_matches_is_refused_by_name(tmp_path):
+    """A Flux AE tail halves to 16, which a Wan 2.1 release is entitled to, so the
+    quant conv has to be there and agree before the number means anything.
+    """
+    tail_only = write_safetensors(
+        tmp_path / "ae.safetensors",
+        {"encoder.conv_out.weight": torch.zeros(32, 256, 3, 3)})
+    with pytest.raises(ValueError, match="without the quant conv"):
+        detect_latent_width(str(tail_only))
+
+    disagree = write_safetensors(
+        tmp_path / "disagreeing.safetensors",
+        {"encoder.head.2.weight": torch.zeros(96, 1, 1, 1, 1),
+         "conv2.weight": torch.zeros(16, 16, 1, 1, 1)})
+    with pytest.raises(ValueError, match="'conv2.weight' says 16"):
+        detect_latent_width(str(disagree))
+
+    foreign = write_safetensors(tmp_path / "not_a_vae.safetensors",
+                                {"unet.weight": torch.zeros(4)})
+    with pytest.raises(ValueError, match="no Wan VAE encoder output conv"):
+        detect_latent_width(str(foreign))
 
 
 def test_the_compression_properties_are_the_codecs_own():

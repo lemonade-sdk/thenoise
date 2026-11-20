@@ -549,9 +549,8 @@ H3_CODEC_SIGNATURE = Signature("H3-Image codec",
 def _geometry(header: Header) -> dict:
     """The widths and the decoder depth the header states.
 
-    A wrong checkpoint says so here instead of failing on a shape halfway through the
-    load. The encoder's stage *strides* are not in the header, so they stay the release's
-    (:data:`SPACE_DOWN`, :data:`TIME_DOWN`) and the strict load checks the rest.
+    The encoder's stage *strides* are not in the header, so they stay the release's
+    (:data:`SPACE_DOWN`, :data:`TIME_DOWN`).
     """
     embed = header.shapes.get("decoder.x_embedder.weight")
     conv_in = header.shapes.get("encoder.conv_in.weight")

@@ -465,10 +465,8 @@ _HALF_WIDTHS = {"encoder": (1, _PIXEL_CHANNELS), "decoder": (_CH_MULT[-1], _Z_CH
 def _half_width(header: Header, half: str, vae_path: str) -> int:
     """Base channel width of one half of the file — 96 for a small decoder, 128 otherwise.
 
-    Each half's ``conv_in`` states it, so no config file is needed and the strict load
-    right after checks the rest of the layout. Requiring the input channels — 3 pixels,
-    32 raw latent — is what separates a Flux.2 AE from any VAE that happens to carry a
-    ``decoder.conv_in.weight``.
+    Requiring the input channels — 3 pixels, 32 raw latent — is what separates a
+    Flux.2 AE from any VAE that happens to carry a ``decoder.conv_in.weight``.
     """
     scale, in_channels = _HALF_WIDTHS[half]
     key = f"{half}.conv_in.weight"

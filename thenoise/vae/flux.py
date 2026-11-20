@@ -300,7 +300,6 @@ def load_flux_vae(
         what="Flux VAE decoder",
         signature=FLUX_AE_SIGNATURE,
         construct=lambda header: AutoencoderKLFlux(),
-        # The ``decoder.`` prefix is stripped so keys line up with the model's bare names.
         state_map=lambda sd, vae: {
             k[len("decoder."):]: v for k, v in sd.items() if k.startswith("decoder.")
         },

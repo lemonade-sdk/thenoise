@@ -543,8 +543,7 @@ class AutoencoderKLMageFlow(nn.Module):
         return self.decoder_model(noise, t, cond).clamp(-1.0, 1.0)
 
 
-#: The export's two halves. Their names, not the model's, so the loader remaps below —
-#: and the same names tell a Mage-Flow run which of its two codecs it was pointed at.
+#: The export's two halves: their names, not the module tree's, so the loader remaps.
 MAGE_VAE_SIGNATURE = Signature("Mage-VAE", prefixes=("student.", "pipeline."))
 
 

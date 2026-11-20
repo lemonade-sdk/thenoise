@@ -683,9 +683,8 @@ def convert_comfyui_key(key: str) -> str:
     """``key`` in the official AutoencoderKL names.
 
     A ComfyUI repackaging spells the modules its own way; the leaf (``weight``,
-    ``bias``, and a quantized file's scale siblings) rides through. A key already in
-    the official names comes back untouched, so a file needs no layout detection —
-    and the header is read under the same names as the weights it loads onto.
+    ``bias``, and a quantized file's scale siblings) rides through. Names already
+    official are not in the table, so the file needs no layout detection.
     """
     parent = key.rsplit(".", 1)[0]
     renamed = _COMFYUI_MODULES.get(parent)
@@ -785,8 +784,8 @@ def _latent_channels(header: Header, vae_path: str, declared: int) -> int:
     return declared
 
 
-#: The names this family's geometry is read through, under the module tree's own
-#: spelling: the pixel round trip, and the latent width as three modules state it.
+#: The names the geometry below is read through, after :func:`convert_comfyui_key`:
+#: the pixel round trip, and the latent width as three modules state it.
 QWEN_CODEC_SIGNATURE = Signature("Qwen-Image family codec", keys=(
     "encoder.conv_in.weight",
     "decoder.conv_out.weight",
