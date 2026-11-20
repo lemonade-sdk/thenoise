@@ -69,6 +69,10 @@ class Mesh:
     def is_empty(self) -> bool:
         return self.faces.shape[0] == 0
 
+    def cpu(self) -> "Mesh":
+        """The mesh detached and on the host, which is where every writer starts."""
+        return Mesh(self.vertices.detach().cpu(), self.faces.detach().cpu())
+
     def signed_volume(self) -> Tensor:
         """The volume the faces enclose, positive when they face outward."""
         triangles = self.vertices[self.faces]
@@ -116,6 +120,7 @@ def extract_surface(volume: SdfVolume) -> Mesh:
     corner_id = (index[..., 0] * stride + index[..., 1]) * stride + index[..., 2]
     inside = volume.values.reshape(-1)[corner_id] < volume.level
     tetrahedra = TETRAHEDRA.to(cells.device)
+    tables = _TET_TABLES.to(cells.device)
     bits = (1 << torch.arange(4, device=cells.device))
     codes = (inside[:, tetrahedra].to(torch.long) * bits).sum(-1)
 
@@ -125,7 +130,7 @@ def extract_surface(volume: SdfVolume) -> Mesh:
         keep = (code != 0) & (code != 15)
         if not bool(keep.any()):
             continue
-        plan = _TET_TABLES[_FLIP[tet].item()][code[keep]]
+        plan = tables[_FLIP[tet].item()][code[keep]]
         ids = corner_id[keep][:, tetrahedra[tet]]
         pairs = torch.gather(ids, 1, plan.clamp(min=0).reshape(ids.shape[0], -1))
         triangles = (plan >= 0).all(-1).all(-1)

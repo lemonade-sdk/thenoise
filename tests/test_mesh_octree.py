@@ -21,7 +21,8 @@ def brute_force(sdf, resolution, bounds=1.0, level=0.0):
 
 
 def test_levels_end_at_the_resolution_and_divide_the_next():
-    assert octree_levels(384) == (48, 96, 192, 384)
+    assert octree_levels(384) == (96, 192, 384)
+    assert octree_levels(128) == (64, 128)
     for resolution in range(1, 600):
         levels = octree_levels(resolution, start=4)
         assert levels[-1] == resolution
@@ -77,6 +78,31 @@ def test_a_surface_outside_the_box_yields_no_cells():
     assert volume.queries > 0
 
 
+def test_a_saturating_field_still_yields_a_surface():
+    """The decoder answers in logits, not distances: steep, and no unit gradient anywhere."""
+    volume = sample_sdf(lambda points: torch.tanh(50.0 * (points.norm(dim=-1) - 0.4)),
+                        96, device="cpu", start=12)
+    assert volume.cells.any()
+    radius = volume.corner_positions(volume.extracted_cells()).norm(dim=-1)
+    assert 0.35 < radius.mean() < 0.45
+
+
+def test_a_field_narrower_than_the_grid_is_stored_anyway():
+    """A bf16 codec answers in bf16, and an index store refuses a narrower source."""
+    for dtype in (torch.bfloat16, torch.float16):
+        volume = sample_sdf(lambda points: (points.norm(dim=-1) - 0.4).to(dtype),
+                            24, device="cpu", start=6)
+        assert volume.values.dtype is torch.float32
+        assert volume.cells.any()
+
+
+def test_a_field_that_never_reaches_the_level_says_so():
+    volume = sample_sdf(lambda points: torch.full((points.shape[0],), -3.0), 64,
+                        device="cpu", start=8)
+    assert not volume.cells.any()
+    assert volume.span() == "-3.0000..-3.0000"
+
+
 def test_the_level_selects_which_surface_is_extracted():
     def two_shells(points):
         radius = points.norm(dim=-1)
@@ -86,6 +112,21 @@ def test_the_level_selects_which_surface_is_extracted():
     outer = sample_sdf(two_shells, 64, device="cpu", level=-0.01, start=8, bounds=0.55)
     assert inner.cells.any() and outer.cells.any()
     assert inner.queries > outer.queries
+
+
+def test_a_band_refines_the_cells_that_only_come_near_the_level():
+    """A field that saturates can hide its surface in a cell whose corners are all on one
+    side of it, so refining on sign changes alone stops before the surface. The band chases
+    what only approaches the level, without falling back to a dense grid."""
+
+    def ledge(points):
+        near = (points.norm(dim=-1) - 0.6).abs() < 0.02
+        return 1.3 - 0.8 * near
+
+    plain = sample_sdf(ledge, 64, device="cpu", level=0.0, start=16)
+    banded = sample_sdf(ledge, 64, device="cpu", level=0.0, start=16, band=0.9)
+    assert not banded.cells.any()
+    assert plain.queries < banded.queries < 65 ** 3 // 3
 
 
 @pytest.mark.parametrize("kwargs", [

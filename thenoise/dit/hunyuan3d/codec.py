@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from typing import Tuple
-
 import torch
 import torch.nn as nn
 from accelerate import init_empty_weights
 
 from thenoise.dit.feed_forward import FeedForward
 from thenoise.dit.quantized import QuantizedLinear
-from thenoise.utils.attention import attention
+from thenoise.utils.attention import attention, interleaved_heads
 from thenoise.utils.fourier import fourier_dim, fourier_features
 from thenoise.utils.loader import load_dit
 from thenoise.utils.qk_norm import QKNorm
@@ -20,15 +18,10 @@ from .keys import (
     take_prefix,
 )
 
+#: The shape VAE's own ``include_pi: false``, which no tensor shape reveals.
+INCLUDE_PI = False
+
 COORDS = 3
-
-
-def _heads(fused: torch.Tensor, num_heads: int, parts: int) -> Tuple[torch.Tensor, ...]:
-    """``[B, N, parts*heads*d]`` -> ``parts`` ``[B, heads, N, d]``, parts inside each head."""
-    batches, tokens, total = fused.shape
-    per = total // (num_heads * parts)
-    grouped = fused.view(batches, tokens, num_heads, parts, per)
-    return tuple(head.transpose(1, 2) for head in torch.unbind(grouped, dim=3))
 
 
 class CodecSelfAttention(nn.Module):
@@ -44,7 +37,7 @@ class CodecSelfAttention(nn.Module):
                           if qk_norm else None)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        q, k, v = _heads(self.c_qkv(x), self.num_heads, 3)
+        q, k, v = interleaved_heads(self.c_qkv(x), self.num_heads, 3)
         if self.attention is not None:
             q, k = self.attention(q, k)
         return self.c_proj(attention(q, k=k, v=v))
@@ -64,8 +57,8 @@ class CodecCrossAttention(nn.Module):
                           if qk_norm else None)
 
     def forward(self, x: torch.Tensor, data: torch.Tensor) -> torch.Tensor:
-        q = _heads(self.c_q(x), self.num_heads, 1)[0]
-        k, v = _heads(self.c_kv(data), self.num_heads, 2)
+        q = interleaved_heads(self.c_q(x), self.num_heads, 1)[0]
+        k, v = interleaved_heads(self.c_kv(data), self.num_heads, 2)
         if self.attention is not None:
             q, k = self.attention(q, k)
         return self.c_proj(attention(q, k=k, v=v))
@@ -120,7 +113,8 @@ class GeoDecoder(nn.Module):
 
     def forward(self, latents: torch.Tensor, queries: torch.Tensor) -> torch.Tensor:
         """``latents`` ``[B, N, width]``, ``queries`` ``[B, M, 3]`` -> ``[B, M, 1]``."""
-        x = self.query_proj(fourier_features(queries, self.num_freqs).to(latents.dtype))
+        x = self.query_proj(fourier_features(queries, self.num_freqs,
+                                             include_pi=INCLUDE_PI).to(latents.dtype))
         x = self.cross_attn_decoder(x, latents)
         if self.ln_post is not None:
             x = self.ln_post(x)

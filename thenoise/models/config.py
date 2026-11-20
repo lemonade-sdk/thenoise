@@ -12,6 +12,7 @@ import torch
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Optional, Union
 
+from thenoise.mesh.octree import CHUNK
 from thenoise.utils.lora_roles import LoraSpecs
 from thenoise.utils.safetensors import Header, read_header
 
@@ -172,10 +173,11 @@ class MeshSamplingParams(SamplingParams):
 class MeshDecodeParams:
     """The volume-and-surface knobs, which no sampler sees."""
 
-    octree_resolution: int = 384
-    bounds: float = 1.01
-    mc_level: float = 0.0
-    chunk: int = 8192
+    # No defaults here: a model's own defaults table is where these are written down.
+    octree_resolution: int
+    bounds: float
+    mc_level: float
+    chunk: int = CHUNK
 
 
 __all__ = ["ModelConfig", "EncodePromptArgs", "GenerateRequest", "SamplingParams",

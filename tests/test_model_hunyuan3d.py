@@ -1,6 +1,6 @@
 import pytest
 import torch
-from PIL import Image
+from PIL import Image, ImageDraw
 from test_dit_hunyuan3d import TINY
 from thenoise.dit.hunyuan3d import Hunyuan3DShapeParams
 
@@ -32,6 +32,8 @@ class StubConditioner:
 
 
 class StubCodec(torch.nn.Module):
+    """Answers the way the shape codec does: an occupancy logit, positive inside."""
+
     def __init__(self, scale_factor=2.0):
         super().__init__()
         self.scale_factor = scale_factor
@@ -46,7 +48,21 @@ class StubCodec(torch.nn.Module):
     def sdf(self, tokens, points):
         self.sdf_calls.append(tuple(points.shape))
         radius = points[0].norm(dim=-1)
-        return (radius - 0.5)[None]
+        return (0.5 - radius)[None]
+
+
+class LowPrecisionCodec(StubCodec):
+    """The codec as served in bf16, which is how the checkpoint arrives."""
+
+    def sdf(self, tokens, points):
+        return (0.5 - points[0].norm(dim=-1))[None].to(torch.bfloat16)
+
+
+class OneSignCodec(StubCodec):
+    """A field with no surface in it, which is what a bad latent looks like from below."""
+
+    def sdf(self, tokens, points):
+        return torch.full((1, points.shape[1]), -3.0)
 
 
 def bare(dtype=torch.float32) -> Hunyuan3DShapeModel:
@@ -74,13 +90,16 @@ def test_the_shared_shape_file_is_the_only_component():
     assert Hunyuan3DShapeModel.REF_METHODS == ("vision",)
 
 
-def test_the_dits_t_is_the_complement_of_the_solver_sigma():
+def test_the_dit_is_asked_at_the_inverted_clock_and_answers_inverted():
+    """It counts up from noise and predicts ``x0 - noise``; the samplers take ``noise - x0``
+    at a descending sigma, so neither the clock nor the flow can be handed over as they come."""
     model = bare()
     latents = torch.zeros(1, 3, TINY["in_channels"])
     with torch.no_grad():
         out = model._velocity(latents, torch.tensor(0.25), torch.zeros(1, 5, TINY["context_dim"]))
     t, _ = model.dit.seen[0]
-    assert torch.allclose(t, torch.tensor(0.75))
+    assert torch.equal(t, torch.tensor([0.75]))
+    assert t.dtype is torch.float32
     assert torch.equal(out, torch.full_like(latents, -2.0))
 
 
@@ -145,7 +164,7 @@ def test_the_scale_factor_comes_off_before_the_codec_is_queried():
     model = bare()
     latents = torch.full((1, 4, TINY["in_channels"]), 4.0)
     model.decode_mesh(latents, MeshDecodeParams(octree_resolution=8, bounds=1.0,
-                                                chunk=64))
+                                                mc_level=0.0, chunk=64))
     assert model.codec.token_calls == 1
     assert torch.allclose(model.codec.last, torch.full((1, 4, TINY["in_channels"]), 2.0))
 
@@ -153,7 +172,8 @@ def test_the_scale_factor_comes_off_before_the_codec_is_queried():
 def test_the_tokens_are_refined_once_for_the_whole_volume():
     model = bare()
     model.decode_mesh(torch.zeros(1, 4, TINY["in_channels"]),
-                      MeshDecodeParams(octree_resolution=16, bounds=1.0, chunk=32))
+                      MeshDecodeParams(octree_resolution=16, bounds=1.0, mc_level=0.0,
+                                       chunk=32))
     assert model.codec.token_calls == 1
     assert len(model.codec.sdf_calls) > 1
 
@@ -161,17 +181,62 @@ def test_the_tokens_are_refined_once_for_the_whole_volume():
 def test_a_mesh_comes_out_of_the_decode():
     model = bare()
     mesh = model.decode_mesh(torch.zeros(1, 4, TINY["in_channels"]),
-                            MeshDecodeParams(octree_resolution=32, bounds=1.0, chunk=512))
+                             MeshDecodeParams(octree_resolution=32, bounds=1.0, mc_level=0.0,
+                                              chunk=512))
     assert not mesh.is_empty
     assert mesh.signed_volume() > 0
 
 
-def test_references_are_fitted_to_whole_patches_inside_the_towers_canvas():
-    sizing = Hunyuan3DShapeModel.REFERENCE_SIZING
-    width, height = sizing.target_size(1920, 1080)
-    assert width % 14 == 0 and height % 14 == 0
-    assert width * height <= 518 * 518 + 14 * 14
-    assert width / height == pytest.approx(1920 / 1080, rel=0.05)
+def test_a_bf16_codec_still_yields_a_mesh():
+    model = bare()
+    model.codec = LowPrecisionCodec()
+    mesh = model.decode_mesh(torch.zeros(1, 4, TINY["in_channels"]),
+                             MeshDecodeParams(octree_resolution=32, bounds=1.0, mc_level=0.0,
+                                              chunk=512))
+    assert not mesh.is_empty
+    assert mesh.vertices.dtype is torch.float32
+
+
+def test_a_shape_that_never_surfaces_blames_the_field_it_saw():
+    model = bare()
+    model.codec = OneSignCodec()
+    with pytest.raises(RuntimeError) as caught:
+        model.decode_mesh(torch.zeros(1, 4, TINY["in_channels"]),
+                          MeshDecodeParams(octree_resolution=16, bounds=1.0, mc_level=0.0,
+                                           chunk=64))
+    assert "no corner changed sign" in str(caught.value)
+    assert "3.0000..3.0000" in str(caught.value)
+    assert "latents mean 0.000 std 0.000" in str(caught.value)
+
+
+def test_the_volume_defaults_are_the_shape_pipelines():
+    assert Hunyuan3DShapeModel.DEFAULT_PREFS["octree_resolution"] == 384
+    assert Hunyuan3DShapeModel.DEFAULT_PREFS["bounds"] == 1.01
+    assert Hunyuan3DShapeModel.DEFAULT_PREFS["mc_level"] == 1 / 512
+
+
+def test_a_reference_arrives_as_the_square_the_tower_was_trained_on():
+    cutout = Image.new("RGBA", (900, 300), (0, 0, 0, 0))
+    ImageDraw.Draw(cutout).rectangle((300, 60, 600, 240), fill=(10, 20, 30, 255))
+    images = bare().conditioned_images(
+        EncodePromptArgs(prompt="", image=[cutout], guidance_scale=1.0))
+    assert images[0].size == (518, 518)
+    assert images[0].getpixel((0, 0)) == (255, 255, 255)
+    assert sum(images[0].getpixel((259, 259))) < 120
+
+
+def test_a_reference_is_covered_and_centre_cropped_rather_than_squashed():
+    """The tower's own fit sends the short side to 518 and crops the overhang off the long
+    one, so an off-centre band that leaves the frame does so symmetrically."""
+    image = Image.new("RGB", (1000, 500), "white")
+    ImageDraw.Draw(image).rectangle((0, 0, 199, 499), fill="black")
+    framed = bare().prepare_reference(image)
+    assert framed.size == (518, 518)
+    assert framed.convert("L").getextrema() == (255, 255)
+
+
+def test_a_small_reference_is_enlarged_to_the_towers_canvas():
+    assert bare().prepare_reference(Image.new("RGB", (120, 90))).size == (518, 518)
 
 
 class Handle:

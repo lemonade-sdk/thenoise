@@ -35,9 +35,19 @@ from thenoise.models.config import (
     ModelConfig,
 )
 from thenoise.samplers import sigma_steps
-from thenoise.utils.image_tensor import ReferenceSizing
+from thenoise.utils.image_tensor import cover_crop
 
 logger = logging.getLogger(__name__)
+
+#: The square the tower takes: 518/14 patches a side, whose count plus the cls token is
+#: the ``text_len: 1370`` in the model config. Any other frame size re-interpolates its
+#: position grid, which it was never trained on.
+REFERENCE_SIDE = 518
+
+#: How close to the cut a corner may sit and still have its cell refined. The codec's
+#: field saturates at about ±1, and the reference decoder keeps this much margin so a
+#: surface a coarse grid steps over is still chased at the next level.
+NEAR_BAND = 0.95
 
 
 class Hunyuan3DShapeModel(DiffusionModel):
@@ -60,11 +70,16 @@ class Hunyuan3DShapeModel(DiffusionModel):
         "num_latents": 4096,
         "octree_resolution": 384,
         "bounds": 1.01,
-        "mc_level": 0.0,
+        # The shape pipeline's cut, -1/512 on the inside-positive logit it answers with;
+        # this field counts the other way, so the sign goes with it.
+        "mc_level": 1 / 512,
     }
 
-    #: Whole DINOv2 patches, aspect preserved: the tower interpolates its position grid.
-    REFERENCE_SIZING = ReferenceSizing(fit="area", cap=518 * 518, align=14)
+    def prepare_reference(self, image: Image.Image) -> Image.Image:
+        """Short side to :data:`REFERENCE_SIDE`, then centre-crop the overhang: the frame the
+        tower builds itself with ``Resize``+``CenterCrop``, so no aspect ratio arrives
+        stretched or forces its position grid to interpolate."""
+        return cover_crop(image, REFERENCE_SIDE, REFERENCE_SIDE)
 
     @staticmethod
     def detect(f) -> bool:
@@ -133,17 +148,23 @@ class Hunyuan3DShapeModel(DiffusionModel):
 
     def _velocity(self, latents: torch.Tensor, sigma: torch.Tensor,
                   context: torch.Tensor) -> torch.Tensor:
-        """The DiT's ``dx/dt`` as ``dx/dsigma``, which is what ``x -= delta * v`` descends."""
-        t = (1.0 - sigma).expand(latents.shape[0]).to(dtype=latents.dtype)
+        """The DiT counts up from noise (``x_t = t x0 + (1-t) noise``) and predicts
+        ``x0 - noise``; this engine counts down and wants ``noise - x0``, so the clock it
+        is fed and the flow it answers both come inverted."""
+        t = (1.0 - sigma).expand(latents.shape[0])
         return -self.dit(latents, t, context)
 
     # ------------------------------------------------------------ the mesh half
     def sdf_function(self, latents: torch.Tensor) -> Callable[[torch.Tensor], torch.Tensor]:
-        """One SDF query to ``[M]``, over tokens refined once for the whole volume."""
+        """One SDF query to ``[M]``, over tokens refined once for the whole volume.
+
+        The codec answers an inside-positive occupancy logit; the mesh layer wants an SDF,
+        negative inside, and that is also what decides which way the triangles face.
+        """
         tokens = self.codec.tokens(latents / self.codec.scale_factor)
 
         def sdf(points: torch.Tensor) -> torch.Tensor:
-            return self.codec.sdf(tokens, points[None])[0]
+            return -self.codec.sdf(tokens, points[None])[0]
 
         return sdf
 
@@ -151,8 +172,16 @@ class Hunyuan3DShapeModel(DiffusionModel):
         """Latents to triangles: refine once, sample the narrow band, extract its surface."""
         volume = sample_sdf(self.sdf_function(latents), params.octree_resolution,
                             device=self.device, bounds=params.bounds,
-                            level=params.mc_level, chunk=params.chunk)
-        return extract_surface(volume)
+                            level=params.mc_level, chunk=params.chunk,
+                            band=NEAR_BAND)
+        mesh = extract_surface(volume)
+        if mesh.is_empty:
+            seen = latents.float()
+            raise RuntimeError(
+                f"no corner changed sign across level {params.mc_level}: the field spanned "
+                f"{volume.span()} over {volume.queries} queries of "
+                f"±{params.bounds}, latents mean {seen.mean():.3f} std {seen.std():.3f}")
+        return mesh
 
 
 __all__ = ["Hunyuan3DShapeModel"]

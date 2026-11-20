@@ -6,17 +6,16 @@ import torch
 from torch import Tensor
 
 
-def fourier_frequencies(num_freqs: int, *, include_pi: bool = True,
-                        device=None) -> Tensor:
+def fourier_frequencies(num_freqs: int, *, include_pi: bool, device=None) -> Tensor:
     """``[num_freqs]`` doublings ``2**i``, optionally every one scaled by pi."""
     freqs = 2.0 ** torch.arange(num_freqs, dtype=torch.float32, device=device)
     return freqs * math.pi if include_pi else freqs
 
 
-def fourier_features(coords: Tensor, num_freqs: int, *, include_input: bool = True,
-                     include_pi: bool = True) -> Tensor:
+def fourier_features(coords: Tensor, num_freqs: int, *, include_pi: bool,
+                     include_input: bool = True) -> Tensor:
     """``[..., dim]`` -> ``[..., dim * (2 * num_freqs + 1)]``: coords, then sines, then cosines."""
-    # Angles in fp32: 128 * pi is where an fp16 frequency stops being exact.
+    # Angles in fp32: the top doubling is 128, and sin of a large angle is noise in fp16.
     angles = (coords[..., None].float()
               * fourier_frequencies(num_freqs, include_pi=include_pi,
                                     device=coords.device)).flatten(-2)

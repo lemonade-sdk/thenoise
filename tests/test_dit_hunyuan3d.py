@@ -21,8 +21,8 @@ from thenoise.dit.hunyuan3d import (
     shape_params,
     take_prefix,
 )
-from thenoise.dit.hunyuan3d.codec import _heads
-from thenoise.dit.hunyuan3d.models import MoE
+from thenoise.dit.hunyuan3d.models import Attention, MoE
+from thenoise.utils.attention import interleaved_heads
 from thenoise.utils.fourier import fourier_dim, fourier_features, fourier_frequencies
 
 TINY = dict(
@@ -208,14 +208,33 @@ def tiny_codec(**overrides) -> Hunyuan3DShapeCodec:
 
 def test_fourier_features_put_the_coordinate_first():
     coords = torch.tensor([[0.5, -0.25, 1.0]])
-    out = fourier_features(coords, num_freqs=3)
+    out = fourier_features(coords, num_freqs=3, include_pi=True)
     assert out.shape == (1, 21) == (1, fourier_dim(3, 3))
     assert torch.equal(out[:, :3], coords)
     sin, cos = out[:, 3:12], out[:, 12:21]
-    angles = coords[:, :, None] * fourier_frequencies(3, device=coords.device)
+    angles = coords[:, :, None] * fourier_frequencies(3, include_pi=True, device=coords.device)
     assert torch.allclose(sin, angles.sin().flatten(1), atol=1e-6)
     assert torch.allclose(cos, angles.cos().flatten(1), atol=1e-6)
-    assert fourier_features(coords, 3, include_input=False).shape == (1, 18)
+    assert fourier_features(coords, 3, include_pi=True, include_input=False).shape == (1, 18)
+
+
+def test_the_geo_decoder_embeds_points_at_plain_doublings(monkeypatch):
+    """No tensor shape reveals include_pi, and every point lands elsewhere when it is wrong."""
+    decoder = tiny_codec().geo_decoder
+    point = torch.tensor([[[0.3, 0.4, 0.5]]])
+    seen = {}
+
+    def record(embedding):
+        seen["embedding"] = embedding
+        return torch.zeros(*embedding.shape[:-1], TINY_CODEC["width"])
+
+    monkeypatch.setattr(decoder.query_proj, "forward", record)
+    with torch.no_grad():
+        decoder(torch.zeros(1, 6, TINY_CODEC["width"]), point)
+    assert torch.equal(seen["embedding"],
+                       fourier_features(point, TINY_CODEC["num_freqs"], include_pi=False))
+    assert not torch.allclose(seen["embedding"],
+                              fourier_features(point, TINY_CODEC["num_freqs"], include_pi=True))
 
 
 def test_fourier_frequencies_double_and_optionally_scale_by_pi():
@@ -229,10 +248,61 @@ def test_qkv_is_interleaved_inside_each_head():
     q, k, v = (torch.randn(2, 5, heads * per) for _ in range(3))
     fused = torch.stack((q.view(2, 5, heads, per), k.view(2, 5, heads, per),
                          v.view(2, 5, heads, per)), dim=-2).reshape(2, 5, 3 * heads * per)
-    got_q, got_k, got_v = _heads(fused, heads, 3)
+    got_q, got_k, got_v = interleaved_heads(fused, heads, 3)
     assert got_q.shape == (2, heads, 5, per)
     assert torch.equal(got_q.transpose(1, 2).reshape(2, 5, heads * per), q)
     assert torch.equal(got_v.transpose(1, 2).reshape(2, 5, heads * per), v)
+
+
+def _hand_split(tensor: torch.Tensor, heads: int, parts: int, part: int) -> torch.Tensor:
+    """The reference's own read, written out here so the module is checked against
+    something other than itself: head ``i`` owns ``parts * head_dim`` features, part first."""
+    per = tensor.shape[-1] // (heads * parts)
+    blocks = [tensor[..., i * parts * per + part * per:i * parts * per + (part + 1) * per]
+              for i in range(heads)]
+    return torch.stack(blocks, dim=1)
+
+
+def _hand_attention(query, key, value, out_proj) -> torch.Tensor:
+    attended = torch.nn.functional.scaled_dot_product_attention(query, key, value)
+    batch, tokens = query.shape[0], query.shape[2]
+    return out_proj(attended.transpose(1, 2).reshape(batch, tokens, -1))
+
+
+def test_self_attention_reads_query_key_and_value_three_blocks_to_a_head():
+    """Not a per-projection split: head 0's key is ``to_q``'s second block of features, and
+    later heads straddle the projections. The two agree on every tensor shape and disagree
+    on every number, and the trained weights belong to this one."""
+    torch.manual_seed(5)
+    heads, dim = TINY["num_heads"], TINY["hidden_size"]
+    attention = Attention(dim, dim, heads, qkv_bias=True, qk_norm_eps=1e-6)
+    x = torch.randn(2, 6, dim)
+    fused = torch.cat((attention.to_q(x), attention.to_k(x), attention.to_v(x)), dim=-1)
+    q, k, v = (_hand_split(fused, heads, 3, part) for part in range(3))
+    q, k = attention.qk_norm(q, k)
+    assert torch.allclose(attention(x), _hand_attention(q, k, v, attention.out_proj),
+                          atol=1e-6)
+
+    plain = [_hand_split(projection, heads, 1, 0) for projection in
+             (attention.to_q(x), attention.to_k(x), attention.to_v(x))]
+    q_plain, k_plain = attention.qk_norm(plain[0], plain[1])
+    naive = _hand_attention(q_plain, k_plain, plain[2], attention.out_proj)
+    assert not torch.allclose(attention(x), naive, atol=1e-3)
+
+
+def test_cross_attention_splits_its_query_plainly_and_interleaves_only_key_and_value():
+    """The other layout in the same model: the query comes from ``to_q`` head by head, while
+    the fused key-value projection is read two blocks to a head."""
+    torch.manual_seed(6)
+    heads, dim, context_dim = TINY["num_heads"], TINY["hidden_size"], TINY["context_dim"]
+    attention = Attention(dim, context_dim, heads, qkv_bias=True, qk_norm_eps=1e-6)
+    x, context = torch.randn(2, 6, dim), torch.randn(2, 9, context_dim)
+    kv = torch.cat((attention.to_k(context), attention.to_v(context)), dim=-1)
+    q = _hand_split(attention.to_q(x), heads, 1, 0)
+    k, v = (_hand_split(kv, heads, 2, part) for part in range(2))
+    q, k = attention.qk_norm(q, k)
+    assert torch.allclose(attention(x, context), _hand_attention(q, k, v, attention.out_proj),
+                          atol=1e-6)
 
 
 def test_the_codec_returns_one_logit_per_queried_point():
@@ -390,6 +460,15 @@ def test_the_tower_gives_one_token_per_patch_plus_the_cls():
         assert tiny_dino()([picture()], torch.float32).shape == (1, 17, TINY_DINO["hidden_size"])
         no_cls = tiny_dino(use_cls_token=False)([picture()], torch.float32)
         assert no_cls.shape == (1, 16, TINY_DINO["hidden_size"])
+
+
+def test_the_picture_is_handed_to_the_device_the_weights_are_on():
+    """PIL arrives on the CPU; residency can have the tower anywhere, so the batch follows
+    the weights rather than the caller."""
+    encoder = tiny_dino().to("meta")
+    pixels = encoder.pixels([picture()], torch.bfloat16)
+    assert pixels.device == next(encoder.parameters()).device
+    assert pixels.dtype == torch.bfloat16
 
 
 def test_the_tower_takes_any_whole_number_of_patches():
