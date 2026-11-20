@@ -21,3 +21,5 @@ build/
 # Misc
 .DS_Store
 .pytest_cache/
+thenoise/utils/text_encoder/configs/gemma3_ltx/tokenizer.model
+thenoise/utils/text_encoder/configs/gemma3_ltx/tokenizer.json

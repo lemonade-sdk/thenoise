@@ -6,7 +6,9 @@ with its model-specific LTX projection weights.
 """
 from __future__ import annotations
 
+from contextlib import nullcontext
 import json
+import os
 from pathlib import Path
 
 import torch
@@ -14,6 +16,27 @@ from thenoise.utils.safetensors import MemoryEfficientSafeOpen
 from torch import nn
 
 from thenoise.utils.loader import load_text_encoder_weights
+
+
+def _use_math_gemma_attention(device: torch.device) -> bool:
+    """Avoid broken masked Gemma SDPA on confirmed ROCm GPU architectures.
+
+    Selection is scoped to Gemma inference, never global or DiT-wide.
+    `THENOISE_LTX_GEMMA_SDPA=math|default` permits A/B validation of an
+    affected driver/PyTorch combination without changing installed packages.
+    """
+    mode = os.environ.get("THENOISE_LTX_GEMMA_SDPA", "auto").strip().lower()
+    if mode not in ("auto", "math", "default"):
+        raise ValueError("THENOISE_LTX_GEMMA_SDPA must be auto, math or default")
+    if mode != "auto":
+        return mode == "math"
+    if not torch.version.hip or device.type != "cuda":
+        return False
+    try:
+        arch = torch.cuda.get_device_properties(device).gcnArchName.split(":", 1)[0]
+    except (AttributeError, RuntimeError):
+        return False
+    return arch in ("gfx1100", "gfx1151")
 
 
 class GemmaFeatures(nn.Module):
@@ -27,9 +50,15 @@ class GemmaFeatures(nn.Module):
         # Calling the inner model avoids the 250K-token LM-head logits, exactly
         # as the official Lightricks text-encoder implementation does.
         inner = getattr(self.model, "model", self.model)
-        features = inner(
-            input_ids=ids, attention_mask=mask, output_hidden_states=True,
-        ).hidden_states
+        if _use_math_gemma_attention(ids.device):
+            from torch.nn.attention import SDPBackend, sdpa_kernel
+            attention_context = sdpa_kernel([SDPBackend.MATH])
+        else:
+            attention_context = nullcontext()
+        with attention_context:
+            features = inner(
+                input_ids=ids, attention_mask=mask, output_hidden_states=True,
+            ).hidden_states
         if features is None:
             raise RuntimeError("Gemma text model returned no hidden states")
         return torch.stack(features, dim=-1).flatten(2, 3)
@@ -241,11 +270,28 @@ def _load_ltx_text_weights(module, path: Path, key_map, drop_keys: tuple[str, ..
     )
 
 
+def _gemma3_tokenizer_path(checkpoint: Path, vendor: Path) -> Path:
+    """Find the full Gemma-3 tokenizer JSON in either checkpoint layout."""
+    for directory in checkpoint.parents[:3]:
+        candidate = directory / "tokenizer.json"
+        if candidate.is_file():
+            return candidate
+    # Support an explicitly supplied offline asset beside the vendored config.
+    candidate = vendor / "tokenizer.json"
+    if candidate.is_file():
+        return candidate
+    raise FileNotFoundError(
+        f"LTX 2.3 requires the full Gemma-3 tokenizer.json for {checkpoint}. "
+        "Run 'python scripts/download.py --model ltx23' "
+        "(add --int8-convrot for INT8 checkpoints)."
+    )
+
+
 def load_ltx_gemma(path: str | Path, *, version: str, cancel):
     """Return `(GemmaFeatures, tokenizer, text_config)` on CPU.
 
-    Model weights come from one safetensors file. Gemma3 uses a vendored
-    tokenizer/config; Gemma4 uses assets embedded in the checkpoint.
+    Model weights come from one safetensors file. Gemma3 uses local
+    tokenizer.json and a vendored config; Gemma4 embeds its assets.
     """
     try:
         from transformers import AutoModelForImageTextToText, PreTrainedTokenizerFast
@@ -266,13 +312,20 @@ def load_ltx_gemma(path: str | Path, *, version: str, cancel):
         config = Gemma3TextConfig(**json.loads(
             (vendor / "text_config.json").read_text(encoding="utf-8")
         ))
-        tokenizer_path = vendor / "tokenizer.model"
-        if not tokenizer_path.is_file():
-            raise FileNotFoundError(f"LTX Gemma3 tokenizer is not bundled: {tokenizer_path}")
+        tokenizer_path = _gemma3_tokenizer_path(path, vendor)
+        # Transformers 5.4 GemmaTokenizer no longer reads `vocab_file`:
+        # that argument silently constructs a five-token fallback vocabulary.
         tokenizer = GemmaTokenizer(
-            vocab_file=str(tokenizer_path),
+            tokenizer_file=str(tokenizer_path),
             add_bos_token=True, add_eos_token=False,
         )
+        if tokenizer.vocab_size < 250_000 or len(
+            tokenizer("A red fox runs through a snowy forest.").input_ids
+        ) < 6:
+            raise RuntimeError(
+                f"LTX Gemma-3 tokenizer is incomplete: {tokenizer_path}; "
+                "expected a full Gemma-3 tokenizer.json"
+            )
         with torch.device("meta"):
             model = Gemma3TextModel(config)
             replace_linears(model)
