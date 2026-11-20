@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import re
 
+from thenoise.utils.qk_norm import qk_norm_key_map
+
 
 def wan_dit_key(raw: str) -> str:
     """Map ComfyUI WanModel weights to TheNoise DiT module paths.
@@ -32,6 +34,7 @@ def wan_dit_key(raw: str) -> str:
     block, suffix = match.groups()
     if suffix == "modulation":
         return f"{block}.scale_shift_table"
+    suffix = qk_norm_key_map(suffix, q_legacy="norm_q", k_legacy="norm_k")
     # ComfyUI norm2 is FFN, norm3 is cross-attention; Diffusers used the reverse.
     if suffix.startswith("norm2."):
         suffix = "norm3." + suffix[len("norm2."):]
@@ -42,14 +45,12 @@ def wan_dit_key(raw: str) -> str:
         ("self_attn.k.", "attn1.to_k."),
         ("self_attn.v.", "attn1.to_v."),
         ("self_attn.o.", "attn1.to_out."),
-        ("self_attn.norm_q.", "attn1.norm_q."),
-        ("self_attn.norm_k.", "attn1.norm_k."),
+        ("self_attn.qk_norm.", "attn1.qk_norm."),
         ("cross_attn.q.", "attn2.to_q."),
         ("cross_attn.k.", "attn2.to_k."),
         ("cross_attn.v.", "attn2.to_v."),
         ("cross_attn.o.", "attn2.to_out."),
-        ("cross_attn.norm_q.", "attn2.norm_q."),
-        ("cross_attn.norm_k.", "attn2.norm_k."),
+        ("cross_attn.qk_norm.", "attn2.qk_norm."),
         ("ffn.0.", "ffn_in."),
         ("ffn.2.", "ffn_out."),
     ):

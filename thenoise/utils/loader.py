@@ -289,6 +289,10 @@ def _load_bf16(
 
 # --------------------------------------------------------------------------- quantized checkpoint helpers
 
+#: A quantized file's remaining full-precision tensors follow the quantized kernels,
+#: which emit BF16; whatever dtype the export left them in is not worth trusting.
+QUANTIZED_COMPUTE_DTYPE = torch.bfloat16
+
 
 def is_quantized_checkpoint(dit_path: str) -> bool:
     """Return True if ``dit_path`` is a quantized (INT8 or FP8) checkpoint.

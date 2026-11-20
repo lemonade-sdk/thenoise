@@ -7,14 +7,14 @@ from typing import Optional
 import torch
 
 from thenoise.dit.wan_video.model import Wan22Params, WanNativeDiT, detect_params
-from thenoise.utils.loader import is_quantized_checkpoint, load_dit
+from thenoise.utils.loader import (
+    QUANTIZED_COMPUTE_DTYPE,
+    is_quantized_checkpoint,
+    load_dit,
+)
 from thenoise.utils.wan_weights import wan_dit_key
 
 logger = logging.getLogger(__name__)
-
-#: A quantized file's remaining full-precision tensors follow the quantized kernels,
-#: which emit BF16; whatever dtype the export left them in is not worth trusting.
-QUANTIZED_COMPUTE_DTYPE = torch.bfloat16
 
 
 def load_wan_native_transformer(

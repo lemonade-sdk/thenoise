@@ -103,10 +103,12 @@ _WAN_RAW_KEYS = {
 _WAN_RAW_BLOCK_KEYS = (
     ("attn1.to_q.", "self_attn.q."), ("attn1.to_k.", "self_attn.k."),
     ("attn1.to_v.", "self_attn.v."), ("attn1.to_out.", "self_attn.o."),
-    ("attn1.norm_q.", "self_attn.norm_q."), ("attn1.norm_k.", "self_attn.norm_k."),
+    ("attn1.qk_norm.query_norm.", "self_attn.norm_q."),
+    ("attn1.qk_norm.key_norm.", "self_attn.norm_k."),
     ("attn2.to_q.", "cross_attn.q."), ("attn2.to_k.", "cross_attn.k."),
     ("attn2.to_v.", "cross_attn.v."), ("attn2.to_out.", "cross_attn.o."),
-    ("attn2.norm_q.", "cross_attn.norm_q."), ("attn2.norm_k.", "cross_attn.norm_k."),
+    ("attn2.qk_norm.query_norm.", "cross_attn.norm_q."),
+    ("attn2.qk_norm.key_norm.", "cross_attn.norm_k."),
     ("ffn_in.", "ffn.0."), ("ffn_out.", "ffn.2."),
 )
 

@@ -14,6 +14,7 @@ from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import attention
 from thenoise.utils.dynamo import mark_token_axis
 from thenoise.utils.positions import grid_positions
+from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
 from thenoise.utils.safetensors import MemoryEfficientSafeOpen, unwrap_key
 from thenoise.utils.timestep import timestep_embedding
@@ -138,7 +139,7 @@ class WanNativeRoPE(nn.Module):
 
 
 class WanNativeAttention(nn.Module):
-    """Wan QK normalization and attention via TheNoise's shared SDPA."""
+    """Wan QK normalization and attention."""
 
     def __init__(self, dim: int, heads: int, eps: float):
         super().__init__()
@@ -146,14 +147,14 @@ class WanNativeAttention(nn.Module):
         self.to_q = QuantizedLinear(dim, dim)
         self.to_k = QuantizedLinear(dim, dim)
         self.to_v = QuantizedLinear(dim, dim)
-        self.norm_q = nn.RMSNorm(dim, eps=eps)
-        self.norm_k = nn.RMSNorm(dim, eps=eps)
+        self.qk_norm = QKNorm(dim, eps=eps)
         self.to_out = QuantizedLinear(dim, dim)
 
     def forward(self, x: Tensor, context: Tensor | None, rope: Tensor | None) -> Tensor:
         source = x if context is None else context
-        q = self.norm_q(self.to_q(x)).unflatten(-1, (self.heads, -1)).transpose(1, 2)
-        k = self.norm_k(self.to_k(source)).unflatten(-1, (self.heads, -1)).transpose(1, 2)
+        q, k = self.qk_norm(self.to_q(x), self.to_k(source))
+        q = q.unflatten(-1, (self.heads, -1)).transpose(1, 2)
+        k = k.unflatten(-1, (self.heads, -1)).transpose(1, 2)
         v = self.to_v(source).unflatten(-1, (self.heads, -1)).transpose(1, 2)
         if rope is not None:
             q, k = apply_rope(q, k, rope)
