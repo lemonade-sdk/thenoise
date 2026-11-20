@@ -101,7 +101,7 @@ class LTXVideo(VideoModel):
     @classmethod
     def detect(cls, source) -> bool:
         # Match the shared, keys-only model detection contract.
-        keys = set(source.keys())
+        keys = set(source.names)
         is_av = (any(k.endswith("patchify_proj.weight") for k in keys) and
                  any(k.endswith("audio_patchify_proj.weight") for k in keys))
         has_keyframe = any(k.endswith("keyframes_abs_pos_embedding") for k in keys)
@@ -145,6 +145,7 @@ class LTXVideo(VideoModel):
             self.upscaler_path, version=self.version, gemma_text_config=text_cfg,
             cancel=lambda: None, text_encoder_path=self.text_encoder_path,
             text_projection_path=self.text_projection_path,
+            header_cache={Path(self.dit_path).expanduser().resolve(): self.header},
         )
         # Same admission policy as all other model adapters: consult the
         # shared memory manager before placing each independently swappable role.

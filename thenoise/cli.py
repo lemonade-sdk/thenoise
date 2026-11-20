@@ -22,22 +22,16 @@ def _add_model_paths(p: argparse.ArgumentParser, required: bool = True) -> None:
                         "(subdirectories allowed)")
 
 
-def _add_dit_low(p: argparse.ArgumentParser) -> None:
-    """The second expert of a two-expert model, where ``--dit`` is the first."""
-    p.add_argument("--dit-low", default="", metavar="PATH",
-                   help="low-noise DiT checkpoint of a two-expert model "
-                        "(--dit selects the high-noise expert)")
-
-
 def _add_auxiliary_paths(p: argparse.ArgumentParser) -> None:
-    """Optional component paths; adapters validate the roles they accept."""
+    """Additional explicitly selected component paths; adapters validate roles."""
+    p.add_argument("--dit-low", default="", metavar="PATH",
+                   help="second (low-noise) DiT for a two-expert model")
     p.add_argument("--audio-vae", default="", metavar="PATH",
-                   help="auxiliary audio VAE and vocoder checkpoint")
+                   help="audio VAE (and optionally vocoder) checkpoint")
     p.add_argument("--spatial-upscaler", default="", metavar="PATH",
-                   help="auxiliary spatial latent upscaler checkpoint")
+                   help="spatial latent upscaler checkpoint")
     p.add_argument("--text-projection", default="", metavar="PATH",
-                   help="auxiliary text projection checkpoint")
-
+                   help="additional text projection checkpoint")
 
 def _add_upscaler_args(p: argparse.ArgumentParser) -> None:
     """Pixel-upscaler flags for a subcommand: ``serve`` takes ``--upscaler-dir``, the
@@ -168,7 +162,6 @@ def build_parser() -> argparse.ArgumentParser:
     # and only the pixel-upscale tab is usable.
     serve = sub.add_parser("serve", help="run the FastAPI HTTP server")
     _add_model_paths(serve, required=False)
-    _add_dit_low(serve)
     _add_auxiliary_paths(serve)
     _add_upscaler_args(serve)
     _add_controlmap_args(serve)
@@ -203,7 +196,6 @@ def build_parser() -> argparse.ArgumentParser:
     # video
     video = sub.add_parser("video", help="run one generation and save a clip")
     _add_model_paths(video)
-    _add_dit_low(video)
     _add_auxiliary_paths(video)
     _add_video_args(video)
 

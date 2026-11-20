@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Callable
 
 import torch
-from thenoise.utils.safetensors import MemoryEfficientSafeOpen
 
 log = logging.getLogger(__name__)
 
@@ -23,32 +22,23 @@ VERSION_25 = "2.5"
 
 
 def version_from_checkpoint(path: str | Path) -> str | None:
-    """Read headers, never weight data; don't detect from a guessed basename alone."""
+    """Identify a released LTX file using the shared header representation."""
+    from thenoise.utils.safetensors import read_header
+
     path = Path(path).expanduser()
     if not path.is_file():
         return None
-    with MemoryEfficientSafeOpen(str(path)) as f:
-        keys = set(f.keys())
-        meta = f.metadata() or {}
-    cfg = meta.get("config")
-    try:
-        cfg = json.loads(cfg) if isinstance(cfg, str) else (cfg or {})
-    except (TypeError, ValueError):
-        cfg = {}
-    version = str(meta.get("model_version", "") or cfg.get("model_version", ""))
+    header = read_header(str(path))
+    cfg = header.metadata_json("config")
+    version = str(header.metadata.get("model_version", "") or cfg.get("model_version", ""))
     if version.startswith("2.5"):
         return VERSION_25
     if version.startswith("2.3"):
         return VERSION_23
-    # The absolute-position embedding is LTX-2.5-specific. The diffusion
-    # checkpoint may be split or use the Comfy wrapper prefix.
-    if any(k.endswith("keyframes_abs_pos_embedding") for k in keys):
+    keys = header.names
+    if "keyframes_abs_pos_embedding" in keys:
         return VERSION_25
-    if any(k.endswith("patchify_proj.weight") for k in keys) and any(
-        k.endswith("audio_patchify_proj.weight") for k in keys
-    ):
-        # Version 2.5 carries the keyframe embedding; its absence is 2.3.
-        # Never infer an architecture from user-controlled path names.
+    if "patchify_proj.weight" in keys and "audio_patchify_proj.weight" in keys:
         return VERSION_23
     return None
 
@@ -194,10 +184,8 @@ def make_transformer(version: str):
         use_prompt_embeddings=False, perturbed_attn=True,
         ff_bias=version != VERSION_25, use_keyframes_abs_pos_embedding=version == VERSION_25,
     )
-    from thenoise.dit.quantized import replace_linears
     with torch.device("meta"):
         model = LTX2VideoTransformer3DModel(**cfg)
-        replace_linears(model)
         return model
 
 
@@ -305,114 +293,110 @@ def make_connectors(version: str, gemma_text_config):
         per_modality_projections=True, video_hidden_dim=4096,
         audio_hidden_dim=2048, proj_bias=True,
     )
-    from thenoise.dit.quantized import replace_linears
     with torch.device("meta"):
         model = LTX2TextConnectors(**cfg)
-        replace_linears(model)
         return model
 
 
 def load_ltx_component(
     name: str, module: torch.nn.Module, groups: dict[Path, set[str]],
     *, cancel: Callable[[], None], dtype: torch.dtype,
+    header_cache: dict[Path, object] | None = None,
 ) -> torch.nn.Module:
-    """Assemble one LTX component's split checkpoint files, then use TheNoise's loader.
+    """Map LTX checkpoint names onto a component; shared I/O and assignment.
 
-    The component-specific *key mapping* belongs here. Quantization, ConvRot and
-    assignment are handled by the existing shared load_quantized_state_dict.
-    In particular this does not add a new generic loader to thenoise.utils.
+    An original 2.3 checkpoint can carry multiple roles, while the 2.5 text
+    connector can be split across DiT and text files. Only selection and
+    model-specific key mapping live here. Quantized/plain assignment, marker
+    decoding and strict checking stay in thenoise.utils.loader.
     """
+    from thenoise.utils.loader import (RUNTIME_STATE_SUFFIXES, load_module_state,
+                                      load_quantized_state_dict)
     from thenoise.utils.checkpoint import CHECKPOINT_MARKER_KEYS
-    from thenoise.utils.loader import RUNTIME_STATE_SUFFIXES, load_quantized_state_dict
-    from thenoise.utils.safetensors import unwrap_key
+    from thenoise.utils.safetensors import read_header, load_safetensors, unwrap_key
 
-    expected = {key: tuple(value.shape) for key, value in module.state_dict().items()}
-    weights: dict[str, torch.Tensor] = {}
+    expected = {key: tuple(t.shape) for key, t in module.state_dict().items()}
     quant_suffixes = (".weight_scale", ".scale_weight", ".scale_input",
                       ".input_scale", ".comfy_quant")
-    quant_dtypes = {torch.int8}
-    quant_dtypes.update(getattr(torch, attr) for attr in ("float8_e4m3fn", "float8_e5m2")
-                        if hasattr(torch, attr))
+    weights: dict[str, torch.Tensor] = {}
+    used: list[str] = []
 
     for path, roles in groups.items():
         if name not in roles:
             continue
         cancel()
-        with MemoryEfficientSafeOpen(str(path)) as source:
-            for index, raw in enumerate(source.keys()):
-                if index % 16 == 0:
-                    cancel()
-                if raw.endswith(RUNTIME_STATE_SUFFIXES) or unwrap_key(raw) in CHECKPOINT_MARKER_KEYS:
+        # Runtime already handed the adapter the primary Header. All other
+        # split component headers are parsed only once per model load, too.
+        header = header_cache.get(path) if header_cache is not None else None
+        if header is None:
+            header = read_header(str(path))
+            if header_cache is not None:
+                header_cache[path] = header
+        selected: dict[str, str] = {}
+        for raw in header.raw_entries:
+            key = unwrap_key(raw)
+            if key in CHECKPOINT_MARKER_KEYS or raw.endswith(RUNTIME_STATE_SUFFIXES):
+                continue
+            if 'dit' in roles or 'connectors' in roles:
+                mapped = split_ltx_key(key)
+            elif 'vae' in roles:
+                mapped = ('vae', key.removeprefix('vae.'))
+            elif 'audio_vae' in roles:
+                mapped = (('vocoder', key.removeprefix('vocoder.'))
+                          if key.startswith('vocoder.') else
+                          ('audio_vae', key.removeprefix('audio_vae.')))
+            elif 'upscaler' in roles:
+                mapped = _upscaler_key(key)
+            else:
+                raise RuntimeError(f'unknown LTX checkpoint roles: {roles}')
+            if mapped is None or mapped[0] != name:
+                continue
+            target = _map_component(name, mapped[1])
+            if target is None:
+                continue
+            suffix = next((v for v in quant_suffixes if target.endswith(v)), None)
+            if suffix:
+                if target[:-len(suffix)] + '.weight' not in expected:
+                    raise ValueError(f'{path}: unexpected quantization metadata {raw!r}')
+            elif target not in expected:
+                # A multi-role file may carry an FP8 marker, not a model tensor.
+                if target == 'scaled_fp8' or target.endswith('.scaled_fp8'):
                     continue
-                if "dit" in roles or "connectors" in roles:
-                    mapped = split_ltx_key(raw)
-                elif "vae" in roles:
-                    mapped = ("vae", raw.removeprefix("vae."))
-                elif "audio_vae" in roles:
-                    mapped = (("vocoder", raw.removeprefix("vocoder."))
-                              if raw.startswith("vocoder.") else
-                              ("audio_vae", raw.removeprefix("audio_vae.")))
-                elif "upscaler" in roles:
-                    mapped = _upscaler_key(raw)
-                else:
-                    raise RuntimeError(f"unknown LTX checkpoint group: {roles}")
-                if mapped is None or mapped[0] != name:
-                    continue
-                key = _map_component(name, mapped[1])
-                if key is None:
-                    continue
-                # A scale/marker belongs to a weight, not the module's state_dict.
-                suffix = next((s for s in quant_suffixes if key.endswith(s)), None)
-                if suffix is not None:
-                    parent = key[:-len(suffix)]
-                    if parent + ".weight" not in expected:
-                        raise ValueError(f"{path}: unexpected LTX quantization metadata {raw!r}")
-                elif key not in expected:
-                    # Checkpoint-wide metadata is not a learned parameter.
-                    if key == "scaled_fp8" or key.endswith(".scaled_fp8"):
-                        continue
-                    raise ValueError(f"{path}: unexpected {name} tensor {raw!r} -> {key!r}")
-                elif tuple(source.header[raw]["shape"]) != expected[key]:
-                    raise ValueError(f"{path}: {raw!r} shape "
-                                     f"{source.header[raw]['shape']} != {expected[key]}")
-                if key in weights:
-                    raise ValueError(f"{path}: duplicate LTX {name} weight {key!r}")
-                weights[key] = source.get_tensor(raw)
+                raise ValueError(f'{path}: unexpected {name} tensor {raw!r} -> {target!r}')
+            elif tuple(header.raw_entries[raw]['shape']) != expected[target]:
+                raise ValueError(f'{path}: {raw!r} shape '
+                                 f'{header.raw_entries[raw]["shape"]} != {expected[target]}')
+            if target in weights or target in selected.values():
+                raise ValueError(f'{path}: duplicate {name} weight {target!r}')
+            selected[raw] = target
+
+        if not selected:
+            continue
+        # Only the selected raw keys are materialized. Particularly important for
+        # LTX 2.3 monoliths, where audio, video and text share the same file.
+        data = load_safetensors(str(path), device='cpu', keys=set(selected))
+        for raw, tensor in data.items():
+            weights[selected[raw]] = tensor
+        used.append(str(path))
 
     missing = set(expected) - set(weights)
     if missing:
-        raise ValueError(f"LTX {name} checkpoint missing={sorted(missing)[:8]} "
-                         "(no random/meta weight fallback)")
-    is_quantized = any(key in expected and tensor.dtype in quant_dtypes
-                       for key, tensor in weights.items())
-    if is_quantized:
-        # Shared quant loader checks marker structure and restores the native
-        # QuantizedTensor layout. Do not implement a second quantized assigner.
-        for key, value in weights.items():
-            if key not in expected or value.dtype != torch.int8:
-                continue
-            if not key.endswith(".weight"):
-                raise ValueError(f"LTX {name} unexpected INT8 parameter {key!r}")
-            stem = key[:-len(".weight")]
-            scales = [stem + s for s in (".weight_scale", ".scale_weight")
-                      if stem + s in weights]
-            if len(scales) != 1 or stem + ".comfy_quant" not in weights:
-                raise ValueError(f"LTX {name}: INT8 {key} requires a single "
-                                 "weight scale and .comfy_quant marker")
+        raise ValueError(f'LTX {name} checkpoint missing={sorted(missing)[:8]} '
+                         '(no random/meta weight fallback)')
+
+    quantized = (any(key.endswith(('.weight_scale', '.scale_weight')) for key in weights)
+                 or any(t.dtype == torch.int8 or str(t.dtype).startswith('torch.float8')
+                        for t in weights.values()))
+    if quantized:
         load_quantized_state_dict(module, weights, dtype=dtype)
     else:
-        stray = sorted(set(weights) - set(expected))
-        if stray:
-            raise ValueError(f"LTX {name} checkpoint has unused quant metadata: {stray[:8]}")
-        module.load_state_dict(
-            {key: value.to(dtype=dtype) if value.is_floating_point() else value
-             for key, value in weights.items()},
-            strict=True, assign=True,
-        )
-    leftover = [key for key, weight in module.named_parameters() if weight.is_meta]
-    leftover += [key for key, weight in module.named_buffers() if weight.is_meta]
+        load_module_state(module, {k: v.to(dtype=dtype) if v.is_floating_point() else v
+                                   for k, v in weights.items()},
+                          ', '.join(used), what=f'LTX {name}')
+    leftover = [key for key, p in module.named_parameters() if p.is_meta]
+    leftover += [key for key, b in module.named_buffers() if b.is_meta]
     if leftover:
-        raise RuntimeError(f"LTX {name} contains uninitialized tensors: {leftover[:8]}")
+        raise RuntimeError(f'LTX {name} uninitialized tensors: {leftover[:8]}')
     return module.eval()
 
 
@@ -422,6 +406,7 @@ def load_original_components(
     *, version: str, cancel: Callable[[], None], dtype=torch.bfloat16,
     gemma_text_config=None, text_encoder_path: str | Path | None = None,
     text_projection_path: str | Path | None = None,
+    header_cache: dict[Path, object] | None = None,
 ) -> dict:
     """Original LTX file roles and mappings, using TheNoise's quantized loader.
 
@@ -453,6 +438,8 @@ def load_original_components(
         elif text_projection_path is not None:
             groups.setdefault(Path(text_projection_path).expanduser().resolve(), set()).add("connectors")
 
+    if header_cache is None:
+        header_cache = {}
     for component, module in modules.items():
-        load_ltx_component(component, module, groups, cancel=cancel, dtype=dtype)
+        load_ltx_component(component, module, groups, cancel=cancel, dtype=dtype, header_cache=header_cache)
     return modules

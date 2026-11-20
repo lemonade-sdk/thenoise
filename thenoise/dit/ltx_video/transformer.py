@@ -19,8 +19,10 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
+from thenoise.dit.quantized import QuantizedLinear
+
 from thenoise.utils.attention import AttentionParams, attention
-from thenoise.utils.rope import apply_rope_split_half
+from thenoise.utils.rope import apply_ltx_rope_split_half
 from thenoise.utils.timestep import timestep_embedding
 
 
@@ -35,8 +37,8 @@ class _TimeFeatures(nn.Module):
     def __init__(self, width: int):
         super().__init__()
         self.timestep_embedder = nn.Module()
-        self.timestep_embedder.linear_1 = nn.Linear(256, width)
-        self.timestep_embedder.linear_2 = nn.Linear(width, width)
+        self.timestep_embedder.linear_1 = QuantizedLinear(256, width)
+        self.timestep_embedder.linear_2 = QuantizedLinear(width, width)
         self.timestep_embedder.act = nn.SiLU()
 
     def forward(self, time: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -50,7 +52,7 @@ class _AdaLayerNormSingle(nn.Module):
         super().__init__()
         self.emb = _TimeFeatures(width)
         self.silu = nn.SiLU()
-        self.linear = nn.Linear(width, mod_params * width)
+        self.linear = QuantizedLinear(width, mod_params * width)
 
     def forward(self, time: torch.Tensor, *, batch_size: int, hidden_dtype: torch.dtype):
         embedded = self.emb(time, hidden_dtype)
@@ -60,7 +62,7 @@ class _AdaLayerNormSingle(nn.Module):
 class _GELUProj(nn.Module):
     def __init__(self, width: int, inner: int, bias: bool):
         super().__init__()
-        self.proj = nn.Linear(width, inner, bias=bias)
+        self.proj = QuantizedLinear(width, inner, bias=bias)
         self.gelu = nn.GELU(approximate="tanh")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -73,7 +75,7 @@ class _FeedForward(nn.Module):
         self.net = nn.ModuleList([
             _GELUProj(width, width * 4, bias),
             nn.Dropout(0.0),
-            nn.Linear(width * 4, width, bias=bias),
+            QuantizedLinear(width * 4, width, bias=bias),
         ])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -93,11 +95,11 @@ class _LTXAttention(nn.Module):
         self.head_dim = head_dim
         self.norm_q = nn.RMSNorm(inner, eps=1e-6)
         self.norm_k = nn.RMSNorm(inner, eps=1e-6)
-        self.to_q = nn.Linear(query_dim, inner, bias=True)
-        self.to_k = nn.Linear(cross_dim, inner, bias=True)
-        self.to_v = nn.Linear(cross_dim, inner, bias=True)
-        self.to_out = nn.ModuleList([nn.Linear(inner, query_dim, bias=True), nn.Dropout(0.0)])
-        self.to_gate_logits = nn.Linear(query_dim, heads, bias=True) if gated else None
+        self.to_q = QuantizedLinear(query_dim, inner, bias=True)
+        self.to_k = QuantizedLinear(cross_dim, inner, bias=True)
+        self.to_v = QuantizedLinear(cross_dim, inner, bias=True)
+        self.to_out = nn.ModuleList([QuantizedLinear(inner, query_dim, bias=True), nn.Dropout(0.0)])
+        self.to_gate_logits = QuantizedLinear(query_dim, heads, bias=True) if gated else None
 
     def forward(self, x: torch.Tensor, *, context: torch.Tensor | None = None,
                 mask: torch.Tensor | None = None,
@@ -115,8 +117,8 @@ class _LTXAttention(nn.Module):
         k = k.reshape(b, k_tokens, self.heads, self.head_dim).transpose(1, 2)
         v = v.reshape(b, k_tokens, self.heads, self.head_dim).transpose(1, 2)
         if q_rope is not None:
-            q = apply_rope_split_half(q, *q_rope)
-            k = apply_rope_split_half(k, *(k_rope if k_rope is not None else q_rope))
+            q = apply_ltx_rope_split_half(q, *q_rope)
+            k = apply_ltx_rope_split_half(k, *(k_rope if k_rope is not None else q_rope))
         if mask is not None:
             if mask.ndim == 2:
                 mask = mask[:, None, None, :]
@@ -389,8 +391,8 @@ class LTX2VideoTransformer3DModel(nn.Module):
         )
         vdim = num_attention_heads * attention_head_dim
         adim = audio_num_attention_heads * audio_attention_head_dim
-        self.proj_in = nn.Linear(in_channels, vdim)
-        self.audio_proj_in = nn.Linear(audio_in_channels, adim)
+        self.proj_in = QuantizedLinear(in_channels, vdim)
+        self.audio_proj_in = QuantizedLinear(audio_in_channels, adim)
         if use_keyframes_abs_pos_embedding:
             self.keyframes_abs_pos_embedding = nn.Parameter(torch.zeros(1, vdim))
         self.prompt_modulation = cross_attn_mod or audio_cross_attn_mod
@@ -439,9 +441,9 @@ class LTX2VideoTransformer3DModel(nn.Module):
             for _ in range(num_layers)
         ])
         self.norm_out = nn.LayerNorm(vdim, eps=1e-6, elementwise_affine=False)
-        self.proj_out = nn.Linear(vdim, out_channels)
+        self.proj_out = QuantizedLinear(vdim, out_channels)
         self.audio_norm_out = nn.LayerNorm(adim, eps=1e-6, elementwise_affine=False)
-        self.audio_proj_out = nn.Linear(adim, audio_out_channels)
+        self.audio_proj_out = QuantizedLinear(adim, audio_out_channels)
 
     @property
     def dtype(self):

@@ -58,24 +58,30 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def apply_rope_split_half(xq: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    """Apply split-half RoPE to ``xq`` ``[B, H, L, D]``.
-
-    Accept the existing ``[L,1,1,D]`` frequency layout and LTX's batched,
-    per-head ``[B,H,L,D/2]`` layout. The latter supplies one angle per *pair*
-    of split-half coordinates. Cast back to the query dtype after the FP32
-    rotation, so BF16/FP16 Q,K,V still select a common SDPA kernel.
-    """
-    ltx_layout = (cos.ndim == 4 and cos.shape[:3] == xq.shape[:3]
-                  and cos.shape[-1] * 2 == xq.shape[-1])
-    if ltx_layout:
-        cos, sin = torch.cat((cos, cos), -1), torch.cat((sin, sin), -1)
-    else:
-        cos, sin = cos.transpose(0, 2), sin.transpose(0, 2)
+    """Apply split-half RoPE to ``xq`` ``[B, H, L, D]`` using ``cos/sin`` ``[L, 1, 1, D]``."""
+    cos = cos.transpose(0, 2)  # [1, 1, L, D]
+    sin = sin.transpose(0, 2)
     rot_dim = cos.shape[-1]
     xq_rot, xq_pass = xq[..., :rot_dim], xq[..., rot_dim:]
     xq_rot = xq_rot * cos + _rotate_half(xq_rot) * sin
-    result = torch.cat((xq_rot, xq_pass), dim=-1)
-    return result.to(xq.dtype) if ltx_layout else result
+    return torch.cat((xq_rot, xq_pass), dim=-1)
+
+
+def apply_ltx_rope_split_half(xq: torch.Tensor, cos: torch.Tensor,
+                              sin: torch.Tensor) -> torch.Tensor:
+    """LTX batched split-half RoPE; half-width phases [B,H,L,D/2].
+
+    Kept separate from the original [L,1,1,D] convention used by other DiTs.
+    The rotation is computed at FP32 and returned in the query's original dtype.
+    """
+    if (xq.ndim != 4 or cos.shape != sin.shape
+            or cos.shape != (*xq.shape[:3], xq.shape[3] // 2)
+            or xq.shape[-1] % 2):
+        raise ValueError("LTX RoPE expects xq [B,H,L,D] and cos/sin [B,H,L,D/2]")
+    q = xq.float()
+    c = torch.cat((cos.float(), cos.float()), dim=-1)
+    sn = torch.cat((sin.float(), sin.float()), dim=-1)
+    return (q * c + _rotate_half(q) * sn).to(xq.dtype)
 
 
 def split_half_rope_1d(head_dim: int, theta: float = 10000.0):

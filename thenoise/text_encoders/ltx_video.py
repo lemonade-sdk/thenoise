@@ -6,9 +6,7 @@ with its model-specific LTX projection weights.
 """
 from __future__ import annotations
 
-from contextlib import nullcontext
 import json
-import os
 from pathlib import Path
 
 import torch
@@ -18,25 +16,7 @@ from torch import nn
 from thenoise.utils.loader import load_text_encoder_weights
 
 
-def _use_math_gemma_attention(device: torch.device) -> bool:
-    """Avoid broken masked Gemma SDPA on confirmed ROCm GPU architectures.
 
-    Selection is scoped to Gemma inference, never global or DiT-wide.
-    `THENOISE_LTX_GEMMA_SDPA=math|default` permits A/B validation of an
-    affected driver/PyTorch combination without changing installed packages.
-    """
-    mode = os.environ.get("THENOISE_LTX_GEMMA_SDPA", "auto").strip().lower()
-    if mode not in ("auto", "math", "default"):
-        raise ValueError("THENOISE_LTX_GEMMA_SDPA must be auto, math or default")
-    if mode != "auto":
-        return mode == "math"
-    if not torch.version.hip or device.type != "cuda":
-        return False
-    try:
-        arch = torch.cuda.get_device_properties(device).gcnArchName.split(":", 1)[0]
-    except (AttributeError, RuntimeError):
-        return False
-    return arch in ("gfx1100", "gfx1151")
 
 
 class GemmaFeatures(nn.Module):
@@ -47,22 +27,14 @@ class GemmaFeatures(nn.Module):
         self.model = model
 
     def forward(self, ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        # Calling the inner model avoids the 250K-token LM-head logits, exactly
-        # as the official Lightricks text-encoder implementation does.
+        # Transformers owns the Gemma attention backend, and the existing model
+        # exposes all hidden states; no global/architecture-specific SDPA override.
         inner = getattr(self.model, "model", self.model)
-        if _use_math_gemma_attention(ids.device):
-            from torch.nn.attention import SDPBackend, sdpa_kernel
-            attention_context = sdpa_kernel([SDPBackend.MATH])
-        else:
-            attention_context = nullcontext()
-        with attention_context:
-            features = inner(
-                input_ids=ids, attention_mask=mask, output_hidden_states=True,
-            ).hidden_states
+        features = inner(input_ids=ids, attention_mask=mask,
+                         output_hidden_states=True).hidden_states
         if features is None:
             raise RuntimeError("Gemma text model returned no hidden states")
         return torch.stack(features, dim=-1).flatten(2, 3)
-
 
 def _read_asset(source, meta: dict, name: str) -> bytes:
     key = f"hf_asset__{name}"
@@ -270,21 +242,7 @@ def _load_ltx_text_weights(module, path: Path, key_map, drop_keys: tuple[str, ..
     )
 
 
-def _gemma3_tokenizer_path(checkpoint: Path, vendor: Path) -> Path:
-    """Find the full Gemma-3 tokenizer JSON in either checkpoint layout."""
-    for directory in checkpoint.parents[:3]:
-        candidate = directory / "tokenizer.json"
-        if candidate.is_file():
-            return candidate
-    # Support an explicitly supplied offline asset beside the vendored config.
-    candidate = vendor / "tokenizer.json"
-    if candidate.is_file():
-        return candidate
-    raise FileNotFoundError(
-        f"LTX 2.3 requires the full Gemma-3 tokenizer.json for {checkpoint}. "
-        "Run 'python scripts/download.py --model ltx23' "
-        "(add --int8-convrot for INT8 checkpoints)."
-    )
+
 
 
 def load_ltx_gemma(path: str | Path, *, version: str, cancel):
@@ -306,15 +264,14 @@ def load_ltx_gemma(path: str | Path, *, version: str, cancel):
     if version == "2.3":
         from transformers import Gemma3TextConfig, Gemma3TextModel, GemmaTokenizer
         from thenoise.dit.quantized import replace_linears
-        from thenoise.utils.text_encoder import GEMMA3_LTX_CONFIG_DIR
+        from thenoise.utils.text_encoder import GEMMA3_CONFIG_DIR
 
-        vendor = Path(GEMMA3_LTX_CONFIG_DIR)
+        vendor = Path(GEMMA3_CONFIG_DIR)
         config = Gemma3TextConfig(**json.loads(
             (vendor / "text_config.json").read_text(encoding="utf-8")
         ))
-        tokenizer_path = _gemma3_tokenizer_path(path, vendor)
-        # Transformers 5.4 GemmaTokenizer no longer reads `vocab_file`:
-        # that argument silently constructs a five-token fallback vocabulary.
+        tokenizer_path = vendor / "tokenizer.json"
+        # Use the bundled full fast tokenizer JSON, not a five-token fallback:
         tokenizer = GemmaTokenizer(
             tokenizer_file=str(tokenizer_path),
             add_bos_token=True, add_eos_token=False,

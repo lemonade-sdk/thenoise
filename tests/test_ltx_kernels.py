@@ -5,42 +5,17 @@ migration-time reference model is required.
 """
 from __future__ import annotations
 
-from types import SimpleNamespace
 import pytest
 import torch
 
 from thenoise.dit.ltx_video.connectors import LTX2TextConnectors
 from thenoise.dit.ltx_video.transformer import LTX2VideoTransformer3DModel
 from thenoise.dit.ltx_video.checkpoint import make_video_vae
-from thenoise.utils.rope import apply_rope_split_half
+from thenoise.utils.rope import apply_rope_split_half, apply_ltx_rope_split_half
 from thenoise.vae.ltx_video import LTXVideoVAE
 
 
-def test_ltx_gemma_sdpa_fallback_is_scoped_and_overridable(monkeypatch):
-    from thenoise.text_encoders.ltx_video import _use_math_gemma_attention
 
-    monkeypatch.delenv("THENOISE_LTX_GEMMA_SDPA", raising=False)
-    assert not _use_math_gemma_attention(torch.device("cpu"))
-
-    # Fake ROCm attributes to test the architecture check on CPU-only CI.
-    monkeypatch.setattr(torch.version, "hip", "test-rocm", raising=False)
-    monkeypatch.setattr(torch.cuda, "get_device_properties",
-                        lambda device: SimpleNamespace(gcnArchName="gfx1151:sramecc-"))
-    assert _use_math_gemma_attention(torch.device("cuda:0"))
-    monkeypatch.setattr(torch.cuda, "get_device_properties",
-                        lambda device: SimpleNamespace(gcnArchName="gfx1100"))
-    assert _use_math_gemma_attention(torch.device("cuda:0"))
-    monkeypatch.setattr(torch.cuda, "get_device_properties",
-                        lambda device: SimpleNamespace(gcnArchName="gfx1201"))
-    assert not _use_math_gemma_attention(torch.device("cuda:0"))
-
-    monkeypatch.setenv("THENOISE_LTX_GEMMA_SDPA", "math")
-    assert _use_math_gemma_attention(torch.device("cpu"))
-    monkeypatch.setenv("THENOISE_LTX_GEMMA_SDPA", "default")
-    assert not _use_math_gemma_attention(torch.device("cuda:0"))
-    monkeypatch.setenv("THENOISE_LTX_GEMMA_SDPA", "invalid")
-    with pytest.raises(ValueError, match="THENOISE_LTX_GEMMA_SDPA"):
-        _use_math_gemma_attention(torch.device("cuda:0"))
 
 
 @pytest.mark.parametrize("ltx25", [False, True])
@@ -117,8 +92,8 @@ def test_ltx_batched_rope_preserves_shared_convention_and_dtype():
     cos, sin = phases.cos(), phases.sin()
     expected = torch.cat((x[..., :4] * cos - x[..., 4:] * sin,
                           x[..., 4:] * cos + x[..., :4] * sin), dim=-1)
-    torch.testing.assert_close(apply_rope_split_half(x, cos, sin), expected)
-    assert apply_rope_split_half(x.bfloat16(), cos, sin).dtype == torch.bfloat16
+    torch.testing.assert_close(apply_ltx_rope_split_half(x, cos, sin), expected)
+    assert apply_ltx_rope_split_half(x.bfloat16(), cos, sin).dtype == torch.bfloat16
     legacy_cos = torch.cat((cos[0, 0], cos[0, 0]), -1)[:, None, None, :]
     legacy_sin = torch.cat((sin[0, 0], sin[0, 0]), -1)[:, None, None, :]
     assert apply_rope_split_half(x[:1, :2], legacy_cos, legacy_sin).shape == (1, 2, 4, 8)
@@ -152,29 +127,3 @@ def test_native_video_vae_meta_layout_and_frame_grid():
             decoded = small.decode(latent, None, return_dict=False)[0]
             assert decoded.shape == pixels.shape
             assert torch.isfinite(decoded).all()
-
-
-def test_ltx_gemma3_tokenizer_json_lookup_in_both_checkpoint_layouts(tmp_path):
-    from thenoise.text_encoders.ltx_video import _gemma3_tokenizer_path
-
-    gemma_dir = tmp_path / "ltx23" / "gemma3"
-    gemma_dir.mkdir(parents=True)
-    vendor = tmp_path / "vendor"
-    vendor.mkdir()
-    int8 = gemma_dir / "gemma_3_12B_it_int8_convrot.safetensors"
-    bf16 = gemma_dir / "split_files/text_encoders/gemma_3_12B_it.safetensors"
-
-    # A legacy .model must not be accepted as the fast tokenizer JSON.
-    (gemma_dir / "tokenizer.model").write_bytes(b"legacy")
-    with pytest.raises(FileNotFoundError, match="tokenizer.json"):
-        _gemma3_tokenizer_path(int8, vendor)
-
-    full = gemma_dir / "tokenizer.json"
-    full.write_text("{}")  # Lookup only; no tokenizer decoding in this unit test.
-    assert _gemma3_tokenizer_path(int8, vendor) == full
-    assert _gemma3_tokenizer_path(bf16, vendor) == full
-    full.unlink()
-
-    fallback = vendor / "tokenizer.json"
-    fallback.write_text("{}")
-    assert _gemma3_tokenizer_path(int8, vendor) == fallback

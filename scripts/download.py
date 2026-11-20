@@ -45,9 +45,8 @@ Models:
                   https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf
                   https://huggingface.co/usyd-community/vitpose-base-simple
 
-Tokenizer/processor configs are generally vendored inside the ``thenoise``
-package. LTX 2.3 downloads its Gemma tokenizer as a model artifact; loading
-remains fully offline.
+Tokenizer/processor configs are vendored inside ``thenoise``;
+model loading remains fully offline.
 
 Usage:
     python scripts/download.py --model anima
@@ -426,8 +425,6 @@ def _ltx23_jobs(args: argparse.Namespace) -> list[Artifact]:
     repo = "Lightricks/LTX-2.3"
     shared = [("spatial_upscaler", repo,
                "ltx-2.3-spatial-upscaler-x2-1.1.safetensors")]
-    shared.append(("gemma3/tokenizer.json", "Lightricks/gemma-3-12b-it-qat-q4_0-unquantized",
-                   "tokenizer.json"))
     if not args.int8_convrot:
         # Only single-file Gemma3 weights, as used by ComfyUI.
         return [

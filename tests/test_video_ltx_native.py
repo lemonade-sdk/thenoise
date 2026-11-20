@@ -70,30 +70,15 @@ def test_streamed_load_is_strict_and_materializes_parameters_and_buffers(tmp_pat
     assert model.weight.is_meta
 
 
-def test_int8_requires_scale_and_comfy_quant_marker(tmp_path):
-    m = _checkpoint()
-
-    class QuantLinear(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.weight = torch.nn.Parameter(torch.empty(2, 4, device="meta"))
-
-        def load_quantized(self, weight, *, input_scale=None):
-            self.weight = weight
-
-    for missing in ("scale", "marker"):
-        data = {"net.layer.weight": torch.ones(2, 4, dtype=torch.int8)}
-        if missing != "scale":
-            data["net.layer.weight_scale"] = torch.tensor([.01, .01])
-        if missing != "marker":
-            data["net.layer.comfy_quant"] = torch.tensor(
-                list(json.dumps({"convrot": True}).encode()), dtype=torch.uint8
-            )
-        path = _save(tmp_path / f"missing_{missing}.safetensors", data)
-        with pytest.raises(ValueError, match="requires a single"):
-            load_ltx_component(
-                "dit", torch.nn.ModuleDict({"layer": QuantLinear()}), {path: {"dit"}},
-                cancel=lambda: None, dtype=torch.bfloat16)
+def test_int8_requires_weight_scale(tmp_path):
+    from thenoise.dit.quantized import QuantizedLinear
+    data = {"net.layer.weight": torch.ones(2, 4, dtype=torch.int8)}
+    path = _save(tmp_path / "missing_scale.safetensors", data)
+    with torch.device("meta"):
+        module = torch.nn.ModuleDict({"layer": QuantizedLinear(4, 2, bias=False)})
+    with pytest.raises(RuntimeError, match="missing its"):
+        load_ltx_component("dit", module, {path: {"dit"}},
+                           cancel=lambda: None, dtype=torch.bfloat16)
 
 
 def test_gemma3_wrapper_mapping_and_deterministic_meta_buffers():
@@ -440,14 +425,14 @@ def test_ltx_gemma3_requires_single_safetensors_file(tmp_path):
 
 def test_ltx_gemma3_vendored_minimal_assets():
     from transformers import GemmaTokenizer
-    from thenoise.utils.text_encoder import GEMMA3_LTX_CONFIG_DIR
+    from thenoise.utils.text_encoder import GEMMA3_CONFIG_DIR
     from pathlib import Path
     import json
-    assets = Path(GEMMA3_LTX_CONFIG_DIR)
+    assets = Path(GEMMA3_CONFIG_DIR)
     cfg = json.loads((assets / "text_config.json").read_text())
     assert cfg["hidden_size"] == 3840 and cfg["num_hidden_layers"] == 48
     assert cfg["rope_scaling"] == {"factor": 8.0, "rope_type": "linear"}
-    tokenizer = GemmaTokenizer(vocab_file=str(assets / "tokenizer.model"),
+    tokenizer = GemmaTokenizer(tokenizer_file=str(assets / "tokenizer.json"),
                                add_bos_token=True, add_eos_token=False)
     assert tokenizer("A red fox")["input_ids"][0] == tokenizer.bos_token_id
 

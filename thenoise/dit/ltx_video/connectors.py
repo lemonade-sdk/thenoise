@@ -14,6 +14,8 @@ from types import SimpleNamespace
 import torch
 from torch import nn
 
+from thenoise.dit.quantized import QuantizedLinear
+
 from thenoise.dit.ltx_video.transformer import _AVRoPE, _FeedForward, _LTXAttention
 
 
@@ -109,8 +111,8 @@ class LTX2TextConnectors(nn.Module):
             per_modality_projections=per_modality_projections,
         )
         dim = caption_channels * text_proj_in_factor
-        self.video_text_proj_in = nn.Linear(dim, video_hidden_dim, bias=proj_bias)
-        self.audio_text_proj_in = nn.Linear(dim, audio_hidden_dim, bias=proj_bias)
+        self.video_text_proj_in = QuantizedLinear(dim, video_hidden_dim, bias=proj_bias)
+        self.audio_text_proj_in = QuantizedLinear(dim, audio_hidden_dim, bias=proj_bias)
         self.video_connector = _Connector(
             video_connector_num_attention_heads, video_connector_attention_head_dim,
             video_connector_num_layers, video_connector_num_learnable_registers,

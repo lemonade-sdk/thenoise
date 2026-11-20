@@ -41,6 +41,9 @@ class ModelConfig:
     device: str = "cuda"
     dtype: torch.dtype = torch.bfloat16
     lora_dir: Optional[str] = None
+    audio_vae_path: str = ""
+    spatial_upscaler_path: str = ""
+    text_projection_path: str = ""
     #: Headers handed in already parsed, by role. The runtime passes the one it read to
     #: pick the model; anything a role has here is never opened again.
     headers: Optional[dict[str, Header]] = None

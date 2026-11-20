@@ -105,6 +105,12 @@ class Runtime:
             text_projection_path=paths.text_projection_path,
         )
         cls.validate_paths(config.all_headers())
+        # Extra files remain generic; each adapter declares accepted roles.
+        extras = ("audio_vae_path", "spatial_upscaler_path", "text_projection_path")
+        unsupported = [key for key in extras if getattr(paths, key)
+                       and key not in getattr(cls, "AUXILIARY_PATHS", ())]
+        if unsupported:
+            raise ValueError(f"{name} does not accept auxiliary checkpoints: {unsupported}")
 
         self._unload()  # swap: only one model resident at a time
         logger.info("Loading model '%s'", name)
