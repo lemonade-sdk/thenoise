@@ -1,4 +1,4 @@
-"""Hunyuan3D shape adapter: one file, a reference picture in, a mesh out."""
+"""Hunyuan3D 2.1 shape adapter."""
 from __future__ import annotations
 
 import logging
@@ -41,8 +41,6 @@ logger = logging.getLogger(__name__)
 
 
 class Hunyuan3DShapeModel(DiffusionModel):
-    """Hunyuan3D 2.1 image-to-shape: DINOv2 context, flow-matched DiT, SDF codec."""
-
     name = "hunyuan3d-shape"
 
     MEDIUM = "mesh"
@@ -58,6 +56,7 @@ class Hunyuan3DShapeModel(DiffusionModel):
         "guidance_scale": 5.0,
         "sampler": "euler",
         "negative_prompt": "",
+        "output_format": "glb",
         "num_latents": 4096,
         "octree_resolution": 384,
         "bounds": 1.01,
@@ -69,7 +68,7 @@ class Hunyuan3DShapeModel(DiffusionModel):
 
     @staticmethod
     def detect(f) -> bool:
-        """True for the shared shape file: DiT, conditioner and codec in one."""
+        """True for the one-file 2.1 shape checkpoint."""
         return is_hunyuan3d_shape(normalize_keys(f.keys()))
 
     def __init__(self, *, config: ModelConfig):

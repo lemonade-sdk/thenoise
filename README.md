@@ -76,6 +76,12 @@ model repainting the picture it was given. Ask for it with `ref_method: vision`.
 | **LTX 2.3 Distilled**, audiovisual generation | ✓ | ✓ | ✓ | [ltx](docs/models/ltx.md) |
 | **LTX 2.5 Distilled**, audiovisual generation | ✓ | ✓ | ✓ | [ltx](docs/models/ltx.md) |
 
+### Mesh models
+
+| Model | Image-to-shape | Details |
+|---|---|---|
+| **Hunyuan3D 2.1 shape**, transformer, image conditioner and shape codec in one file | ✓ | [hunyuan3d](docs/models/hunyuan3d.md) |
+
 
 ## How does it compare to ComfyUI?
 
@@ -167,9 +173,9 @@ uv pip install -e ".[scripts]"
 
 | If you want to… | Use |
 |---|---|
-| generate an image or a clip from the command line | the [CLI](docs/cli.md) - `generate`, `edit`, `video`, `upscale`, `controlmap` |
+| generate an image or a clip from the command line | the [CLI](docs/cli.md) - `generate`, `edit`, `video`, `mesh`, `upscale`, `controlmap` |
 | work through a browser | the web UI at `http://localhost:8000/` when running `serve` |
-| call it from other software | the [HTTP API](docs/api.md) - `/text2image`, `/edit`, `/upscale`, `/controlmap` |
+| call it from other software | the [HTTP API](docs/api.md) - `/text2image`, `/edit`, `/video`, `/mesh`, `/upscale`, `/controlmap` |
 | manage it as a service | the [Docker / Compose](docs/docker.md) image - start, stop, swap models |
 | extract a control map from an image | `controlmap` - the [CLI](docs/cli.md#control-map-a-control-map), the `/controlmap` endpoint or the web UI's Control Maps tab |
 
@@ -178,7 +184,7 @@ uv pip install -e ".[scripts]"
 | | |
 |---|---|
 | [**Setup**](docs/setup.md) | from a released build to your first image |
-| [**CLI reference**](docs/cli.md) | all `generate` / `edit` / `video` / `serve` / `upscale` flags, upscaling, LoRAs |
+| [**CLI reference**](docs/cli.md) | all `generate` / `edit` / `video` / `mesh` / `serve` / `upscale` flags, upscaling, LoRAs |
 | [**HTTP API**](docs/api.md) | endpoints, request/response reference, curl and Python examples |
 | [**Docker / Compose**](docs/docker.md) | running the ROCm container, model + cache volumes, swapping models |
 | [**Development & Contribution**](docs/development.md) | building from source, tests, portable builds, adding models |

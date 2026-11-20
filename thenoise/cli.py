@@ -1,5 +1,5 @@
-"""CLI subcommands: serve, generate, edit, video, upscale, controlmap — the first four
-take model paths, the last two are model-free. No config file: everything is a flag.
+"""CLI subcommands: serve, generate, edit, video, mesh, upscale, controlmap — all but the
+last two take model paths. No config file: everything is a flag.
 """
 from __future__ import annotations
 
@@ -10,13 +10,21 @@ from thenoise.postprocess.options import PostprocessOptions
 from thenoise.utils.options import add_flags
 
 
-def _add_model_paths(p: argparse.ArgumentParser, required: bool = True) -> None:
-    p.add_argument("--dit", required=required, default="", metavar="PATH",
-                   help="DiT checkpoint (.safetensors)")
-    p.add_argument("--vae", required=required, default="", metavar="PATH",
-                   help="VAE checkpoint (.safetensors)")
-    p.add_argument("--text-encoder", required=required, default="", metavar="PATH",
-                   help="text encoder checkpoint (.safetensors)")
+#: The checkpoints a command can be pointed at, in the order its ``--help`` lists them.
+CHECKPOINTS = {
+    "dit": "DiT checkpoint (.safetensors)",
+    "vae": "VAE checkpoint (.safetensors)",
+    "text_encoder": "text encoder checkpoint (.safetensors)",
+}
+
+
+def _add_model_paths(p: argparse.ArgumentParser, required: bool = True,
+                     paths: tuple[str, ...] = ("dit", "vae", "text_encoder")) -> None:
+    """The checkpoint flags a command takes. A model whose parts ship in one file is
+    pointed at by ``--dit`` alone: pass the subset of ``CHECKPOINTS`` it reads."""
+    for name in paths:
+        p.add_argument("--" + name.replace("_", "-"), required=required, default="",
+                       metavar="PATH", help=CHECKPOINTS[name])
     p.add_argument("--lora-dir", default="", metavar="PATH",
                    help="directory containing LoRA .safetensors files "
                         "(subdirectories allowed)")
@@ -172,6 +180,40 @@ def _add_video_args(p: argparse.ArgumentParser) -> None:
                    help="inference device; ROCm aliases cuda -> hip (default: cuda)")
 
 
+def _add_mesh_args(p: argparse.ArgumentParser) -> None:
+    """The shape knobs: tokens and the volume its surface is cut from. Nothing defaults
+    but the output path and the device: what a release ships is the model's to answer
+    for."""
+    p.add_argument("--image", required=True, metavar="PATH",
+                   help="the picture whose shape to reconstruct; the only conditioning "
+                        "this medium reads")
+    p.add_argument("--prompt", default="",
+                   help="text a shape model does not read, kept so a request travels "
+                        "between media unchanged")
+    p.add_argument("--negative-prompt")
+    p.add_argument("--latents", type=int,
+                   help="latent tokens to denoise (default: the model's)")
+    p.add_argument("--steps", type=int)
+    p.add_argument("--guidance-scale", type=float)
+    p.add_argument("--sampler", metavar="NAME",
+                   help="denoising solver (default: the model's)")
+    p.add_argument("--seed", type=int)
+    p.add_argument("--octree-resolution", type=int, metavar="N",
+                   help="finest voxel grid the surface is cut from (default: the model's)")
+    p.add_argument("--bounds", type=float, metavar="R",
+                   help="half-width of the volume sampled, in latent units")
+    p.add_argument("--mc-level", dest="mc_level", type=float, metavar="SDF",
+                   help="the SDF value the surface is cut at (default: 0, the skin)")
+    p.add_argument("--output-format", choices=["glb", "obj", "stl"],
+                   help="container; --out's extension is taken when this is left out")
+    p.add_argument("--lora", action="append", default=[], metavar="FILE[:WEIGHT]",
+                   help="LoRA for the shape transformer (repeatable)")
+    p.add_argument("--out", default="out.glb",
+                   help="output mesh path (default: out.glb)")
+    p.add_argument("--device", default="cuda",
+                   help="inference device; ROCm aliases cuda -> hip (default: cuda)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="thenoise")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -218,6 +260,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_dit_low(video)
     _add_av_components(video)
     _add_video_args(video)
+
+    # mesh
+    mesh = sub.add_parser("mesh", help="run one shape generation and save a mesh")
+    _add_model_paths(mesh, paths=("dit",))
+    _add_mesh_args(mesh)
 
     # upscale
     up = sub.add_parser("upscale", help="pixel-upscale an image (no model needed)")

@@ -17,6 +17,7 @@ from thenoise.jobs import Uncancellable
 from thenoise.runtime import ModelPaths, Settings
 from thenoise.upscale_cli import run_upscale
 from thenoise.utils.paths import ensure_png_extension
+from thenoise.mesh_cli import run_mesh
 from thenoise.video_cli import run_video
 
 
@@ -96,6 +97,27 @@ class _FakeVideo:
         self.rendered = {"spec": spec, "token": token, "output": output}
 
 
+class _FakeShape:
+    """A mesh controller with fixed model defaults, keeping the render it was handed."""
+
+    DEFAULTS = {"negative_prompt": "", "output_format": "glb", "num_latents": 64,
+                "steps": 12, "guidance_scale": 5.0, "sampler": "euler",
+                "octree_resolution": 64, "bounds": 1.01, "mc_level": 0.0}
+
+    def __init__(self):
+        self.spec = None
+        self.rendered = None
+
+    def resolve(self, spec):
+        self.spec = spec
+        return spec.resolve(self.DEFAULTS)
+
+    def render(self, spec, token, progress, output):
+        progress("sampling", spec.steps, spec.steps)
+        output.write_bytes(b"glTF")
+        self.rendered = {"spec": spec, "token": token, "output": output}
+
+
 class _FakeRuntime:
     #: What a loaded model answers for ``Runtime.medium``; the clip tests flip it.
     medium_on_load: str | None = None
@@ -115,7 +137,8 @@ class _FakeRuntime:
         self.loaded = paths
         if self.medium_on_load:
             self.medium = self.medium_on_load
-            self.pipeline = _FakeVideo()
+            self.pipeline = (_FakeVideo() if self.medium_on_load == "video"
+                             else _FakeShape())
 
     def run(self, action):
         """As the real one, minus the rebuild the tests here are not about."""
@@ -420,8 +443,80 @@ def test_video_refuses_a_name_promising_another_container(video_runtime, tmp_pat
                           "--out", str(tmp_path / "fox.mp4")]))
 
 
+MESH_PATHS = ["--dit", "shape.safetensors"]
+
+
+@pytest.fixture
+def mesh_runtime(fake_runtime, monkeypatch):
+    """A fake runtime whose loaded model makes shapes."""
+    monkeypatch.setattr(_FakeRuntime, "medium_on_load", "mesh")
+    return fake_runtime
+
+
+def test_mesh_refuses_an_unknown_sampler_before_anything_loads(mesh_runtime, tmp_path):
+    with pytest.raises(SystemExit, match="unknown sampler: 'dpmpp'"):
+        run_mesh(_parse(["mesh", *MESH_PATHS, "--image", "chair.png",
+                         "--sampler", "dpmpp", "--out", str(tmp_path / "chair")]))
+    assert mesh_runtime == []
+
+
+def test_mesh_names_the_flag_of_a_picture_it_cannot_read(mesh_runtime):
+    with pytest.raises(SystemExit, match=r"--image.*nowhere\.png"):
+        run_mesh(_parse(["mesh", *MESH_PATHS, "--image", "nowhere.png"]))
+
+
+def test_mesh_wires_the_picture_the_tokens_and_the_volume(mesh_runtime, tmp_path):
+    picture = tmp_path / "chair.png"
+    picture.write_bytes(b"png bytes")
+    run_mesh(_parse([
+        "mesh", *MESH_PATHS, "--image", str(picture), "--lora-dir", "loras",
+        "--device", "hip", "--prompt", "a chair", "--negative-prompt", "blur",
+        "--latents", "1024", "--steps", "6", "--guidance-scale", "2.5",
+        "--sampler", "euler", "--seed", "7", "--octree-resolution", "96",
+        "--bounds", "1.2", "--mc-level", "0.01", "--lora", "style:0.7",
+        "--out", str(tmp_path / "chair"),
+    ]))
+    rt = mesh_runtime[0]
+    assert rt.settings.device == "hip"
+    assert rt.loaded == ModelPaths(dit_path="shape.safetensors", vae_path="",
+                                   text_encoder_path="", lora_dir="loras",
+                                   dit_low_path="")
+    rendered = rt.pipeline.rendered
+    spec = rendered["spec"]
+    assert spec.image == b"png bytes"
+    assert (spec.latents, spec.steps, spec.octree_resolution) == (1024, 6, 96)
+    assert (spec.bounds, spec.mc_level, spec.seed) == (1.2, 0.01, 7)
+    assert spec.lora_specs == {"dit": ["style:0.7"]}
+    assert rendered["output"].suffix == ".glb"
+    assert rendered["output"].read_bytes() == b"glTF"
+
+
+def test_mesh_takes_its_container_from_the_output_name(mesh_runtime, tmp_path):
+    picture = tmp_path / "chair.png"
+    picture.write_bytes(b"png")
+    run_mesh(_parse(["mesh", *MESH_PATHS, "--image", str(picture),
+                     "--out", str(tmp_path / "chair.obj")]))
+    assert mesh_runtime[0].pipeline.rendered["output"].suffix == ".obj"
+
+
+def test_mesh_refuses_a_model_that_makes_clips(video_runtime, tmp_path):
+    picture = tmp_path / "chair.png"
+    picture.write_bytes(b"png")
+    with pytest.raises(SystemExit, match="does not serve mesh"):
+        run_mesh(_parse(["mesh", *MESH_PATHS, "--image", str(picture),
+                         "--out", str(tmp_path / "chair")]))
+
+
+def test_mesh_refuses_an_output_naming_another_container(mesh_runtime, tmp_path):
+    picture = tmp_path / "chair.png"
+    picture.write_bytes(b"png")
+    with pytest.raises(SystemExit, match="ends in .glb but this shape is obj"):
+        run_mesh(_parse(["mesh", *MESH_PATHS, "--image", str(picture),
+                         "--output-format", "obj", "--out", str(tmp_path / "chair.glb")]))
+
+
 def test_video_refuses_a_model_that_renders_stills(fake_runtime):
-    with pytest.raises(SystemExit, match="renders stills"):
+    with pytest.raises(SystemExit, match="does not serve video"):
         run_video(_parse(["video", *VIDEO_PATHS, "--prompt", "x"]))
 
 

@@ -1,0 +1,103 @@
+"""The mesh pipeline controller."""
+from __future__ import annotations
+
+import io
+import logging
+from pathlib import Path
+from typing import Callable
+
+from thenoise.inference import inference
+from thenoise.jobs import Cancellation, stepping
+from thenoise.models.config import EncodePromptArgs, MeshDecodeParams, MeshSamplingParams
+from thenoise.samplers import check_sampler, create_sampler
+from thenoise.stages import Stages
+from thenoise.utils.image_tensor import load_image
+from thenoise.utils.lora_roles import check_lora_roles
+from thenoise.utils.pipeline_cache import PipelineCache, content_digest
+
+from .spec import MeshSpec, ResolvedMesh
+from .write import write_mesh
+
+logger = logging.getLogger(__name__)
+
+
+class MeshPipelineController:
+    """The shape pipeline: picture, denoise, volume, file. Nothing past sampling caches."""
+
+    def __init__(self, model):
+        self.model = model
+        self._cache = PipelineCache()
+
+    def list_loras(self) -> list[str]:
+        return self.model.list_loras()
+
+    def resolve(self, spec: MeshSpec) -> ResolvedMesh:
+        """Refuse what this model cannot serve, then apply its defaults."""
+        model = self.model
+        if not model.capability("mesh")[spec.mode]:
+            raise ValueError(f"model '{model.name}' does not support {spec.mode}")
+        resolved = spec.resolve(model.default_prefs)
+        check_sampler(resolved.sampler)
+        check_lora_roles(resolved.lora_specs, model.lora_components())
+        return resolved
+
+    def render(self, spec: ResolvedMesh, token: Cancellation,
+               progress: Callable[[str, int, int], None], output: Path) -> None:
+        """Condition -> denoise -> volume -> file, checking ``token`` throughout."""
+        model = self.model
+        image = load_image(io.BytesIO(spec.image)) if spec.image else None
+        with inference():
+            if spec.lora_specs and not model.lora_dir:
+                raise ValueError("mesh LoRAs require --lora-dir")
+            params = MeshSamplingParams(
+                height=0, width=0, steps=spec.steps, seed=spec.seed,
+                guidance_scale=spec.guidance_scale, sampler=spec.sampler,
+                num_latents=spec.latents,
+            )
+            stages = Stages(model, self._cache)
+            # A shape has no pixel grid of its own: its token count sizes the reserve.
+            work = spec.latents
+
+            cond = stages.run(
+                model.encode_prompt,
+                EncodePromptArgs(prompt=spec.prompt, negative_prompt=spec.negative_prompt,
+                                 guidance_scale=spec.guidance_scale, image=image),
+                resident=("conditioner",),
+                pixels=image.width * image.height if image else work,
+                cache="prompt", key=self._cache_key(spec),
+            )
+            token.check()
+
+            model.switch_loras(spec.lora_specs.get("sampling"), "dit", "sampling")
+            latents = model.init_latents(params)
+            x = stages.run(self._denoise, latents, model.fuse_text(cond), params, spec,
+                           token, progress, resident=("dit",), pixels=work)
+            token.check()
+
+            mesh = stages.run(
+                model.decode_mesh, x,
+                MeshDecodeParams(octree_resolution=spec.octree_resolution,
+                                 bounds=spec.bounds, mc_level=spec.mc_level),
+                resident=("codec",), pixels=work,
+            )
+            write_mesh(mesh, output, spec.output_format)
+            logger.info("Mesh: %d vertices, %d triangles, resolution %d",
+                        mesh.vertices.shape[0], mesh.faces.shape[0], spec.octree_resolution)
+
+    @staticmethod
+    def _cache_key(spec: ResolvedMesh) -> tuple:
+        """The conditioning is the picture's, so the picture and the guidance are the key."""
+        image = load_image(io.BytesIO(spec.image)) if spec.image else None
+        return ("prompt", spec.prompt, spec.negative_prompt, spec.guidance_scale,
+                content_digest([image] if image else []))
+
+    def _denoise(self, latents, cond, params, spec: ResolvedMesh, token: Cancellation,
+                 progress):
+        """One solver run, from a fresh solver: a retried stage must not carry history."""
+        return create_sampler(params.sampler, self.model).sample(
+            latents, list(self.model.schedule(params)), cond, spec.guidance_scale,
+            params.seed, step_callback=stepping(token, progress, "sampling", 0,
+                                                spec.steps))
+
+
+__all__ = ["MeshPipelineController"]

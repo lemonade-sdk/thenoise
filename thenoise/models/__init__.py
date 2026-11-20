@@ -1,4 +1,4 @@
-"""Checkpoint-detected model catalog for image and video models."""
+"""Checkpoint-detected model catalog for image, video and mesh models."""
 from __future__ import annotations
 
 from typing import Union
@@ -12,6 +12,7 @@ from .fibo2 import Fibo2Model
 from .flux_klein import FluxKleinModel
 from .flux3 import Flux3Model
 from .h3_image import H3ImageModel
+from .hunyuan3d import Hunyuan3DShapeModel
 from .krea2 import Krea2Model
 from .mage_flow import MageFlowModel
 from .ming_image import MingImageModel
@@ -38,6 +39,7 @@ MODEL_CATALOG: list[type] = [
     Wan22Model,
     LTX23Video,
     LTX25Video,
+    Hunyuan3DShapeModel,
 ]
 
 
