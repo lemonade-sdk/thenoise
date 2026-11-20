@@ -136,9 +136,7 @@ def test_a_model_with_two_segments_gets_one_progress_clock(tmp_path, monkeypatch
 
 def test_shared_controller_cleans_video_state_on_failure(tmp_path, monkeypatch):
     """Request-owned AV references must be cleared even when a stage fails."""
-    model = StubVideo(config=ModelConfig(
-        dit_paths={"": str(tmp_path / "dit")}, vae_path="vae", text_encoder_path="te",
-        device="cpu", offload_device="cpu"))
+    model = StubVideo(config=_stub_config(tmp_path))
     cleared = []
     model.clear_video_state = lambda: cleared.append(True)
     controller = VideoPipelineController(model)
