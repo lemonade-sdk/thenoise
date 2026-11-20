@@ -1,0 +1,139 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from itertools import product
+from typing import Callable, Tuple
+
+import torch
+from torch import Tensor
+
+#: The eight corners of a cell, offsets from its index.
+CORNERS = torch.tensor(list(product((0, 1), repeat=3)), dtype=torch.long)
+
+#: Coarsest level the octree starts from; below this a shape is coarser than the mesh.
+MIN_LEVEL_RESOLUTION = 48
+
+SdfFn = Callable[[Tensor], Tensor]
+
+
+@dataclass(frozen=True)
+class SdfVolume:
+    """Sampled SDF: ``values``/``sampled`` are ``[R+1, R+1, R+1]`` corners, ``cells`` the ``[R, R, R]`` holding the level."""
+
+    values: Tensor
+    cells: Tensor
+    sampled: Tensor
+    resolution: int
+    bounds: float
+    level: float
+    queries: int
+
+    def extracted_cells(self) -> Tensor:
+        """Indices of the cells holding the surface."""
+        return self.cells.nonzero()
+
+    def corner_positions(self, cells: Tensor) -> Tensor:
+        """``[K, 3]`` cell indices -> ``[K, 8, 3]`` points in ``[-bounds, bounds]``."""
+        index = cells[:, None, :] + CORNERS.to(cells.device)
+        return self.corner_coordinates(index)
+
+    def corner_coordinates(self, index: Tensor) -> Tensor:
+        """Corner grid indices -> points in ``[-bounds, bounds]``."""
+        return -self.bounds + 2.0 * self.bounds * index.to(torch.float32) / self.resolution
+
+
+def octree_levels(resolution: int, start: int = MIN_LEVEL_RESOLUTION) -> Tuple[int, ...]:
+    """Resolutions sampled coarsest first, each halving the next cell so corners carry over; 384 starts at 48, not 1."""
+    if resolution < 1:
+        raise ValueError(f"octree resolution must be positive, got {resolution}")
+    if start < 1:
+        raise ValueError(f"octree start must be positive, got {start}")
+    coarse = resolution
+    while coarse % 2 == 0:
+        coarse //= 2
+    while coarse < start and coarse < resolution:
+        coarse *= 2
+    levels = []
+    while coarse < resolution:
+        levels.append(coarse)
+        coarse *= 2
+    levels.append(resolution)
+    return tuple(levels)
+
+
+def _cells_of(size: int, device) -> Tensor:
+    axis = torch.arange(size, device=device)
+    return torch.stack(torch.meshgrid(axis, axis, axis, indexing="ij"), dim=-1).reshape(-1, 3)
+
+
+def _corner_grid_index(index: Tensor, size: int) -> Tensor:
+    """One integer per corner of a ``size`` grid, so duplicates collapse in a 1D unique."""
+    stride = size + 1
+    return (index[:, 0] * stride + index[:, 1]) * stride + index[:, 2]
+
+
+def _unpack(grid: Tensor, stride: int) -> Tensor:
+    plane = stride * stride
+    return torch.stack((grid // plane, (grid // stride) % stride, grid % stride), dim=-1)
+
+
+def _evaluate(sdf: SdfFn, points: Tensor, chunk: int) -> Tensor:
+    if points.shape[0] <= chunk:
+        return sdf(points)
+    return torch.cat([sdf(part) for part in points.split(chunk)])
+
+
+@torch.no_grad()
+def sample_sdf(sdf: SdfFn, resolution: int, *, device, bounds: float = 1.0,
+               level: float = 0.0, chunk: int = 8192,
+               start: int = MIN_LEVEL_RESOLUTION) -> SdfVolume:
+    """Narrow-band octree sampling of ``sdf``, which maps ``[M, 3]`` to ``[M]``: cost tracks surface area, not ``resolution ** 3``."""
+    if bounds <= 0:
+        raise ValueError(f"bounds must be positive, got {bounds}")
+    if chunk < 1:
+        raise ValueError(f"chunk must be positive, got {chunk}")
+    levels = octree_levels(resolution, start)
+
+    cells = _cells_of(levels[0], device)
+    corners = values = crossing = None
+    queried = 0
+    for size in levels:
+        index = (cells[:, None, :] + CORNERS.to(device)).reshape(-1, 3)
+        stride = size + 1
+        unique, inverse = torch.unique(_corner_grid_index(index, size), return_inverse=True)
+        positions = -bounds + 2.0 * bounds * _unpack(unique, stride).to(torch.float32) / size
+        values = _evaluate(sdf, positions, chunk)
+        queried += positions.shape[0]
+        corners = _unpack(unique, stride)
+        around = values[inverse.view(-1).view(cells.shape[0], 8)]
+        lo, hi = around.amin(dim=1), around.amax(dim=1)
+        crossing = (lo <= level) & (hi >= level)
+        if size == levels[-1]:
+            break
+        # A 1-Lipschitz field cannot reach the level inside a cell further from it than the cell diagonal.
+        margin = 3.0 ** 0.5 * 2.0 * bounds / size
+        keep = (lo <= level + margin) & (hi >= level - margin)
+        cells = (cells[keep, None, :] * 2 + CORNERS.to(device)).reshape(-1, 3)
+        if cells.shape[0] == 0:
+            corners = values = crossing = None
+            break
+
+    grid = torch.zeros((resolution + 1,) * 3, dtype=torch.float32, device=device)
+    sampled = torch.zeros((resolution + 1,) * 3, dtype=torch.bool, device=device)
+    inside = torch.zeros((resolution,) * 3, dtype=torch.bool, device=device)
+    if corners is not None:
+        grid[corners[:, 0], corners[:, 1], corners[:, 2]] = values
+        sampled[corners[:, 0], corners[:, 1], corners[:, 2]] = True
+    if crossing is not None and bool(crossing.any()):
+        holding = cells[crossing]
+        inside[holding[:, 0], holding[:, 1], holding[:, 2]] = True
+
+    return SdfVolume(
+        values=grid,
+        cells=inside,
+        sampled=sampled,
+        resolution=resolution,
+        bounds=bounds,
+        level=level,
+        queries=queried,
+    )
