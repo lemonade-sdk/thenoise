@@ -3,17 +3,26 @@ import torch
 from conftest import write_safetensors
 
 from thenoise.dit.hunyuan3d import (
+    CODEC_PREFIX,
     DIT_PREFIX,
+    Hunyuan3DCodecParams,
+    Hunyuan3DShapeCodec,
     Hunyuan3DShapeDiT,
     Hunyuan3DShapeParams,
+    checkpoint_shapes,
+    codec_key_map,
+    codec_params,
     detect_params,
     is_hunyuan3d_shape,
+    load_hunyuan3d_shape_codec,
     load_hunyuan3d_shape_dit,
     shape_key_map,
     shape_params,
     take_prefix,
 )
+from thenoise.dit.hunyuan3d.codec import _heads
 from thenoise.dit.hunyuan3d.models import MoE
+from thenoise.utils.fourier import fourier_dim, fourier_features, fourier_frequencies
 
 TINY = dict(
     hidden_size=32,
@@ -168,3 +177,123 @@ def test_a_shared_file_loads_its_dit_and_nothing_else(tmp_path):
     assert torch.equal(loaded.blocks[3].moe.experts[0].net[0].proj.weight,
                        dit.blocks[3].moe.experts[0].net[0].proj.weight)
     assert not hasattr(loaded, "vae")
+
+
+# ---------------------------------------------------------------------- shape codec
+
+TINY_CODEC = dict(
+    width=32,
+    embed_dim=4,
+    num_heads=4,
+    head_dim=8,
+    layers=2,
+    mlp_ratio=2,
+    geo_mlp_ratio=2,
+    num_freqs=2,
+    qkv_bias=False,
+    qk_norm=True,
+    geo_ln_post=True,
+)
+
+
+def tiny_codec(**overrides) -> Hunyuan3DShapeCodec:
+    params = Hunyuan3DCodecParams(**{**TINY_CODEC, **overrides})
+    model = Hunyuan3DShapeCodec(params)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            torch.nn.init.normal_(parameter, std=0.02)
+    return model.eval()
+
+
+def test_fourier_features_put_the_coordinate_first():
+    coords = torch.tensor([[0.5, -0.25, 1.0]])
+    out = fourier_features(coords, num_freqs=3)
+    assert out.shape == (1, 21) == (1, fourier_dim(3, 3))
+    assert torch.equal(out[:, :3], coords)
+    sin, cos = out[:, 3:12], out[:, 12:21]
+    angles = coords[:, :, None] * fourier_frequencies(3, device=coords.device)
+    assert torch.allclose(sin, angles.sin().flatten(1), atol=1e-6)
+    assert torch.allclose(cos, angles.cos().flatten(1), atol=1e-6)
+    assert fourier_features(coords, 3, include_input=False).shape == (1, 18)
+
+
+def test_fourier_frequencies_double_and_optionally_scale_by_pi():
+    assert torch.equal(fourier_frequencies(3, include_pi=False), torch.tensor([1.0, 2.0, 4.0]))
+    assert torch.allclose(fourier_frequencies(3, include_pi=True) / torch.pi,
+                          torch.tensor([1.0, 2.0, 4.0]))
+
+
+def test_qkv_is_interleaved_inside_each_head():
+    heads, per = 4, 8
+    q, k, v = (torch.randn(2, 5, heads * per) for _ in range(3))
+    fused = torch.stack((q.view(2, 5, heads, per), k.view(2, 5, heads, per),
+                         v.view(2, 5, heads, per)), dim=-2).reshape(2, 5, 3 * heads * per)
+    got_q, got_k, got_v = _heads(fused, heads, 3)
+    assert got_q.shape == (2, heads, 5, per)
+    assert torch.equal(got_q.transpose(1, 2).reshape(2, 5, heads * per), q)
+    assert torch.equal(got_v.transpose(1, 2).reshape(2, 5, heads * per), v)
+
+
+def test_the_codec_returns_one_logit_per_queried_point():
+    codec = tiny_codec()
+    latents = torch.zeros(2, 5, TINY_CODEC["embed_dim"])
+    queries = torch.zeros(2, 7, 3)
+    with torch.no_grad():
+        out = codec(latents, queries)
+    assert out.shape == (2, 7, 1)
+
+
+def test_the_codec_norms_heads_with_layernorm_not_rmsnorm():
+    norm = tiny_codec().transformer.resblocks[0].attn.attention.query_norm
+    assert isinstance(norm, torch.nn.LayerNorm) and norm.bias is not None
+
+
+def test_codec_params_are_read_out_of_the_checkpoint_shapes():
+    width, embed, heads_dim, freqs = 32, 4, 8, 2
+    shapes = {
+        "vae.post_kl.weight": (width, embed),
+        "vae.transformer.resblocks.0.attn.attention.q_norm.weight": (heads_dim,),
+        "vae.transformer.resblocks.0.mlp.c_fc.weight": (width * 2, width),
+        "vae.geo_decoder.query_proj.weight": (width, fourier_dim(3, freqs)),
+        "vae.geo_decoder.cross_attn_decoder.mlp.c_fc.weight": (width * 3, width),
+    }
+    params = codec_params(shapes)
+    assert (params.width, params.embed_dim, params.num_heads, params.head_dim) == (32, 4, 4, 8)
+    assert (params.layers, params.mlp_ratio, params.geo_mlp_ratio) == (1, 2, 3)
+    assert params.num_freqs == 2
+    assert params.qkv_bias is False and params.qk_norm is True
+    assert params.geo_ln_post is False
+
+
+def test_codec_key_map_finds_the_shared_slots():
+    assert codec_key_map("vae.transformer.resblocks.0.mlp.c_fc.weight").endswith(
+        "mlp.net.0.proj.weight"
+    )
+    assert codec_key_map("vae.transformer.resblocks.0.mlp.c_proj.weight").endswith(
+        "mlp.net.2.weight"
+    )
+    assert codec_key_map("vae.geo_decoder.cross_attn_decoder.attn.attention.k_norm.bias"
+                         ).endswith("attn.attention.key_norm.bias")
+
+
+def test_the_encode_half_is_left_where_it_is(tmp_path):
+    codec = tiny_codec()
+    tensors = {}
+    for key, value in codec.state_dict().items():
+        key = key.replace(".mlp.net.0.proj.", ".mlp.c_fc.")
+        key = key.replace(".mlp.net.2.", ".mlp.c_proj.")
+        key = key.replace(".attention.query_norm.", ".attention.q_norm.")
+        key = key.replace(".attention.key_norm.", ".attention.k_norm.")
+        tensors[CODEC_PREFIX + key] = value
+    tensors[CODEC_PREFIX + "encoder.input_proj.weight"] = torch.ones(32, 15)
+    tensors[CODEC_PREFIX + "pre_kl.weight"] = torch.ones(8, 32)
+    tensors["model.x_embedder.weight"] = torch.ones(4, 4)
+    path = write_safetensors(tmp_path / "codec.safetensors", tensors)
+
+    loaded = load_hunyuan3d_shape_codec(path, codec_params(checkpoint_shapes(path)),
+                                        device="cpu", dtype=torch.float32)
+
+    assert torch.equal(loaded.post_kl.weight, codec.post_kl.weight)
+    assert torch.equal(loaded.geo_decoder.output_proj.weight,
+                       codec.geo_decoder.output_proj.weight)
+    assert not hasattr(loaded, "encoder")

@@ -1,9 +1,12 @@
 """QK-norm used by the DiT attention blocks.
 
-RMSNorm on the query and key head tensors before attention; the value tensor never
-participates. ``eps`` is a constructor parameter because the models differ.
+A norm on the query and key head tensors before attention; the value tensor never
+participates. ``eps`` and the norm class are parameters because the models differ: the
+DiTs use RMSNorm on head vectors, the shape codec's LayerNorms carry a bias.
 """
 from __future__ import annotations
+
+from typing import Type
 
 import torch
 import torch.nn as nn
@@ -12,7 +15,7 @@ from thenoise.utils.rms_norm import RMSNorm
 
 
 class QKNorm(nn.Module):
-    """RMSNorm on query and key; value is untouched. The two norms share no weights.
+    """A norm on query and key; value is untouched. The two norms share no weights.
 
     The width a norm spans is a fact about the checkpoint: an RMS over one head is not
     an RMS over the concatenated head vector, so normalising before the split into heads
@@ -21,10 +24,10 @@ class QKNorm(nn.Module):
     layout :func:`thenoise.utils.attention.attention` asks for.
     """
 
-    def __init__(self, dim: int, eps: float = 1e-5) -> None:
+    def __init__(self, dim: int, eps: float = 1e-5, norm: Type[nn.Module] = RMSNorm) -> None:
         super().__init__()
-        self.query_norm = RMSNorm(dim, eps=eps)
-        self.key_norm = RMSNorm(dim, eps=eps)
+        self.query_norm = norm(dim, eps=eps)
+        self.key_norm = norm(dim, eps=eps)
 
     def reset_parameters(self) -> None:
         self.query_norm.reset_parameters()
