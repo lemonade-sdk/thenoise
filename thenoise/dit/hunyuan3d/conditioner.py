@@ -12,7 +12,7 @@ from thenoise.utils.loader import load_dit
 
 from .keys import CONDITIONER_PREFIX, Hunyuan3DConditionerParams, conditioner_key_map, take_prefix
 
-#: What DINOv2 was pretrained on; the tower wants these, not a symmetric rescale.
+#: DINOv2's pretraining statistics.
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
 
@@ -28,7 +28,7 @@ def dino_normalize(pixels: torch.Tensor) -> torch.Tensor:
 
 
 class Hunyuan3DImageEncoder(Dinov2Model):
-    """DINOv2 over a reference picture; the tower is ``transformers``', so the checkpoint's names survive verbatim."""
+    """DINOv2 over a reference picture, using the ``transformers`` tower so the saved names load verbatim."""
 
     def __init__(self, params: Hunyuan3DConditionerParams):
         super().__init__(Dinov2Config(

@@ -10,7 +10,7 @@ from torch import Tensor
 #: The eight corners of a cell, offsets from its index.
 CORNERS = torch.tensor(list(product((0, 1), repeat=3)), dtype=torch.long)
 
-#: Coarsest level the octree starts from; below this a shape is coarser than the mesh.
+#: Coarsest level the octree starts from.
 MIN_LEVEL_RESOLUTION = 48
 
 SdfFn = Callable[[Tensor], Tensor]
@@ -43,7 +43,7 @@ class SdfVolume:
 
 
 def octree_levels(resolution: int, start: int = MIN_LEVEL_RESOLUTION) -> Tuple[int, ...]:
-    """Resolutions sampled coarsest first, each halving the next cell so corners carry over; 384 starts at 48, not 1."""
+    """Resolutions sampled coarsest first; each must divide the next, so a coarse corner is also a fine corner."""
     if resolution < 1:
         raise ValueError(f"octree resolution must be positive, got {resolution}")
     if start < 1:
@@ -67,7 +67,7 @@ def _cells_of(size: int, device) -> Tensor:
 
 
 def _corner_grid_index(index: Tensor, size: int) -> Tensor:
-    """One integer per corner of a ``size`` grid, so duplicates collapse in a 1D unique."""
+    """One integer per corner of a ``size`` grid, so a 1D unique finds the duplicates."""
     stride = size + 1
     return (index[:, 0] * stride + index[:, 1]) * stride + index[:, 2]
 
@@ -87,7 +87,7 @@ def _evaluate(sdf: SdfFn, points: Tensor, chunk: int) -> Tensor:
 def sample_sdf(sdf: SdfFn, resolution: int, *, device, bounds: float = 1.0,
                level: float = 0.0, chunk: int = 8192,
                start: int = MIN_LEVEL_RESOLUTION) -> SdfVolume:
-    """Narrow-band octree sampling of ``sdf``, which maps ``[M, 3]`` to ``[M]``: cost tracks surface area, not ``resolution ** 3``."""
+    """Narrow-band octree sampling of ``sdf`` (``[M, 3] -> [M]``), costing surface area rather than volume."""
     if bounds <= 0:
         raise ValueError(f"bounds must be positive, got {bounds}")
     if chunk < 1:

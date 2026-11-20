@@ -1,8 +1,7 @@
 """QK-norm used by the DiT attention blocks.
 
 A norm on the query and key head tensors before attention; the value tensor never
-participates. ``eps`` and the norm class are parameters because the models differ: the
-DiTs use RMSNorm on head vectors, the shape codec's LayerNorms carry a bias.
+participates. ``eps`` and ``norm`` are constructor parameters because the models differ.
 """
 from __future__ import annotations
 

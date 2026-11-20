@@ -17,7 +17,7 @@ def timestep_embedding(
 
     ``t`` is the flow timestep in ``[0, 1]``, scaled by ``time_factor`` before the
     sinusoid. Leading dims are preserved: ``(B,) -> (B, dim)``. ``sin_first`` puts the
-    sine half first, as the checkpoints that saved it that way expect.
+    sine half first.
     """
     t_f = t.float() * time_factor
     half = dim // 2

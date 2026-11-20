@@ -12,7 +12,7 @@ DIT_PREFIX = "model."
 CONDITIONER_PREFIX = "conditioner.main_image_encoder.model."
 CODEC_PREFIX = "vae."
 
-#: Experts the gate picks; no shape says, and no released checkpoint differs.
+#: Experts the gate picks; the checkpoint does not say.
 MOE_TOP_K = 2
 
 #: The 2.1 fingerprint: a two-layer timestep MLP, and QK-norm inside the first block.
@@ -43,7 +43,7 @@ class Hunyuan3DShapeParams:
 
     @property
     def skip_layers(self) -> int:
-        """Blocks that fold in an earlier block's output; the deep half, minus one."""
+        """Blocks that fold in an earlier block's output."""
         return self.depth - self.depth // 2 - 1
 
     def uses_moe(self, layer: int) -> bool:
@@ -53,7 +53,7 @@ class Hunyuan3DShapeParams:
         return layer > self.depth // 2
 
 
-#: The 2.1 latent scale. No tensor in the file carries it, so it is a per-release fact.
+#: The 2.1 latent scale; no tensor in the file carries it.
 SHAPE_SCALE_FACTOR = 1.0039506158752403
 
 
@@ -200,7 +200,7 @@ def _expert_count(shapes: Mapping[str, Tuple[int, ...]], prefix: str) -> int:
     return 0
 
 
-#: DINOv2 splits every width into 64-wide heads; the checkpoint cannot say so itself.
+#: DINOv2 head width; the checkpoint does not say.
 DINO_HEAD_DIM = 64
 
 
