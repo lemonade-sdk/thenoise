@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 import sentencepiece as spm
 import torch
-from conftest import (stub_wan_components, video_pipeline, wan_adapter, write_wan_dit,
-                      write_wan_vae)
+from conftest import (stub_wan_components, video_pipeline, wan_adapter, wan_raw_key,
+                      wan_tiny_params, write_wan_dit, write_wan_vae)
 from PIL import Image
 from safetensors.torch import save_file
 
@@ -138,53 +138,16 @@ def test_dit_comfy_names():
         "blocks.2.ffn.0.weight": "blocks.2.ffn_in.weight",
         "blocks.2.ffn.2.weight": "blocks.2.ffn_out.weight",
         "blocks.7.self_attn.o.weight": "blocks.7.attn1.to_out.weight",
+        "blocks.7.self_attn.norm_q.weight": "blocks.7.attn1.qk_norm.query_norm.weight",
+        "blocks.7.cross_attn.norm_k.weight": "blocks.7.attn2.qk_norm.key_norm.weight",
     }
     assert {k: wan_dit_key(k) for k in expected} == expected
 
 
 # ----------------------------------------------------------------- Transformer checkpoint
 
-#: Small enough to build in a test, and still legal geometry for `detect_params`:
-#: one 128-wide head, two blocks.
-DIT = Wan22Params(in_channels=48, out_channels=48, dim=128, num_layers=2,
-                   ffn_dim=256, freq_dim=32, text_dim=32, patch_size=(1, 2, 2))
-
-
-def _raw_key(key: str) -> str:
-    """The inverse of `wan_dit_key`, to write a checkpoint the way Comfy-Org does."""
-    roots = {
-        "condition_embedder.text_linear_1.": "text_embedding.0.",
-        "condition_embedder.text_linear_2.": "text_embedding.2.",
-        "condition_embedder.time_linear_1.": "time_embedding.0.",
-        "condition_embedder.time_linear_2.": "time_embedding.2.",
-        "condition_embedder.time_proj.": "time_projection.1.",
-        "proj_out.": "head.head.",
-        "scale_shift_table": "head.modulation",
-    }
-    for dst, src in roots.items():
-        if key.startswith(dst):
-            return src + key[len(dst):]
-    if not key.startswith("blocks."):
-        return key
-    parts = key.split(".", 2)
-    prefix, suffix = ".".join(parts[:2]) + ".", parts[2]
-    if suffix == "scale_shift_table":
-        return prefix + "modulation"
-    # ComfyUI norm2 is the FFN norm, norm3 the cross-attention one.
-    if suffix.startswith("norm2."):
-        return prefix + "norm3." + suffix[6:]
-    for dst, src in (
-        ("attn1.to_q.", "self_attn.q."), ("attn1.to_k.", "self_attn.k."),
-        ("attn1.to_v.", "self_attn.v."), ("attn1.to_out.", "self_attn.o."),
-        ("attn1.norm_q.", "self_attn.norm_q."), ("attn1.norm_k.", "self_attn.norm_k."),
-        ("attn2.to_q.", "cross_attn.q."), ("attn2.to_k.", "cross_attn.k."),
-        ("attn2.to_v.", "cross_attn.v."), ("attn2.to_out.", "cross_attn.o."),
-        ("attn2.norm_q.", "cross_attn.norm_q."), ("attn2.norm_k.", "cross_attn.norm_k."),
-        ("ffn_in.", "ffn.0."), ("ffn_out.", "ffn.2."),
-    ):
-        if suffix.startswith(dst):
-            return prefix + src + suffix[len(dst):]
-    return key
+#: Small enough to build in a test, and still legal geometry for `detect_params`.
+DIT = wan_tiny_params()
 
 
 _MATMUL_WEIGHTS = re.compile(r"^blocks\.\d+\.(?:self|cross)_attn\.[qkvo]\.weight$"
@@ -203,7 +166,7 @@ def _write_dit(root, *, name="wan2.2_ti2v_5B_fp16.safetensors", missing=None, wr
             param.uniform_(-0.1, 0.1)
     state = {}
     for module_name, tensor in source.state_dict().items():
-        raw = _raw_key(module_name)
+        raw = wan_raw_key(module_name)
         assert wan_dit_key(raw) == module_name, (module_name, raw, wan_dit_key(raw))
         precision = torch.float16
         if mixed:
