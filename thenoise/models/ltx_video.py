@@ -250,15 +250,17 @@ class LTXVideo(VideoModel):
     def encode_references(self, pixels, frames=1):
         if len(pixels) != 1:
             raise ValueError("LTX I2V accepts exactly one starting image")
-        # pil_to_pixels in VideoPipelineController ALREADY supplies [-1,1].
-        full = pixels[0][None, :, None].to(self.device, torch.float32)
-        small = F.interpolate(full[:, :, 0], scale_factor=0.5,
+        # One frame, encoded twice: at full resolution for the refine pass' grid, and at
+        # half resolution for the grid the first half of the clip runs on. The resample
+        # stays in fp32; the codec then runs in its own dtype, as on the decode side.
+        frame = pixels[0][None, :, None].to(self.device)
+        small = F.interpolate(frame[:, :, 0], scale_factor=0.5,
                               mode="bilinear", align_corners=False)[:, :, None]
+        full, small = frame.to(self.vae.dtype), small.to(self.vae.dtype)
         with torch.no_grad():
             low = self.vae.encode(small).latent_dist.mode()
             high = self.vae.encode(full).latent_dist.mode()
-        return [_normal_video(low, self.vae).float(),
-                _normal_video(high, self.vae).float()]
+        return [_normal_video(low, self.vae), _normal_video(high, self.vae)]
 
     def _geometry(self, params: VideoSamplingParams, high: bool):
         return ((params.frames - 1) // 8 + 1,

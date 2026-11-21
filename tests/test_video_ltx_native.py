@@ -165,6 +165,40 @@ def test_denoise_scales_timesteps_and_does_not_mark_regular_frames():
             assert args["timestep"].item() == 750
 
 
+def test_starting_frame_is_encoded_in_the_codecs_own_dtype():
+    """The released video VAE is BF16; feeding its encoder fp32 pixels is a crash.
+
+    ``pil_to_pixels`` hands over fp32 in [-1, 1], so the adapter is the only place that
+    can put the frame on the codec's terms before a conv3d notices.
+    """
+    from thenoise.models.ltx_video import LTXVideo
+
+    class TinyBF16VAE:
+        dtype = torch.bfloat16
+        latents_mean = torch.zeros(128)
+        latents_std = torch.ones(128)
+        config = SimpleNamespace(scaling_factor=1.0)
+
+        def __init__(self):
+            self.shapes = []
+
+        def encode(self, pixels):
+            if pixels.dtype is not torch.bfloat16:
+                raise RuntimeError("Input type (float) and bias type (c10::BFloat16) "
+                                   "should be the same")
+            self.shapes.append(tuple(pixels.shape))
+            latent = torch.zeros(1, 128, 1, pixels.shape[-2] // 32, pixels.shape[-1] // 32,
+                                 dtype=torch.bfloat16)
+            return SimpleNamespace(latent_dist=SimpleNamespace(mode=lambda: latent))
+
+    model = object.__new__(LTXVideo)
+    model.device = "cpu"
+    model.vae = TinyBF16VAE()
+    low, high = model.encode_references([torch.zeros(3, 64, 64)])
+    assert model.vae.shapes == [(1, 3, 1, 32, 32), (1, 3, 1, 64, 64)]
+    assert (low.shape, high.shape) == ((1, 128, 1, 1, 1), (1, 128, 1, 2, 2))
+
+
 def test_denoise_guidance_runs_both_branches_with_one_scale():
     """One ``guidance_scale`` over the joined stream, combined like every other adapter."""
     from thenoise.models.ltx_video import AVConditioning, LTXVideo
