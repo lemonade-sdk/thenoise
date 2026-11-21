@@ -40,22 +40,14 @@ UPSCALER_FACTOR = 2
 
 @dataclasses.dataclass(frozen=True)
 class Clip:
-    """What one clip carries between the hooks that build it.
+    """An image condition's first frames, one per stage of the schedule.
 
-    One object rather than four attributes, because `_velocity` and both decoders read
-    the reference latents, the stage and the geometry together: updating one and leaving
-    another behind from a previous clip is the failure this shape removes, and there is
-    then exactly one line that drops a clip's state.
+    One object rather than two attributes because both are written and dropped together,
+    and a clip left holding the previous clip's frame is a silent wrong answer.
     """
 
-    #: An image condition's first frame, on each stage's own latent grid.
     reference_low: torch.Tensor | None = None
     reference_high: torch.Tensor | None = None
-    #: The refine half, whose latents sit on the finer grid.
-    refine: bool = False
-    #: Request geometry: the joined stream cannot be split into video and audio tokens
-    #: without it, and neither `denoise_step` nor the decoders are given it.
-    params: VideoSamplingParams | None = None
 
 
 def _pack(x: torch.Tensor) -> torch.Tensor:
@@ -249,7 +241,6 @@ class LTXVideo(VideoModel):
         return t * h * w
 
     def init_latents(self, params: VideoSamplingParams):
-        self._clip = dataclasses.replace(self._clip, params=params)
         t, h, w = self._geometry(params, False)
         audio_length = max(1, round(params.frames / params.fps * LATENT_TOKENS_PER_SECOND))
         seed = torch.Generator(device="cpu").manual_seed(params.seed)
@@ -284,18 +275,11 @@ class LTXVideo(VideoModel):
     def segments(self, params, schedule, guidance_scale):
         _, refine = stage_grids(params.steps)
         return [
-            Segment("dit", self.dit, tuple(schedule), guidance_scale),
+            Segment("dit", self.dit, tuple(schedule), guidance_scale, params),
             Segment("dit", self.dit,
                     tuple(sigma_steps(refine, self.device, torch.float32)),
-                    guidance_scale),
+                    guidance_scale, params),
         ]
-
-    def begin_segment(self, segment: Segment) -> None:
-        super().begin_segment(segment)
-        # The main half always starts at pure noise; the refine half starts at the
-        # re-noise level. Counting segments instead would break when ``stages.run``
-        # replays its prepare callable after a memory squeeze.
-        self._clip = dataclasses.replace(self._clip, refine=float(segment.steps[0].t) < 1.0)
 
     def transition_segment(self, x, previous: Segment, next_segment: Segment,
                            params: VideoSamplingParams, token):
@@ -339,10 +323,15 @@ class LTXVideo(VideoModel):
         return uncond + guidance_scale * (vel - uncond)
 
     def _velocity(self, latents, t, video_cond, audio_cond, cond_mask) -> torch.Tensor:
-        params = self._clip.params
-        if params is None:
-            raise RuntimeError("LTX denoise_step requires initialized clip parameters")
-        lt, h, w = self._geometry(params, self._clip.refine)
+        segment = self._segment
+        if segment is None:
+            raise RuntimeError("LTX denoise_step is outside a segment")
+        params = segment.params
+        # Which half of the schedule a step sits in decides where the joined stream
+        # splits, and the half is written on its first sigma: pure noise, or the
+        # re-noise level the refine stage is entered at.
+        refine = float(segment.steps[0].t) < 1.0
+        lt, h, w = self._geometry(params, refine)
         nv = lt * h * w
         video = latents[:, :nv]
         audio = latents[:, nv:]
@@ -353,7 +342,7 @@ class LTXVideo(VideoModel):
         )
         vtime = scaled_t
         mask = None
-        ref = self._clip.reference_high if self._clip.refine else self._clip.reference_low
+        ref = self._clip.reference_high if refine else self._clip.reference_low
         if ref is not None:
             mask = torch.zeros((1, nv), device=self.device, dtype=torch.float32)
             mask[:, :h*w] = 1.0
@@ -382,28 +371,21 @@ class LTXVideo(VideoModel):
         return torch.cat((pv.float(), pa.float()), dim=1)
 
     def finalize_latent(self, latents, params):
-        # The reference frames have done their last step; the geometry stays, because
-        # the decoders still read it.
-        self._clip = dataclasses.replace(self._clip, reference_low=None, reference_high=None)
+        self._clip = Clip()
         return latents
 
     def audio_components(self) -> tuple[str, ...]:
         return ("audio_vae", "vocoder")
 
-    def decode_audio(self, latents):
-        params = self._clip.params
-        if params is None:
-            raise RuntimeError("LTX audio decoding has no clip parameters")
+    def decode_audio(self, latents, params: VideoSamplingParams):
         nv = self._video_tokens(params, True)
         a = latents[:, nv:]
         mel = self.audio_vae.decode_to_mel(a)
         sound = self.vocoder(mel.to(self.vocoder.dtype))
         return Waveform(sound, self.vocoder.output_sampling_rate)
 
-    def decode_frames(self, latents) -> Iterator[torch.Tensor]:
-        params = self._clip.params
-        if params is None:
-            raise RuntimeError("LTX video decoding has no clip parameters")
+    def decode_frames(self, latents,
+                      params: VideoSamplingParams) -> Iterator[torch.Tensor]:
         t, h, w = self._geometry(params, True)
         video = _unpack(latents[:, :t*h*w], t, h, w)
         pixels = self.vae.decode_to_pixels(video)

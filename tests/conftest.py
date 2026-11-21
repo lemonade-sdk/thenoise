@@ -973,7 +973,7 @@ class StubVideo(VideoModel):
         return torch.zeros(1, self.Z_DIM, 1, pixels.shape[-2] // self.SCALE,
                            pixels.shape[-1] // self.SCALE)
 
-    def decode_frames(self, latents):
+    def decode_frames(self, latents, params):
         for _ in range(latents.shape[2]):
             yield torch.zeros(3, latents.shape[3] * self.SCALE,
                               latents.shape[4] * self.SCALE)

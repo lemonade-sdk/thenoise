@@ -257,6 +257,8 @@ def test_a_gemma_built_on_meta_keeps_the_buffers_no_checkpoint_carries():
 
 def test_denoise_scales_timesteps_and_does_not_mark_regular_frames():
     from thenoise.models.ltx_video import Clip, LTXVideo
+    from thenoise.models.video_base import Segment
+    from thenoise.samplers import Step
 
     class RecordingDiT:
         dtype = torch.float32
@@ -277,7 +279,10 @@ def test_denoise_scales_timesteps_and_does_not_mark_regular_frames():
         fake.device = "cpu"
         fake.dit = dit
         fake.version = version
-        fake._clip = Clip(params=SimpleNamespace(fps=24), reference_low=ref)
+        fake._clip = Clip(reference_low=ref)
+        # A step of the main half: its first sigma is still pure noise.
+        fake._segment = Segment("dit", None, (Step(t=1.0, delta=0.25),), 1.0,
+                                SimpleNamespace(fps=24))
         fake._geometry = lambda *_: (2, 2, 3)
         nv = 12
         x = torch.randn(1, nv + 4, 128)
@@ -320,6 +325,8 @@ def test_starting_frame_is_encoded_in_the_codecs_own_dtype():
 def test_denoise_guidance_runs_both_branches_with_one_scale():
     """One ``guidance_scale`` over the joined stream, combined like every other adapter."""
     from thenoise.models.ltx_video import AVConditioning, Clip, LTXVideo
+    from thenoise.models.video_base import Segment
+    from thenoise.samplers import Step
 
     class TwoBranchDiT:
         dtype = torch.float32
@@ -337,7 +344,9 @@ def test_denoise_guidance_runs_both_branches_with_one_scale():
     fake = object.__new__(LTXVideo)
     fake.device = "cpu"
     fake.dit = TwoBranchDiT()
-    fake._clip = Clip(params=SimpleNamespace(fps=24))
+    fake._clip = Clip()
+    fake._segment = Segment("dit", None, (Step(t=1.0, delta=0.25),), 1.0,
+                            SimpleNamespace(fps=24))
     fake._geometry = lambda *_: (2, 2, 3)
     x = torch.randn(1, 16, 128)
     ones = torch.ones(1, 2, 4096)

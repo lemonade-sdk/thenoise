@@ -114,8 +114,9 @@ def test_a_model_with_two_segments_gets_one_progress_clock(tmp_path, monkeypatch
     class TwoExpert(StubVideo):
         def segments(self, params, schedule, guidance_scale):
             half = len(schedule) // 2
-            return [Segment("dit", self.dit, schedule[:half], guidance_scale),
-                    Segment("dit_low", self.dit, schedule[half:], guidance_scale / 2)]
+            return [Segment("dit", self.dit, schedule[:half], guidance_scale, params),
+                    Segment("dit_low", self.dit, schedule[half:],
+                            guidance_scale / 2, params)]
 
     model = TwoExpert(config=_stub_config(tmp_path))
     staged = []

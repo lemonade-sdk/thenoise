@@ -100,8 +100,7 @@ class VideoPipelineController:
         """
         model = self.model
         # One frame, not the clip: frames reach the container as they are decoded, so
-        # nothing in the run grows with `frame_count`. Whether a long clip still wants
-        # more headroom than one frame is a measurement, not a correctness question.
+        # nothing in the run grows with `frame_count`.
         pixels = spec.width * spec.height
         with inference():
             if spec.lora_specs and not model.lora_dir:
@@ -204,7 +203,7 @@ class VideoPipelineController:
                 token.check()
 
             stages.run(
-                self._mux, x, spec, token, progress, output, audio,
+                self._mux, x, spec, params, token, progress, output, audio,
                 resident=("vae",),
                 pixels=pixels,
             )
@@ -232,20 +231,22 @@ class VideoPipelineController:
             x, list(segment.steps), cond, segment.guidance_scale, params.seed,
             step_callback=stepping(token, progress, "sampling", done, total))
 
-    def _mux(self, latents, spec: ResolvedVideo, token: Cancellation,
-             progress, output: Path, audio=None) -> None:
+    def _mux(self, latents, spec: ResolvedVideo, params: VideoSamplingParams,
+             token: Cancellation, progress, output: Path, audio=None) -> None:
         """Decode into the container: the clip never exists all at once.
 
         Stays inside the ``vae`` stage because the generator pulls from the codec as the
         encoder drains it — which is also what lets one frame, rather than the clip, size
-        the stage's headroom.
+        the stage's headroom. The call itself is made inside, not beside the latents,
+        because ``stages.run`` replays its callable on a retry and a generator started
+        once would come back half-drained.
         """
         total = spec.frame_count
 
         def frames():
             progress("decoding", 0, total)
             with tqdm(total=total, desc="decoding") as bar:
-                for i, frame in enumerate(self.model.decode_frames(latents)):
+                for i, frame in enumerate(self.model.decode_frames(latents, params)):
                     token.check()
                     progress("decoding", i + 1, total)
                     bar.update(1)

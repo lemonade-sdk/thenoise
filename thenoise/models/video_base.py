@@ -13,6 +13,7 @@ from typing import Iterator, Optional, Sequence
 import torch
 
 from thenoise.memory import MemoryManager
+from thenoise.models.config import VideoSamplingParams
 from thenoise.models.pixel_base import PixelModel
 from thenoise.samplers import Step
 from thenoise.utils.image_tensor import load_image
@@ -32,6 +33,10 @@ class Segment:
     module: torch.nn.Module
     steps: tuple[Step, ...]
     guidance_scale: float
+    #: What the request asked for. ``steps`` says where this span sits in the schedule;
+    #: this says what the latents it walks are a picture of, which a flat latent cannot
+    #: tell a codec whose stream carries more than one modality.
+    params: VideoSamplingParams
 
 
 @dataclass(frozen=True)
@@ -100,7 +105,8 @@ class VideoModel(PixelModel):
         solver over its steps, so a model with more than one transformer says only where
         the spans are.
         """
-        return [Segment("dit", self.dit, tuple(schedule), guidance_scale)]
+        return [Segment("dit", self.dit, tuple(schedule), guidance_scale, params)]
+
     def begin_segment(self, segment: Segment) -> None:
         """Tell ``denoise_step`` which segment it is inside; called before each one."""
         self._segment = segment
@@ -110,14 +116,17 @@ class VideoModel(PixelModel):
         """Extra MemoryManager roles needed to decode audio, if this codec has any."""
         return ()
 
-    def decode_audio(self, latents: torch.Tensor) -> Optional["Waveform"]:
+    def decode_audio(self, latents: torch.Tensor,
+                     params: VideoSamplingParams) -> Optional["Waveform"]:
         """Canonical clip latent -> the sound to mux beside its frames, if this codec has one."""
         return None
 
     @abstractmethod
-    def decode_frames(self, latents: torch.Tensor) -> Iterator[torch.Tensor]:
+    def decode_frames(self, latents: torch.Tensor,
+                      params: VideoSamplingParams) -> Iterator[torch.Tensor]:
         """Canonical clip latent -> pixels ``[C, H, W]`` in [-1, 1], yielded one frame at
-        a time so a long clip is never live all at once."""
+        a time so a long clip is never live all at once.
+        """
 
     # ------------------------------------------------------------ teardown
     @abstractmethod
