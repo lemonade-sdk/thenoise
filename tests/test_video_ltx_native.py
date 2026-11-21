@@ -823,10 +823,30 @@ def test_native_ltx_spatial_upscaler_streams_original_checkpoint_keys(tmp_path):
 def test_ltx_gemma3_requires_single_safetensors_file(tmp_path):
     from thenoise.text_encoders.ltx_video import load_ltx_gemma
     with pytest.raises(ValueError, match="one existing"):
-        load_ltx_gemma(tmp_path, version="2.3")
+        load_ltx_gemma(tmp_path, version="2.3", device="cpu")
     with pytest.raises(ValueError, match="one existing"):
         load_ltx_gemma(tmp_path / "model-00001-of-00005.safetensors",
-                       version="2.3")
+                       version="2.3", device="cpu")
+
+
+def test_the_text_encoder_is_built_where_the_manager_says(monkeypatch):
+    """Its weights are written at the residency device, not read onto CPU and carried
+    back afterwards: that round trip holds the whole encoder in host RAM while the
+    transformer is being read as well."""
+    from pathlib import Path
+
+    from thenoise.text_encoders import ltx_video
+
+    seen = {}
+
+    def record(module, checkpoint, **kwargs):
+        seen.update(kwargs)
+        return module
+
+    monkeypatch.setattr(ltx_video, "load_text_encoder_weights", record)
+    ltx_video._load_ltx_text_weights(torch.nn.Linear(1, 1), Path("gemma.safetensors"),
+                                     lambda key: (None, key), (), "cuda:1")
+    assert seen["device"] == "cuda:1"
 
 
 def test_ltx_component_roles_and_lora_contract():

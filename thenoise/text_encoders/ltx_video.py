@@ -199,11 +199,16 @@ def _gemma3_key(raw: str) -> tuple[str, str] | None:
     return "gemma", "model." + key
 
 
-def _load_ltx_text_weights(module, path: Path, key_map, drop_keys: tuple[str, ...]):
+def _load_ltx_text_weights(module, path: Path, key_map,
+                           drop_keys: tuple[str, ...], device: str):
     """Use TheNoise's shared Gemma/quantized text-encoder loader.
 
     Only checkpoint-specific name mapping lives here. Tokenizer/config blobs are
     assets, not model tensors. Learned unknown keys must fail, not be dropped.
+
+    ``device`` is the caller's because it is the residency manager's: this file is
+    15-26 GB, and reading it onto CPU to be carried back afterwards holds all of it in
+    host RAM while the transformer is being read too.
     """
     def mapped(raw):
         result = key_map(raw)
@@ -212,7 +217,7 @@ def _load_ltx_text_weights(module, path: Path, key_map, drop_keys: tuple[str, ..
         return result[1]
 
     return load_text_encoder_weights(
-        module, str(path), device="cpu", dtype=torch.bfloat16,
+        module, str(path), device=device, dtype=torch.bfloat16,
         key_map=mapped, drop_keys=drop_keys,
     )
 
@@ -220,11 +225,15 @@ def _load_ltx_text_weights(module, path: Path, key_map, drop_keys: tuple[str, ..
 
 
 
-def load_ltx_gemma(path: str | Path, *, version: str):
-    """Return `(GemmaFeatures, prompter, text_config)` on CPU.
+def load_ltx_gemma(path: str | Path, *, version: str, device: str):
+    """Return `(GemmaFeatures, prompter, text_config)` built on ``device``.
 
     Weights come from one safetensors file: Gemma 3 from a vendored tokenizer and
-    config, Gemma 4 from assets embedded in that same file.
+    config, Gemma 4 from assets embedded in that same file. They are written straight
+    to ``device``, and the finished module is moved there as well: these builds blank
+    the parameters and leave ``transformers``' own buffers — the rotary frequencies,
+    ``embed_scale`` — behind on CPU, and a moved module sweeps them without touching a
+    parameter that is already where it belongs.
     """
     try:
         from transformers import AutoModelForImageTextToText, PreTrainedTokenizerFast
@@ -253,8 +262,9 @@ def load_ltx_gemma(path: str | Path, *, version: str):
              "model.multi_modal_projector.", "gemma3_12b.multi_modal_projector.",
              "vision_tower.", "model.vision_tower.", "gemma3_12b.vision_tower.",
              "vision_model.", "model.vision_model.", "gemma3_12b.vision_model."),
+            device,
         )
-        return wrapper.eval(), prompter, config
+        return wrapper.to(device).eval(), prompter, config
 
     if version != "2.5":
         raise ValueError(f"unsupported LTX text encoder version: {version!r}")
@@ -291,5 +301,7 @@ def load_ltx_gemma(path: str | Path, *, version: str):
         ("tokenizer_json", "hf_asset__", "text_embedding_projection.",
          "connectors.", "video_embeddings_connector.", "audio_embeddings_connector.",
          "video_connector.", "audio_connector.", "lm_head.", "model.lm_head."),
+        device,
     )
-    return wrapper.eval(), GemmaPrompter.from_transformers(tokenizer), hf_config.text_config
+    return (wrapper.to(device).eval(), GemmaPrompter.from_transformers(tokenizer),
+            hf_config.text_config)

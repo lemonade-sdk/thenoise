@@ -132,6 +132,7 @@ class LTXVideo(VideoModel):
 
         gemma, self.tokenizer, text_cfg = load_ltx_gemma(
             self.text_encoder_path, version=self.version,
+            device=self._load_target(self.text_encoder_path),
         )
         components, _ = load_original_components(
             {"": self.dit_path, "vae": self.vae_path, **config.extra_paths,
@@ -146,7 +147,6 @@ class LTXVideo(VideoModel):
         self.vocoder = components["vocoder"]
         self.upscaler = components["upscaler"]
         self.text_encoder = _PromptTower(gemma, components["connectors"])
-        self.text_encoder.to(self._load_target(self.text_encoder_path))
         for role in ("vae", "audio_vae", "vocoder", "upscaler", "text_encoder"):
             self.memory.register(role, getattr(self, role))
         self.memory.register("dit", self.dit)
