@@ -8,6 +8,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 import pytest
 import torch
+from torch import nn
 
 from thenoise.dit.ltx_video.connectors import LTX2TextConnectors
 from thenoise.dit.ltx_video.transformer import LTX2VideoTransformer3DModel
@@ -21,31 +22,56 @@ from conftest import tiny_ltx_video_vae
 
 
 
-def test_ltx_gemma_sdpa_fallback_is_scoped_and_overridable(monkeypatch):
-    from thenoise.text_encoders.ltx_video import _use_math_gemma_attention
+def test_a_prompt_runs_at_its_own_length_and_is_padded_afterwards():
+    """Gemma sees the prompt; the connectors' register-block context is filled after it.
 
-    monkeypatch.delenv("THENOISE_LTX_GEMMA_SDPA", raising=False)
-    assert not _use_math_gemma_attention(torch.device("cpu"))
+    The released pipeline left-pads every prompt to the context width and passes a mask
+    through 48 layers. Nothing in the connector needs that -- it re-aligns the valid rows
+    itself -- so the padding moved behind the encoder, where it is one copy.
+    """
+    from thenoise.models.ltx_video import _PromptTower
+    from thenoise.text_encoders.ltx_video import PROMPT_CONTEXT
 
-    # Fake ROCm attributes to test the architecture check on CPU-only CI.
-    monkeypatch.setattr(torch.version, "hip", "test-rocm", raising=False)
-    monkeypatch.setattr(torch.cuda, "get_device_properties",
-                        lambda device: SimpleNamespace(gcnArchName="gfx1151:sramecc-"))
-    assert _use_math_gemma_attention(torch.device("cuda:0"))
-    monkeypatch.setattr(torch.cuda, "get_device_properties",
-                        lambda device: SimpleNamespace(gcnArchName="gfx1100"))
-    assert _use_math_gemma_attention(torch.device("cuda:0"))
-    monkeypatch.setattr(torch.cuda, "get_device_properties",
-                        lambda device: SimpleNamespace(gcnArchName="gfx1201"))
-    assert not _use_math_gemma_attention(torch.device("cuda:0"))
+    class FakeGemma(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.probe = nn.Parameter(torch.zeros(1))
+            self.seen = []
 
-    monkeypatch.setenv("THENOISE_LTX_GEMMA_SDPA", "math")
-    assert _use_math_gemma_attention(torch.device("cpu"))
-    monkeypatch.setenv("THENOISE_LTX_GEMMA_SDPA", "default")
-    assert not _use_math_gemma_attention(torch.device("cuda:0"))
-    monkeypatch.setenv("THENOISE_LTX_GEMMA_SDPA", "invalid")
-    with pytest.raises(ValueError, match="THENOISE_LTX_GEMMA_SDPA"):
-        _use_math_gemma_attention(torch.device("cuda:0"))
+        def forward(self, ids):
+            self.seen.append(tuple(ids.shape))
+            return torch.zeros(ids.shape[0], ids.shape[1], 4)
+
+    class FakeConnectors(nn.Module):
+        dtype = torch.float32
+
+        def forward(self, hidden, mask):
+            assert mask.shape == (hidden.shape[0], hidden.shape[1])
+            return hidden, hidden, mask
+
+    tower = _PromptTower(FakeGemma(), FakeConnectors())
+    video, audio, mask = tower(torch.arange(6).reshape(1, 6))
+    assert tower.gemma.seen == [(1, 6)], "the encoder saw the prompt, not the context"
+    assert video.shape == audio.shape == (1, PROMPT_CONTEXT, 4)
+    assert int(mask.sum()) == 6 and int(mask[0, :PROMPT_CONTEXT - 6].sum()) == 0
+
+
+def test_a_prompt_arrives_as_bos_first_ids_truncated_to_the_context():
+    from thenoise.text_encoders.ltx_video import PROMPT_CONTEXT, GemmaPrompter
+
+    class Tokens:
+        def __init__(self, ids, bos=2):
+            self.ids, self.bos_token_id = ids, bos
+
+        def __call__(self, text, **options):
+            assert options["padding"] is False and options["truncation"] is True
+            return {"input_ids": list(self.ids)}
+
+    assert GemmaPrompter(Tokens([3, 4, 5])).encode("  a red fox  ").tolist() == [[2, 3, 4, 5]]
+    assert GemmaPrompter(Tokens([2, 3])).encode("fox").tolist() == [[2, 3]]
+    assert len(GemmaPrompter(Tokens([3] * 4000)).encode("fox")[0]) == PROMPT_CONTEXT
+    with pytest.raises(ValueError, match="no BOS token"):
+        GemmaPrompter(Tokens([3], bos=None)).encode("fox")
 
 
 @pytest.mark.parametrize("ltx25", [False, True])

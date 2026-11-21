@@ -24,7 +24,7 @@ from thenoise.dit.ltx_video.sampling import REFINE_GRID, stage_grids
 from thenoise.models.config import EncodePromptArgs, VideoSamplingParams
 from thenoise.models.video_base import Segment, VideoModel, Waveform
 from thenoise.samplers import Step, sigma_steps
-from thenoise.text_encoders.ltx_video import load_ltx_gemma
+from thenoise.text_encoders.ltx_video import PROMPT_CONTEXT, load_ltx_gemma
 from thenoise.utils.image_tensor import cover_crop
 from thenoise.vae.ltx_audio import LATENT_TOKENS_PER_SECOND
 from thenoise.video.spec import ResolvedVideo, VideoSpec
@@ -73,10 +73,22 @@ class _PromptTower(nn.Module):
         self.gemma = gemma
         self.connectors = connectors
 
-    def forward(self, ids, mask):
-        hidden = self.gemma(ids, mask)
-        hidden = hidden.to(self.connectors.dtype)
-        return self.connectors(hidden, mask, padding_side="left")
+    def forward(self, ids: torch.Tensor):
+        """Gemma at the prompt's own length, then the connectors' fixed context.
+
+        That width is a property of their learned registers, not of the tokenizer, so it
+        is filled here: one copy of the features, instead of 48 layers of attention over
+        a thousand positions of which two dozen are the prompt.
+        """
+        hidden = self.gemma(ids).to(self.connectors.dtype)
+        pad = PROMPT_CONTEXT - hidden.shape[1]
+        if pad < 0:
+            raise ValueError(f"Gemma produced {hidden.shape[1]} tokens for a "
+                             f"{PROMPT_CONTEXT}-wide connector context")
+        hidden = F.pad(hidden, (0, 0, pad, 0))
+        positions = torch.arange(PROMPT_CONTEXT, device=ids.device)
+        mask = (positions >= pad).to(torch.long).expand(hidden.shape[0], -1)
+        return self.connectors(hidden, mask)
 
 
 class LTXVideo(VideoModel):
@@ -175,42 +187,21 @@ class LTXVideo(VideoModel):
         return dataclasses.replace(r, frame_count=frame_grid(r.frame_count,
                                                             explicit=r.explicit_frames))
 
-    def _tokenize(self, prompts: list[str]):
-        self.tokenizer.padding_side = "left"
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        bos_id = self.tokenizer.bos_token_id
-        if bos_id is None:
-            raise ValueError("LTX Gemma tokenizer has no BOS token")
-        rows = []
-        for prompt in prompts:
-            encoded = self.tokenizer(
-                prompt.strip(), padding=False, truncation=True,
-                max_length=1024, return_tensors="pt",
-            )
-            ids = encoded.input_ids[0].tolist()
-            if not ids or ids[0] != bos_id:
-                ids = [bos_id, *ids][:1024]
-            rows.append(ids)
-        padded = self.tokenizer.pad(
-            {"input_ids": rows}, padding="max_length", max_length=1024,
-            return_tensors="pt", return_attention_mask=True,
-        )
-        return padded.input_ids.to(self.device), padded.attention_mask.to(self.device)
-
     def encode_prompt(self, args: EncodePromptArgs) -> AVConditioning:
         """Both connector streams, and the unconditional halves guidance needs.
 
-        One encoder pass carries the conditional and unconditional prompts as a batch of
-        two, which is how the reference pipeline runs them.
+        Each prompt is encoded on its own. The released pipeline batches them, which
+        means padding every prompt to the context width; alone, a prompt is 48 layers of
+        attention over its own length and needs no mask at all. Two rows of two dozen
+        tokens are not worth a wider kernel.
         """
         need_null = args.guidance_scale > 1.0 or bool(args.negative_prompt.strip())
-        ids, mask = self._tokenize(
-            [args.prompt, args.negative_prompt] if need_null else [args.prompt])
-        v, a, m = self.text_encoder(ids, mask)
+        prompts = [args.prompt, args.negative_prompt] if need_null else [args.prompt]
+        rows = [self.text_encoder(self.tokenizer.encode(prompt).to(self.device))
+                for prompt in prompts]
         if not need_null:
-            return AVConditioning(v[0:1], a[0:1], m[0:1])
-        return AVConditioning(v[0:1], a[0:1], m[0:1], v[1:2], a[1:2], m[1:2])
+            return AVConditioning(*rows[0])
+        return AVConditioning(*rows[0], *rows[1])
 
     def fit_references(self, images, target):
         if len(images) != 1:

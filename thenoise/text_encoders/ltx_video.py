@@ -6,9 +6,7 @@ projection weights.
 """
 from __future__ import annotations
 
-from contextlib import nullcontext
 import json
-import os
 from pathlib import Path
 
 import torch
@@ -16,6 +14,12 @@ from thenoise.utils.safetensors import MemoryEfficientSafeOpen
 from torch import nn
 
 from thenoise.utils.loader import load_text_encoder_weights
+
+#: The prompt context the LTX text connectors were released with: eight blocks of their
+#: 128 learned registers, every position of which becomes DiT cross-attention context.
+#: The tokenizer truncates to it; nothing runs an attention over it -- the width is
+#: filled after Gemma has run, on rows the prompt's real length produced.
+PROMPT_CONTEXT = 1024
 
 #: Both Gemma builders share the engine's seam: `init_empty_weights` patches
 #: parameter registration, so the learned weights land on meta for the loader while the
@@ -27,27 +31,6 @@ from accelerate import init_empty_weights
 
 
 
-def _use_math_gemma_attention(device: torch.device) -> bool:
-    """Avoid broken masked Gemma SDPA on confirmed ROCm GPU architectures.
-
-    Selection is scoped to Gemma inference, never global or DiT-wide.
-    `THENOISE_LTX_GEMMA_SDPA=math|default` permits A/B validation of an
-    affected driver/PyTorch combination without changing installed packages.
-    """
-    mode = os.environ.get("THENOISE_LTX_GEMMA_SDPA", "auto").strip().lower()
-    if mode not in ("auto", "math", "default"):
-        raise ValueError("THENOISE_LTX_GEMMA_SDPA must be auto, math or default")
-    if mode != "auto":
-        return mode == "math"
-    if not torch.version.hip or device.type != "cuda":
-        return False
-    try:
-        arch = torch.cuda.get_device_properties(device).gcnArchName.split(":", 1)[0]
-    except (AttributeError, RuntimeError):
-        return False
-    return arch in ("gfx1100", "gfx1151")
-
-
 class GemmaFeatures(nn.Module):
     """Module wrapper so the standard TheNoise MemoryManager owns residency."""
 
@@ -55,22 +38,41 @@ class GemmaFeatures(nn.Module):
         super().__init__()
         self.model = model
 
-    def forward(self, ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        # Calling the inner model avoids the 250K-token LM-head logits, exactly
-        # as the official Lightricks text-encoder implementation does.
+    def forward(self, ids: torch.Tensor) -> torch.Tensor:
+        """Prompt ids at their own length -> every layer's features, concatenated.
+
+        The inner model is called directly, so the vocab logits are never formed. No
+        attention mask goes in: a prompt arrives alone, so there is nothing to mask out,
+        and a dense row is both cheaper and free of the masked kernels that the padded
+        form needed.
+        """
         inner = getattr(self.model, "model", self.model)
-        if _use_math_gemma_attention(ids.device):
-            from torch.nn.attention import SDPBackend, sdpa_kernel
-            attention_context = sdpa_kernel([SDPBackend.MATH])
-        else:
-            attention_context = nullcontext()
-        with attention_context:
-            features = inner(
-                input_ids=ids, attention_mask=mask, output_hidden_states=True,
-            ).hidden_states
+        features = inner(input_ids=ids, output_hidden_states=True).hidden_states
         if features is None:
             raise RuntimeError("Gemma text model returned no hidden states")
         return torch.stack(features, dim=-1).flatten(2, 3)
+
+
+class GemmaPrompter:
+    """Prompt text to ids, at the prompt's own length.
+
+    Truncation is against the connector's context, since that is the width the ids
+    finally occupy. The BOS is the tokenizer's to add where it knows how; the packed
+    Gemma-4 tokenizer does not, and a prompt without it conditions on the wrong token.
+    """
+
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+
+    def encode(self, text: str) -> torch.Tensor:
+        ids = self.tokenizer(text.strip(), padding=False, truncation=True,
+                             max_length=PROMPT_CONTEXT)["input_ids"]
+        bos = self.tokenizer.bos_token_id
+        if bos is None:
+            raise ValueError("LTX Gemma tokenizer has no BOS token")
+        if not ids or ids[0] != bos:
+            ids = [bos, *ids][:PROMPT_CONTEXT]
+        return torch.tensor([ids], dtype=torch.long)
 
 def _read_asset(source, meta: dict, name: str) -> bytes:
     key = f"hf_asset__{name}"
@@ -191,10 +193,10 @@ def _load_ltx_text_weights(module, path: Path, key_map, drop_keys: tuple[str, ..
 
 
 def load_ltx_gemma(path: str | Path, *, version: str):
-    """Return `(GemmaFeatures, tokenizer, text_config)` on CPU.
+    """Return `(GemmaFeatures, prompter, text_config)` on CPU.
 
-    Model weights come from one safetensors file. Gemma3 uses local
-    tokenizer.json and a vendored config; Gemma4 embeds its assets.
+    Weights come from one safetensors file: Gemma 3 from a vendored tokenizer and
+    config, Gemma 4 from assets embedded in that same file.
     """
     try:
         from transformers import AutoModelForImageTextToText, PreTrainedTokenizerFast
@@ -239,7 +241,7 @@ def load_ltx_gemma(path: str | Path, *, version: str):
              "vision_tower.", "model.vision_tower.", "gemma3_12b.vision_tower.",
              "vision_model.", "model.vision_model.", "gemma3_12b.vision_model."),
         )
-        return wrapper.eval(), tokenizer, config
+        return wrapper.eval(), GemmaPrompter(tokenizer), config
 
     if version != "2.5":
         raise ValueError(f"unsupported LTX text encoder version: {version!r}")
@@ -286,4 +288,4 @@ def load_ltx_gemma(path: str | Path, *, version: str):
          "connectors.", "video_embeddings_connector.", "audio_embeddings_connector.",
          "video_connector.", "audio_connector.", "lm_head.", "model.lm_head."),
     )
-    return wrapper.eval(), tokenizer, hf_config.text_config
+    return wrapper.eval(), GemmaPrompter(tokenizer), hf_config.text_config

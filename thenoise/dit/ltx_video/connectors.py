@@ -130,8 +130,7 @@ class LTX2TextConnectors(nn.Module):
         # projection: QuantizedTensor storage dtype may be INT8.
         return self.video_connector.transformer_blocks[0].attn1.norm_q.weight.dtype
 
-    def forward(self, hidden: torch.Tensor, attention_mask: torch.Tensor,
-                padding_side: str = "left", scale_factor: int = 8
+    def forward(self, hidden: torch.Tensor, attention_mask: torch.Tensor
                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         geometry = (self.config.caption_channels, self.config.text_proj_in_factor)
         if hidden.ndim == 3:
