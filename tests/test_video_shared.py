@@ -114,8 +114,9 @@ def test_a_model_with_two_segments_gets_one_progress_clock(tmp_path, monkeypatch
     class TwoExpert(StubVideo):
         def segments(self, params, schedule, guidance_scale):
             half = len(schedule) // 2
-            return [Segment("dit", self.dit, schedule[:half], guidance_scale),
-                    Segment("dit_low", self.dit, schedule[half:], guidance_scale / 2)]
+            return [Segment("dit", self.dit, schedule[:half], guidance_scale, params),
+                    Segment("dit_low", self.dit, schedule[half:],
+                            guidance_scale / 2, params)]
 
     model = TwoExpert(config=_stub_config(tmp_path))
     staged = []
@@ -132,3 +133,54 @@ def test_a_model_with_two_segments_gets_one_progress_clock(tmp_path, monkeypatch
 
     assert [e for e in events if e[0] == "sampling"] == [("sampling", i, 4) for i in range(1, 5)]
     assert staged == ["text_encoder", "dit", "dit_low", "vae"]
+
+
+def test_shared_controller_cleans_video_state_on_failure(tmp_path, monkeypatch):
+    """Request-owned AV references must be cleared even when a stage fails."""
+    model = StubVideo(config=_stub_config(tmp_path))
+    cleared = []
+    model.clear_video_state = lambda: cleared.append(True)
+    controller = VideoPipelineController(model)
+
+    def fail(*_args):
+        raise RuntimeError("injected failure")
+
+    monkeypatch.setattr(controller, "_render", fail)
+    spec = model.resolve_video(VideoSpec(prompt="fox"))
+    with pytest.raises(RuntimeError, match="injected failure"):
+        controller.render(spec, Cancellation(), lambda *_: None,
+                          tmp_path / "failed.webm")
+    assert cleared == [True]
+
+
+def test_a_codec_that_streams_frames_sizes_its_decode_stage_by_one(tmp_path):
+    """The default takes :meth:`decode_frames` at its word: a frame at a time.
+
+    A codec that must run over the whole clip before the first frame can leave declares
+    the clip instead, since a stage sized by a frame alone then survives only by being
+    retried for memory.
+    """
+    model = StubVideo(config=_stub_config(tmp_path))
+    resolved = model.resolve_video(VideoSpec(prompt="frames", width=128, height=96))
+    assert model.decoded_pixels(resolved) == 128 * 96
+
+
+def test_a_frame_count_lands_on_the_grid_a_codec_can_pack():
+    """One causal-clip grid, whatever the codec's temporal compression is.
+
+    A codec packs `compression*n+1` frames -- a first frame, then whole groups -- so the
+    shortest clip it can hold is one group, and the nearest grid point to a single frame
+    is a whole group rather than nothing.
+    """
+    from thenoise.video.spec import frame_grid
+
+    assert frame_grid(9, compression=8, upward=True) == 9
+    assert [frame_grid(n, compression=8, upward=True) for n in (1, 2, 8)] == [9, 9, 9]
+    assert [frame_grid(n, compression=8, upward=True) for n in (10, 17)] == [17, 17]
+    # A duration may round down, and a half goes up: 12 is nearer 9, 13 nearer 17.
+    assert [frame_grid(n, compression=8, upward=False) for n in (12, 13, 20)] == [9, 17, 17]
+    assert frame_grid(1.2 * 24, compression=4, upward=False) == 29  # the other codec, same rule
+
+    for wanted in (0, -3, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="positive and finite"):
+            frame_grid(wanted, compression=8, upward=True)

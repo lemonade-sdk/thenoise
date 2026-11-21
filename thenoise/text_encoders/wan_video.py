@@ -13,8 +13,9 @@ logger = logging.getLogger(__name__)
 
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention
-from thenoise.utils.loader import is_quantized_checkpoint, load_text_encoder_weights
-from thenoise.utils.safetensors import MemoryEfficientSafeOpen
+from thenoise.utils.loader import (
+    is_quantized_checkpoint, load_text_encoder_weights, spiece_model,
+)
 
 #: UMT5's gated FFN can overflow FP16 before its final normalization. BF16 keeps the
 #: FP16 checkpoint's memory footprint but widens the exponent.
@@ -163,20 +164,6 @@ def _text_key(name: str) -> str:
     return name.removeprefix("text_encoders.").removeprefix("umt5xxl.transformer.").removeprefix("transformer.")
 
 
-def _tokenizer_proto(path: str) -> bytes:
-    """The SentencePiece proto ComfyUI embeds in its UMT5 file.
-
-    It is tokenizer payload rather than module state, so the weight load drops the
-    key and this reads it on its own.
-    """
-    with MemoryEfficientSafeOpen(path) as f:
-        if "spiece_model" not in f.keys():
-            raise ValueError(f"{path} is missing its embedded spiece_model tokenizer")
-        if f.header["spiece_model"]["dtype"] != "U8":
-            raise ValueError("invalid Comfy UMT5 sentencepiece tokenizer data")
-        return f.get_tensor("spiece_model").numpy().tobytes()
-
-
 def load_wan_text_encoder(
     path: str,
     device: str | torch.device,
@@ -193,7 +180,7 @@ def load_wan_text_encoder(
     tensors at the compute dtype while they are assigned, because quantized kernels
     emit BF16.
     """
-    proto = _tokenizer_proto(path)
+    proto = spiece_model(path)
     compute = dtype or COMPUTE_DTYPE
     quantized = is_quantized_checkpoint(path)
     logger.info("Loading %sUMT5 from %s", "quantized " if quantized else "", path)

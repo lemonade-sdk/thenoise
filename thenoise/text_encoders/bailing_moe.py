@@ -317,8 +317,7 @@ def video_rope(
     angles[:, 0:spatial:2] = height[:, None] * inv_freq[0:spatial:2]
     angles[:, 1:spatial:2] = width[:, None] * inv_freq[1:spatial:2]
 
-    emb = torch.cat((angles, angles), dim=-1)[:, None, None, :]
-    return emb.cos(), emb.sin()
+    return angles.cos()[None, None], angles.sin()[None, None]
 
 
 class BailingMoeV2(nn.Module):

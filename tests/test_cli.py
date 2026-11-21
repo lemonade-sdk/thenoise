@@ -49,6 +49,16 @@ def test_cli_serve_parses_model_paths_and_defaults(parse):
     assert not hasattr(bare, "pixel_upscaler")
 
 
+def test_ltx_auxiliary_checkpoint_flags_are_explicit(parse):
+    paths = ["--audio-vae", "audio.safetensors", "--spatial-upscaler", "up.safetensors",
+             "--text-projection", "projection.safetensors"]
+    for command, extra in (("serve", []), ("video", ["--prompt", "a fox"])):
+        args = parse([command, *PATHS, *paths, *extra])
+        assert args.audio_vae == "audio.safetensors"
+        assert args.spatial_upscaler == "up.safetensors"
+        assert args.text_projection == "projection.safetensors"
+
+
 def test_cli_rejects_removed_flags(parse):
     """``--model`` and ``--dtype`` are gone: everything is auto-detected / bf16."""
     with pytest.raises(SystemExit):

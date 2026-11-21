@@ -19,7 +19,7 @@ from thenoise.dit.wan_video.model import (
     detect_params,
 )
 from thenoise.models.base import Conditioning
-from thenoise.models.config import EncodePromptArgs
+from thenoise.models.config import EncodePromptArgs, VideoSamplingParams
 from thenoise.models.pixel_base import expect_latent_width
 from thenoise.models.video_base import Segment, VideoModel
 from thenoise.samplers import Step, sigma_steps
@@ -28,7 +28,7 @@ from thenoise.utils.image_tensor import cover_crop
 from thenoise.utils.safetensors import Header
 from thenoise.utils.wan_weights import wan_dit_key
 from thenoise.vae.wan_video import detect_latent_width, load_wan_video_vae, TEMPORAL_COMPRESSION
-from thenoise.video.spec import ResolvedVideo, VideoSpec
+from thenoise.video.spec import ResolvedVideo, VideoSpec, frame_grid
 
 logger = logging.getLogger(__name__)
 
@@ -267,7 +267,7 @@ class Wan22Model(VideoModel):
         resolved = super().resolve_video(spec)
         return dataclasses.replace(
             resolved,
-            frame_count=wan_sampling.wan_frame_grid(
+            frame_count=frame_grid(
                 resolved.frame_count, compression=TEMPORAL_COMPRESSION,
                 upward=resolved.explicit_frames),
         )
@@ -430,7 +430,8 @@ class Wan22Model(VideoModel):
                 module=self.dit if high else self.low_dit,
                 steps=tuple(steps[start:end]),
                 guidance_scale=(guidance_scale if high
-                                else guidance_scale * experts.low_cfg_ratio)))
+                                else guidance_scale * experts.low_cfg_ratio),
+                params=params))
             start = end
         return spans
 
@@ -462,7 +463,8 @@ class Wan22Model(VideoModel):
         return module(x, timestep=timestep, encoder_hidden_states=context).float()
 
     # ------------------------------------------------------------ codec
-    def decode_frames(self, latents: torch.Tensor) -> Iterator[torch.Tensor]:
+    def decode_frames(self, latents: torch.Tensor,
+                      params: VideoSamplingParams) -> Iterator[torch.Tensor]:
         for video in self.vae.decode_to_pixel_frames(latents):
             for i in range(video.shape[2]):
                 yield video[0, :, i].float()

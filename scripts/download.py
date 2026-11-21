@@ -12,6 +12,8 @@ Models:
                   https://huggingface.co/circlestone-labs/Anima
   krea2           Krea 2 Turbo (bf16 / raw)
                   https://huggingface.co/Comfy-Org/Krea-2
+  ltx23           LTX 2.3 Distilled (audio/video + Gemma 3)
+  ltx25           LTX 2.5 Distilled (audio/video + Gemma 4)
   wan22           Wan 2.2 TI2V-5B, FastWan turbo by default (text-to-video and
                   image-to-video; --variant base takes the FP16 release)
                   https://huggingface.co/thenoise-ai/diffusion-models
@@ -43,8 +45,8 @@ Models:
                   https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf
                   https://huggingface.co/usyd-community/vitpose-base-simple
 
-Tokenizer/processor configs are vendored inside the ``thenoise`` package, so no
-tokenizer is ever downloaded; loading is fully offline.
+Tokenizer/processor configs are vendored inside ``thenoise``;
+model loading remains fully offline.
 
 Usage:
     python scripts/download.py --model anima
@@ -417,6 +419,47 @@ def _esrgan_jobs(args: argparse.Namespace) -> list[Artifact]:
     ]
 
 
+# LTX uses the standard --int8-convrot switch. Both Gemma encoders are
+# single .safetensors checkpoints, never Hugging Face shard directories.
+def _ltx23_jobs(args: argparse.Namespace) -> list[Artifact]:
+    repo = "Lightricks/LTX-2.3"
+    shared = [("spatial_upscaler", repo,
+               "ltx-2.3-spatial-upscaler-x2-1.1.safetensors")]
+    if not args.int8_convrot:
+        # Only single-file Gemma3 weights, as used by ComfyUI.
+        return [
+            ("dit", repo, "ltx-2.3-22b-distilled-1.1.safetensors"),
+            *shared,
+            ("gemma3/gemma_3_12B_it.safetensors", "Comfy-Org/ltx-2",
+             "split_files/text_encoders/gemma_3_12B_it.safetensors"),
+        ]
+    return [
+        ("dit", "milo01/ComfyUI-Native-INT8_ConvRot",
+         "checkpoints/ltx-2.3-22b-distilled-1.1-int8-ConvRot.safetensors"),
+        *shared,
+        ("vae", "Kijai/LTX2.3_comfy", "vae/LTX23_video_vae_bf16.safetensors"),
+        ("audio_vae", "Kijai/LTX2.3_comfy", "vae/LTX23_audio_vae_bf16.safetensors"),
+        ("text_projection", "Kijai/LTX2.3_comfy",
+         "text_encoders/ltx-2.3_text_projection_bf16.safetensors"),
+        ("gemma3/gemma_3_12B_it_int8_convrot.safetensors",
+         "Stick9190/gemma-3-12b-it-int8-convrot",
+         "gemma_3_12B_it_int8_convrot.safetensors"),
+    ]
+
+
+def _ltx25_jobs(args: argparse.Namespace) -> list[Artifact]:
+    repo = "comfyicu/LTX-2.5"
+    suffix = "comfy-int8-convrot" if args.int8_convrot else "bf16"
+    return [
+        ("dit", repo, f"diffusion_models/ltx-2.5-22b-distilled-transformer-{suffix}.safetensors"),
+        ("text_encoder", repo, f"text_encoders/gemma4-12b-with-proj-ltx-2.5-{suffix}.safetensors"),
+        ("vae", repo, "vae/ltx-2.5-video-vae-conv-bf16.safetensors"),
+        ("audio_vae", repo, "vae/ltx-2.5-audio-vae-bf16.safetensors"),
+        ("spatial_upscaler", repo,
+         "latent_upscale_models/ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors"),
+    ]
+
+
 _WAN_REPO = "Comfy-Org/Wan-2.2"
 
 
@@ -614,6 +657,16 @@ MODELS: dict[str, ModelSpec] = {
         "MiniMax H3-Image (t2i + edit in one DiT)",
         _h3_image_jobs,
     ),
+    "ltx23": ModelSpec(
+        "ltx23", "./models/ltx23",
+        "LTX 2.3 Distilled (T2V / I2V + audio; BF16 or INT8 ConvRot)", _ltx23_jobs,
+        has_int8=True,
+    ),
+    "ltx25": ModelSpec(
+        "ltx25", "./models/ltx-2.5",
+        "LTX 2.5 Distilled (T2V / I2V + audio; BF16 or INT8 ConvRot)", _ltx25_jobs,
+        has_int8=True,
+    ),
     "wan22": ModelSpec(
         "wan22", "./models/wan22",
         "Wan 2.2 TI2V-5B (T2V / I2V; FastWan turbo by default)",
@@ -683,6 +736,9 @@ def _epilog() -> str:
         "  python scripts/download.py --model fibo2",
         "  python scripts/download.py --model fibo2 --variant dev --int8-convrot",
         "  python scripts/download.py --model h3-image",
+        "  python scripts/download.py --model ltx23 --int8-convrot",
+        "  python scripts/download.py --model ltx25 --int8-convrot",
+        "  python scripts/download.py --model ltx25               # BF16",
         "  python scripts/download.py --model wan22",
         "  python scripts/download.py --model wan22 --variant base",
         "  python scripts/download.py --model wan22-14b",

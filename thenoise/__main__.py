@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from .cli import build_parser
+from .cli import build_parser, component_paths
 
 
 class _QuietReads(logging.Filter):
@@ -22,7 +22,7 @@ def _serve(args) -> None:
 
     runtime = Runtime(settings)
 
-    # --dit alone identifies a model.
+    # --dit alone identifies a model. Auxiliary checkpoints require --dit.
     if args.dit:
         runtime.load(
             ModelPaths(
@@ -31,10 +31,11 @@ def _serve(args) -> None:
                 text_encoder_path=args.text_encoder,
                 lora_dir=args.lora_dir,
                 dit_low_path=args.dit_low,
+                extra_paths=component_paths(args),
             ),
         )
-    elif args.vae or args.text_encoder or args.dit_low:
-        raise SystemExit("serve: --vae, --text-encoder and --dit-low need --dit")
+    elif args.vae or args.text_encoder or args.dit_low or component_paths(args):
+        raise SystemExit("serve: auxiliary model checkpoints require --dit")
 
     # The queue exists whether or not there is a model to serve: a submit that finds
     # nothing loaded is refused, and an unused queue never creates its directory.

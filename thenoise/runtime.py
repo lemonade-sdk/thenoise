@@ -4,7 +4,7 @@ DiT checkpoint, swapping (unload + GC) on reload. The VAE and encoder match the 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from thenoise.errors import ModelReloadNeeded
@@ -38,6 +38,10 @@ class ModelPaths:
     text_encoder_path: str = ""
     lora_dir: str = ""
     dit_low_path: str = ""
+    #: Component checkpoints by role: ``"audio_vae"``, ``"upscaler"``,
+    #: ``"text_projection"``. Which roles a model reads is the adapter's; a role left
+    #: out is looked for in the files that were given.
+    extra_paths: dict[str, str] = field(default_factory=dict)
 
     @property
     def dit_paths(self) -> dict[str, str]:
@@ -97,7 +101,13 @@ class Runtime:
             device=self._settings.device,
             offload_device=self._settings.offload_device,
             lora_dir=paths.lora_dir or None,
+            extra_paths=paths.extra_paths,
         )
+        # A component file the adapter has no role for is refused, not left out quietly.
+        unwanted = sorted(set(paths.extra_paths) - set(cls.COMPONENT_ROLES))
+        if unwanted:
+            raise ValueError(f"{name} has no use for --"
+                             + ", --".join(role.replace("_", "-") for role in unwanted))
         cls.validate_paths(config.all_headers())
 
         self._unload()  # swap: only one model resident at a time

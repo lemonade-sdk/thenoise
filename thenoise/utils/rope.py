@@ -6,8 +6,8 @@ an ``apply_*`` that consumes them:
   * **2x2 matrix** (``[cos, -sin, sin, cos]`` per adjacent pair, carried as a
     ``[B, L, dim/2, 2, 2]`` tensor). No complex ops, so ``torch.compile`` can
     codegen the attention path.
-  * **split-half** (precomputed ``cos/sin`` pairs applied to the two halves of the
-    head dim).
+  * **split-half** (``cos/sin`` at half the rotated width, applied to the two halves
+    of those channels).
 
 ``RopeCache`` stores frequencies under simple string names, computing them on
 demand through a model-supplied builder.
@@ -57,30 +57,55 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rope_split_half(xq: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    """Apply split-half RoPE to ``xq`` ``[B, H, L, D]`` using ``cos/sin`` ``[L, 1, 1, D]``."""
-    cos = cos.transpose(0, 2)  # [1, 1, L, D]
-    sin = sin.transpose(0, 2)
-    rot_dim = cos.shape[-1]
-    xq_rot, xq_pass = xq[..., :rot_dim], xq[..., rot_dim:]
-    xq_rot = xq_rot * cos + _rotate_half(xq_rot) * sin
-    return torch.cat((xq_rot, xq_pass), dim=-1)
+def apply_rope_split_half(xq: torch.Tensor, cos: torch.Tensor,
+                          sin: torch.Tensor) -> torch.Tensor:
+    """Rotate the first ``2 * cos.shape[-1]`` channels of ``xq`` ``[B, H, L, D]``.
+
+    ``cos``/``sin`` carry each angle once rather than duplicated over the rotation's two
+    halves, and broadcast against the channels they turn: ``[1, 1, L, rot/2]`` from the
+    builders below, or ``[B, H, L, rot/2]`` where a stream hands its heads different
+    slices of one frequency range. Channels past the rotation pass through untouched,
+    which is where a rope narrower than the head leaves its idle tail.
+
+    The band is doubled here rather than carried doubled in the table, to keep the
+    rotation a single elementwise chain on its way into attention. On gfx1151 a ``cat``
+    joining two *computed* operands costs 1.6x to 3.4x at 16k tokens (measured on blocks
+    of three models, where gfx1150 does not notice), whereas a ``cat`` appending an idle
+    tail — one computed operand and a view of the query — is free. The doubling pays for
+    itself even where the band is per-head and therefore as wide as the rotation it
+    feeds: 5-6% ahead of the concatenation on a two-stream block, measured at both 9k
+    and 16k tokens. Carrying the band doubled in the table would buy the same chain at
+    the price of phases twice as wide, so the doubling happens on the way past.
+
+    The answer comes back in the query's dtype. Leaving a promotion in place — fp32
+    phases beside bf16 weights — hands SDPA operands of mixed dtype, and it answers
+    that with its unfused backend rather than by refusing.
+    """
+    if cos.shape != sin.shape:
+        raise ValueError("RoPE needs cos and sin of one shape")
+    half = cos.shape[-1]
+    if not half or 2 * half > xq.shape[-1]:
+        raise ValueError(f"a rotation of {2 * half} channels does not fit a head of "
+                         f"{xq.shape[-1]}")
+    cos, sin = (torch.cat((band, band), dim=-1) for band in (cos, sin))
+    rotated, rest = xq[..., :2 * half], xq[..., 2 * half:]
+    rotated = rotated * cos + _rotate_half(rotated) * sin
+    if rest.shape[-1]:
+        rotated = torch.cat((rotated, rest), dim=-1)
+    return rotated.to(xq.dtype)
 
 
 def split_half_rope_1d(head_dim: int, theta: float = 10000.0):
     """Builder for the split-half convention over a 1D position sequence.
 
-    Returns ``(seq_len, device) -> (cos, sin)``, each ``[seq_len, 1, 1, head_dim]``
-    (the ``[cos, sin]`` pair duplicated to fill the head dim), with frequencies
-    following ``theta ** (2i/head_dim)``.
+    Returns ``(seq_len, device) -> (cos, sin)``, each ``[1, 1, seq_len, head_dim // 2]``,
+    with frequencies following ``theta ** (2i/head_dim)``.
     """
     inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32) / head_dim))
 
     def build(seq_len: int, device):
         freqs = torch.outer(torch.arange(seq_len, device=device, dtype=torch.float32), inv_freq.to(device))
-        emb = torch.cat([freqs, freqs], dim=-1)
-        emb = emb[:, None, None, :]  # [seq_len, 1, 1, head_dim]
-        return emb.cos(), emb.sin()
+        return freqs.cos()[None, None], freqs.sin()[None, None]
 
     return build
 
@@ -88,7 +113,7 @@ def split_half_rope_1d(head_dim: int, theta: float = 10000.0):
 def split_half_rope_axes(scale: torch.Tensor, angle_scale: float = 1.0):
     """Builder of the split-half convention over any number of axes sharing one frequency.
 
-    Returns ``pos -> (cos, sin)``, each ``[L, 1, 1, 2 * n_axes * len(scale)]``, for ``pos``
+    Returns ``pos -> (cos, sin)``, each ``[1, 1, L, n_axes * len(scale)]``, for ``pos``
     an ``[L, n_axes]`` coordinate tensor: every axis rotated by the same ``scale``, the
     axes' angles concatenated in coordinate order.
 
@@ -98,8 +123,7 @@ def split_half_rope_axes(scale: torch.Tensor, angle_scale: float = 1.0):
 
     def build(pos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         angles = (angle_scale * pos[:, :, None] * scale.to(pos)).flatten(1)
-        angles = torch.cat((angles, angles), dim=-1)
-        return angles.cos()[:, None, None, :], angles.sin()[:, None, None, :]
+        return angles.cos()[None, None], angles.sin()[None, None]
 
     return build
 
@@ -107,12 +131,12 @@ def split_half_rope_axes(scale: torch.Tensor, angle_scale: float = 1.0):
 def split_half_rope_4d(head_dim: int, theta: float = 10000.0):
     """Builder for the split-half convention over a 4-axis ``(r, f, h, w)`` position.
 
-    Returns ``pos -> (cos, sin)``, each ``[L, 1, 1, head_dim]``, for ``pos`` an
+    Returns ``pos -> (cos, sin)``, each ``[1, 1, L, head_dim // 2]``, for ``pos`` an
     ``[L, 4]`` coordinate tensor (no batch axis, as ``utils.positions`` builds them).
 
-    The head dim splits into 4 axes of ``head_dim // 4`` dims, each carrying
+    The head dim splits into 4 axes of ``head_dim // 4`` channels, each carrying
     ``head_dim // 8`` frequencies. That fixes which pair :func:`apply_rope_split_half`
-    rotates with which angle: ``(j, j + head_dim // 2)`` belongs to axis
+    rotates with which angle: ``(j, j + head_dim // 4)`` belongs to axis
     ``j // (head_dim // 8)``.
     """
     if head_dim % 8:
@@ -171,9 +195,8 @@ def split_half_rope_3d(
         t_e = half_t[:, None, None, :].expand(T, H, W, -1)
         h_e = half_h[None, :, None, :].expand(T, H, W, -1)
         w_e = half_w[None, None, :, :].expand(T, H, W, -1)
-        # Duplicate the (t, h, w) freqs to fill the full head dim.
-        angles = torch.cat([t_e, h_e, w_e, t_e, h_e, w_e], dim=-1).reshape(T * H * W, 1, 1, -1)
-        return angles.cos(), angles.sin()
+        angles = torch.cat([t_e, h_e, w_e], dim=-1).reshape(T * H * W, -1)
+        return angles.cos()[None, None], angles.sin()[None, None]
 
     return build
 
