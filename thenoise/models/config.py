@@ -7,6 +7,7 @@ the denoise-stage geometry.
 """
 from __future__ import annotations
 
+import os
 import torch
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Optional, Union
@@ -19,6 +20,12 @@ from thenoise.utils.options import declared_knobs
 
 if TYPE_CHECKING:  # pragma: no cover - only for annotations
     from PIL import Image
+
+
+def _resolved(path: str) -> str:
+    """Files are identified by their resolved path: an all-in-one checkpoint arrives
+    under several roles at once."""
+    return os.path.realpath(os.path.expanduser(path))
 
 
 @dataclass
@@ -41,28 +48,41 @@ class ModelConfig:
     device: str = "cuda"
     dtype: torch.dtype = torch.bfloat16
     lora_dir: Optional[str] = None
-    audio_vae_path: str = ""
-    spatial_upscaler_path: str = ""
-    text_projection_path: str = ""
+    #: Component checkpoints by role, beside the transformer, VAE and text encoder.
+    extra_paths: dict[str, str] = field(default_factory=dict)
     #: Headers handed in already parsed, by role. The runtime passes the one it read to
     #: pick the model; anything a role has here is never opened again.
     headers: Optional[dict[str, Header]] = None
+    #: Parsed headers by resolved file, so a file is opened once however many roles
+    #: share it.
     _read: dict = field(default_factory=dict, repr=False, compare=False)
+    _given: dict = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def dit_path(self) -> str:
         """The primary DiT."""
         return self.dit_paths[""]
 
+    @property
+    def paths(self) -> dict[str, str]:
+        """Every checkpoint file the request named, by role."""
+        return {**self.dit_paths, **self.extra_paths}
+
     def header(self, role: str = "") -> Header:
-        """Role ``role``'s parsed header, read once however many parts ask for it."""
-        if role not in self._read:
-            self._read[role] = (self.headers or {}).get(role) or read_header(self.dit_paths[role])
-        return self._read[role]
+        """Role ``role``'s parsed header, read once per file however many roles share it."""
+        given = self.headers or {}
+        if role in given:
+            return given[role]
+        if not self._given:
+            self._given = {_resolved(h.path): h for h in given.values()}
+        path = _resolved(self.paths[role])
+        if path not in self._read:
+            self._read[path] = self._given.get(path) or read_header(path)
+        return self._read[path]
 
     def all_headers(self) -> dict[str, Header]:
-        """Every DiT role's header, keyed as ``dit_paths`` is."""
-        return {role: self.header(role) for role in self.dit_paths}
+        """Every named checkpoint's header, keyed as :attr:`paths` is."""
+        return {role: self.header(role) for role in self.paths}
 
 
 @dataclass

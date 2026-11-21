@@ -46,6 +46,9 @@ Then open <http://localhost:8000/> for the web UI. Full endpoint reference:
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--dit-low` | — | Low-noise DiT of a two-expert model, e.g. Wan 2.2 A14B; `--dit` then selects the high-noise expert |
+| `--audio-vae` | — | Audio VAE and vocoder checkpoint, for a release that ships them apart from the transformer |
+| `--spatial-upscaler` | — | Spatial latent upscaler checkpoint, for a release that ships it apart |
+| `--text-projection` | — | Text projection checkpoint, for a release that packs it apart from the transformer |
 | `--host` | `127.0.0.1` | Bind host |
 | `--port` | `8000` | Bind port |
 | `--upscaler-dir` | — | Directory containing pixel upscaler `.safetensors` files (e.g. Real-ESRGAN); selected per-request via `pixel_upscaler` |
@@ -121,7 +124,9 @@ A model whose only way with a picture is the text encoder — MOSS-Image — lis
 
 Renders one clip and writes it to `--out`. Needs a video model — the ones
 supported today are in the [video models](../README.md#video-models) list — and a
-two-expert variant takes `--dit-low` beside `--dit`.
+two-expert variant takes `--dit-low` beside `--dit`. A model that renders sound
+takes the component flags above wherever its release ships those parts as their
+own files.
 
 ```bash
 ./thenoise.sh video \

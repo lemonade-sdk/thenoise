@@ -92,8 +92,8 @@ class LTXVideo(VideoModel):
     """A shared LTX2.x kernel adapter with explicit 2.3/2.5 checkpoint differences."""
 
     version: ClassVar[str]
-    AUXILIARY_PATHS: ClassVar[tuple[str, ...]] = (
-        "audio_vae_path", "spatial_upscaler_path", "text_projection_path")
+    COMPONENT_ROLES: ClassVar[tuple[str, ...]] = ("audio_vae", "upscaler",
+                                                  "text_projection")
     CAPABILITIES = {**VideoModel.CAPABILITIES, "upscale": False,
                     "video": {"t2v": True, "i2v": True, "flf2v": False}}
     DEFAULT_PREFS = {
@@ -113,6 +113,11 @@ class LTXVideo(VideoModel):
         has_keyframe = any(k.endswith("keyframes_abs_pos_embedding") for k in keys)
         return is_av and (has_keyframe == (cls.version == VERSION_25))
 
+    @classmethod
+    def validate_paths(cls, checkpoints: dict[str, object]) -> None:
+        if cls.version == VERSION_25 and "text_projection" in checkpoints:
+            raise ValueError("LTX 2.5 keeps its text projections with --text-encoder")
+
     def __init__(self, *, config):
         super().__init__(config=config)
         self._ref_low = None
@@ -120,50 +125,27 @@ class LTXVideo(VideoModel):
         self._refine = False
         self._params: VideoSamplingParams | None = None
 
-        # Required auxiliary weights are explicit CLI paths. Neither the download
-        # directory layout nor the checkpoint basename is an architecture hint.
-        self.audio_vae_path = (Path(config.audio_vae_path).expanduser()
-                               if config.audio_vae_path else None)
-        self.upscaler_path = (Path(config.spatial_upscaler_path).expanduser()
-                              if config.spatial_upscaler_path else None)
-        self.text_projection_path = (Path(config.text_projection_path).expanduser()
-                                     if config.text_projection_path else None)
-        if self.audio_vae_path is None:
-            raise ValueError("LTX requires --audio-vae PATH")
-        if self.upscaler_path is None:
-            raise ValueError("LTX requires --spatial-upscaler PATH")
-        # The strict LTX connector loader diagnoses any missing projection.
-        # Do not infer its presence from whether --dit and --vae name one file.
-        if self.version == VERSION_25 and self.text_projection_path is not None:
-            raise ValueError("LTX 2.5 text projections already belong to --text-encoder")
-        required = [self.audio_vae_path, self.upscaler_path]
-        if self.text_projection_path is not None:
-            required.append(self.text_projection_path)
-        for path in required:
-            if not path.is_file():
-                raise FileNotFoundError(f"LTX required checkpoint missing: {path}")
-
         gemma, self.tokenizer, text_cfg = load_ltx_gemma(
             self.text_encoder_path, version=self.version, cancel=lambda: None,
         )
-        components = load_original_components(
-            self.dit_path, self.vae_path, self.audio_vae_path,
-            self.upscaler_path, version=self.version, gemma_text_config=text_cfg,
-            cancel=lambda: None, text_encoder_path=self.text_encoder_path,
-            text_projection_path=self.text_projection_path,
+        components, sources = load_original_components(
+            {"": self.dit_path, "vae": self.vae_path, **config.extra_paths,
+             "text_encoder": self.text_encoder_path},
+            version=self.version, gemma_text_config=text_cfg,
+            cancel=lambda: None,
             header_cache={Path(self.dit_path).expanduser().resolve(): self.header},
         )
-        # Same admission policy as all other model adapters: consult the
-        # shared memory manager before placing each independently swappable role.
         # Connectors are part of the text-encoder residency role, not the DiT.
-        self.dit = components["dit"].to(self._load_target(self.dit_path))
-        self.vae = components["vae"].to(self._load_target(self.vae_path))
-        self.audio_vae = components["audio_vae"].to(self._load_target(str(self.audio_vae_path)))
+        self.dit = components["dit"].to(self._load_target(str(sources["dit"])))
+        self.vae = components["vae"].to(self._load_target(str(sources["vae"])))
+        self.audio_vae = components["audio_vae"].to(
+            self._load_target(str(sources["audio_vae"])))
         self.vocoder = components["vocoder"]
-        self.upscaler = components["upscaler"].to(self._load_target(str(self.upscaler_path)))
+        self.upscaler = components["upscaler"].to(
+            self._load_target(str(sources["upscaler"])))
         self.text_encoder = _PromptTower(gemma, components["connectors"])
         self.text_encoder.to(self._load_target(self.text_encoder_path))
-        self.vocoder.to(self._load_target(str(self.audio_vae_path)))
+        self.vocoder.to(self._load_target(str(sources["vocoder"])))
         for role in ("vae", "audio_vae", "vocoder", "upscaler", "text_encoder"):
             self.memory.register(role, getattr(self, role))
         self.memory.register("dit", self.dit)
@@ -438,8 +420,13 @@ class LTXVideo(VideoModel):
 class LTX23Video(LTXVideo):
     name = "LTX-2.3-Distilled"
     version = VERSION_23
+    #: Its codecs, vocoder and projections ship inside the transformer file -- in BF16
+    #: and in the quantised releases that pack the same way.
+    REQUIRED_COMPONENTS = ("text_encoder",)
 
 
 class LTX25Video(LTXVideo):
     name = "LTX-2.5-Distilled"
     version = VERSION_25
+    #: No all-in-one 2.5 release: its codecs and upscaler ship apart.
+    REQUIRED_COMPONENTS = ("vae", "text_encoder")

@@ -22,16 +22,34 @@ def _add_model_paths(p: argparse.ArgumentParser, required: bool = True) -> None:
                         "(subdirectories allowed)")
 
 
-def _add_auxiliary_paths(p: argparse.ArgumentParser) -> None:
-    """Additional explicitly selected component paths; adapters validate roles."""
+def _add_dit_low(p: argparse.ArgumentParser) -> None:
+    """The second expert of a two-expert model, where ``--dit`` is the first."""
     p.add_argument("--dit-low", default="", metavar="PATH",
-                   help="second (low-noise) DiT for a two-expert model")
+                   help="low-noise DiT checkpoint of a two-expert model "
+                        "(--dit selects the high-noise expert)")
+
+
+#: The sound-making component flags, and the role each one fills.
+COMPONENT_FLAGS = {"audio_vae": "audio_vae", "spatial_upscaler": "upscaler",
+                   "text_projection": "text_projection"}
+
+
+def _add_av_components(p: argparse.ArgumentParser) -> None:
+    """The sound-making checkpoints, all optional; the adapter says what it needs."""
     p.add_argument("--audio-vae", default="", metavar="PATH",
-                   help="audio VAE (and optionally vocoder) checkpoint")
+                   help="audio VAE and vocoder checkpoint")
     p.add_argument("--spatial-upscaler", default="", metavar="PATH",
                    help="spatial latent upscaler checkpoint")
     p.add_argument("--text-projection", default="", metavar="PATH",
-                   help="additional text projection checkpoint")
+                   help="text projection checkpoint, for a release that packs it apart "
+                        "from the transformer rather than with it")
+
+
+def component_paths(args) -> dict[str, str]:
+    """The component checkpoints the flags name, by role."""
+    return {role: getattr(args, flag)
+            for flag, role in COMPONENT_FLAGS.items() if getattr(args, flag, "")}
+
 
 def _add_upscaler_args(p: argparse.ArgumentParser) -> None:
     """Pixel-upscaler flags for a subcommand: ``serve`` takes ``--upscaler-dir``, the
@@ -162,7 +180,8 @@ def build_parser() -> argparse.ArgumentParser:
     # and only the pixel-upscale tab is usable.
     serve = sub.add_parser("serve", help="run the FastAPI HTTP server")
     _add_model_paths(serve, required=False)
-    _add_auxiliary_paths(serve)
+    _add_dit_low(serve)
+    _add_av_components(serve)
     _add_upscaler_args(serve)
     _add_controlmap_args(serve)
     serve.add_argument("--cache-dir", default="~/.cache/thenoise", metavar="DIR",
@@ -196,7 +215,8 @@ def build_parser() -> argparse.ArgumentParser:
     # video
     video = sub.add_parser("video", help="run one generation and save a clip")
     _add_model_paths(video)
-    _add_auxiliary_paths(video)
+    _add_dit_low(video)
+    _add_av_components(video)
     _add_video_args(video)
 
     # upscale

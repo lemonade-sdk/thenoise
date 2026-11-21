@@ -38,8 +38,8 @@ class Segment:
 class Waveform:
     """PCM a model decoded for a clip: ``[channels, samples]``, float in [-1, 1].
 
-    The rate travels with the audio because it is a property of the model's codec, not
-    of the container: the muxer must never infer it from the clip length.
+    The rate is the codec's, so it travels with the audio: the muxer must not infer it
+    from the clip length.
     """
 
     samples: torch.Tensor

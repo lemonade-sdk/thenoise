@@ -54,7 +54,7 @@ def test_streamed_load_is_strict_and_materializes_parameters_and_buffers(tmp_pat
             "net.running": torch.full((3,), 5.)}
     path = _save(tmp_path / "okay.safetensors", data)
     result = load_ltx_component(
-        "dit", model, {path: {"dit"}}, cancel=lambda: None, dtype=torch.float32)
+        "dit", model, [path], cancel=lambda: None, dtype=torch.float32)
     assert result is model
     assert not any(x.is_meta for x in (*model.parameters(), *model.buffers()))
     torch.testing.assert_close(model(torch.ones(2)), torch.tensor([3., 3., 3.]))
@@ -66,7 +66,7 @@ def test_streamed_load_is_strict_and_materializes_parameters_and_buffers(tmp_pat
         model.register_buffer("running", torch.zeros(3))
     with pytest.raises(ValueError, match="shape"):
         load_ltx_component(
-            "dit", model, {path: {"dit"}}, cancel=lambda: None, dtype=torch.float32)
+            "dit", model, [path], cancel=lambda: None, dtype=torch.float32)
     assert model.weight.is_meta
 
 
@@ -77,7 +77,7 @@ def test_int8_requires_weight_scale(tmp_path):
     with torch.device("meta"):
         module = torch.nn.ModuleDict({"layer": QuantizedLinear(4, 2, bias=False)})
     with pytest.raises(RuntimeError, match="missing its"):
-        load_ltx_component("dit", module, {path: {"dit"}},
+        load_ltx_component("dit", module, [path],
                            cancel=lambda: None, dtype=torch.bfloat16)
 
 
@@ -166,11 +166,7 @@ def test_denoise_scales_timesteps_and_does_not_mark_regular_frames():
 
 
 def test_starting_frame_is_encoded_in_the_codecs_own_dtype():
-    """The released video VAE is BF16; feeding its encoder fp32 pixels is a crash.
-
-    ``pil_to_pixels`` hands over fp32 in [-1, 1], so the adapter is the only place that
-    can put the frame on the codec's terms before a conv3d notices.
-    """
+    """The video VAE is BF16, and its encoder rejects a frame the adapter left in fp32."""
     from thenoise.models.ltx_video import LTXVideo
 
     class TinyBF16VAE:
@@ -294,7 +290,7 @@ def test_native_ltx_vocoder_short_audio_waveform_and_streaming(tmp_path):
     with torch.device("meta"):
         candidate = LTXVocoderWithBWE(**cfg)
     loaded = load_ltx_component(
-            "vocoder", candidate, {file: {"audio_vae", "vocoder"}},
+            "vocoder", candidate, [file],
             cancel=lambda: None, dtype=torch.float32,
         )
     assert loaded is candidate
@@ -320,7 +316,7 @@ def test_native_ltx_audio_vae_streams_full_weights(tmp_path):
     with torch.device("meta"):
         candidate = LTXAudioVAE(**cfg)
     loaded = load_ltx_component(
-            "audio_vae", candidate, {file: {"audio_vae", "vocoder"}},
+            "audio_vae", candidate, [file],
             cancel=lambda: None, dtype=torch.float32,
         )
     assert loaded is candidate
@@ -334,8 +330,8 @@ def test_native_ltx_audio_vae_streams_full_weights(tmp_path):
         )
 
 
-def test_split_connectors_are_complete_across_dit_and_text_file(tmp_path, monkeypatch):
-    """A split LTX 2.5 connector cannot pass with missing learned weights."""
+def _tiny_components(monkeypatch):
+    """Every LTX component factory replaced by a two-parameter stand-in."""
     m = _checkpoint()
 
     def linear():
@@ -368,6 +364,77 @@ def test_split_connectors_are_complete_across_dit_and_text_file(tmp_path, monkey
     for name in ("make_video_vae", "make_audio_vae", "make_vocoder"):
         monkeypatch.setattr(m, name, linear)
     monkeypatch.setattr(m, "make_upsampler", upscaler)
+    return m
+
+
+#: What the released all-in-one checkpoint holds: transformer, both codecs, vocoder and
+#: text projections. Its spatial upscaler ships apart.
+def _monolith_keys(weight):
+    return {
+        "model.diffusion_model.patchify_proj.weight": weight,
+        "model.diffusion_model.video_embeddings_connector.learnable_registers":
+            torch.ones(1, 2),
+        "model.diffusion_model.audio_embeddings_connector.learnable_registers":
+            torch.ones(1, 2),
+        "text_embedding_projection.video_aggregate_embed.weight": weight,
+        "text_embedding_projection.audio_aggregate_embed.weight": weight,
+        "vae.weight": weight,
+        "audio_vae.weight": weight,
+        "vocoder.weight": weight,
+    }
+
+
+def _load(m, files, version="2.3"):
+    return m.load_original_components(files, version=version,
+                                      gemma_text_config=object(),
+                                      cancel=lambda: None, dtype=torch.float32)
+
+
+def _upscaler_file(tmp_path, weight):
+    return _save(tmp_path / "upscaler.safetensors", {"upsampler.0.weight": weight})
+
+
+def test_one_file_answers_for_every_part_it_holds(tmp_path, monkeypatch):
+    m = _tiny_components(monkeypatch)
+    weight = torch.ones(2, 2)
+    monolith = _save(tmp_path / "all-in-one.safetensors", _monolith_keys(weight))
+    parts, sources = _load(m, {"": monolith, "upscaler": _upscaler_file(tmp_path, weight)})
+    assert set(parts) == {"dit", "vae", "audio_vae", "vocoder", "upscaler", "connectors"}
+    assert {sources[name] for name in ("dit", "vae", "audio_vae", "vocoder",
+                                       "connectors")} == {monolith.resolve()}
+
+
+def test_a_named_file_takes_its_part_from_the_all_in_one(tmp_path, monkeypatch):
+    """Naming a separately packaged codec replaces the one inside the transformer file
+    instead of colliding with it."""
+    m = _tiny_components(monkeypatch)
+    weight = torch.ones(2, 2)
+    keys = _monolith_keys(weight)
+    del keys["vae.weight"]
+    monolith = _save(tmp_path / "all-in-one.safetensors", keys)
+    codec = _save(tmp_path / "video-vae.safetensors", {"vae.weight": weight})
+    parts, sources = _load(m, {"": monolith, "vae": codec,
+                               "upscaler": _upscaler_file(tmp_path, weight)})
+    assert sources["vae"] == codec.resolve()
+    assert sources["vocoder"] == monolith.resolve()
+    torch.testing.assert_close(parts["vae"].weight, weight)
+
+
+def test_a_part_no_given_file_holds_names_the_flag(tmp_path, monkeypatch):
+    m = _tiny_components(monkeypatch)
+    weight = torch.ones(2, 2)
+    keys = _monolith_keys(weight)
+    del keys["vae.weight"]
+    monolith = _save(tmp_path / "all-in-one.safetensors", keys)
+    with pytest.raises(ValueError, match=r"LTX vae weights are in none of.*--vae"):
+        _load(m, {"": monolith, "upscaler": _upscaler_file(tmp_path, weight)})
+
+
+def test_split_connectors_are_complete_across_dit_and_text_file(tmp_path, monkeypatch):
+    """A split LTX 2.5 connector cannot pass with missing learned weights."""
+    m = _tiny_components(monkeypatch)
+
+
 
     weight = torch.ones(2, 2)
     path_dit = _save(tmp_path / "dit.safetensors", {
@@ -386,9 +453,10 @@ def test_split_connectors_are_complete_across_dit_and_text_file(tmp_path, monkey
 
     def load():
         return m.load_original_components(
-            path_dit, path_vae, path_audio, path_upscaler,
+            {"": path_dit, "vae": path_vae, "audio_vae": path_audio,
+             "upscaler": path_upscaler, "text_encoder": path_text},
             version="2.5", gemma_text_config=object(),
-            text_encoder_path=path_text, cancel=lambda: None, dtype=torch.float32,
+            cancel=lambda: None, dtype=torch.float32,
         )
 
     projections = {
@@ -396,7 +464,7 @@ def test_split_connectors_are_complete_across_dit_and_text_file(tmp_path, monkey
         "text_embedding_projection.audio_aggregate_embed.weight": weight,
     }
     _save(path_text, projections)
-    parts = load()
+    parts, sources = load()
     assert set(parts) == {"dit", "vae", "audio_vae", "vocoder", "upscaler", "connectors"}
     assert all(not t.is_meta for module in parts.values() for t in module.parameters())
 
@@ -503,7 +571,7 @@ def test_native_ltx_spatial_upscaler_streams_original_checkpoint_keys(tmp_path):
     with torch.device("meta"):
         target = LTXSpatialUpscaler(in_channels=8, mid_channels=32, num_blocks_per_stage=1)
     loaded = load_ltx_component(
-            "upscaler", target, {checkpoint: {"upscaler"}},
+            "upscaler", target, [checkpoint],
             cancel=lambda: None, dtype=torch.float32,
         )
     assert loaded is target
@@ -537,8 +605,10 @@ def test_ltx_gemma3_vendored_minimal_assets():
     assert tokenizer("A red fox")["input_ids"][0] == tokenizer.bos_token_id
 
 
-def test_ltx_auxiliary_path_roles_and_lora_contract():
-    from thenoise.models.ltx_video import LTXVideo
-    assert LTXVideo.AUXILIARY_PATHS == (
-        "audio_vae_path", "spatial_upscaler_path", "text_projection_path")
+def test_ltx_component_roles_and_lora_contract():
+    from thenoise.models.ltx_video import LTX23Video, LTX25Video, LTXVideo
+    assert LTXVideo.COMPONENT_ROLES == ("audio_vae", "upscaler", "text_projection")
+    # 2.3 packs its codecs with the transformer, so only the encoder is a second file.
+    assert LTX23Video.REQUIRED_COMPONENTS == ("text_encoder",)
+    assert LTX25Video.REQUIRED_COMPONENTS == ("vae", "text_encoder")
     assert LTXVideo.lora_components(object()) == {}

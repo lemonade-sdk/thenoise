@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from .cli import build_parser
+from .cli import build_parser, component_paths
 
 
 class _QuietReads(logging.Filter):
@@ -31,19 +31,10 @@ def _serve(args) -> None:
                 text_encoder_path=args.text_encoder,
                 lora_dir=args.lora_dir,
                 dit_low_path=args.dit_low,
-                audio_vae_path=args.audio_vae,
-                spatial_upscaler_path=args.spatial_upscaler,
-                text_projection_path=args.text_projection,
+                extra_paths=component_paths(args),
             ),
         )
-    elif any((
-        args.vae,
-        args.text_encoder,
-        args.dit_low,
-        args.audio_vae,
-        args.spatial_upscaler,
-        args.text_projection,
-    )):
+    elif args.vae or args.text_encoder or args.dit_low or component_paths(args):
         raise SystemExit("serve: auxiliary model checkpoints require --dit")
 
     # The queue exists whether or not there is a model to serve: a submit that finds

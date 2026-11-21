@@ -120,17 +120,13 @@ def test_mp4_audio_video_mux_and_atomic_publish(tmp_path, monkeypatch):
 
 
 def test_every_container_the_request_allows_carries_sound():
-    """``encode_video`` indexes the codec table directly, so it must stay total."""
+    """The codec table must cover every container the request allows."""
     assert set(OUTPUT_FORMATS) == set(AUDIO_CODECS)
 
 
 @pytest.mark.parametrize("container", OUTPUT_FORMATS)
 def test_generated_sound_is_demuxable_from_every_container(tmp_path, container):
-    """PyAV for real: the sound must survive a container, not just reach a muxer.
-
-    The fake-AV tests check the calls; only a real container proves the codec the table
-    names exists in this build and that the timestamps land where the clip ends.
-    """
+    """Only a real container proves the codec the table names exists in this build."""
     rate = 48000
     clip = VideoSpec(prompt="fox", width=64, height=64, frames=9, fps=24,
                      output_format=container).resolve(wan_prefs())

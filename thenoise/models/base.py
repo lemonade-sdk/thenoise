@@ -54,14 +54,16 @@ class DiffusionModel(LoRASupport, ABC):
     """Base class for model adapters. Subclasses must set ``name``."""
 
     name: str = ""
-    # Optional standalone checkpoints accepted by this model adapter.
-    AUXILIARY_PATHS: ClassVar[tuple[str, ...]] = ()
 
     #: What this adapter produces; ``thenoise.mediums`` maps it to a controller and routes.
     MEDIUM: ClassVar[str] = "image"
 
     #: Required components; ``()`` when embedded.
     REQUIRED_COMPONENTS: ClassVar[Tuple[str, ...]] = ("vae", "text_encoder")
+
+    #: Components a release may ship as their own file, so a request can name one. A
+    #: role outside this set is refused before anything loads.
+    COMPONENT_ROLES: ClassVar[Tuple[str, ...]] = ()
 
     #: Model defaults behind ``pref``; an adapter merges the entries it differs on.
     DEFAULT_PREFS: ClassVar[Dict[str, Any]] = {
