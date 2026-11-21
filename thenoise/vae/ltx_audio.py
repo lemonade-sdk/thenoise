@@ -9,8 +9,6 @@ and runs the original convolutional encoder/decoder structure.
 """
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -266,16 +264,40 @@ class LTXAudioVAE(nn.Module):
                    dropout=dropout, mid_block_add_attention=mid_block_add_attention)
         self.encoder = _Encoder(**cfg, double_z=double_z)
         self.decoder = _Decoder(**cfg, mel_bins=mel_bins)
-        self.register_buffer("latents_mean", torch.zeros(base_channels))
-        self.register_buffer("latents_std", torch.ones(base_channels))
+        self.latent_channels = latent_channels
+        #: Latent grid bins one token holds: the mel, divided by what the encoder folds.
+        self.latent_bins = mel_bins // 2 ** (len(ch_mult) - 1)
+        #: Statistics are kept per flat token channel, which for the released codec is
+        #: 8 channels of 16 bins -- the same width the checkpoint ships them at.
+        flat = latent_channels * self.latent_bins
+        self.register_buffer("latents_mean", torch.zeros(flat))
+        self.register_buffer("latents_std", torch.ones(flat))
 
     @property
     def dtype(self) -> torch.dtype:
-        return self.decoder.conv_in.conv.weight.dtype if hasattr(self.decoder.conv_in, "conv") else self.decoder.conv_in.weight.dtype
+        return next(self.decoder.parameters()).dtype
 
-    def decode(self, z: torch.Tensor, return_dict: bool = True):
-        decoded = self.decoder(z)
-        return SimpleNamespace(sample=decoded) if return_dict else (decoded,)
+    @property
+    def device(self) -> torch.device:
+        return next(self.decoder.parameters()).device
+
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        """Latents in the checkpoint's scale -> mel."""
+        return self.decoder(z)
+
+    def decode_to_mel(self, tokens: torch.Tensor) -> torch.Tensor:
+        """The stream's audio tokens -> the mel the vocoder eats.
+
+        A token is the codec's channels laid out flat, and the statistics are per flat
+        channel, so the unnormalising and the reshape belong here and not beside a
+        literal in whatever is decoding.
+        """
+        tokens = tokens.to(self.device, self.dtype)
+        mean = self.latents_mean.to(tokens.device, tokens.dtype)
+        std = self.latents_std.to(tokens.device, tokens.dtype)
+        z = (tokens * std + mean).unflatten(
+            2, (self.latent_channels, self.latent_bins)).transpose(1, 2)
+        return self.decoder(z)
 
 
 __all__ = ["LTXAudioVAE"]

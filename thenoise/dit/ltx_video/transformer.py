@@ -502,12 +502,9 @@ class LTX2VideoTransformer3DModel(nn.Module):
         attention_kwargs: dict | None = None,
         video_self_attention_mask: torch.Tensor | None = None,
         video_keyframes_mask: torch.Tensor | None = None,
-        return_dict: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if spatio_temporal_guidance_blocks or perturbation_mask is not None or attention_kwargs:
             raise NotImplementedError("LTX distilled adapter does not support STG/perturbation/attention overrides")
-        if return_dict:
-            raise ValueError("TheNoise LTX adapter uses return_dict=False")
         b = hidden_states.shape[0]
         audio_timestep = timestep if audio_timestep is None else audio_timestep
         audio_sigma = sigma if audio_sigma is None else audio_sigma

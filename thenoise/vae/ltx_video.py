@@ -10,8 +10,6 @@ parameter names are preserved for TheNoise's strict streamed Safetensors loader.
 """
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -272,7 +270,12 @@ class _Decoder(nn.Module):
 
 
 class LTXVideoVAE(nn.Module):
-    """Original LTX video VAE parameter layout and TheNoise encode/decode ABI."""
+    """LTX video codec: the encoder and decoder, and the statistics either side of them.
+
+    The latents a run carries are normalised; the checkpoint's own scale is converted at
+    this boundary and never escapes, except through :meth:`from_canonical` for the one
+    thing trained on it -- the spatial upscaler.
+    """
 
     def __init__(self, *, in_channels: int = 3, out_channels: int = 3,
                  latent_channels: int = 128,
@@ -296,7 +299,6 @@ class LTXVideoVAE(nn.Module):
                  spatial_compression_ratio: int = 32,
                  temporal_compression_ratio: int = 8,
                  timestep_conditioning: bool = False,
-                 scaling_factor: float = 1.0,
                  **kwargs):
         super().__init__()
         if (kwargs or timestep_conditioning or any(decoder_inject_noise)
@@ -307,7 +309,6 @@ class LTXVideoVAE(nn.Module):
             raise ValueError("Invalid LTX encoder layers")
         if len(decoder_layers_per_block) != len(decoder_block_out_channels) + 1:
             raise ValueError("Invalid LTX decoder layers")
-        self.config = SimpleNamespace(scaling_factor=float(scaling_factor))
         self.encoder = _Encoder(in_channels, latent_channels, block_out_channels,
                                 layers_per_block, spatio_temporal_scaling, downsample_type,
                                 patch_size, spatial_padding_mode=encoder_spatial_padding_mode,
@@ -319,6 +320,7 @@ class LTXVideoVAE(nn.Module):
                                 causal=decoder_causal)
         self.register_buffer("latents_mean", torch.zeros(latent_channels), persistent=True)
         self.register_buffer("latents_std", torch.ones(latent_channels), persistent=True)
+        self.latent_channels = latent_channels
         self.spatial_compression_ratio = spatial_compression_ratio
         self.temporal_compression_ratio = temporal_compression_ratio
 
@@ -326,15 +328,44 @@ class LTXVideoVAE(nn.Module):
     def dtype(self) -> torch.dtype:
         return self.decoder.conv_in.conv.weight.dtype
 
-    def encode(self, x: torch.Tensor, causal: bool | None = None,
-               return_dict: bool = True):
-        posterior = DiagonalGaussianDistribution(self.encoder(x, causal=causal))
-        return SimpleNamespace(latent_dist=posterior) if return_dict else (posterior,)
+    @property
+    def device(self) -> torch.device:
+        return self.decoder.conv_in.conv.weight.device
 
-    def decode(self, z: torch.Tensor, temb=None, causal: bool | None = None,
-               return_dict: bool = True):
-        frames = self.decoder(z, temb, causal=causal)
-        return SimpleNamespace(sample=frames) if return_dict else (frames,)
+    def encode(self, x: torch.Tensor, *, causal: bool | None = None) -> torch.Tensor:
+        """Pixels in [-1, 1] -> the encoder's latent means, in the checkpoint's scale."""
+        return DiagonalGaussianDistribution(self.encoder(x, causal=causal)).mode()
+
+    def decode(self, z: torch.Tensor, *, causal: bool | None = None) -> torch.Tensor:
+        """Latents in the checkpoint's scale -> pixels, unclamped."""
+        return self.decoder(z, None, causal=causal)
+
+    def to_canonical(self, raw: torch.Tensor) -> torch.Tensor:
+        """The checkpoint's latent scale -> the scale the stream carries."""
+        return (raw - self._mean(raw)) / self._std(raw)
+
+    def from_canonical(self, latents: torch.Tensor) -> torch.Tensor:
+        """The stream's latents -> the checkpoint's scale.
+
+        The spatial upscaler was trained on this scale, so a stage boundary crosses it
+        twice: out of the stream, through the upscaler, back in.
+        """
+        return latents * self._std(latents) + self._mean(latents)
+
+    def encode_pixels_to_latents(self, pixels: torch.Tensor) -> torch.Tensor:
+        """Pixels in [-1, 1] -> the stream's latents."""
+        return self.to_canonical(self.encode(pixels.to(self.device, self.dtype)))
+
+    def decode_to_pixels(self, latents: torch.Tensor) -> torch.Tensor:
+        """The stream's latents -> pixels in [-1, 1]."""
+        return self.decode(self.from_canonical(
+            latents.to(self.device, self.dtype)).to(self.dtype))
+
+    def _mean(self, like: torch.Tensor) -> torch.Tensor:
+        return self.latents_mean.to(like.device, like.dtype).reshape(1, -1, 1, 1, 1)
+
+    def _std(self, like: torch.Tensor) -> torch.Tensor:
+        return self.latents_std.to(like.device, like.dtype).reshape(1, -1, 1, 1, 1)
 
 
 __all__ = ["LTXVideoVAE"]

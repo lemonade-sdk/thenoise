@@ -296,6 +296,25 @@ def wan_prefs(variant: str = "ti2v_5b") -> dict:
     return prefs
 
 
+def tiny_ltx_video_vae():
+    """The LTX video codec at the smallest size its block arithmetic accepts."""
+    from thenoise.vae.ltx_video import LTXVideoVAE
+
+    return LTXVideoVAE(
+        in_channels=3, out_channels=3, latent_channels=8, patch_size=2,
+        block_out_channels=(32, 64), down_block_types=("LTX2VideoDownBlock3D",) * 2,
+        decoder_block_out_channels=(32, 64),
+        layers_per_block=(1, 1, 1), decoder_layers_per_block=(1, 1, 1),
+        spatio_temporal_scaling=(True, True),
+        decoder_spatio_temporal_scaling=(True, True),
+        decoder_inject_noise=(False,) * 3,
+        downsample_type=("spatiotemporal", "spatiotemporal"),
+        upsample_type=("spatiotemporal", "spatiotemporal"),
+        upsample_factor=(2, 2), upsample_residual=(False,) * 2,
+        spatial_compression_ratio=8, temporal_compression_ratio=4,
+    ).eval()
+
+
 def comfy_quant(convrot: bool = True, groupsize: int = 256) -> torch.Tensor:
     """Build a ``comfy_quant`` marker tensor like ComfyUI's INT8 exporter."""
     conf = {"convrot": bool(convrot)}

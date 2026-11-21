@@ -31,6 +31,10 @@ from thenoise.video.spec import ResolvedVideo, VideoSpec
 
 logger = logging.getLogger(__name__)
 
+#: The spatial upscaler's gain, which is why a request's size is what the second stage
+#: renders and the first stage renders half of it.
+UPSCALER_FACTOR = 2
+
 
 def frame_grid(requested: float, *, explicit: bool) -> int:
     """Causal first frame followed by groups of eight; explicit counts round up."""
@@ -45,18 +49,6 @@ def _pack(x: torch.Tensor) -> torch.Tensor:
 
 def _unpack(x: torch.Tensor, frames: int, height: int, width: int) -> torch.Tensor:
     return x.reshape(x.shape[0], frames, height, width, -1).permute(0, 4, 1, 2, 3)
-
-
-def _normal_video(x, vae):
-    mean = vae.latents_mean.to(x.device, x.dtype).reshape(1, -1, 1, 1, 1)
-    std = vae.latents_std.to(x.device, x.dtype).reshape(1, -1, 1, 1, 1)
-    return (x - mean) * vae.config.scaling_factor / std
-
-
-def _denormal_video(x, vae):
-    mean = vae.latents_mean.to(x.device, x.dtype).reshape(1, -1, 1, 1, 1)
-    std = vae.latents_std.to(x.device, x.dtype).reshape(1, -1, 1, 1, 1)
-    return x * std / vae.config.scaling_factor + mean
 
 
 @dataclass(frozen=True)
@@ -162,9 +154,12 @@ class LTXVideo(VideoModel):
         self._refine = False
 
     def resolve_size(self, width, height):
-        width, height = (width // 64) * 64, (height // 64) * 64
-        if width < 64 or height < 64:
-            raise ValueError("LTX requires output width and height >= 64 pixels")
+        # The grid the first stage renders on, which is the codec's compression twice
+        # over because a low stage is half the delivered size.
+        grid = self.vae.spatial_compression_ratio * UPSCALER_FACTOR
+        width, height = (width // grid) * grid, (height // grid) * grid
+        if width < grid or height < grid:
+            raise ValueError(f"LTX requires output width and height >= {grid} pixels")
         return width, height
 
     def default_edit_size(self, width, height):
@@ -226,21 +221,26 @@ class LTXVideo(VideoModel):
         if len(pixels) != 1:
             raise ValueError("LTX I2V accepts exactly one starting image")
         # One frame, encoded twice: at full resolution for the refine pass' grid, and at
-        # half resolution for the grid the first half of the clip runs on. The resample
-        # stays in fp32; the codec then runs in its own dtype, as on the decode side.
+        # half resolution for the grid the first half of the clip runs on. The resample is
+        # fp32 and the codec casts to its own dtype at its own boundary, as on decode.
         frame = pixels[0][None, :, None].to(self.device)
         small = F.interpolate(frame[:, :, 0], scale_factor=0.5,
                               mode="bilinear", align_corners=False)[:, :, None]
-        full, small = frame.to(self.vae.dtype), small.to(self.vae.dtype)
         with torch.no_grad():
-            low = self.vae.encode(small).latent_dist.mode()
-            high = self.vae.encode(full).latent_dist.mode()
-        return [_normal_video(low, self.vae), _normal_video(high, self.vae)]
+            return [self.vae.encode_pixels_to_latents(small),
+                    self.vae.encode_pixels_to_latents(frame)]
 
     def _geometry(self, params: VideoSamplingParams, high: bool):
-        return ((params.frames - 1) // 8 + 1,
-                params.height // (32 if high else 64),
-                params.width // (32 if high else 64))
+        """Latent (frames, height, width).
+
+        The codec says how far it folds each way; the stage before the spatial upscaler
+        divides by its gain as well, since it renders half the delivered picture.
+        """
+        frames = (params.frames - 1) // self.vae.temporal_compression_ratio + 1
+        compress = self.vae.spatial_compression_ratio
+        if not high:
+            compress *= UPSCALER_FACTOR
+        return frames, params.height // compress, params.width // compress
 
     def _video_tokens(self, params, high):
         t, h, w = self._geometry(params, high)
@@ -251,7 +251,8 @@ class LTXVideo(VideoModel):
         t, h, w = self._geometry(params, False)
         audio_length = max(1, round(params.frames / params.fps * LATENT_TOKENS_PER_SECOND))
         seed = torch.Generator(device="cpu").manual_seed(params.seed)
-        video = torch.randn((1, 128, t, h, w), generator=seed, dtype=torch.float32)
+        video = torch.randn((1, self.vae.latent_channels, t, h, w),
+                            generator=seed, dtype=torch.float32)
         audio = torch.randn((1, audio_length, 128), generator=seed, dtype=torch.float32)
         return torch.cat((_pack(video), audio), dim=1).to(self.device)
 
@@ -301,12 +302,13 @@ class LTXVideo(VideoModel):
         video = _unpack(x[:, :t*h*w], t, h, w)
         audio = x[:, t*h*w:]
         with self.memory.stage("upscaler", pixels=params.width * params.height) as st:
-            raw = _denormal_video(video, self.vae).to(self.upscaler.dtype)
+            raw = self.vae.from_canonical(video).to(self.upscaler.dtype)
             upscale = st.run(self.upscaler, raw)
-        upscale = _normal_video(upscale, self.vae).float()
+        upscale = self.vae.to_canonical(upscale).float()
         t1, h1, w1 = self._geometry(params, True)
-        if upscale.shape != (1, 128, t1, h1, w1):
-            raise ValueError(f"LTX upscaler returned {tuple(upscale.shape)}, expected {(1,128,t1,h1,w1)}")
+        want = (1, self.vae.latent_channels, t1, h1, w1)
+        if upscale.shape != want:
+            raise ValueError(f"LTX upscaler returned {tuple(upscale.shape)}, expected {want}")
         sigma = REFINE_GRID[0]
         gen = torch.Generator(device="cpu").manual_seed(params.seed + 5)
         vnoise = torch.randn(upscale.shape, generator=gen, dtype=torch.float32).to(self.device)
@@ -370,7 +372,7 @@ class LTXVideo(VideoModel):
             num_frames=lt, height=h, width=w, fps=params.fps,
             audio_num_frames=audio.shape[1],
             video_keyframes_mask=None,
-            use_cross_timestep=True, return_dict=False,
+            use_cross_timestep=True,
         )
         if mask is not None:
             pv = pv.float() * (1 - mask)[:, :, None]
@@ -389,10 +391,7 @@ class LTXVideo(VideoModel):
             raise RuntimeError("LTX audio decoding has no clip parameters")
         nv = self._video_tokens(params, True)
         a = latents[:, nv:]
-        mean = self.audio_vae.latents_mean.to(a.device, a.dtype)
-        std = self.audio_vae.latents_std.to(a.device, a.dtype)
-        a = (a * std + mean).unflatten(2, (8, 16)).transpose(1, 2)
-        mel = self.audio_vae.decode(a.to(self.audio_vae.dtype), return_dict=False)[0]
+        mel = self.audio_vae.decode_to_mel(a)
         sound = self.vocoder(mel.to(self.vocoder.dtype))
         return Waveform(sound, self.vocoder.output_sampling_rate)
 
@@ -402,8 +401,7 @@ class LTXVideo(VideoModel):
             raise RuntimeError("LTX video decoding has no clip parameters")
         t, h, w = self._geometry(params, True)
         video = _unpack(latents[:, :t*h*w], t, h, w)
-        video = _denormal_video(video, self.vae).to(self.vae.dtype)
-        pixels = self.vae.decode(video, None, return_dict=False)[0]
+        pixels = self.vae.decode_to_pixels(video)
         for i in range(pixels.shape[2]):
             # VideoPipelineController converts these [-1,1] pixels once, not twice.
             yield pixels[0, :, i].float().clamp(-1, 1)

@@ -10,6 +10,8 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
+from conftest import tiny_ltx_video_vae
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -258,33 +260,20 @@ def test_denoise_scales_timesteps_and_does_not_mark_regular_frames():
 
 
 def test_starting_frame_is_encoded_in_the_codecs_own_dtype():
-    """The video VAE is BF16, and its encoder rejects a frame the adapter left in fp32."""
+    """A BF16 codec handed the fp32 frame the resize produced.
+
+    The cast is the codec's own, at its own boundary, so neither half of it can be
+    forgotten: the adapter passes what it has, and the latents come back in the
+    precision the rest of the run continues in.
+    """
     from thenoise.models.ltx_video import LTXVideo
-
-    class TinyBF16VAE:
-        dtype = torch.bfloat16
-        latents_mean = torch.zeros(128)
-        latents_std = torch.ones(128)
-        config = SimpleNamespace(scaling_factor=1.0)
-
-        def __init__(self):
-            self.shapes = []
-
-        def encode(self, pixels):
-            if pixels.dtype is not torch.bfloat16:
-                raise RuntimeError("Input type (float) and bias type (c10::BFloat16) "
-                                   "should be the same")
-            self.shapes.append(tuple(pixels.shape))
-            latent = torch.zeros(1, 128, 1, pixels.shape[-2] // 32, pixels.shape[-1] // 32,
-                                 dtype=torch.bfloat16)
-            return SimpleNamespace(latent_dist=SimpleNamespace(mode=lambda: latent))
 
     model = object.__new__(LTXVideo)
     model.device = "cpu"
-    model.vae = TinyBF16VAE()
+    model.vae = tiny_ltx_video_vae().to(torch.bfloat16)
     low, high = model.encode_references([torch.zeros(3, 64, 64)])
-    assert model.vae.shapes == [(1, 3, 1, 32, 32), (1, 3, 1, 64, 64)]
-    assert (low.shape, high.shape) == ((1, 128, 1, 1, 1), (1, 128, 1, 2, 2))
+    assert low.dtype is torch.bfloat16 and high.dtype is torch.bfloat16
+    assert (low.shape, high.shape) == ((1, 8, 1, 4, 4), (1, 8, 1, 8, 8))
 
 
 def test_denoise_guidance_runs_both_branches_with_one_scale():
@@ -356,7 +345,7 @@ def test_native_ltx_audio_vae_checkpoint_layout_and_forward():
     small = LTXAudioVAE(base_channels=32, ch_mult=(1, 2), num_res_blocks=1,
                         resolution=32, latent_channels=4, mel_bins=8).eval()
     with torch.no_grad():
-        output = small.decode(torch.randn(1, 4, 3, 8), return_dict=False)[0]
+        output = small.decode(torch.randn(1, 4, 3, 8))
     assert output.shape == (1, 2, 9, 8)
     assert output.isfinite().all()
 
@@ -411,9 +400,33 @@ def test_native_ltx_audio_vae_streams_full_weights(tmp_path):
     latents = torch.randn(1, 4, 3, 8)
     with torch.no_grad():
         torch.testing.assert_close(
-            candidate.decode(latents, return_dict=False)[0],
-            reference.decode(latents, return_dict=False)[0],
+            candidate.decode(latents),
+            reference.decode(latents),
         )
+
+
+def test_the_audio_codec_turns_stream_tokens_into_mel():
+    """The stream carries audio as flat tokens, and the codec says how wide one is.
+
+    The released pair is 8 channels of 16 mel bins -- the mel divided by what the
+    encoder folds -- which used to be two literals in the middle of a decode.
+    """
+    from thenoise.vae.ltx_audio import LTXAudioVAE
+
+    with torch.no_grad():
+        vae = LTXAudioVAE(base_channels=8, ch_mult=(1, 2), num_res_blocks=1,
+                          resolution=32, latent_channels=4, mel_bins=8).eval()
+        flat = vae.latent_channels * vae.latent_bins
+        vae.latents_mean.copy_(torch.linspace(-0.4, 0.4, flat))
+        vae.latents_std.copy_(torch.linspace(0.8, 1.6, flat))
+        assert (vae.latent_channels, vae.latent_bins) == (4, 4)
+
+        tokens = torch.randn(1, 3, flat)
+        mel = vae.decode_to_mel(tokens)
+        assert mel.shape == (1, 2, 9, 8)
+        direct = vae.decode((tokens * vae.latents_std + vae.latents_mean)
+                            .unflatten(2, (4, 4)).transpose(1, 2))
+        torch.testing.assert_close(mel, direct)
 
 
 def _load_part(part: str, module, file, prefix: str = ""):
@@ -660,6 +673,8 @@ def test_ltx_variants_resolve_with_shared_video_contract_and_fixed_refinement():
         model.checkpoint_prefs = {}
         model.device = "cpu"
         model.dit = torch.nn.Identity()
+        model.vae = SimpleNamespace(spatial_compression_ratio=32,
+                                    temporal_compression_ratio=8)
 
         def params_for(resolved):
             return VideoSamplingParams(

@@ -15,6 +15,8 @@ from thenoise.dit.ltx_video.checkpoint import make_video_vae
 from thenoise.utils.rope import apply_rope_split_half, apply_ltx_rope_split_half
 from thenoise.vae.ltx_video import LTXVideoVAE
 
+from conftest import tiny_ltx_video_vae
+
 
 
 
@@ -71,7 +73,7 @@ def test_av_transformer_forward_and_checkpoint_variants(ltx25):
         timestep=torch.tensor([[0., 750., 750., 750.]]),
         audio_timestep=torch.tensor([750.]), sigma=torch.tensor([750.]),
         audio_sigma=torch.tensor([750.]), num_frames=1, height=2, width=2,
-        audio_num_frames=3, use_cross_timestep=True, return_dict=False,
+        audio_num_frames=3, use_cross_timestep=True,
     )
     with torch.inference_mode():
         video, audio = model(**args)
@@ -136,24 +138,12 @@ def test_native_video_vae_meta_layout_and_frame_grid():
     assert state["encoder.conv_in.conv.weight"].shape == (128, 48, 3, 3, 3)
     assert state["decoder.up_blocks.0.upsamplers.0.conv.conv.weight"].shape == (4096, 1024, 3, 3, 3)
 
-    small = LTXVideoVAE(
-        in_channels=3, out_channels=3, latent_channels=8, patch_size=2,
-        block_out_channels=(32, 64), down_block_types=("LTX2VideoDownBlock3D",) * 2,
-        decoder_block_out_channels=(32, 64),
-        layers_per_block=(1, 1, 1), decoder_layers_per_block=(1, 1, 1),
-        spatio_temporal_scaling=(True, True),
-        decoder_spatio_temporal_scaling=(True, True),
-        decoder_inject_noise=(False,) * 3,
-        downsample_type=("spatiotemporal", "spatiotemporal"),
-        upsample_type=("spatiotemporal", "spatiotemporal"),
-        upsample_factor=(2, 2), upsample_residual=(False,) * 2,
-        spatial_compression_ratio=8, temporal_compression_ratio=4,
-    ).eval()
+    small = tiny_ltx_video_vae()
     with torch.inference_mode():
         for frames in (1, 9):
             pixels = torch.randn(1, 3, frames, 16, 16)
-            latent = small.encode(pixels).latent_dist.mode()
+            latent = small.encode(pixels)
             assert latent.shape == (1, 8, (frames - 1) // 4 + 1, 2, 2)
-            decoded = small.decode(latent, None, return_dict=False)[0]
+            decoded = small.decode(latent)
             assert decoded.shape == pixels.shape
             assert torch.isfinite(decoded).all()
