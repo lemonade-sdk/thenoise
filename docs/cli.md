@@ -67,8 +67,8 @@ Then open <http://localhost:8000/> for the web UI. Full endpoint reference:
 |------|----------|---------|-------------|
 | `--prompt` | yes | — | Text prompt |
 | `--negative-prompt` | no | `""` | Negative prompt |
-| `--width` | no | model default | Output width (1..4096; omit for auto) |
-| `--height` | no | model default | Output height (1..4096; omit for auto) |
+| `--width` | no | model default | Output width (omit for auto) |
+| `--height` | no | model default | Output height (omit for auto) |
 | `--steps` | no | model default | Denoising steps |
 | `--guidance-scale` | no | model default | CFG scale (≤ 1.0 disables CFG) |
 | `--seed` | no | random | Random seed |

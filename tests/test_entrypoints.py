@@ -295,8 +295,8 @@ def test_generate_resolves_seed_when_not_given(monkeypatch, fake_runtime):
     assert fake_runtime[0].pipeline.generate_request.seed == 12345
 
 
-@pytest.mark.parametrize("name,value", [("width", 5000), ("height", -1), ("width", 0)])
-def test_generate_rejects_out_of_range_dimensions(capsys, name, value):
+@pytest.mark.parametrize("name,value", [("height", -1), ("width", 0)])
+def test_generate_rejects_a_non_positive_dimension(capsys, name, value):
     """A dimension is a size, not a flag: 0 is rejected, omission means "auto".
     The pipeline resolves an omitted field from the model, so 0 would mean 0 pixels.
     """
@@ -304,7 +304,7 @@ def test_generate_rejects_out_of_range_dimensions(capsys, name, value):
     argv += [f"--{name}", str(value)]
     with pytest.raises(SystemExit):
         run_generate(_parse(argv))
-    assert f"error: {name} must be between 1 and 4096" in capsys.readouterr().err
+    assert f"error: {name} must be at least 1" in capsys.readouterr().err
 
 
 def test_generate_refuses_an_unknown_sampler_before_anything_loads(capsys, fake_runtime):

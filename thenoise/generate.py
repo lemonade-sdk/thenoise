@@ -14,13 +14,11 @@ from .utils.png import save_output
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-_MAX_DIM = 4096
-
 
 def _check_dim(name: str, value) -> None:
-    """Reject an out-of-range dimension; only an omitted flag means "auto"."""
-    if value is not None and (value < 1 or value > _MAX_DIM):
-        print(f"error: {name} must be between 1 and {_MAX_DIM} (got {value}).", file=sys.stderr)
+    """Reject a non-positive dimension; only an omitted flag means "auto"."""
+    if value is not None and value < 1:
+        print(f"error: {name} must be at least 1 (got {value}).", file=sys.stderr)
         sys.exit(1)
 
 
