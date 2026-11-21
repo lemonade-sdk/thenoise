@@ -116,6 +116,15 @@ class VideoModel(PixelModel):
         """Extra MemoryManager roles needed to decode audio, if this codec has any."""
         return ()
 
+    def decoded_pixels(self, spec: ResolvedVideo) -> int:
+        """Pixels one call to :meth:`decode_frames` holds live at its peak.
+
+        A codec that answers a frame at a time needs a frame of headroom. One that has to
+        run over the whole clip before it can hand back the first frame needs the clip,
+        and a stage sized by the frame alone then survives only by being retried.
+        """
+        return spec.width * spec.height
+
     def decode_audio(self, latents: torch.Tensor,
                      params: VideoSamplingParams) -> Optional["Waveform"]:
         """Canonical clip latent -> the sound to mux beside its frames, if this codec has one."""

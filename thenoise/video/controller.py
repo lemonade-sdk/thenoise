@@ -99,9 +99,11 @@ class VideoPipelineController:
         The clip latent is not cached: nothing downstream of sampling exists for video.
         """
         model = self.model
-        # One frame, not the clip: frames reach the container as they are decoded, so
-        # nothing in the run grows with `frame_count`.
+        # A frame sizes the stages that hold a frame. Decoding is the model's to size:
+        # frames reach the container as they are handed back, but a codec whose decoder
+        # runs over the whole clip first holds the whole clip while it does.
         pixels = spec.width * spec.height
+        decoding = model.decoded_pixels(spec)
         with inference():
             if spec.lora_specs and not model.lora_dir:
                 raise ValueError("video LoRAs require --lora-dir")
@@ -205,7 +207,7 @@ class VideoPipelineController:
             stages.run(
                 self._mux, x, spec, params, token, progress, output, audio,
                 resident=("vae",),
-                pixels=pixels,
+                pixels=decoding,
             )
             del x, audio
 

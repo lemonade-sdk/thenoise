@@ -709,6 +709,22 @@ def test_released_grids_survive_their_own_resampling():
         assert refine[0] == REFINE_GRID[0]  # the hand-over re-noise level is fixed
 
 
+def test_a_clip_decoded_whole_asks_for_the_pixels_it_holds():
+    """Not every frame leaves the decoder before the last latent is read.
+
+    The released decoder pads both ends of time, so the clip's pixels are live together
+    and a decode stage sized by one frame would be saved only by the memory retry.
+    """
+    from thenoise.models.ltx_video import LTX25Video
+    from thenoise.video.spec import VideoSpec
+
+    model = object.__new__(LTX25Video)
+    model.checkpoint_prefs = {}
+    model.vae = SimpleNamespace(spatial_compression_ratio=32, temporal_compression_ratio=8)
+    clip = model.resolve_video(VideoSpec(prompt="moving fox", frames=34))
+    assert model.decoded_pixels(clip) == clip.width * clip.height * clip.frame_count
+
+
 def test_ltx_variants_resolve_with_shared_video_contract_and_fixed_refinement():
     """Both released variants use VideoModel, sigma_steps and shared Segments."""
     from thenoise.models.config import VideoSamplingParams

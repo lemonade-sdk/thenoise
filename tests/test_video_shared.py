@@ -153,6 +153,18 @@ def test_shared_controller_cleans_video_state_on_failure(tmp_path, monkeypatch):
     assert cleared == [True]
 
 
+def test_a_codec_that_streams_frames_sizes_its_decode_stage_by_one(tmp_path):
+    """The default takes :meth:`decode_frames` at its word: a frame at a time.
+
+    A codec that must run over the whole clip before the first frame can leave declares
+    the clip instead, since a stage sized by a frame alone then survives only by being
+    retried for memory.
+    """
+    model = StubVideo(config=_stub_config(tmp_path))
+    resolved = model.resolve_video(VideoSpec(prompt="frames", width=128, height=96))
+    assert model.decoded_pixels(resolved) == 128 * 96
+
+
 def test_a_frame_count_lands_on_the_grid_a_codec_can_pack():
     """One causal-clip grid, whatever the codec's temporal compression is.
 

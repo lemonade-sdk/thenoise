@@ -384,6 +384,11 @@ class LTXVideo(VideoModel):
         sound = self.vocoder(mel.to(self.vocoder.dtype))
         return Waveform(sound, self.vocoder.output_sampling_rate)
 
+    def decoded_pixels(self, spec: ResolvedVideo) -> int:
+        # The released decoder is not causal along time: every output frame depends on
+        # every latent frame, so all of them are live before the first one is yielded.
+        return spec.width * spec.height * spec.frame_count
+
     def decode_frames(self, latents,
                       params: VideoSamplingParams) -> Iterator[torch.Tensor]:
         t, h, w = self._geometry(params, True)
