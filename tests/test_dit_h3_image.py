@@ -13,6 +13,7 @@ from safetensors.torch import save_file
 
 from conftest import TINY_HIDDEN, tiny_qwen_config, write_safetensors
 from thenoise.dit.h3_image import sampling
+from thenoise.samplers import sigma_ladder
 from thenoise.dit.kvcache import KVCache
 from thenoise.dit.h3_image.encoder import (
     _truncate_qwen3_vl,
@@ -469,17 +470,17 @@ def test_detect_defaults_to_one_head_without_the_metadata(tmp_path):
 
 
 def test_the_schedule_is_the_grid_itself_at_the_distilled_step_count():
-    ladder = sampling.sigma_ladder(TINY_SIGMAS, 2)
+    ladder = sigma_ladder(TINY_SIGMAS, 2)
     assert ladder == pytest.approx([1.0, 0.5, 0.0])
 
 
 def test_a_coarser_schedule_walks_the_grid_index_not_the_sigma_axis():
-    ladder = sampling.sigma_ladder(TINY_SIGMAS, 1)
+    ladder = sigma_ladder(TINY_SIGMAS, 1)
     assert ladder == pytest.approx([1.0, 0.0])
 
     grid = (1.0, 0.9, 0.5, 0.0)
     # Four steps over three intervals: the index lands between points 1 and 2 at step 2.
-    ladder = sampling.sigma_ladder(grid, 4)
+    ladder = sigma_ladder(grid, 4)
     assert ladder[0] == pytest.approx(1.0)
     assert ladder[2] == pytest.approx(0.7)
     assert ladder[-1] == 0.0

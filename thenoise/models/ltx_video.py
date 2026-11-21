@@ -21,6 +21,7 @@ from torch import nn
 from thenoise.dit.ltx_video.checkpoint import (
     VERSION_23, VERSION_25, load_original_components,
 )
+from thenoise.dit.ltx_video.sampling import REFINE_GRID, stage_grids
 from thenoise.models.config import EncodePromptArgs, VideoSamplingParams
 from thenoise.models.video_base import Segment, VideoModel
 from thenoise.samplers import Step, sigma_steps
@@ -29,9 +30,6 @@ from thenoise.utils.image_tensor import cover_crop
 from thenoise.video.spec import ResolvedVideo, VideoSpec
 
 logger = logging.getLogger(__name__)
-
-_STAGE1 = (1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0)
-_STAGE2 = (0.909375, 0.725, 0.421875, 0.0)
 
 
 def frame_grid(requested: float, *, explicit: bool) -> int:
@@ -63,9 +61,16 @@ def _denormal_video(x, vae):
 
 @dataclass(frozen=True)
 class AVConditioning:
+    """Connector features for both streams, per the shared ``Conditioning`` convention:
+    the ``null_*`` halves are ``None`` when guidance is off.
+    """
+
     video: torch.Tensor
     audio: torch.Tensor
     mask: torch.Tensor
+    null_video: torch.Tensor | None = None
+    null_audio: torch.Tensor | None = None
+    null_mask: torch.Tensor | None = None
 
 
 class _PromptTower(nn.Module):
@@ -111,7 +116,7 @@ class LTXVideo(VideoModel):
         super().__init__(config=config)
         self._ref_low = None
         self._ref_high = None
-        self._pass = 1
+        self._refine = False
         self._params: VideoSamplingParams | None = None
 
         # Required auxiliary weights are explicit CLI paths. Neither the download
@@ -179,7 +184,7 @@ class LTXVideo(VideoModel):
         """Drop reference latents on normal completion and on every failure/cancel."""
         self._ref_low = self._ref_high = None
         self._params = None
-        self._pass = 1
+        self._refine = False
 
     def resolve_size(self, width, height):
         width, height = (width // 64) * 64, (height // 64) * 64
@@ -194,41 +199,48 @@ class LTXVideo(VideoModel):
 
     def resolve_video(self, spec: VideoSpec) -> ResolvedVideo:
         r = super().resolve_video(spec)
-        # Mode/LoRA support is validated by the shared controller.
-        if r.steps != 8:
-            raise ValueError("LTX distilled checkpoints require steps=8 (plus 3 refine steps)")
-        if r.guidance_scale != 1.0 or r.negative_prompt:
-            raise ValueError("LTX distilled requires guidance_scale=1 and no negative_prompt")
-        if r.sampler not in ("euler", "native"):
-            raise ValueError("LTX distilled supports the Euler solver (sampler=euler)")
-        # The shared controller validates audio container compatibility.
-        return dataclasses.replace(r, sampler="euler",
-                                   frame_count=frame_grid(r.frame_count,
-                                                          explicit=r.explicit_frames))
+        # Step count, guidance and solver are the request's: the released recipe is
+        # DEFAULT_PREFS, and the schedule resamples the published grid to whatever else
+        # is asked for. Mode/LoRA support is validated by the shared controller.
+        return dataclasses.replace(r, frame_count=frame_grid(r.frame_count,
+                                                            explicit=r.explicit_frames))
 
-    def encode_prompt(self, args: EncodePromptArgs) -> AVConditioning:
-        """Both connector streams are included in the same staged text role."""
+    def _tokenize(self, prompts: list[str]):
         self.tokenizer.padding_side = "left"
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        encoded = self.tokenizer(
-            args.prompt.strip(), padding=False, truncation=True,
-            max_length=1024, return_tensors="pt",
-        )
         bos_id = self.tokenizer.bos_token_id
         if bos_id is None:
             raise ValueError("LTX Gemma tokenizer has no BOS token")
-        ids = encoded.input_ids[0].tolist()
-        if not ids or ids[0] != bos_id:
-            ids = [bos_id, *ids][:1024]
-        encoded = self.tokenizer.pad(
-            {"input_ids": [ids]}, padding="max_length", max_length=1024,
+        rows = []
+        for prompt in prompts:
+            encoded = self.tokenizer(
+                prompt.strip(), padding=False, truncation=True,
+                max_length=1024, return_tensors="pt",
+            )
+            ids = encoded.input_ids[0].tolist()
+            if not ids or ids[0] != bos_id:
+                ids = [bos_id, *ids][:1024]
+            rows.append(ids)
+        padded = self.tokenizer.pad(
+            {"input_ids": rows}, padding="max_length", max_length=1024,
             return_tensors="pt", return_attention_mask=True,
         )
-        v, a, mask = self.text_encoder(
-            encoded.input_ids.to(self.device), encoded.attention_mask.to(self.device)
-        )
-        return AVConditioning(v, a, mask)
+        return padded.input_ids.to(self.device), padded.attention_mask.to(self.device)
+
+    def encode_prompt(self, args: EncodePromptArgs) -> AVConditioning:
+        """Both connector streams, and the unconditional halves guidance needs.
+
+        One encoder pass carries the conditional and unconditional prompts as a batch of
+        two, which is how the reference pipeline runs them.
+        """
+        need_null = args.guidance_scale > 1.0 or bool(args.negative_prompt.strip())
+        ids, mask = self._tokenize(
+            [args.prompt, args.negative_prompt] if need_null else [args.prompt])
+        v, a, m = self.text_encoder(ids, mask)
+        if not need_null:
+            return AVConditioning(v[0:1], a[0:1], m[0:1])
+        return AVConditioning(v[0:1], a[0:1], m[0:1], v[1:2], a[1:2], m[1:2])
 
     def fit_references(self, images, target):
         if len(images) != 1:
@@ -280,19 +292,29 @@ class LTXVideo(VideoModel):
         return latents
 
     def schedule(self, params: VideoSamplingParams) -> list[Step]:
-        return sigma_steps(_STAGE1, self.device, torch.float32)
+        """The main stage's ladder, which is what a request's ``steps`` counts.
+
+        The refine pass belongs to the release's recipe rather than to the request, so it
+        is a second segment and not extra entries here.
+        """
+        main, _ = stage_grids(params.steps)
+        return sigma_steps(main, self.device, torch.float32)
 
     def segments(self, params, schedule, guidance_scale):
+        _, refine = stage_grids(params.steps)
         return [
             Segment("dit", self.dit, tuple(schedule), guidance_scale),
             Segment("dit", self.dit,
-                    tuple(sigma_steps(_STAGE2, self.device, torch.float32)),
+                    tuple(sigma_steps(refine, self.device, torch.float32)),
                     guidance_scale),
         ]
 
     def begin_segment(self, segment: Segment) -> None:
         super().begin_segment(segment)
-        self._pass = 1 if len(segment.steps) == 8 else 2
+        # The main half always starts at pure noise; the refine half starts at the
+        # re-noise level. Counting segments instead would break when ``stages.run``
+        # replays its prepare callable after a memory squeeze.
+        self._refine = float(segment.steps[0].t) < 1.0
 
     def transition_segment(self, x, previous: Segment, next_segment: Segment,
                            params: VideoSamplingParams, token):
@@ -308,7 +330,7 @@ class LTXVideo(VideoModel):
         t1, h1, w1 = self._geometry(params, True)
         if upscale.shape != (1, 128, t1, h1, w1):
             raise ValueError(f"LTX upscaler returned {tuple(upscale.shape)}, expected {(1,128,t1,h1,w1)}")
-        sigma = _STAGE2[0]
+        sigma = REFINE_GRID[0]
         gen = torch.Generator(device="cpu").manual_seed(params.seed + 5)
         vnoise = torch.randn(upscale.shape, generator=gen, dtype=torch.float32).to(self.device)
         anoise = torch.randn(audio.shape, generator=gen, dtype=torch.float32).to(self.device)
@@ -320,10 +342,25 @@ class LTXVideo(VideoModel):
         return torch.cat((_pack(v), a), dim=1)
 
     def denoise_step(self, latents, t, cond: AVConditioning, guidance_scale: float, i):
-        if self._params is None:
-            raise RuntimeError("LTX denoise_step requires initialized clip parameters")
+        """One step of the joined audio+video latent.
+
+        Guidance is the shared two-forward CFG, one scale over both streams. The released
+        distilled checkpoints run with it off; upstream's separate audio scale,
+        ``guidance_rescale``, STG and modality-isolation guidance are not implemented here
+        (see ``docs/models/ltx.md``).
+        """
+        vel = self._velocity(latents, t, cond.video, cond.audio, cond.mask)
+        if cond.null_video is None:
+            return vel
+        uncond = self._velocity(latents, t,
+                                cond.null_video, cond.null_audio, cond.null_mask)
+        return uncond + guidance_scale * (vel - uncond)
+
+    def _velocity(self, latents, t, video_cond, audio_cond, cond_mask) -> torch.Tensor:
         params = self._params
-        lt, h, w = self._geometry(params, self._pass == 2)
+        if params is None:
+            raise RuntimeError("LTX denoise_step requires initialized clip parameters")
+        lt, h, w = self._geometry(params, self._refine)
         nv = lt * h * w
         video = latents[:, :nv]
         audio = latents[:, nv:]
@@ -334,7 +371,7 @@ class LTXVideo(VideoModel):
         )
         vtime = scaled_t
         mask = None
-        ref = self._ref_high if self._pass == 2 else self._ref_low
+        ref = self._ref_high if self._refine else self._ref_low
         if ref is not None:
             mask = torch.zeros((1, nv), device=self.device, dtype=torch.float32)
             mask[:, :h*w] = 1.0
@@ -345,10 +382,10 @@ class LTXVideo(VideoModel):
         pv, pa = self.dit(
             hidden_states=video.to(dtype),
             audio_hidden_states=audio.to(dtype),
-            encoder_hidden_states=cond.video,
-            audio_encoder_hidden_states=cond.audio,
-            encoder_attention_mask=cond.mask,
-            audio_encoder_attention_mask=cond.mask,
+            encoder_hidden_states=video_cond,
+            audio_encoder_hidden_states=audio_cond,
+            encoder_attention_mask=cond_mask,
+            audio_encoder_attention_mask=cond_mask,
             timestep=vtime,
             audio_timestep=scaled_t,
             sigma=scaled_t,

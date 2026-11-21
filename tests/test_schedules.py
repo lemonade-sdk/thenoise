@@ -111,8 +111,6 @@ RESOLUTION_AWARE = {"flux_klein", "qwen_image", "qwen_image21", "ming_image"}
 @pytest.mark.parametrize("model_cls", MODEL_CATALOG, ids=CATALOG_IDS)
 @pytest.mark.parametrize("steps", [1, 4, 8])
 def test_schedule_contract(model_cls, steps):
-    if model_cls.name in ("LTX-2.3-Distilled", "LTX-2.5-Distilled") and steps != 8:
-        pytest.skip("LTX distilled checkpoints require exactly 8 steps")
     model = _bare(model_cls, **BARE[model_cls.name])
     schedule = model.schedule(_params(steps=steps))
 

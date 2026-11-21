@@ -32,7 +32,7 @@ from thenoise.models.base import (
 )
 from thenoise.models.pixel_base import PixelModel
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
-from thenoise.samplers import Step
+from thenoise.samplers import Step, sigma_ladder
 from thenoise.upscale import LatentUpscaler, VAEPixelUpscaler
 from thenoise.utils.image_tensor import ReferenceSizing, resize_to_short_edge
 from thenoise.utils.math import round_up
@@ -204,7 +204,7 @@ class H3ImageModel(PixelModel):
 
     def schedule(self, params: SamplingParams) -> list[Step]:
         """Uniform in the distilled grid's index — the grid itself at ``pdd_steps`` steps."""
-        ladder = h3_sampling.sigma_ladder(self.params.pdd_sigmas, params.steps)
+        ladder = sigma_ladder(self.params.pdd_sigmas, params.steps)
         return [Step(t=ladder[i], delta=ladder[i] - ladder[i + 1])
                 for i in range(params.steps)]
 

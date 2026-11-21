@@ -135,16 +135,21 @@ def test_denoise_scales_timesteps_and_does_not_mark_regular_frames():
     for version, i2v in (("2.3", False), ("2.5", False), ("2.5", True)):
         dit = RecordingDiT()
         ref = torch.rand(1, 128, 1, 2, 3) if i2v else None
-        fake = SimpleNamespace(
-            device="cpu", dit=dit, version=version, _pass=1,
-            _params=SimpleNamespace(fps=24), _ref_high=None, _ref_low=ref,
-            _geometry=lambda *_: (2, 2, 3),
-        )
+        fake = object.__new__(LTXVideo)
+        fake.device = "cpu"
+        fake.dit = dit
+        fake.version = version
+        fake._refine = False
+        fake._params = SimpleNamespace(fps=24)
+        fake._ref_high = None
+        fake._ref_low = ref
+        fake._geometry = lambda *_: (2, 2, 3)
         nv = 12
         x = torch.randn(1, nv + 4, 128)
         cond = SimpleNamespace(video=torch.randn(1, 2, 4096),
-                               audio=torch.randn(1, 2, 2048), mask=torch.ones(1, 2))
-        out = LTXVideo.denoise_step(fake, x, torch.tensor(.75), cond, 1., 0)
+                               audio=torch.randn(1, 2, 2048), mask=torch.ones(1, 2),
+                               null_video=None, null_audio=None, null_mask=None)
+        out = fake.denoise_step(x, torch.tensor(.75), cond, 1., 0)
         assert out.shape == x.shape
         args = dit.arguments
         assert args["sigma"].item() == 750
@@ -158,6 +163,41 @@ def test_denoise_scales_timesteps_and_does_not_mark_regular_frames():
             assert torch.all(args["timestep"][:, 6:] == 750)
         else:
             assert args["timestep"].item() == 750
+
+
+def test_denoise_guidance_runs_both_branches_with_one_scale():
+    """One ``guidance_scale`` over the joined stream, combined like every other adapter."""
+    from thenoise.models.ltx_video import AVConditioning, LTXVideo
+
+    class TwoBranchDiT:
+        dtype = torch.float32
+        config = SimpleNamespace(timestep_scale_multiplier=1000)
+
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, **kwargs):
+            self.calls += 1
+            level = 1.0 if self.calls == 1 else 2.0
+            return (torch.full_like(kwargs["hidden_states"], level),
+                    torch.full_like(kwargs["audio_hidden_states"], level))
+
+    fake = object.__new__(LTXVideo)
+    fake.device = "cpu"
+    fake.dit = TwoBranchDiT()
+    fake._refine = False
+    fake._params = SimpleNamespace(fps=24)
+    fake._ref_high = fake._ref_low = None
+    fake._geometry = lambda *_: (2, 2, 3)
+    x = torch.randn(1, 16, 128)
+    ones = torch.ones(1, 2, 4096)
+    cond = AVConditioning(ones, torch.ones(1, 2, 2048), torch.ones(1, 2),
+                          null_video=ones, null_audio=torch.ones(1, 2, 2048),
+                          null_mask=torch.ones(1, 2))
+    out = fake.denoise_step(x, torch.tensor(0.5), cond, 3.0, 0)
+    assert fake.dit.calls == 2
+    # uncond + scale * (cond - uncond) with cond=1, uncond=2 -> -1, audio included.
+    assert torch.allclose(out, torch.full_like(out, -1.0))
 
 
 def test_native_ltx_vocoder_checkpoint_layout_and_hann_filter():
@@ -331,6 +371,19 @@ def test_split_connectors_are_complete_across_dit_and_text_file(tmp_path, monkey
         load()
 
 
+def test_released_grids_survive_their_own_resampling():
+    """The default step count must reproduce the published ladder, not approximate it."""
+    from thenoise.dit.ltx_video.sampling import MAIN_GRID, REFINE_GRID, stage_grids
+
+    assert stage_grids(8) == (list(MAIN_GRID), list(REFINE_GRID))
+    for steps in (1, 2, 3, 5, 7, 9, 16):
+        main, refine = stage_grids(steps)
+        assert len(main) == steps + 1 and len(refine) >= 2
+        assert main[0] == 1.0 and main[-1] == 0.0 and refine[-1] == 0.0
+        assert all(a > b for a, b in zip(main, main[1:]))
+        assert refine[0] == REFINE_GRID[0]  # the hand-over re-noise level is fixed
+
+
 def test_ltx_variants_resolve_with_shared_video_contract_and_fixed_refinement():
     """Both released variants use VideoModel, sigma_steps and shared Segments."""
     from thenoise.models.config import VideoSamplingParams
@@ -344,25 +397,34 @@ def test_ltx_variants_resolve_with_shared_video_contract_and_fixed_refinement():
         model.device = "cpu"
         model.dit = torch.nn.Identity()
 
+        def params_for(resolved):
+            return VideoSamplingParams(
+                height=resolved.height, width=resolved.width,
+                steps=resolved.steps, seed=0, guidance_scale=resolved.guidance_scale,
+                sampler=resolved.sampler, frames=resolved.frame_count,
+                flow_shift=resolved.flow_shift, fps=resolved.fps,
+            )
+
         resolved = model.resolve_video(VideoSpec(prompt="moving fox"))
         assert (resolved.width, resolved.height, resolved.frame_count) == (768, 512, 33)
         assert (resolved.steps, resolved.sampler, resolved.output_format) == (8, "euler", "mp4")
-        explicit = model.resolve_video(VideoSpec(prompt="moving fox", frames=34, sampler="native"))
+        explicit = model.resolve_video(VideoSpec(prompt="moving fox", frames=34))
         assert explicit.frame_count == 41  # explicit frame request rounds up to 8n+1
-        assert explicit.sampler == "euler"  # reuse the shared solver registry
 
-        params = VideoSamplingParams(
-            height=resolved.height, width=resolved.width,
-            steps=resolved.steps, seed=0, guidance_scale=1.0,
-            sampler="euler", frames=resolved.frame_count,
-            flow_shift=resolved.flow_shift, fps=resolved.fps,
-        )
-        schedule = model.schedule(params)
+        schedule = model.schedule(params_for(resolved))
         assert len(schedule) == 8
-        assert [len(s.steps) for s in model.segments(params, schedule, 1.0)] == [8, 3]
-
-        with pytest.raises(ValueError, match="steps=8"):
-            model.resolve_video(VideoSpec(prompt="moving fox", steps=4))
+        assert [len(s.steps) for s in model.segments(params_for(resolved), schedule, 1.0)] == [8, 3]
+        # The released recipe is the default, not a floor: another count resamples the
+        # published grid and the refine pass keeps its share of it.
+        for steps, refine in ((1, 1), (4, 2), (16, 6)):
+            other = model.resolve_video(VideoSpec(prompt="moving fox", steps=steps))
+            assert other.steps == steps
+            spans = model.segments(other, model.schedule(params_for(other)), 1.0)
+            assert [len(s.steps) for s in spans] == [steps, refine]
+        # Guidance and a negative prompt belong to the request, not to the adapter.
+        guided = model.resolve_video(VideoSpec(prompt="moving fox",
+                                               negative_prompt="blurry", guidance_scale=3.5))
+        assert (guided.guidance_scale, guided.negative_prompt) == (3.5, "blurry")
         with pytest.raises(ValueError, match="mp4"):
             VideoPipelineController(model).resolve(VideoSpec(prompt="moving fox", output_format="webm"))
 
