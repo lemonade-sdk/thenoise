@@ -1,8 +1,8 @@
 """Gemma 3/4 prompt features for LTX 2.x; no LTX Python package imports.
 
-Both Gemma 3 and Gemma 4 encoders are single-file safetensors. Gemma 3
-uses vendored minimal tokenizer/config assets; Gemma 4 embeds those assets
-with its model-specific LTX projection weights.
+Both encoders are a single safetensors file. Gemma 3 reads its tokenizer and config
+from vendored assets, Gemma 4 carries them inside the checkpoint beside its LTX
+projection weights.
 """
 from __future__ import annotations
 
@@ -16,6 +16,12 @@ from thenoise.utils.safetensors import MemoryEfficientSafeOpen
 from torch import nn
 
 from thenoise.utils.loader import load_text_encoder_weights
+
+#: Both Gemma builders share the engine's seam: `init_empty_weights` patches
+#: parameter registration, so the learned weights land on meta for the loader while the
+#: buffers no checkpoint carries -- the embedding scale, the RoPE frequencies -- are
+#: built for real by the library.
+from accelerate import init_empty_weights
 
 
 
@@ -144,97 +150,6 @@ def _gemma4_key(raw: str, expected: set[str] | None = None) -> tuple[str, str] |
     return "gemma", names[0]
 
 
-def _drop_gemma_lm_head(model: nn.Module) -> None:
-    """LTX reads hidden states, never vocab logits (~2 GiB for Gemma-4).
-
-    Comfy's LTX text checkpoint deliberately contains no lm_head; HF's
-    conditional-generation wrapper creates one. Drop it before strict loading,
-    without suppressing any required text/vision/audio weights.
-    """
-    if "lm_head" in model._modules:
-        del model.lm_head
-
-
-def _materialize_gemma4_constants(model: nn.Module) -> None:
-    """Rebuild Gemma-4's deterministic, non-persistent buffers outside meta.
-
-    LTX checkpoints never contain the scaled embedding constant or the RoPE
-    inverse frequencies. HF creates them on meta together with the huge learned
-    weights; unlike the learned weights, the loader cannot assign these from the
-    checkpoint. Only reconstruct the original constants from HF's own config and
-    constructors. Never replace learned parameters or relax the strict load.
-    """
-    language = model.model.language_model
-    for attr in ("embed_tokens", "embed_tokens_per_layer"):
-        embedding = getattr(language, attr, None)
-        if embedding is None:
-            continue
-        scale = embedding._buffers.get("embed_scale")
-        if scale is None or not scale.is_meta:
-            continue
-        if "embed_scale" not in embedding._non_persistent_buffers_set:
-            raise RuntimeError(f"Gemma-4 {attr}.embed_scale is unexpectedly persistent")
-        original = getattr(embedding, "scalar_embed_scale", None)
-        if original is None or scale.numel() != 1:
-            raise RuntimeError(f"Gemma-4 {attr}.embed_scale cannot be reconstructed")
-        embedding.register_buffer(
-            "embed_scale", torch.tensor(original, device="cpu", dtype=scale.dtype).reshape(scale.shape),
-            persistent=False,
-        )
-
-    rotary = language.rotary_emb
-    if not any(buffer.is_meta for buffer in rotary.buffers()):
-        return
-    # RoPE has no learned state. Its constructor alone recreates its frequency
-    # vectors, including the separate sliding/full attention tables and any
-    # version-specific rope scaling. Instantiating it costs only small CPU buffers.
-    if list(rotary.parameters()) or rotary.state_dict():
-        raise RuntimeError("Gemma-4 rotary_emb unexpectedly has checkpoint state")
-    with torch.device("cpu"):
-        ready = type(rotary)(rotary.config, device=torch.device("cpu"))
-    if (set(ready._buffers) != set(rotary._buffers)
-            or ready._non_persistent_buffers_set != rotary._non_persistent_buffers_set
-            or list(ready.parameters()) or ready.state_dict()
-            or any(buffer.is_meta for buffer in ready.buffers())):
-        raise RuntimeError("Gemma-4 RoPE runtime buffers could not be reconstructed")
-    language.rotary_emb = ready
-
-
-def _materialize_gemma3_constants(model: nn.Module) -> None:
-    """Initialize only deterministic Gemma-3 runtime buffers created on meta.
-
-    The INT8 checkpoint supplies learned parameters, not the nonpersistent
-    embedding scale or RoPE inverse frequencies. Keep _assign() strict for
-    all learned weights instead of tolerating uninitialized tensors.
-    """
-    embedding = model.embed_tokens
-    scale = embedding._buffers.get("embed_scale")
-    if scale is not None and scale.is_meta:
-        if "embed_scale" not in embedding._non_persistent_buffers_set:
-            raise RuntimeError("Gemma-3 embed_scale is unexpectedly persistent")
-        value = getattr(embedding, "scalar_embed_scale", None)
-        if value is None or scale.numel() != 1:
-            raise RuntimeError("Gemma-3 embed_scale cannot be reconstructed")
-        embedding.register_buffer(
-            "embed_scale", torch.tensor(value, dtype=scale.dtype, device="cpu").reshape(scale.shape),
-            persistent=False,
-        )
-
-    rotary = model.rotary_emb
-    if not any(buffer.is_meta for buffer in rotary.buffers()):
-        return
-    if list(rotary.parameters()) or rotary.state_dict():
-        raise RuntimeError("Gemma-3 rotary_emb unexpectedly contains checkpoint state")
-    with torch.device("cpu"):
-        ready = type(rotary)(rotary.config)
-    if (set(ready._buffers) != set(rotary._buffers)
-            or ready._non_persistent_buffers_set != rotary._non_persistent_buffers_set
-            or list(ready.parameters()) or ready.state_dict()
-            or any(buffer.is_meta for buffer in ready.buffers())):
-        raise RuntimeError("Gemma-3 RoPE runtime buffers could not be reconstructed")
-    model.rotary_emb = ready
-
-
 def _gemma3_key(raw: str) -> tuple[str, str] | None:
     """Map Comfy Gemma-3 text-only layers to HF Gemma3TextModel keys."""
     if raw in ("spiece_model", "tokenizer_json") or raw.startswith("hf_asset__"):
@@ -312,10 +227,9 @@ def load_ltx_gemma(path: str | Path, *, version: str):
                 f"LTX Gemma-3 tokenizer is incomplete: {tokenizer_path}; "
                 "expected a full Gemma-3 tokenizer.json"
             )
-        with torch.device("meta"):
+        with init_empty_weights():
             model = Gemma3TextModel(config)
             replace_linears(model)
-        _materialize_gemma3_constants(model)
         wrapper = GemmaFeatures(model)
         _load_ltx_text_weights(
             wrapper, path, _gemma3_key,
@@ -351,13 +265,13 @@ def load_ltx_gemma(path: str | Path, *, version: str):
             tokenizer_object=Tokenizer.from_buffer(tokenizer_data),
             model_max_length=1024, **tokenizer_config,
         )
-        # Construct without a CPU-initialized 24-GiB copy.
         from thenoise.dit.quantized import replace_linears
-        with torch.device("meta"):
+        with init_empty_weights():
             model = AutoModelForImageTextToText.from_config(hf_config)
-            _drop_gemma_lm_head(model)
+            # The wrapper's vocab logits are never run, and building them for a
+            # 262144-token vocabulary costs about 2 GiB of weights to drop.
+            del model.lm_head
             replace_linears(model)
-        _materialize_gemma4_constants(model)
         wrapper = GemmaFeatures(model)
         # The expected names are the actual loaded Transformers version's
         # layout, not guesses based on an HF release. Every other learned

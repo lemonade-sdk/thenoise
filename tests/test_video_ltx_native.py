@@ -175,40 +175,37 @@ def test_a_checkpoint_key_reaches_the_parameter_it_fills():
     assert m._upscaler_key("upsampler.0.weight") == ("upscaler", "upsampler.0.weight")
 
 
-def test_gemma3_wrapper_mapping_and_deterministic_meta_buffers():
-    from thenoise.text_encoders.ltx_video import (
-        _gemma3_key, _materialize_gemma3_constants,
-    )
+def test_a_gemma3_checkpoint_key_reaches_the_model():
+    from thenoise.text_encoders.ltx_video import _gemma3_key
+
     for raw in ("model.layers.0.self_attn.q_proj.weight",
                 "gemma3_12b.model.layers.0.self_attn.q_proj.weight"):
         assert _gemma3_key(raw) == ("gemma", "model.layers.0.self_attn.q_proj.weight")
 
-    class Embedding(torch.nn.Module):
-        scalar_embed_scale = 2.0
 
-        def __init__(self):
-            super().__init__()
-            self.register_buffer("embed_scale", torch.empty((), device="meta"), persistent=False)
-            self.weight = torch.nn.Parameter(torch.empty(2, 2, device="meta"))
+def test_a_gemma_built_on_meta_keeps_the_buffers_no_checkpoint_carries():
+    """The encoder's deterministic constants have to be real, not meta.
 
-    class Rotary(torch.nn.Module):
-        def __init__(self, config):
-            super().__init__()
-            self.config = config
-            self.register_buffer("full_attention_inv_freq", torch.arange(2.), persistent=False)
+    ``init_empty_weights`` patches parameter registration and leaves buffers alone, so
+    the embedding scale and the RoPE frequencies are built once by the library. The
+    learned weights stay on meta, which is what keeps the strict load strict: the
+    alternative was rebuilding these two behind the loader, from the library's own
+    internals, every time it changed them.
+    """
+    from accelerate import init_empty_weights
+    from transformers import Gemma3TextConfig, Gemma3TextModel
 
-    class Model(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.embed_tokens = Embedding()
-            with torch.device("meta"):
-                self.rotary_emb = Rotary(None)
+    config = Gemma3TextConfig(vocab_size=64, hidden_size=16, num_hidden_layers=2,
+                              num_attention_heads=2, num_key_value_heads=2,
+                              intermediate_size=32, head_dim=8)
+    with init_empty_weights():
+        model = Gemma3TextModel(config)
 
-    model = Model()
-    _materialize_gemma3_constants(model)
-    assert model.embed_tokens.embed_scale.item() == 2
-    assert not model.rotary_emb.full_attention_inv_freq.is_meta
-    assert model.embed_tokens.weight.is_meta  # The learned weight must still load strictly.
+    assert model.embed_tokens.weight.is_meta, "learned weights still come from the file"
+    scale = model.embed_tokens._buffers["embed_scale"]
+    assert not scale.is_meta and scale.item() > 0
+    frequencies = list(model.rotary_emb.buffers())
+    assert frequencies and not any(freq.is_meta for freq in frequencies)
 
 
 def test_denoise_scales_timesteps_and_does_not_mark_regular_frames():
