@@ -25,6 +25,7 @@ from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention
 from thenoise.utils.qk_norm import QKNorm
 from thenoise.dit.ltx_video.rope import AVRope
+from thenoise.utils.dynamo import mark_token_axis
 from thenoise.utils.rope import apply_rope_split_half
 from thenoise.utils.timestep import timestep_embedding
 
@@ -179,6 +180,7 @@ class _AVBlock(nn.Module):
     def _ada(table: torch.Tensor, emb: torch.Tensor) -> tuple[torch.Tensor, ...]:
         return (table[None, None].to(emb) + emb.reshape(emb.shape[0], emb.shape[1], table.shape[0], -1)).unbind(2)
 
+    @torch.compile(fullgraph=True)
     def forward(self, v: torch.Tensor, a: torch.Tensor,
                 vtext: torch.Tensor, atext: torch.Tensor,
                 vtime: torch.Tensor, atime: torch.Tensor,
@@ -468,6 +470,16 @@ class LTX2VideoTransformer3DModel(nn.Module):
         a_cross, _ = self._embed(self.av_cross_attn_audio_scale_shift, a_cross_time, b, a.dtype)
         v_gate, _ = self._embed(self.av_cross_attn_video_a2v_gate, v_cross_time * ratio, b, v.dtype)
         a_gate, _ = self._embed(self.av_cross_attn_audio_v2a_gate, a_cross_time * ratio, b, a.dtype)
+        # The block forward is compiled, and what varies across requests is each
+        # stream's token count: resolution for the video, the mel hop's for the audio.
+        # Declared rather than promoted, so Dynamo writes one graph per pair of streams
+        # and leaves batch, heads and trunk static.
+        mark_token_axis(v, a, encoder_hidden_states, audio_encoder_hidden_states,
+                        vtime, atime, v_cross, a_cross, v_gate, a_gate,
+                        vprompt, aprompt, encoder_attention_mask,
+                        audio_encoder_attention_mask, video_self_attention_mask)
+        # A phase table's token axis is the one before last: [B, H, tokens, angles].
+        mark_token_axis(*v_rope, *a_rope, *v_ca_rope, *a_ca_rope, dim=-2)
         for block in self.transformer_blocks:
             v, a = block(v, a, encoder_hidden_states, audio_encoder_hidden_states,
                          vtime, atime, v_cross, a_cross, v_gate, a_gate,
