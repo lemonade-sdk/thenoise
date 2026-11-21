@@ -67,12 +67,13 @@ def apply_rope_split_half(xq: torch.Tensor, cos: torch.Tensor,
     slices of one frequency range. Channels past the rotation pass through untouched,
     which is where a rope narrower than the head leaves its idle tail.
 
-    Written as the two halves instead of as ``x * cos + rotate_half(x) * sin``, and the
-    layout is the reason: an elementwise op takes its output layout from the operand it
-    is given, so multiplying a packed ``[B, L, H, D]`` projection by broadcast phases
-    hands back a packed answer, and :func:`utils.attention.uniform_layout` then copies
-    it back to L-major at every attention. These two slices write through one ``cat``,
-    which lands L-major and costs less than the copy it saves.
+    The band is doubled here rather than carried doubled in the table, to keep the
+    rotation a single elementwise chain on its way into attention. On gfx1151 a ``cat``
+    joining two *computed* operands costs 1.6x to 3.4x at 16k tokens (measured on blocks
+    of three models, where gfx1150 does not notice), whereas a ``cat`` appending an idle
+    tail — one computed operand and a view of the query — is free. Doubling the stored
+    table would buy the same chain at the price of phases twice as wide, so the doubling
+    happens on the way past.
 
     The answer comes back in the query's dtype. Leaving a promotion in place — fp32
     phases beside bf16 weights — hands SDPA operands of mixed dtype, and it answers
@@ -84,10 +85,12 @@ def apply_rope_split_half(xq: torch.Tensor, cos: torch.Tensor,
     if not half or 2 * half > xq.shape[-1]:
         raise ValueError(f"a rotation of {2 * half} channels does not fit a head of "
                          f"{xq.shape[-1]}")
+    cos, sin = (torch.cat((band, band), dim=-1) for band in (cos, sin))
     rotated, rest = xq[..., :2 * half], xq[..., 2 * half:]
-    first, second = rotated[..., :half], rotated[..., half:]
-    rotated = torch.cat((first * cos - second * sin, second * cos + first * sin), dim=-1)
-    return torch.cat((rotated, rest), dim=-1).to(xq.dtype)
+    rotated = rotated * cos + _rotate_half(rotated) * sin
+    if rest.shape[-1]:
+        rotated = torch.cat((rotated, rest), dim=-1)
+    return rotated.to(xq.dtype)
 
 
 def split_half_rope_1d(head_dim: int, theta: float = 10000.0):

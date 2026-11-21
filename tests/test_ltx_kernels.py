@@ -232,9 +232,11 @@ def test_split_half_rope_rotates_broadcast_phases_in_the_query_dtype():
     rotated = apply_rope_split_half(x[:1, :2], narrow.cos(), narrow.sin())
     torch.testing.assert_close(rotated[..., 4:], x[:1, :2][..., 4:])
 
-    # The layout is the point: SDPA reads L-major operands and copies anything else.
+    # Elementwise all the way through, so the answer carries the query's layout: a
+    # packed projection stays packed, and it is attention that puts its operands in
+    # one layout.
     packed = torch.randn(2, 4, 3, 8).transpose(1, 2)  # [B,H,L,D] out of a packed projection
-    assert apply_rope_split_half(packed, cos, sin).stride(-2) == x.shape[-1]
+    assert apply_rope_split_half(packed, cos, sin).stride() == packed.stride()
 
     with pytest.raises(ValueError, match="does not fit"):
         too_wide = torch.randn(2, 3, 4, 6)
