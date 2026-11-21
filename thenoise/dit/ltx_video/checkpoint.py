@@ -14,8 +14,13 @@ from typing import Callable, Mapping
 
 import torch
 
+from thenoise.dit.ltx_video.transformer import (
+    AUDIO_HEAD_DIM, LTXParams, VIDEO_HEAD_DIM,
+)
 from thenoise.utils.loader import load_selected_state, partition_keys
-from thenoise.utils.safetensors import Signature, unwrap_key
+from thenoise.utils.safetensors import (
+    Signature, as_header, require_divisible, unwrap_key,
+)
 
 log = logging.getLogger(__name__)
 
@@ -151,32 +156,77 @@ def _map_component(comp: str, k: str) -> str | None:
     return k
 
 
-def make_transformer(version: str):
-    from thenoise.dit.ltx_video.transformer import LTX2VideoTransformer3DModel
-    cfg = dict(
-        in_channels=128, out_channels=128, patch_size=1, patch_size_t=1,
-        num_attention_heads=32, attention_head_dim=128, cross_attention_dim=4096,
-        vae_scale_factors=(8, 32, 32), pos_embed_max_pos=20,
-        base_height=2048, base_width=2048,
-        gated_attn=True, cross_attn_mod=True,
-        audio_in_channels=128, audio_out_channels=128,
-        audio_patch_size=1, audio_patch_size_t=1,
-        audio_num_attention_heads=32, audio_attention_head_dim=64,
-        audio_cross_attention_dim=2048, audio_scale_factor=4,
-        audio_pos_embed_max_pos=20, audio_sampling_rate=16000,
-        audio_hop_length=160, audio_gated_attn=True, audio_cross_attn_mod=True,
-        num_layers=48, activation_fn="gelu-approximate",
-        qk_norm="rms_norm_across_heads", norm_elementwise_affine=False,
-        norm_eps=1e-6, caption_channels=3840, attention_bias=True,
-        attention_out_bias=True, rope_theta=10000., rope_double_precision=True,
-        causal_offset=1, timestep_scale_multiplier=1000,
-        cross_attn_timestep_scale_multiplier=1000, rope_type="split",
-        use_prompt_embeddings=False, perturbed_attn=True,
-        ff_bias=version != VERSION_25, use_keyframes_abs_pos_embedding=version == VERSION_25,
+#: Prompt modulation adds three rows to an AdaLN table; six is a table without it.
+_MOD_WITH_PROMPT = 9
+
+
+def detect_params(checkpoint) -> LTXParams:
+    """Read a transformer's geometry out of the checkpoint header.
+
+    The shapes are indexed by *module* parameter through :func:`split_ltx_key`, so a key
+    the checkpoint spells differently is renamed once, here and at load, rather than in
+    two places that can drift. A file that is not an LTX transformer fails on the first
+    name :meth:`Header.shape` cannot find.
+    """
+    header = as_header(checkpoint)
+    shapes: dict[str, tuple[int, ...]] = {}
+    for raw in header.names:
+        part, target = split_ltx_key(raw)
+        if part == "dit" and target is not None:
+            shapes[target] = header.shape(raw)
+
+    dim, in_channels = shapes["proj_in.weight"]
+    audio_dim, audio_in = shapes["audio_proj_in.weight"]
+    require_divisible(dim, VIDEO_HEAD_DIM, "video trunk", "head width")
+    require_divisible(audio_dim, AUDIO_HEAD_DIM, "audio trunk", "head width")
+    block = "transformer_blocks.0."
+    return LTXParams(
+        in_channels=in_channels,
+        out_channels=shapes["proj_out.weight"][0],
+        dim=dim,
+        num_layers=1 + max(int(key.split(".")[1]) for key in shapes
+                           if key.startswith("transformer_blocks.")),
+        cross_attention_dim=shapes[block + "attn2.to_k.weight"][1],
+        audio_in_channels=audio_in,
+        audio_out_channels=shapes["audio_proj_out.weight"][0],
+        audio_dim=audio_dim,
+        audio_cross_attention_dim=shapes[block + "audio_attn2.to_k.weight"][1],
+        ff_bias=block + "ff.net.0.proj.bias" in shapes,
+        audio_ff_bias=block + "audio_ff.net.0.proj.bias" in shapes,
+        gated_attn=block + "attn1.to_gate_logits.weight" in shapes,
+        audio_gated_attn=block + "audio_attn1.to_gate_logits.weight" in shapes,
+        cross_attn_mod=shapes["time_embed.linear.weight"][0] // dim == _MOD_WITH_PROMPT,
+        audio_cross_attn_mod=(
+            shapes["audio_time_embed.linear.weight"][0] // audio_dim == _MOD_WITH_PROMPT),
+        keyframes="keyframes_abs_pos_embedding" in shapes,
     )
+
+
+def make_transformer(params: LTXParams):
+    """Build the transformer of these geometry numbers, on meta.
+
+    What a checkpoint cannot state stays here: the RoPE base and causal offset, the
+    timestep multipliers, and the grid the positional embedding was fitted to.
+    """
+    from thenoise.dit.ltx_video.transformer import LTX2VideoTransformer3DModel
+
     with torch.device("meta"):
-        model = LTX2VideoTransformer3DModel(**cfg)
-        return model
+        return LTX2VideoTransformer3DModel(
+            in_channels=params.in_channels, out_channels=params.out_channels,
+            num_attention_heads=params.heads, attention_head_dim=VIDEO_HEAD_DIM,
+            cross_attention_dim=params.cross_attention_dim,
+            audio_in_channels=params.audio_in_channels,
+            audio_out_channels=params.audio_out_channels,
+            audio_num_attention_heads=params.audio_heads,
+            audio_attention_head_dim=AUDIO_HEAD_DIM,
+            audio_cross_attention_dim=params.audio_cross_attention_dim,
+            num_layers=params.num_layers, ff_bias=params.ff_bias,
+            audio_ff_bias=params.audio_ff_bias, gated_attn=params.gated_attn,
+            audio_gated_attn=params.audio_gated_attn,
+            cross_attn_mod=params.cross_attn_mod,
+            audio_cross_attn_mod=params.audio_cross_attn_mod,
+            use_keyframes_abs_pos_embedding=params.keyframes,
+        )
 
 
 def make_video_vae():
@@ -260,16 +310,19 @@ def make_upsampler():
                                  num_blocks_per_stage=4)
 
 
-def make_connectors(version: str, gemma_text_config):
+def make_connectors(gemma_text_config, params: LTXParams):
+    """The text-projection pair, on meta.
+
+    The Gemma decides the caption width and how many of its layers are read out -- both
+    released Gemmas are 3840 wide and 48 deep, which is why no version belonged in that
+    number. The connectors' depth and register count stay literals: those tensors can
+    arrive from a file of their own, and no released pair differs on them.
+    """
     from thenoise.dit.ltx_video.connectors import LTX2TextConnectors
-    if version == VERSION_23:
-        caption_channels, factor = 3840, 49
-    else:
-        caption_channels, factor = (
-            gemma_text_config.hidden_size, gemma_text_config.num_hidden_layers + 1
-        )
+
     cfg = dict(
-        caption_channels=caption_channels, text_proj_in_factor=factor,
+        caption_channels=gemma_text_config.hidden_size,
+        text_proj_in_factor=gemma_text_config.num_hidden_layers + 1,
         video_connector_num_attention_heads=32,
         video_connector_attention_head_dim=128,
         video_connector_num_layers=8, video_connector_num_learnable_registers=128,
@@ -279,17 +332,13 @@ def make_connectors(version: str, gemma_text_config):
         audio_gated_attn=True, connector_rope_base_seq_len=4096,
         rope_theta=10000., rope_double_precision=True,
         causal_temporal_positioning=False, rope_type="split",
-        per_modality_projections=True, video_hidden_dim=4096,
-        audio_hidden_dim=2048, proj_bias=True,
+        per_modality_projections=True, video_hidden_dim=params.dim,
+        audio_hidden_dim=params.audio_dim, proj_bias=True,
     )
     with torch.device("meta"):
         model = LTX2TextConnectors(**cfg)
         return model
 
-
-#: The quantization metadata a repacked checkpoint carries beside its weights.
-QUANT_SUFFIXES = (".weight_scale", ".scale_weight", ".scale_input",
-                  ".input_scale", ".comfy_quant")
 
 #: The parts a file can name by prefix, alone or inside an all-in-one checkpoint.
 COMPONENT_PREFIXES = ("vae", "audio_vae", "vocoder")
@@ -353,19 +402,22 @@ def load_original_components(
     memory manager's decision, made on the bytes of those files -- and the tensors are read
     there, so a 22 GB transformer does not pass through system RAM on its way to the card.
     """
+    given = {role: Path(path).expanduser().resolve()
+             for role, path in files.items() if path}
+    primary = given.get("")
+    if primary is None:
+        raise ValueError("LTX needs its transformer: pass --dit")
+    params = detect_params(_header("", primary, headers))
     modules = dict(
-        dit=make_transformer(version), vae=make_video_vae(),
+        dit=make_transformer(params), vae=make_video_vae(),
         audio_vae=make_audio_vae(), vocoder=make_vocoder(),
         upscaler=make_upsampler(),
     )
     if gemma_text_config is not None:
-        modules["connectors"] = make_connectors(version, gemma_text_config)
+        modules["connectors"] = make_connectors(gemma_text_config, params)
     expected = {name: {key: tuple(t.shape) for key, t in module.state_dict().items()}
                 for name, module in modules.items()}
 
-    given = {role: Path(path).expanduser().resolve()
-             for role, path in files.items() if path}
-    primary = given.get("")
     named_parts: dict[Path, tuple[str, ...]] = {}
     for role, path in given.items():
         named_parts[path] = named_parts.get(path, ()) + tuple(

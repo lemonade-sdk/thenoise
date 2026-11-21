@@ -56,6 +56,8 @@ def test_av_transformer_forward_and_checkpoint_variants(ltx25):
         audio_num_attention_heads=4, audio_attention_head_dim=16,
         audio_cross_attention_dim=64, num_layers=1,
         ff_bias=not ltx25, audio_ff_bias=True,
+        gated_attn=True, audio_gated_attn=True,
+        cross_attn_mod=True, audio_cross_attn_mod=True,
         use_keyframes_abs_pos_embedding=ltx25,
     )
     model = LTX2VideoTransformer3DModel(**config).eval()

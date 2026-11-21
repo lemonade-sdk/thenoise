@@ -14,6 +14,7 @@ native PyTorch modules and existing TheNoise utilities are used at runtime.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import torch
@@ -24,6 +25,11 @@ from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import AttentionParams, attention
 from thenoise.utils.rope import apply_ltx_rope_split_half
 from thenoise.utils.timestep import timestep_embedding
+
+#: How each stream's trunk is divided. A checkpoint states the trunk; it never states
+#: the head split, and the released family divides the same way in both streams.
+VIDEO_HEAD_DIM = 128
+AUDIO_HEAD_DIM = 64
 
 
 class _TimeFeatures(nn.Module):
@@ -335,59 +341,81 @@ class _AVRoPE(nn.Module):
                 sin.reshape(b, t, self.heads, -1).transpose(1, 2))
 
 
+@dataclass(frozen=True)
+class LTXParams:
+    """A transformer's geometry, as a checkpoint header states it.
+
+    Past the widths, four halves of the module tree are optional and the file answers
+    each: whether a stream's feed-forward carries biases (2.3 does, 2.5 does not),
+    whether its attention is gated, whether prompt modulation is wired in, and whether
+    the keyframe embedding exists (2.5 only). Reading them as tensors rather than
+    assuming them is what lets a re-export of different width, or one shipped without
+    its zero biases, load instead of failing a shape check.
+    """
+
+    in_channels: int
+    out_channels: int
+    dim: int
+    num_layers: int
+    cross_attention_dim: int
+    audio_in_channels: int
+    audio_out_channels: int
+    audio_dim: int
+    audio_cross_attention_dim: int
+    ff_bias: bool
+    audio_ff_bias: bool
+    gated_attn: bool
+    audio_gated_attn: bool
+    cross_attn_mod: bool
+    audio_cross_attn_mod: bool
+    keyframes: bool
+
+    @property
+    def heads(self) -> int:
+        return self.dim // VIDEO_HEAD_DIM
+
+    @property
+    def audio_heads(self) -> int:
+        return self.audio_dim // AUDIO_HEAD_DIM
+
+
 class LTX2VideoTransformer3DModel(nn.Module):
     """Native LTX distilled audiovisual DiT with original checkpoint weight names.
 
     The public `forward` arguments are the existing TheNoise LTX adapter's
     interface, *not* a Diffusers pipeline. VideoModel/MemoryManager remain
     entirely responsible for segment scheduling, residency and decoding.
+
+    Only the distilled recipe is implemented: unit patches, so a latent voxel is one
+    token; split-half RoPE; gelu-approximate feed-forward; RMS Q/K norms across heads
+    and no affine block norms; biased attention projections; and prompt modulation from
+    AdaLN tables rather than caption tokens as positions. The widths, the depth and the
+    optional halves come from the checkpoint, not from here.
     """
 
     def __init__(
-        self, in_channels: int = 128, out_channels: int = 128,
-        patch_size: int = 1, patch_size_t: int = 1,
-        num_attention_heads: int = 32, attention_head_dim: int = 128,
-        cross_attention_dim: int = 4096,
-        vae_scale_factors=(8, 32, 32), pos_embed_max_pos: int = 20,
-        base_height: int = 2048, base_width: int = 2048,
-        gated_attn: bool = True, cross_attn_mod: bool = True,
-        audio_in_channels: int = 128, audio_out_channels: int = 128,
-        audio_patch_size: int = 1, audio_patch_size_t: int = 1,
-        audio_num_attention_heads: int = 32, audio_attention_head_dim: int = 64,
-        audio_cross_attention_dim: int = 2048,
+        self, *, in_channels: int, out_channels: int,
+        num_attention_heads: int, attention_head_dim: int, cross_attention_dim: int,
+        audio_in_channels: int, audio_out_channels: int,
+        audio_num_attention_heads: int, audio_attention_head_dim: int,
+        audio_cross_attention_dim: int, num_layers: int,
+        ff_bias: bool, audio_ff_bias: bool, gated_attn: bool, audio_gated_attn: bool,
+        cross_attn_mod: bool, audio_cross_attn_mod: bool,
+        use_keyframes_abs_pos_embedding: bool, use_prompt_adaln_single: bool = True,
+        vae_scale_factors: tuple[int, int, int] = (8, 32, 32),
+        pos_embed_max_pos: int = 20, base_height: int = 2048, base_width: int = 2048,
         audio_scale_factor: int = 4, audio_pos_embed_max_pos: int = 20,
         audio_sampling_rate: int = 16000, audio_hop_length: int = 160,
-        audio_gated_attn: bool = True, audio_cross_attn_mod: bool = True,
-        num_layers: int = 48, activation_fn: str = "gelu-approximate",
-        qk_norm: str = "rms_norm_across_heads", norm_elementwise_affine: bool = False,
-        norm_eps: float = 1e-6, caption_channels: int = 3840,
-        attention_bias: bool = True, attention_out_bias: bool = True,
         rope_theta: float = 10000.0, rope_double_precision: bool = True,
         causal_offset: int = 1, timestep_scale_multiplier: int = 1000,
         cross_attn_timestep_scale_multiplier: int = 1000,
-        rope_type: str = "split", use_prompt_embeddings: bool = False,
-        perturbed_attn: bool = True, ff_bias: bool = True,
-        audio_ff_bias: bool = True, use_prompt_adaln_single: bool = True,
-        use_keyframes_abs_pos_embedding: bool = False,
     ):
         super().__init__()
-        # Only the released distilled configuration is implemented.
-        if (patch_size, patch_size_t, audio_patch_size, audio_patch_size_t) != (1, 1, 1, 1):
-            raise ValueError("LTX distilled transformer requires unit patches")
-        if rope_type != "split" or activation_fn != "gelu-approximate":
-            raise ValueError("unsupported LTX distilled RoPE / FFN configuration")
-        if qk_norm != "rms_norm_across_heads" or norm_elementwise_affine:
-            raise ValueError("unsupported LTX distilled Q/K or block norm")
-        if use_prompt_embeddings or not attention_bias or not attention_out_bias:
-            raise ValueError("unsupported LTX distilled caption / attention projection settings")
-        if norm_eps != 1e-6:
-            raise ValueError("unsupported LTX distilled norm epsilon")
         self.config = SimpleNamespace(
             timestep_scale_multiplier=timestep_scale_multiplier,
             cross_attn_timestep_scale_multiplier=cross_attn_timestep_scale_multiplier,
             use_keyframes_abs_pos_embedding=use_keyframes_abs_pos_embedding,
             use_prompt_adaln_single=use_prompt_adaln_single,
-            use_prompt_embeddings=use_prompt_embeddings,
         )
         vdim = num_attention_heads * attention_head_dim
         adim = audio_num_attention_heads * audio_attention_head_dim

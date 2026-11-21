@@ -102,6 +102,69 @@ def test_a_file_stating_another_version_is_refused_by_the_model_it_was_given_to(
         LTX23Video.validate_paths({"": stated})
 
 
+def _geometry_keys(**extra):
+    """The names a transformer's geometry is read from, at sizes too small to run.
+
+    The widths that have to divide a head count are kept -- 128 video, 64 audio -- and
+    every other number differs, so a swapped pair cannot pass.
+    """
+    return {
+        "model.diffusion_model.patchify_proj.weight": torch.zeros(128, 4),
+        "model.diffusion_model.proj_out.weight": torch.zeros(6, 128),
+        "model.diffusion_model.audio_patchify_proj.weight": torch.zeros(64, 8),
+        "model.diffusion_model.audio_proj_out.weight": torch.zeros(10, 64),
+        "model.diffusion_model.adaln_single.linear.weight": torch.zeros(9 * 128, 128),
+        "model.diffusion_model.audio_adaln_single.linear.weight": torch.zeros(6 * 64, 64),
+        "model.diffusion_model.transformer_blocks.0.attn2.to_k.weight": torch.zeros(128, 96),
+        "model.diffusion_model.transformer_blocks.0.audio_attn2.to_k.weight": torch.zeros(64, 48),
+        **extra,
+    }
+
+
+def _geometry_file(tmp_path, name="av.safetensors", **extra):
+    return _save(tmp_path / name, _geometry_keys(**extra))
+
+
+def test_a_transformer_measures_itself_from_the_header(tmp_path):
+    """A released configuration is not a fact to keep in a dict: depth, widths and the
+    optional halves are read, which is what lets a re-export of another size, or one
+    shipped without its zero biases, load instead of failing a shape check."""
+    from thenoise.dit.ltx_video.checkpoint import detect_params
+
+    two_blocks = {
+        "model.diffusion_model.transformer_blocks.1.attn2.to_k.weight": torch.zeros(128, 96),
+    }
+    released = detect_params(_geometry_file(
+        tmp_path, "released.safetensors",
+        **two_blocks,
+        **{"model.diffusion_model.transformer_blocks.0.ff.net.0.proj.bias": torch.zeros(512)}))
+    assert (released.dim, released.heads, released.num_layers) == (128, 1, 2)
+    assert (released.in_channels, released.out_channels) == (4, 6)
+    assert (released.audio_dim, released.audio_heads) == (64, 1)
+    assert (released.audio_in_channels, released.audio_out_channels) == (8, 10)
+    assert (released.cross_attention_dim, released.audio_cross_attention_dim) == (96, 48)
+    assert released.cross_attn_mod and not released.audio_cross_attn_mod
+    assert released.ff_bias and not released.audio_ff_bias
+    assert not released.keyframes
+
+    stripped = detect_params(_geometry_file(
+        tmp_path, "stripped.safetensors",
+        **{"model.diffusion_model.keyframes_abs_pos_embedding": torch.zeros(1, 128),
+           "model.diffusion_model.transformer_blocks.0.attn1.to_gate_logits.weight":
+               torch.zeros(1, 128)}))
+    assert stripped.keyframes and stripped.gated_attn
+    assert not stripped.ff_bias
+
+
+def test_a_trunk_that_is_not_a_whole_number_of_heads_is_refused(tmp_path):
+    from thenoise.dit.ltx_video.checkpoint import detect_params
+
+    path = _geometry_file(tmp_path, name="odd.safetensors",
+                          **{"model.diffusion_model.patchify_proj.weight": torch.zeros(100, 4)})
+    with pytest.raises(ValueError, match="video trunk 100 is not a multiple"):
+        detect_params(path)
+
+
 def test_a_checkpoint_key_reaches_the_parameter_it_fills():
     m = _checkpoint()
     assert m.split_ltx_key("model.diffusion_model.prompt_adaln_single.linear.weight") == (
@@ -365,19 +428,33 @@ def _load_part(part: str, module, file, prefix: str = ""):
 
 
 def _tiny_components(monkeypatch):
-    """Every LTX component factory replaced by a two-parameter stand-in."""
+    """Every LTX component factory replaced by a two-parameter stand-in.
+
+    Geometry is read out of a header before any factory runs, and these stand-ins are
+    not built to the names a real transformer uses, so the read is replaced with the
+    numbers a two-parameter module wants.
+    """
     m = _checkpoint()
 
     def linear():
         with torch.device("meta"):
             return torch.nn.Linear(2, 2, bias=False)
 
-    def dit(_version):
+    def geometry(_checkpoint):
+        return m.LTXParams(
+            in_channels=2, out_channels=2, dim=128, num_layers=1,
+            cross_attention_dim=2, audio_in_channels=2, audio_out_channels=2,
+            audio_dim=64, audio_cross_attention_dim=2, ff_bias=True,
+            audio_ff_bias=True, gated_attn=True, audio_gated_attn=True,
+            cross_attn_mod=True, audio_cross_attn_mod=True, keyframes=False,
+        )
+
+    def dit(_params):
         model = torch.nn.Module()
         model.proj_in = linear()
         return model
 
-    def connectors(_version, _config):
+    def connectors(_config, _params):
         model = torch.nn.Module()
         for modality in ("video", "audio"):
             block = torch.nn.Module()
@@ -393,6 +470,7 @@ def _tiny_components(monkeypatch):
         model.upsampler = torch.nn.Sequential(linear())
         return model
 
+    monkeypatch.setattr(m, "detect_params", geometry)
     monkeypatch.setattr(m, "make_transformer", dit)
     monkeypatch.setattr(m, "make_connectors", connectors)
     for name in ("make_video_vae", "make_audio_vae", "make_vocoder"):
