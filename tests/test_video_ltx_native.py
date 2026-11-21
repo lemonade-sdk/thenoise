@@ -1,7 +1,6 @@
 """Small CPU contract tests for native LTX checkpoint loading and sampling."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 

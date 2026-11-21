@@ -8,7 +8,6 @@ dependency. ComfyUI is used only as a checkpoint-layout reference.
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 from typing import Callable, Mapping
 
