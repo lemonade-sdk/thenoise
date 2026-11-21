@@ -28,6 +28,43 @@ def _save(path, tensors):
     return path
 
 
+#: Codecs as a checkpoint that ships them inside the transformer file names them.
+MONOLITH_CODEC_KEYS = (
+    "vae.decoder.up_blocks.0.res_blocks.0.conv1.conv.weight",
+    "vae.decoder.up_blocks.1.conv.conv.weight",
+    "vae.decoder.up_blocks.8.res_blocks.1.conv2.conv.bias",
+    "vae.encoder.down_blocks.8.res_blocks.0.conv1.conv.weight",
+    "vae.encoder.down_blocks.1.conv.conv.weight",
+    "vae.per_channel_statistics.mean-of-means",
+    "audio_vae.per_channel_statistics.std-of-means",
+    "vocoder.vocoder.conv_pre.weight",
+    "vocoder.vocoder.resblocks.0.acts1.0.act.alpha",
+    "vocoder.vocoder.ups.0.weight",
+    "vocoder.bwe_generator.act_post.downsample.lowpass.filter",
+)
+
+
+def test_a_codec_packed_with_the_transformer_fills_what_a_codec_alone_fills():
+    """The released all-in-one spellings of the codec tree reach the module.
+
+    A file holding one codec names the blocks the way the module does; a codec packed
+    with the transformer uses the original naming, where the res-block groups and the
+    sampling convs share one numbered list. Missing the rename is a refusal of weights
+    the checkpoint does have.
+    """
+    from thenoise.dit.ltx_video.checkpoint import (make_audio_vae, make_vocoder,
+                                                   make_video_vae, _mapped)
+
+    with torch.device("meta"):
+        modules = {"vae": make_video_vae(), "audio_vae": make_audio_vae(),
+                   "vocoder": make_vocoder()}
+    for raw in MONOLITH_CODEC_KEYS:
+        name = raw.split(".", 1)[0]
+        packed = _mapped(name, raw, transformer=True)
+        assert packed == _mapped(name, raw, transformer=False), raw
+        assert packed[1] in modules[name].state_dict(), f"{raw} -> {packed[1]!r}"
+
+
 def test_header_detection_and_mapping(tmp_path):
     m = _checkpoint()
     for version in ("2.3", "2.5"):

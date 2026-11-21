@@ -330,7 +330,12 @@ def _mapped(name: str, raw: str, *, transformer: bool) -> tuple[str, str | None]
 
     key = unwrap_key(raw)
     if transformer or name in ("dit", "connectors"):
-        return split_ltx_key(key) or ("", None)
+        component, target = split_ltx_key(key) or ("", None)
+        if target is not None and component in COMPONENT_PREFIXES:
+            # A codec packed with the transformer is spelled the original way:
+            # ``split_ltx_key`` strips its prefix, and the codec's own map renames it.
+            target = _map_component(component, target)
+        return component, target
     head, _, rest = key.partition(".")
     if head in COMPONENT_PREFIXES:
         return head, _map_component(head, rest)
