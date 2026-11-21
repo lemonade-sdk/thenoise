@@ -1,0 +1,118 @@
+import math
+
+import pytest
+
+from thenoise.mesh.spec import OUTPUT_FORMATS, MeshSpec, mode_of
+
+DEFAULTS = {
+    "negative_prompt": "",
+    "output_format": "glb",
+    "num_latents": 4096,
+    "steps": 30,
+    "guidance_scale": 5.0,
+    "sampler": "euler",
+    "octree_resolution": 384,
+    "bounds": 1.01,
+    "mc_level": 0.0,
+}
+
+
+def resolve(**overrides):
+    return MeshSpec(**overrides).resolve(DEFAULTS)
+
+
+def test_a_picture_makes_it_an_image_to_shape_request():
+    assert mode_of(None) == "t2d"
+    assert mode_of(b"png") == "i2d"
+    assert resolve(image=b"png").mode == "i2d"
+
+
+def test_an_unset_prompt_is_allowed_because_the_shape_is_not_described_in_words():
+    assert resolve().prompt == ""
+
+
+def test_the_models_defaults_fill_what_the_request_left_out():
+    resolved = resolve()
+    assert (resolved.latents, resolved.steps, resolved.sampler) == (4096, 30, "euler")
+    assert (resolved.octree_resolution, resolved.bounds, resolved.mc_level) == (384, 1.01, 0.0)
+    assert resolved.output_format == "glb"
+
+
+def test_the_request_values_win_over_the_defaults():
+    resolved = resolve(latents=1024, steps=4, guidance_scale=1.0, sampler="dpm++_3m_sde",
+                       octree_resolution=96, bounds=1.5, mc_level=0.02, seed=7)
+    assert resolved.latents == 1024
+    assert resolved.steps == 4
+    assert resolved.octree_resolution == 96
+    assert resolved.bounds == 1.5
+    assert resolved.mc_level == 0.02
+    assert resolved.seed == 7
+
+
+def test_the_latent_field_is_the_token_count_not_the_image_size():
+    assert resolve(latents=8192).latents == 8192
+    with pytest.raises(Exception, match="greater than"):
+        MeshSpec(latents=0)
+
+
+def test_a_seed_of_minus_one_asks_for_a_fresh_one():
+    seeds = {resolve(seed=-1).seed for _ in range(12)}
+    assert len(seeds) > 1
+    assert all(0 <= seed < 2**32 for seed in seeds)
+
+
+def test_an_explicit_seed_survives():
+    assert resolve(seed=0).seed == 0
+
+
+def test_the_container_is_one_of_the_two_writers():
+    assert resolve(output_format="obj").output_format == "obj"
+    with pytest.raises(Exception, match="Input should be"):
+        MeshSpec(output_format="ply")
+    with pytest.raises(ValueError, match="output_format must be one of"):
+        MeshSpec().resolve({**DEFAULTS, "output_format": "ply"})
+
+
+def test_the_volume_must_be_fine_enough_to_have_a_surface_in():
+    with pytest.raises(ValueError, match="octree_resolution"):
+        MeshSpec().resolve({**DEFAULTS, "octree_resolution": 4})
+
+
+def test_the_numbers_have_to_be_numbers_the_solvers_can_use():
+    for field, value in [("guidance_scale", -1.0), ("guidance_scale", math.nan),
+                         ("bounds", 0.0), ("mc_level", math.inf)]:
+        with pytest.raises(ValueError, match=field):
+            MeshSpec(**{field: value}).resolve(DEFAULTS)
+
+
+def test_the_seed_is_inside_torchs_range():
+    with pytest.raises(Exception, match="torch.Generator"):
+        MeshSpec(seed=2**64)
+
+
+def test_the_echo_leaves_the_picture_out():
+    public = resolve(image=b"png", prompt="a chair").public()
+    assert "image" not in public
+    assert public["mode"] == "i2d"
+    assert set(public) <= {"mode", "latents", "steps", "guidance_scale", "sampler",
+                           "seed", "output_format", "octree_resolution", "bounds",
+                           "mc_level", "lora_specs"}
+
+
+def test_a_request_names_no_loras_unless_asked():
+    assert resolve().lora_specs == {}
+
+
+def test_stl_is_one_of_the_answered_containers():
+    assert resolve(output_format="stl").output_format == "stl"
+    assert "stl" in OUTPUT_FORMATS
+
+
+def test_every_promised_container_resolves_and_is_written():
+    from thenoise.mesh.write import write_mesh
+    from test_mesh_write import triangle
+
+    for fmt in OUTPUT_FORMATS:
+        assert resolve(output_format=fmt).output_format == fmt
+    with pytest.raises(ValueError, match="no mesh writer for"):
+        write_mesh(triangle(), "/tmp/nope.ply", "ply")

@@ -430,6 +430,12 @@ def _wan_text_encoder(int8: bool) -> Artifact:
     return ("text_encoder", _WAN_REPO, "split_files/text_encoders/umt5_xxl_fp16.safetensors")
 
 
+def _hunyuan3d_jobs(args: argparse.Namespace) -> list[Artifact]:
+    """Hunyuan3D 2.1 shape: transformer, image conditioner and shape codec in one file,
+    at the repo root. There is no text encoder — a shape is conditioned on a picture."""
+    return [("shape", "Comfy-Org/Hunyuan-3D-2.1", "hunyuan_3d_v2.1.safetensors")]
+
+
 def _wan22_jobs(args: argparse.Namespace) -> list[Artifact]:
     """Wan 2.2 TI2V-5B: FastWan turbo DiT, UMT5 encoder, and causal video VAE.
 
@@ -613,6 +619,12 @@ MODELS: dict[str, ModelSpec] = {
         "h3-image", "./models/h3-image",
         "MiniMax H3-Image (t2i + edit in one DiT)",
         _h3_image_jobs,
+    ),
+    "hunyuan3d": ModelSpec(
+        "hunyuan3d", "./models/hunyuan3d",
+        "Hunyuan3D 2.1 image-to-shape (DiT, conditioner and codec in one file)",
+        _hunyuan3d_jobs,
+        has_int8=False,
     ),
     "wan22": ModelSpec(
         "wan22", "./models/wan22",

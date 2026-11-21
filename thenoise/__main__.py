@@ -71,6 +71,9 @@ def main(argv=None) -> None:
     elif args.command == "video":
         from .video_cli import run_video
         run_video(args)
+    elif args.command == "mesh":
+        from .mesh_cli import run_mesh
+        run_mesh(args)
     elif args.command == "upscale":
         from .upscale_cli import run_upscale
         run_upscale(args)
@@ -79,7 +82,8 @@ def main(argv=None) -> None:
         run_controlmap(args)
     else:  # pragma: no cover - argparse requires a subcommand
         raise SystemExit(
-            "choose a subcommand: serve | generate | edit | video | upscale | controlmap"
+            "choose a subcommand: serve | generate | edit | video | mesh | upscale"
+            " | controlmap"
         )
 
 

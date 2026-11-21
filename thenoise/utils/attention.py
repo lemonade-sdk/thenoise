@@ -67,6 +67,20 @@ def shared_key_prefix(attention_mask: torch.Tensor) -> Optional[int]:
     return valid if bool((rows == ladder).all()) else None
 
 
+def interleaved_heads(fused: torch.Tensor, num_heads: int, parts: int) -> tuple:
+    """``[B, L, parts*heads*d]`` -> ``parts`` ``[B, heads, L, d]``, parts inside each head.
+
+    Head ``i`` owns features ``[i*parts*d, (i+1)*parts*d)`` and the parts slice across that,
+    so a fused qkv keeps head 0's query, key and value inside the first ``3d`` features.
+    Splitting each projection into heads on its own gives the same shapes and a different
+    function; the trained weights of Hunyuan3D's shape DiT and shape codec answer only here.
+    """
+    batches, tokens, total = fused.shape
+    per = total // (num_heads * parts)
+    grouped = fused.view(batches, tokens, num_heads, parts, per)
+    return tuple(head.transpose(1, 2) for head in torch.unbind(grouped, dim=3))
+
+
 def l_major(t: torch.Tensor) -> bool:
     """True when ``L`` is the second-innermost dimension of a ``[B, H, L, D]`` tensor.
 

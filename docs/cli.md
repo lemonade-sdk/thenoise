@@ -13,11 +13,12 @@ DiT checkpoint.
 | `generate` | Generate one image from a text prompt | yes |
 | `edit` | Edit an image from an instruction (image + prompt → edited image) | model that takes a reference |
 | `video` | Generate one clip (text, or an image to start from) | video model |
+| `mesh` | Reconstruct the shape in a picture (`.glb` / `.obj`) | mesh model |
 | `upscale` | Pixel-upscale an existing image | no (upscaler only) |
 | `controlmap` | Extract a control map (canny / depth / pose) from an image | no |
 | `serve` | Serve a model over HTTP: JSON API + web UI at <http://localhost:8000/> | yes (lazily) |
 
-## Shared flags (`serve`, `generate`, `edit`, `video`)
+## Shared flags (`serve`, `generate`, `edit`, `video`, `mesh`)
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
@@ -159,6 +160,34 @@ bars the stages as it goes.
 
 Waiting for a clip is the difference from the job API: queue the same render with
 `POST /jobs/video` instead — see [HTTP API](api.md#video-generation).
+
+## Generate a single shape
+
+Reconstructs the surface in one picture and writes it to `--out` as `.glb`, `.obj` or
+`.stl`.
+Needs a mesh model — [hunyuan3d](models/hunyuan3d.md) is the one supported today — and
+that model's three parts live in one checkpoint, so `--dit` is the only path flag.
+
+```bash
+./thenoise.sh mesh \
+  --dit ./models/hunyuan3d/hunyuan_3d_v2.1.safetensors \
+  --image ./chair.png --out /tmp/chair.glb
+```
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--image` | yes | — | The picture whose shape to reconstruct; the only conditioning this medium reads |
+| `--prompt` | no | `""` | Text a shape model does not read, accepted so a request travels between media |
+| `--latents` | no | model default | Latent tokens to denoise |
+| `--steps`, `--guidance-scale`, `--sampler`, `--seed` | no | model default | Sampling parameters, as for `generate` |
+| `--octree-resolution` | no | model default | Finest voxel grid the surface is cut from; the costliest knob |
+| `--bounds` | no | model default | Half-width of the sampled volume, in latent units |
+| `--mc-level` | no | `1/512` | The field value the surface is cut at |
+| `--lora` | no | — | LoRA for the shape transformer; repeatable, `file:weight` |
+| `--output-format` | no | model default | `glb`, `obj` or `stl`; `--out`'s extension answers when this is left out |
+| `--out` | no | `out.glb` | Output mesh path; with no extension, the container the mesh was written in |
+
+Queue the same render with `POST /jobs/mesh` — see [HTTP API](api.md#mesh-generation).
 
 ## Upscale a single image
 

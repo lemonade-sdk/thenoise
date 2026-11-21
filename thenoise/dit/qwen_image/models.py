@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 
 from thenoise.utils.loader import build_dit
+from thenoise.dit.feed_forward import FeedForward
 from thenoise.dit.kvcache import KVBuffers, KVCache, attend, cache_mode
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.dynamo import mark_token_axis
@@ -94,36 +95,6 @@ class AdaLayerNormContinuous(nn.Module):
         emb = self.linear(self.silu(conditioning_embedding).to(x.dtype))
         scale, shift = torch.chunk(emb, 2, dim=1)
         return self.norm(x) * (1 + scale)[:, None, :] + shift[:, None, :]
-
-
-class GELU(nn.Module):
-    def __init__(self, dim_in: int, dim_out: int, approximate: str = "none", bias: bool = True):
-        super().__init__()
-        self.proj = QuantizedLinear(dim_in, dim_out, bias=bias)
-        self.gelu = nn.GELU(approximate=approximate)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.gelu(self.proj(x))
-
-
-class FeedForward(nn.Module):
-    def __init__(self, dim: int, dim_out: Optional[int] = None, mult: int = 4, bias: bool = True):
-        super().__init__()
-        inner_dim = int(dim * mult)
-        dim_out = dim_out if dim_out is not None else dim
-        # Dropout stays (p=0) so ``net.1``/``net.2`` line up with the checkpoint keys.
-        self.net = nn.ModuleList(
-            [
-                GELU(dim, inner_dim, approximate="tanh", bias=bias),
-                nn.Dropout(0.0),
-                QuantizedLinear(inner_dim, dim_out, bias=bias),
-            ]
-        )
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        for module in self.net:
-            hidden_states = module(hidden_states)
-        return hidden_states
 
 
 class Attention(nn.Module):

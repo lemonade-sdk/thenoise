@@ -11,6 +11,7 @@ import torch
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Optional, Union
 
+from thenoise.mesh.octree import CHUNK
 from thenoise.utils.lora_roles import LoraSpecs
 from thenoise.utils.safetensors import Header, read_header
 
@@ -135,6 +136,24 @@ class VideoSamplingParams(SamplingParams):
 
     frames: int = 1
     flow_shift: float = 1.0
+
+
+@dataclass(frozen=True)
+class MeshSamplingParams(SamplingParams):
+    """A shape's denoise-stage geometry: its token count, a shape having no pixel grid."""
+
+    num_latents: int = 4096
+
+
+@dataclass(frozen=True)
+class MeshDecodeParams:
+    """The volume-and-surface knobs, which no sampler sees."""
+
+    # No defaults here: a model's own defaults table is where these are written down.
+    octree_resolution: int
+    bounds: float
+    mc_level: float
+    chunk: int = CHUNK
 
 
 __all__ = ["ModelConfig", "EncodePromptArgs", "GenerateRequest", "SamplingParams",
