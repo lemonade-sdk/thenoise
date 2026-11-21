@@ -7,6 +7,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from .utils.lora_roles import DEFAULT_LORA_ROLE
+from .cli import component_paths
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -112,6 +113,7 @@ def run_video(args) -> None:
     runtime.load(ModelPaths(
         dit_path=args.dit, vae_path=args.vae, text_encoder_path=args.text_encoder,
         lora_dir=args.lora_dir, dit_low_path=args.dit_low,
+        extra_paths=component_paths(args),
     ))
     if runtime.medium != "video":
         raise SystemExit(

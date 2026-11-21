@@ -17,6 +17,19 @@ _Positive = Annotated[int, Field(gt=0)]
 _PositiveFinite = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 
 
+def frame_grid(wanted: float, *, compression: int, upward: bool) -> int:
+    """The frame count a causal video codec can pack, nearest to the one that was asked for.
+
+    A codec packs ``(F-1)/compression`` temporal cells around a first frame, so only
+    ``compression*n+1`` frames exist at all. Explicit frame counts never shrink; a
+    duration takes the nearest valid count, ties away from zero.
+    """
+    if not math.isfinite(wanted) or wanted <= 0:
+        raise ValueError("video duration / frame count must be positive and finite")
+    cells = (wanted - 1) / compression
+    return compression * max(1, math.ceil(cells) if upward else math.floor(cells + 0.5)) + 1
+
+
 def mode_of(image: bytes | None, end_image: bytes | None) -> str:
     """``t2v``, ``i2v`` or ``flf2v``, from the reference frames a request carries."""
     if image is None:

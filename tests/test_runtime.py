@@ -4,6 +4,8 @@ from __future__ import annotations
 import threading
 
 import pytest
+import torch
+from safetensors.torch import save_file
 
 import thenoise.models as model_catalog
 from conftest import StubVideo, resolves_to
@@ -88,6 +90,26 @@ def test_video_weights_are_ready_when_runtime_load_returns(catalog, monkeypatch)
     assert rt.available() == []  # never publish an incompletely loaded adapter
 
 
+def test_a_component_file_the_model_has_no_role_for_is_refused(catalog):
+    catalog()
+    runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
+    with pytest.raises(ValueError, match="no use for --audio-vae"):
+        runtime.load(ModelPaths("dit", "vae", "te", extra_paths={"audio_vae": "audio"}))
+    assert runtime.available() == []
+
+
+def test_component_files_reach_the_adapter_by_role(catalog, tmp_path):
+    constructed = catalog(COMPONENT_ROLES=("audio_vae", "upscaler"))
+    audio, upscaler = tmp_path / "audio.safetensors", tmp_path / "upscaler.safetensors"
+    for file in (audio, upscaler):
+        save_file({"weight": torch.ones(1)}, str(file))
+    runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
+    runtime.load(ModelPaths("dit", "vae", "te",
+                            extra_paths={"audio_vae": str(audio), "upscaler": str(upscaler)}))
+    assert constructed[0]["config"].extra_paths == {
+        "audio_vae": str(audio), "upscaler": str(upscaler)}
+
+
 def test_load_resolves_the_model_from_the_dit_and_passes_the_paths_through(catalog):
     constructed = catalog()
     runtime = Runtime(Settings(device="cpu", offload_device="cpu"))
@@ -144,6 +166,7 @@ def _counting_model(events: list):
         name = "fake"
         MEDIUM = "image"
         REQUIRED_COMPONENTS = ("vae", "text_encoder")
+        COMPONENT_ROLES: tuple = ()
         CAPABILITIES: dict = {}
         detect = staticmethod(lambda path: False)
         validate_paths = classmethod(lambda cls, dit_paths: None)

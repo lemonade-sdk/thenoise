@@ -140,11 +140,12 @@ def test_the_rope_rotates_the_pairs_and_axes_the_reference_does(head_dim, heads)
     assert torch.equal(ours, reference)
 
 
-def test_the_rope_tables_are_duplicated_over_the_head_dim():
+def test_the_rope_table_carries_each_angle_once_and_becomes_a_full_rotation():
     cos, sin = split_half_rope_4d(64, 10000.0)(joint_positions(2, 2, 3, dtype=torch.float64))
-    assert cos.shape == sin.shape == (7, 1, 1, 64)
-    assert torch.equal(cos[..., :32], cos[..., 32:])
-    assert torch.equal(sin[..., :32], sin[..., 32:])
+    assert cos.shape == sin.shape == (1, 1, 7, 32)
+    # Read against a 64-channel head, that half-width table turns all of it.
+    rotated = apply_rope_split_half(torch.randn(1, 4, 7, 64), cos, sin)
+    assert rotated.shape == (1, 4, 7, 64)
 
 
 def test_a_head_dim_that_will_not_split_into_four_axes_is_refused():
@@ -416,13 +417,15 @@ def test_each_branch_gets_its_own_positions_because_the_length_differs(dit):
 
     tables = dit.pe_embedder._cache
     assert set(tables) == {"joint", "txt", "joint_uncond", "txt_uncond"}
-    assert tables["joint"][0].shape[0] == 3 * 2 + 7
-    assert tables["joint_uncond"][0].shape[0] == 3 * 2 + 3
+    assert tables["joint"][0].shape[-2] == 3 * 2 + 7
+    assert tables["joint_uncond"][0].shape[-2] == 3 * 2 + 3
 
     # Same grid, put at a different ``f``: its rotary rows cannot be shared.
-    assert not torch.equal(tables["joint"][0][:6], tables["joint_uncond"][0][:6])
+    joint, uncond = tables["joint"][0], tables["joint_uncond"][0]
+    assert not torch.equal(joint[..., :6, :], uncond[..., :6, :])
     # The text positions start at f = 0 in both, so the short branch is a prefix.
-    assert torch.equal(tables["txt"][0][:3], tables["txt_uncond"][0])
+    txt, txt_uncond = tables["txt"][0], tables["txt_uncond"][0]
+    assert torch.equal(txt[..., :3, :], txt_uncond)
 
 
 def test_denoise_step_does_plain_cfg_over_the_two_branches(dit):

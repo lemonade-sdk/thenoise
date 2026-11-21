@@ -120,3 +120,18 @@ def test_a_model_carries_each_checkpoint_to_the_manager(tmp_path, monkeypatch):
 
     assert model._load_target(config.dit_path) == "cpu", "12 GiB into 10 free leaves no floor"
     assert model._load_target(config.vae_path) == str(model.memory.load_device)
+
+
+def test_a_component_of_several_files_is_budgeted_as_one(tmp_path, monkeypatch):
+    """Two files, one component: the manager sees their bytes together, or a part that
+    arrives from two places is placed as though it were half its size."""
+    config = _config(tmp_path)
+    stub_room(monkeypatch, 10 * GB)
+    monkeypatch.setattr("thenoise.memory._RESERVE_BASE_BYTES", GB)
+    model = StubModel(config=config)
+    monkeypatch.setattr("thenoise.models.base.checkpoint_bytes",
+                        {config.dit_path: 6 * GB, config.vae_path: 4 * GB}.get)
+
+    assert model._load_target_all([config.dit_path]) == str(model.memory.load_device)
+    assert model._load_target_all([config.dit_path, config.vae_path]) == "cpu"
+

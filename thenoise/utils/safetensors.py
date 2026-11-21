@@ -327,13 +327,24 @@ def load_safetensors(
     path: str,
     device: Union[str, torch.device],
     dtype: Optional[torch.dtype] = None,
+    *,
+    keys: Optional[set[str]] = None,
 ) -> dict[str, torch.Tensor]:
-    """Load a safetensors file into a state dict using the memory-efficient reader."""
+    """Load selected tensors from a safetensors file using the shared reader.
+
+    ``keys`` names raw file keys, not mapped module keys. A multi-component
+    checkpoint can supply just one module without materializing its other tens
+    of gigabytes. ``None`` retains the original load-all behaviour.
+    """
     state_dict = {}
     device = torch.device(device) if device is not None else None
     with MemoryEfficientSafeOpen(path) as f:
+        available = set(f.keys())
+        if keys is not None and not keys <= available:
+            raise KeyError(f"{path}: selected keys not present: {sorted(keys - available)[:5]}")
         for key in f.keys():
-            state_dict[key] = f.get_tensor(key, device=device, dtype=dtype)
+            if keys is None or key in keys:
+                state_dict[key] = f.get_tensor(key, device=device, dtype=dtype)
         synchronize_device(device)
     return state_dict
 

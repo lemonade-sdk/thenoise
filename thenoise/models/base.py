@@ -61,6 +61,10 @@ class DiffusionModel(LoRASupport, ABC):
     #: Required components; ``()`` when embedded.
     REQUIRED_COMPONENTS: ClassVar[Tuple[str, ...]] = ("vae", "text_encoder")
 
+    #: Components a release may ship as their own file, so a request can name one. A
+    #: role outside this set is refused before anything loads.
+    COMPONENT_ROLES: ClassVar[Tuple[str, ...]] = ()
+
     #: Model defaults behind ``pref``; an adapter merges the entries it differs on.
     DEFAULT_PREFS: ClassVar[Dict[str, Any]] = {
         "steps": 28,
@@ -184,7 +188,12 @@ class DiffusionModel(LoRASupport, ABC):
     # ------------------------------------------------------------ devices
     def _load_target(self, path: str) -> str:
         """The device to build the weights at ``path`` on, the manager's decision."""
-        return str(self.memory.device_for(checkpoint_bytes(path)))
+        return self._load_target_all([path])
+
+    def _load_target_all(self, paths) -> str:
+        """``_load_target`` for one component whose weights arrive from several files."""
+        return str(self.memory.device_for(
+            sum(checkpoint_bytes(str(path)) for path in paths)))
 
     # ------------------------------------------------------------ teardown
     def unload(self) -> None:

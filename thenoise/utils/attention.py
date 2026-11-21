@@ -174,6 +174,11 @@ def attention(
 ) -> torch.Tensor:
     """Compute scaled dot-product attention over a batch of sequences.
 
+    ``q``, ``k`` and ``v`` are ``[B, H, L, D]``, which is the order the kernels read.
+    Weights and any norm over them should land in that order where they can: a tensor
+    laid out ``[B, L, H*D]`` reaches the call as a transposed view at best, and a
+    materialised copy of it per attention where the backend will not read the strides.
+
     The whole batch goes through a single SDPA call; variable sequence lengths are
     handled by the key-padding mask in ``attn_params``, or by ``key_prefix``, which
     crops K and V to the keys every query shares and leaves the call unmasked: a

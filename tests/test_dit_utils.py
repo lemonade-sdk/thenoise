@@ -173,7 +173,7 @@ def test_split_half_rope_3d_patches_the_grid_and_builds_cos_sin():
     raw = (1, 16, 2, 8, 12)  # B, C, T, H, W
     cos, sin = builder(raw, "cpu")
     # Patched grid: T'=2, H'=4, W'=6 -> 48 tokens.
-    assert cos.shape == (2 * 4 * 6, 1, 1, 64)
+    assert cos.shape == (1, 1, 2 * 4 * 6, 32)
     assert sin.shape == cos.shape
     assert torch.isfinite(cos).all()
 

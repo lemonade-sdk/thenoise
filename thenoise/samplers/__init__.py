@@ -45,5 +45,29 @@ def sigma_steps(grid, device, dtype) -> list[Step]:
     return [Step(t=ts[i], delta=ts[i] - ts[i + 1]) for i in range(len(grid) - 1)]
 
 
+def sigma_at(grid, t: float) -> float:
+    """The sigma at timestep ``t`` (``0`` clean, ``1`` noise), linear in the grid index.
+
+    ``grid`` decreases from 1 to 0, so it is traversed from its clean end.
+    """
+    ascending = tuple(grid)[::-1]
+    n = len(ascending) - 1
+    pos = min(max(float(t), 0.0), 1.0) * n
+    i = min(int(pos), n - 1)
+    return ascending[i] + (ascending[i + 1] - ascending[i]) * (pos - i)
+
+
+def sigma_ladder(grid, steps: int) -> list[float]:
+    """``steps`` sigmas, descending, of a released ``grid``, with ``0.0`` appended.
+
+    A distilled checkpoint publishes the sigma grid it was distilled on, which is part of
+    its recipe rather than a knob; this walks that grid at whatever count the request
+    asked for. ``steps == len(grid) - 1`` returns the grid unchanged.
+    """
+    ladder = [sigma_at(grid, 1.0 - k / steps) for k in range(steps)]
+    ladder.append(0.0)
+    return ladder
+
+
 __all__ = ["SAMPLERS", "Sampler", "Step", "check_sampler", "create_sampler",
-           "sigma_steps"]
+           "sigma_at", "sigma_ladder", "sigma_steps"]

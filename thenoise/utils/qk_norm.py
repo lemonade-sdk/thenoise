@@ -12,10 +12,13 @@ from thenoise.utils.rms_norm import RMSNorm
 
 
 class QKNorm(nn.Module):
-    """RMSNorm on query and key heads; value is untouched.
+    """RMSNorm on query and key; value is untouched. The two norms share no weights.
 
-    ``q`` and ``k`` are ``[B, H, L, D]``, or any layout whose last dim is the head
-    dim. The two norms share no weights.
+    The width a norm spans is a fact about the checkpoint: an RMS over one head is not
+    an RMS over the concatenated head vector, so normalising before the split into heads
+    is a different operation from normalising after it, and the checkpoint's own norm
+    shape decides which. Before the split also means the tensors have not yet reached the
+    layout :func:`thenoise.utils.attention.attention` asks for.
     """
 
     def __init__(self, dim: int, eps: float = 1e-5) -> None:

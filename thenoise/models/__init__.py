@@ -20,6 +20,7 @@ from .zimage import ZImageModel
 from .qwen_image import QwenImageModel
 from .qwen_image21 import QwenImage21Model
 from .wan_video import Wan22Model
+from .ltx_video import LTX23Video, LTX25Video
 
 MODEL_CATALOG: list[type] = [
     Krea2Model,
@@ -35,6 +36,8 @@ MODEL_CATALOG: list[type] = [
     MossImageModel,
     Fibo2Model,
     Wan22Model,
+    LTX23Video,
+    LTX25Video,
 ]
 
 

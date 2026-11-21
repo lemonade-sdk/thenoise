@@ -1297,6 +1297,134 @@ def wan22_block_5b(ctx: Ctx, tokens: int, scenario: str) -> Case:
     return _wan_case(ctx, tokens, "block_5b", WAN_5B, token_temb=False)
 
 
+# ------------------------------------------------------------------------------ ltx
+
+#: As `ltx-2.3-22b-distilled-1.1.safetensors` states them, read out of its header by
+#: ``detect_params``: video trunk 4096 over 32 heads of 128, audio trunk 2048 over 32
+#: heads of 64, each stream's prompt width equal to its own trunk, prompt modulation on.
+#: Both releases carry these numbers; 2.5 adds the keyframe embedding, which is outside
+#: the block.
+LTX_VDIM, LTX_ADIM = 4096, 2048
+LTX_ACROSS = 2048           # the reciprocal attentions' width, which both sides share:
+                            # they run on the audio heads, so a rotation of 64 channels
+LTX_FRAMES = 16           # five seconds at 24 fps over the video codec's 8x folding,
+                          # which makes the default ladder 16x16x16, 16x24x24, 16x32x32
+LTX_FPS = 24
+LTX_VIDEO_SCALE = 8         # the video codec's temporal folding, which turns the latent
+                            # frame count back into the seconds a clip lasts
+LTX_AUDIO_SCALE = 4       # the audio codec's temporal folding: 25 latent tokens a second
+LTX_AUDIO_TPS = (16000 / 160) / LTX_AUDIO_SCALE
+
+
+def _ltx_projections(attn) -> tuple[int, int]:
+    """One attention's weights, split by the stream that feeds them: ``q``, ``o`` and
+    the gate see the queries; ``k`` and ``v`` see the keys, which for the prompt and
+    cross-modality attentions is a different stream at a different length."""
+    query = gemm_params(attn.to_q) + gemm_params(attn.to_out)
+    if attn.to_gate_logits is not None:
+        query += gemm_params(attn.to_gate_logits)
+    return query, gemm_params(attn.to_k) + gemm_params(attn.to_v)
+
+
+def _ltx_case(ctx: Ctx, tokens: int, role: str, token_timestep: bool) -> Case:
+    """One LTX AV block: both streams, both prompt attentions, and the two reciprocal
+    cross-modal ones that make it one model rather than two.
+
+    A rung is a *clip*, so the video grid keeps its temporal axis. The audio stream is
+    however many tokens the same duration costs the audio codec, and so does not follow
+    the resolution — exactly as in a render, where a step's two streams differ in length
+    and only one of them moves between resolutions.
+
+    The modulation tensors are the block's inputs rather than the timesteps: rows of
+    ``dim`` per AdaLN slot, one row for the batch except where noted. Phases come from
+    ``AVRope``, which is where the model gets them, in fp32 beside bf16 activations.
+    """
+    from thenoise.dit.ltx_video.rope import AVRope
+    from thenoise.dit.ltx_video.transformer import (AUDIO_HEAD_DIM, VIDEO_HEAD_DIM,
+                                                    _AVBlock)
+    from thenoise.utils.dynamo import mark_token_axis
+
+    vdim, adim = LTX_VDIM, LTX_ADIM
+    vheads, aheads = vdim // VIDEO_HEAD_DIM, adim // AUDIO_HEAD_DIM
+    vctx, actx = vdim, adim           # a release ships each prompt width as its trunk
+    frames = LTX_FRAMES
+    side = int(round(math.sqrt(max(tokens, frames) / frames)))
+    if frames * side * side != tokens:
+        print(f"  (snapping {tokens} video tokens to {frames}x{side}x{side})",
+              file=sys.stderr)
+    n = frames * side * side
+    seconds = ((LTX_VIDEO_SCALE * (frames - 1) + 1) / LTX_FPS)
+    audio_tokens = max(1, round(seconds * LTX_AUDIO_TPS))
+    txt = ctx.txt
+    name = f"ltx/{role}"
+
+    blk = new_block(ctx, name, _AVBlock, vdim, adim, vheads, aheads, VIDEO_HEAD_DIM,
+                    AUDIO_HEAD_DIM, vctx, actx, True, True, True, True, True, True)
+    seed_inputs(name, "plain", n)
+
+    v = randn(ctx, 1, n, vdim)
+    a = randn(ctx, 1, audio_tokens, adim)
+    vtext, atext = randn(ctx, 1, txt, vctx), randn(ctx, 1, txt, actx)
+    key_mask = torch.ones(1, txt, device=ctx.tdev, dtype=ctx.dtype)
+    # 9 AdaLN slots per stream once prompt modulation is wired in: 6 for the block's own
+    # norms and gates, 3 more for the prompt attention's.
+    vtime = randn(ctx, 1, n if token_timestep else 1, 9 * vdim)
+    atime = randn(ctx, 1, 1, 9 * adim)
+    v_cross, a_cross = randn(ctx, 1, 1, 4 * vdim), randn(ctx, 1, 1, 4 * adim)
+    v_gate, a_gate = randn(ctx, 1, 1, vdim), randn(ctx, 1, 1, adim)
+    v_prompt, a_prompt = randn(ctx, 1, 1, 2 * vdim), randn(ctx, 1, 1, 2 * adim)
+
+    dev = ctx.tdev
+    v_rope = AVRope(vdim, vheads, modality="video").video(1, frames, side, side,
+                                                          float(LTX_FPS), dev)
+    a_rope = AVRope(adim, aheads, modality="audio",
+                    scale_factors=(LTX_AUDIO_SCALE,)).audio(1, audio_tokens, dev)
+    # Cross-modality attention carries only each stream's time coordinate.
+    v_ca_rope = AVRope(LTX_ACROSS, vheads, modality="video").video_time(
+        1, frames, side, side, float(LTX_FPS), dev)
+    a_ca_rope = AVRope(LTX_ACROSS, aheads, modality="audio",
+                       scale_factors=(LTX_AUDIO_SCALE,)).audio(1, audio_tokens, dev)
+
+    def run():
+        mark_token_axis(v, a, vtext, atext, vtime, atime, v_cross, a_cross,
+                        v_gate, a_gate, v_prompt, a_prompt, key_mask)
+        mark_token_axis(*v_rope, *a_rope, *v_ca_rope, *a_ca_rope, dim=-2)
+        return blk(v, a, vtext, atext, vtime, atime, v_cross, a_cross, v_gate, a_gate,
+                   v_prompt, a_prompt, v_rope, a_rope, v_ca_rope, a_ca_rope,
+                   key_mask, key_mask, None)
+
+    video, audio = (vheads, VIDEO_HEAD_DIM), (aheads, AUDIO_HEAD_DIM)
+    flops = 0.0
+    for attn, shape, queries, keys in (
+            (blk.attn1, video, n, n),
+            (blk.audio_attn1, audio, audio_tokens, audio_tokens),
+            (blk.attn2, video, n, txt),
+            (blk.audio_attn2, audio, audio_tokens, txt),
+            # The reciprocal attentions run on the audio heads on both sides.
+            (blk.audio_to_video_attn, audio, n, audio_tokens),
+            (blk.video_to_audio_attn, audio, audio_tokens, n)):
+        query, key_values = _ltx_projections(attn)
+        flops += gemm_flops((query, queries), (key_values, keys))
+        flops += attn_flops(*shape, ((queries, keys),))
+    flops += gemm_flops((gemm_params(blk.ff), n), (gemm_params(blk.audio_ff),
+                                                   audio_tokens))
+    return Case(run, flops, n + audio_tokens,
+                detail=f"{vdim}+{adim}w {frames}x{side}x{side} a={audio_tokens} txt={txt}")
+
+
+@fixture("ltx", "av")
+def ltx_av(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """LTX 2.3/2.5's AV block at 22B, one timestep row for the batch."""
+    return _ltx_case(ctx, tokens, "av", token_timestep=False)
+
+
+@fixture("ltx", "av_i2v")
+def ltx_av_i2v(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """The same block as an image-conditioned step runs it: a timestep row per video
+    token, because the reference frame's tokens are pinned to a different one."""
+    return _ltx_case(ctx, tokens, "av_i2v", token_timestep=True)
+
+
 # ------------------------------------------------------------------ measurement
 @dataclass
 class Timing:

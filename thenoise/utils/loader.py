@@ -10,7 +10,8 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
-from typing import Callable, Optional, Union
+from pathlib import Path
+from typing import Callable, Mapping, Optional, Sequence, Union
 
 import torch
 
@@ -179,6 +180,127 @@ def load_module_state(
         )
 
 
+def _quantized_owner(key: str) -> Optional[str]:
+    """The weight a quantization key describes, or None when it describes none."""
+    for suffixes in (_WEIGHT_SCALE_SUFFIXES, _INPUT_SCALE_SUFFIXES):
+        stem = _strip_suffix(key, suffixes)
+        if stem is not None:
+            return stem + ".weight"
+    if key.endswith(_COMFY_QUANT_SUFFIX):
+        return key[:-len(_COMFY_QUANT_SUFFIX)] + ".weight"
+    return None
+
+
+def partition_keys(
+    header, parts: Mapping[str, Mapping[str, tuple[int, ...]]], *,
+    part_of: Callable[[str], tuple[Optional[str], Optional[str]]],
+    strict: frozenset = frozenset(),
+) -> tuple[dict, dict]:
+    """Sort one file's tensors into the parts they fill.
+
+    Answers ``(part -> raw key -> module key, part -> raw key -> module key)``: what to
+    read, and what the file spelled as a part while having no parameter for it. One walk
+    of the header is the point -- a checkpoint that packs several components into one file
+    is asked once, however many of them it answers.
+
+    ``parts`` is each part's parameter shapes and ``part_of`` says which part a raw key
+    spells, answering ``(None, None)`` for a tensor that fills nothing here.
+
+    ``strict`` names the parts this file was given for. A tensor that spells such a part
+    and has no home in it is refused; for a part found by looking it is only reported, so
+    a file carrying more than the engine reads still answers the parts it does fit.
+    """
+    picked: dict = {name: {} for name in parts}
+    rejected: dict = {name: {} for name in parts}
+
+    def refuse(name: str, reason: str) -> None:
+        if name in strict:
+            raise ValueError(reason)
+
+    for raw, entry in header.raw_entries.items():
+        if unwrap_key(raw) in CHECKPOINT_MARKER_KEYS or raw.endswith(RUNTIME_STATE_SUFFIXES):
+            continue
+        name, target = part_of(raw)
+        if name not in parts or target is None:
+            continue
+        expected = parts[name]
+        if _is_scaled_fp8_marker(target):
+            picked[name][raw] = target
+            continue
+        if _is_quant_metadata(target):
+            if _quantized_owner(target) not in expected:
+                rejected[name][raw] = target
+                refuse(name, f"{header.path}: {target!r} is quantization metadata "
+                             f"for no {name} weight here")
+                continue
+        elif target not in expected:
+            rejected[name][raw] = target
+            refuse(name, f"{header.path}: unexpected {name} tensor {raw!r} -> {target!r}")
+            continue
+        elif tuple(entry["shape"]) != expected[target]:
+            rejected[name][raw] = target
+            refuse(name, f"{header.path}: {raw!r} shape {entry['shape']} != {expected[target]}")
+            continue
+        if target in picked[name].values():
+            refuse(name, f"{header.path}: duplicate {name} weight {target!r}")
+            continue
+        picked[name][raw] = target
+    return picked, rejected
+
+
+def load_selected_state(
+    model: torch.nn.Module, sources: Sequence[tuple[str, Mapping[str, str]]], *,
+    dtype: Optional[torch.dtype], device: Union[str, torch.device], what: str,
+) -> None:
+    """Fill one module from ``(file, {raw key: module key})`` pairs, reading only those keys.
+
+    For the component that is a slice of a bigger file, where reading the whole file
+    would materialize tensors belonging to something else. Every parameter of ``model``
+    has to arrive, from one file or several; a parameter filled twice is a collision
+    between two files and is refused.
+
+    ``device`` is where the tensors are materialized, so a component the memory manager
+    wants resident is read straight onto the device rather than staged through system
+    RAM and copied. ``model`` may still be on meta: the tensors arrive and replace it.
+
+    Quantized or plain is decided by the tensors that arrive rather than by the file,
+    because a checkpoint that packs a quantized transformer with full-precision codecs is
+    mixed, and the file-level answer is wrong for half of it.
+    """
+    device = torch.device(device)
+    weights: dict[str, torch.Tensor] = {}
+    used: list[str] = []
+    for path, selected in sources:
+        if not selected:
+            continue
+        data = load_safetensors(path, device, keys=set(selected))
+        clash = set(selected.values()) & set(weights)
+        if clash:
+            raise ValueError(f"{path}: duplicate {what} weight {sorted(clash)[:3]}")
+        for raw, tensor in data.items():
+            weights[selected[raw]] = tensor
+        used.append(path)
+
+    expected = model.state_dict()
+    missing = sorted(set(expected) - set(weights))
+    if missing:
+        raise ValueError(f"{what} weights in {', '.join(used)} leave missing={missing[:8]}"
+                         " (no random/meta weight fallback)")
+    if any(key.endswith(_WEIGHT_SCALE_SUFFIXES) for key in weights) or any(
+            t.dtype == torch.int8 or str(t.dtype).startswith("torch.float8")
+            for t in weights.values()):
+        load_quantized_state_dict(model, weights, dtype=dtype)
+    else:
+        load_module_state(model, {k: v.to(dtype=dtype) if v.is_floating_point() else v
+                                  for k, v in weights.items()},
+                          ", ".join(used), what=what)
+    leftover = [key for key, p in model.named_parameters() if p.is_meta]
+    leftover += [key for key, b in model.named_buffers() if b.is_meta]
+    if leftover:
+        raise RuntimeError(f"{what} left uninitialized: {leftover[:8]}")
+    model.to(device)
+
+
 def _load_into(
     model: torch.nn.Module,
     checkpoint: Union[str, Header],
@@ -280,6 +402,21 @@ def load_dit(
         allow_missing=expected_missing,
         quantized_restore=True,
     )
+
+
+def spiece_model(checkpoint: Union[str, Path]) -> bytes:
+    """The serialized SentencePiece proto a text-encoder file ships beside its weights.
+
+    It is tokenizer payload rather than module state, so the weight load drops the key
+    and a tokenizer is built from these bytes instead of a vendored copy of them.
+    """
+    with MemoryEfficientSafeOpen(str(checkpoint)) as f:
+        names = sorted(k for k in f.keys() if k.rsplit(".", 1)[-1] == "spiece_model")
+        if not names:
+            raise ValueError(f"{checkpoint} carries no SentencePiece tokenizer")
+        if f.header[names[0]]["dtype"] != "U8":
+            raise ValueError(f"{checkpoint} stores its spiece_model as something else")
+        return f.get_tensor(names[0]).numpy().tobytes()
 
 
 def load_text_encoder_weights(
@@ -647,6 +784,8 @@ def restore_quantized_layer(
     # The activation scale belongs to the checkpoint's export, not to this layer's
     # history: restoring the weight must not silently drop it.
     module.load_quantized(qt, input_scale=getattr(module, "input_scale", None))
+
+
 
 
 __all__ = [

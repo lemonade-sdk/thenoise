@@ -43,6 +43,8 @@ from thenoise.models import (  # noqa: E402
     MossImageModel,
     QwenImageModel,
     QwenImage21Model,
+    LTX23Video,
+    LTX25Video,
     VideoModel,
     Wan22Model,
     ZImageModel,
@@ -292,6 +294,25 @@ def wan_prefs(variant: str = "ti2v_5b") -> dict:
     if spec.ref_method is not None:
         prefs["ref_method"] = spec.ref_method
     return prefs
+
+
+def tiny_ltx_video_vae():
+    """The LTX video codec at the smallest size its block arithmetic accepts."""
+    from thenoise.vae.ltx_video import LTXVideoVAE
+
+    return LTXVideoVAE(
+        in_channels=3, out_channels=3, latent_channels=8, patch_size=2,
+        block_out_channels=(32, 64), down_block_types=("LTX2VideoDownBlock3D",) * 2,
+        decoder_block_out_channels=(32, 64),
+        layers_per_block=(1, 1, 1), decoder_layers_per_block=(1, 1, 1),
+        spatio_temporal_scaling=(True, True),
+        decoder_spatio_temporal_scaling=(True, True),
+        decoder_inject_noise=(False,) * 3,
+        downsample_type=("spatiotemporal", "spatiotemporal"),
+        upsample_type=("spatiotemporal", "spatiotemporal"),
+        upsample_factor=(2, 2), upsample_residual=(False,) * 2,
+        spatial_compression_ratio=8, temporal_compression_ratio=4,
+    ).eval()
 
 
 def comfy_quant(convrot: bool = True, groupsize: int = 256) -> torch.Tensor:
@@ -841,6 +862,25 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
             "time_embedding.0.weight",
         ],
     ),
+    # LTX audiovisual key signatures, in original and Comfy-wrapped files.
+    "ltx23": (LTX23Video, [
+        "patchify_proj.weight",
+        "audio_patchify_proj.weight",
+    ]),
+    "ltx23_wrapped": (LTX23Video, [
+        "model.diffusion_model.patchify_proj.weight",
+        "model.diffusion_model.audio_patchify_proj.weight",
+    ]),
+    "ltx25": (LTX25Video, [
+        "patchify_proj.weight",
+        "audio_patchify_proj.weight",
+        "keyframes_abs_pos_embedding",
+    ]),
+    "ltx25_wrapped": (LTX25Video, [
+        "model.diffusion_model.patchify_proj.weight",
+        "model.diffusion_model.audio_patchify_proj.weight",
+        "model.diffusion_model.keyframes_abs_pos_embedding",
+    ]),
     "unknown": (None, ["some.random.key", "blocks.0.attn.gate.weight"]),
 }
 
@@ -933,7 +973,7 @@ class StubVideo(VideoModel):
         return torch.zeros(1, self.Z_DIM, 1, pixels.shape[-2] // self.SCALE,
                            pixels.shape[-1] // self.SCALE)
 
-    def decode_frames(self, latents):
+    def decode_frames(self, latents, params):
         for _ in range(latents.shape[2]):
             yield torch.zeros(3, latents.shape[3] * self.SCALE,
                               latents.shape[4] * self.SCALE)
@@ -1157,6 +1197,7 @@ def fake_model_cls():
             "name": name,
             "MEDIUM": "image",
             "REQUIRED_COMPONENTS": ("vae", "text_encoder"),
+            "COMPONENT_ROLES": (),
             "__init__": __init__,
             "detect": classmethod(lambda cls, header: False),
             # A catalog entry answers for its own DiT files and releases its own state;
