@@ -128,7 +128,7 @@ class LTX2TextConnectors(nn.Module):
     def dtype(self) -> torch.dtype:
         # Choose an unquantized normalisation tensor rather than the ConvRot
         # projection: QuantizedTensor storage dtype may be INT8.
-        return self.video_connector.transformer_blocks[0].attn1.norm_q.weight.dtype
+        return self.video_connector.transformer_blocks[0].attn1.qk_norm.query_norm.weight.dtype
 
     def forward(self, hidden: torch.Tensor, attention_mask: torch.Tensor
                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

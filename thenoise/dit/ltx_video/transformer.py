@@ -23,6 +23,7 @@ from torch import nn
 from thenoise.dit.quantized import QuantizedLinear
 
 from thenoise.utils.attention import AttentionParams, attention
+from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.rope import apply_ltx_rope_split_half
 from thenoise.utils.timestep import timestep_embedding
 
@@ -99,8 +100,7 @@ class _LTXAttention(nn.Module):
         inner = heads * head_dim
         self.heads = heads
         self.head_dim = head_dim
-        self.norm_q = nn.RMSNorm(inner, eps=1e-6)
-        self.norm_k = nn.RMSNorm(inner, eps=1e-6)
+        self.qk_norm = QKNorm(inner, eps=1e-6)
         self.to_q = QuantizedLinear(query_dim, inner, bias=True)
         self.to_k = QuantizedLinear(cross_dim, inner, bias=True)
         self.to_v = QuantizedLinear(cross_dim, inner, bias=True)
@@ -114,8 +114,7 @@ class _LTXAttention(nn.Module):
         if context is None:
             context = x
         logits = self.to_gate_logits(x) if self.to_gate_logits is not None else None
-        q = self.norm_q(self.to_q(x))
-        k = self.norm_k(self.to_k(context))
+        q, k = self.qk_norm(self.to_q(x), self.to_k(context))
         v = self.to_v(context)
         b, q_tokens, _ = q.shape
         k_tokens = k.shape[1]

@@ -22,6 +22,34 @@ from conftest import tiny_ltx_video_vae
 
 
 
+def test_a_qk_norm_spans_the_projection_the_checkpoint_measured():
+    """One RMS over the whole projection, before the split into heads.
+
+    The width is numerical, not cosmetic: over ``heads * head_dim`` a norm mixes heads,
+    over ``head_dim`` it does not, and only the first matches the released weight. It
+    also fixes the layout the norm runs in, which this checkpoint puts before the split.
+    """
+    from thenoise.dit.ltx_video.transformer import _LTXAttention
+
+    heads, head_dim = 4, 8
+    attn = _LTXAttention(query_dim=16, cross_dim=16, heads=heads, head_dim=head_dim,
+                         gated=False).eval()
+    assert attn.qk_norm.query_norm.weight.shape == (heads * head_dim,)
+
+    x = torch.randn(2, 5, 16)
+    with torch.inference_mode():
+        raw = attn.to_q(x)
+        normed = attn.qk_norm.query_norm(raw)
+    weight = attn.qk_norm.query_norm.weight
+    whole = raw * torch.rsqrt(raw.square().mean(-1, keepdim=True) + 1e-6) * weight
+    assert torch.allclose(normed, whole, atol=1e-6)
+
+    per_head = raw.reshape(*raw.shape[:2], heads, head_dim)
+    per_head = per_head * torch.rsqrt(per_head.square().mean(-1, keepdim=True) + 1e-6)
+    per_head = per_head * weight.reshape(heads, head_dim)
+    assert not torch.allclose(normed, per_head.reshape(raw.shape), atol=1e-3)
+
+
 def test_a_prompt_runs_at_its_own_length_and_is_padded_afterwards():
     """Gemma sees the prompt; the connectors' register-block context is filled after it.
 

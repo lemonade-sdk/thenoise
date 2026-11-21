@@ -18,6 +18,7 @@ from thenoise.dit.ltx_video.transformer import (
     AUDIO_HEAD_DIM, LTXParams, VIDEO_HEAD_DIM,
 )
 from thenoise.utils.loader import load_selected_state, partition_keys
+from thenoise.utils.qk_norm import qk_norm_key_map
 from thenoise.utils.safetensors import (
     Signature, as_header, require_divisible, unwrap_key,
 )
@@ -50,8 +51,6 @@ _COMMON_TRANSFORMER_RENAMES = (
     ("patchify_proj", "proj_in"),
     ("audio_prompt_adaln_single", "audio_prompt_adaln"),
     ("prompt_adaln_single", "prompt_adaln"),
-    ("q_norm", "norm_q"),
-    ("k_norm", "norm_k"),
 )
 _CONNECTOR_PREFIXES = (
     "connectors.", "video_embeddings_connector.",
@@ -67,6 +66,13 @@ def _strip_dit_prefix(k: str) -> str:
     return k
 
 
+def _qk_layout(k: str) -> str:
+    """The two spellings the releases use for a QK norm, onto the shared module's names."""
+    for legacy in (("q_norm", "k_norm"), ("norm_q", "norm_k")):
+        k = qk_norm_key_map(k, *legacy)
+    return k
+
+
 def split_ltx_key(raw: str) -> tuple[str, str] | None:
     """Return (component, target parameter) for an original checkpoint tensor."""
     k = _strip_dit_prefix(raw)
@@ -79,10 +85,9 @@ def split_ltx_key(raw: str) -> tuple[str, str] | None:
             ("transformer_1d_blocks", "transformer_blocks"),
             ("text_embedding_projection.audio_aggregate_embed", "audio_text_proj_in"),
             ("text_embedding_projection.video_aggregate_embed", "video_text_proj_in"),
-            ("q_norm", "norm_q"), ("k_norm", "norm_k"),
         ):
             k = k.replace(a, b)
-        return "connectors", k
+        return "connectors", _qk_layout(k)
     if k.startswith("vae.") or k.startswith("audio_vae.") or k.startswith("vocoder."):
         prefix, rest = k.split(".", 1)
         return prefix, rest
@@ -94,7 +99,7 @@ def split_ltx_key(raw: str) -> tuple[str, str] | None:
         return "dit", "audio_time_embed." + k[len("audio_adaln_single."):]
     for a, b in _COMMON_TRANSFORMER_RENAMES:
         k = k.replace(a, b)
-    return "dit", k
+    return "dit", _qk_layout(k)
 
 
 def _remap_vae(k: str) -> str | None:
