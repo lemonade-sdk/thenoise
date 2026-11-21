@@ -125,25 +125,22 @@ class LTXVideo(VideoModel):
         self._params: VideoSamplingParams | None = None
 
         gemma, self.tokenizer, text_cfg = load_ltx_gemma(
-            self.text_encoder_path, version=self.version, cancel=lambda: None,
+            self.text_encoder_path, version=self.version,
         )
-        components, sources = load_original_components(
+        components, _ = load_original_components(
             {"": self.dit_path, "vae": self.vae_path, **config.extra_paths,
              "text_encoder": self.text_encoder_path},
             version=self.version, gemma_text_config=text_cfg,
-            cancel=lambda: None, headers=config.all_headers(),
+            headers=config.all_headers(),
+            device_for=self._load_target_all,
         )
-        # Connectors are part of the text-encoder residency role, not the DiT.
-        self.dit = components["dit"].to(self._load_target(str(sources["dit"])))
-        self.vae = components["vae"].to(self._load_target(str(sources["vae"])))
-        self.audio_vae = components["audio_vae"].to(
-            self._load_target(str(sources["audio_vae"])))
+        self.dit = components["dit"]
+        self.vae = components["vae"]
+        self.audio_vae = components["audio_vae"]
         self.vocoder = components["vocoder"]
-        self.upscaler = components["upscaler"].to(
-            self._load_target(str(sources["upscaler"])))
+        self.upscaler = components["upscaler"]
         self.text_encoder = _PromptTower(gemma, components["connectors"])
         self.text_encoder.to(self._load_target(self.text_encoder_path))
-        self.vocoder.to(self._load_target(str(sources["vocoder"])))
         for role in ("vae", "audio_vae", "vocoder", "upscaler", "text_encoder"):
             self.memory.register(role, getattr(self, role))
         self.memory.register("dit", self.dit)

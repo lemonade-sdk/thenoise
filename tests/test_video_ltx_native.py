@@ -330,7 +330,7 @@ def _load_part(part: str, module, file, prefix: str = ""):
 
     load_selected_state(
         module, [(str(file), {prefix + key: key for key in module.state_dict()})],
-        cancel=lambda: None, dtype=torch.float32, what=f"LTX {part}")
+        dtype=torch.float32, device="cpu", what=f"LTX {part}")
     module.eval()
     return module
 
@@ -392,7 +392,8 @@ def _monolith_keys(weight):
 def _load(m, files, version="2.3"):
     return m.load_original_components(files, version=version,
                                       gemma_text_config=object(),
-                                      cancel=lambda: None, dtype=torch.float32)
+                                      device_for=lambda paths: "cpu",
+                                      dtype=torch.float32)
 
 
 def _upscaler_file(tmp_path, weight):
@@ -423,6 +424,32 @@ def test_a_named_file_takes_its_part_from_the_all_in_one(tmp_path, monkeypatch):
     assert sources["vae"] == codec.resolve()
     assert sources["vocoder"] == monolith.resolve()
     torch.testing.assert_close(parts["vae"].weight, weight)
+
+
+def test_a_part_is_asked_where_the_files_that_carry_it_should_live(tmp_path, monkeypatch):
+    """The memory manager decides placement from the files a part arrives from, and the
+    read goes there directly -- a copy afterwards would double a 22 GB transformer."""
+    m = _tiny_components(monkeypatch)
+    weight = torch.ones(2, 2)
+    keys = _monolith_keys(weight)
+    del keys["vae.weight"]
+    monolith = _save(tmp_path / "all-in-one.safetensors", keys)
+    codec = _save(tmp_path / "video-vae.safetensors", {"vae.weight": weight})
+    ups = _upscaler_file(tmp_path, weight)
+
+    asked: list[list[Path]] = []
+
+    def device_for(paths):
+        asked.append(list(paths))
+        return "cpu"
+
+    m.load_original_components({"": monolith, "vae": codec, "upscaler": ups},
+                               version="2.3", gemma_text_config=object(),
+                               dtype=torch.float32, device_for=device_for)
+    assert asked.count([monolith.resolve()]) == 4, "dit, audio_vae, vocoder, connectors"
+    assert asked.count([codec.resolve()]) == 1
+    assert asked.count([ups.resolve()]) == 1
+    assert len(asked) == 6
 
 
 def test_a_file_naming_a_part_without_fitting_it_is_not_taken_for_it(tmp_path, monkeypatch):
@@ -484,7 +511,7 @@ def test_split_connectors_are_complete_across_dit_and_text_file(tmp_path, monkey
             {"": path_dit, "vae": path_vae, "audio_vae": path_audio,
              "upscaler": path_upscaler, "text_encoder": path_text},
             version="2.5", gemma_text_config=object(),
-            cancel=lambda: None, dtype=torch.float32,
+            device_for=lambda paths: "cpu", dtype=torch.float32,
         )
 
     projections = {
@@ -610,10 +637,10 @@ def test_native_ltx_spatial_upscaler_streams_original_checkpoint_keys(tmp_path):
 def test_ltx_gemma3_requires_single_safetensors_file(tmp_path):
     from thenoise.text_encoders.ltx_video import load_ltx_gemma
     with pytest.raises(ValueError, match="one existing"):
-        load_ltx_gemma(tmp_path, version="2.3", cancel=lambda: None)
+        load_ltx_gemma(tmp_path, version="2.3")
     with pytest.raises(ValueError, match="one existing"):
         load_ltx_gemma(tmp_path / "model-00001-of-00005.safetensors",
-                       version="2.3", cancel=lambda: None)
+                       version="2.3")
 
 
 def test_ltx_gemma3_vendored_minimal_assets():

@@ -350,7 +350,8 @@ def _mapped(raw: str, *, transformer: bool = False,
 
 
 def load_original_components(
-    files: dict[str, str | Path], *, version: str, cancel: Callable[[], None],
+    files: dict[str, str | Path], *, version: str,
+    device_for: Callable[[list[Path]], object],
     dtype=torch.bfloat16, gemma_text_config=None, headers: Mapping[str, object] | None = None,
 ) -> tuple[dict, dict[str, Path]]:
     """Build every LTX component from the files a request named by role (``""`` is the
@@ -360,6 +361,10 @@ def load_original_components(
     tensors; the connector pair is read from every file that carries it. ``headers`` is
     the runtime's own parsed headers by role, so a checkpoint is opened once however many
     parts ask about it.
+
+    ``device_for`` answers where the part arriving from the given files should live -- the
+    memory manager's decision, made on the bytes of those files -- and the tensors are read
+    there, so a 22 GB transformer does not pass through system RAM on its way to the card.
     """
     modules = dict(
         dit=make_transformer(version), vae=make_video_vae(),
@@ -382,7 +387,6 @@ def load_original_components(
     picks: dict[str, dict[Path, dict[str, str]]] = {name: {} for name in modules}
     misses: dict[str, list[tuple[Path, str]]] = {name: [] for name in modules}
     for role, path in given.items():
-        cancel()
         named = named_parts[path]
         chosen, rejected = partition_keys(
             _header(role, path, headers), expected,
@@ -412,7 +416,8 @@ def load_original_components(
     for name, module in modules.items():
         load_selected_state(
             module, [(str(path), picks[name][path]) for path in sources[name]],
-            cancel=cancel, dtype=dtype, what=f"LTX {name}")
+            dtype=dtype, device=device_for(sources[name]),
+            what=f"LTX {name}")
         module.eval()
     return modules, {name: paths[0] for name, paths in sources.items()}
 

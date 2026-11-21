@@ -249,7 +249,7 @@ def partition_keys(
 
 def load_selected_state(
     model: torch.nn.Module, sources: Sequence[tuple[str, Mapping[str, str]]], *,
-    cancel: Callable[[], None], dtype: Optional[torch.dtype], what: str,
+    dtype: Optional[torch.dtype], device: Union[str, torch.device], what: str,
 ) -> None:
     """Fill one module from ``(file, {raw key: module key})`` pairs, reading only those keys.
 
@@ -258,17 +258,21 @@ def load_selected_state(
     has to arrive, from one file or several; a parameter filled twice is a collision
     between two files and is refused.
 
+    ``device`` is where the tensors are materialized, so a component the memory manager
+    wants resident is read straight onto the device rather than staged through system
+    RAM and copied. ``model`` may still be on meta: the tensors arrive and replace it.
+
     Quantized or plain is decided by the tensors that arrive rather than by the file,
     because a checkpoint that packs a quantized transformer with full-precision codecs is
     mixed, and the file-level answer is wrong for half of it.
     """
+    device = torch.device(device)
     weights: dict[str, torch.Tensor] = {}
     used: list[str] = []
     for path, selected in sources:
-        cancel()
         if not selected:
             continue
-        data = load_safetensors(path, device="cpu", keys=set(selected))
+        data = load_safetensors(path, device, keys=set(selected))
         clash = set(selected.values()) & set(weights)
         if clash:
             raise ValueError(f"{path}: duplicate {what} weight {sorted(clash)[:3]}")
@@ -293,6 +297,7 @@ def load_selected_state(
     leftover += [key for key, b in model.named_buffers() if b.is_meta]
     if leftover:
         raise RuntimeError(f"{what} left uninitialized: {leftover[:8]}")
+    model.to(device)
 
 
 def _load_into(

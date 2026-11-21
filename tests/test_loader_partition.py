@@ -87,7 +87,7 @@ def test_a_part_is_filled_from_several_files_but_filled_once(tmp_path):
         module = torch.nn.Linear(2, 2)
     load_selected_state(module, [(str(weights), {"a.weight": "weight"}),
                                  (str(biases), {"b.bias": "bias"})],
-                        cancel=lambda: None, dtype=torch.float32, what="dit")
+                        device="cpu", dtype=torch.float32, what="dit")
     torch.testing.assert_close(module.weight, torch.ones(2, 2))
     torch.testing.assert_close(module.bias, torch.zeros(2))
 
@@ -98,7 +98,7 @@ def test_a_part_is_filled_from_several_files_but_filled_once(tmp_path):
     with pytest.raises(ValueError, match="duplicate dit weight"):
         load_selected_state(module, [(str(weights), {"a.weight": "weight"}),
                                      (str(again), {"a.weight": "weight"})],
-                            cancel=lambda: None, dtype=torch.float32, what="dit")
+                            device="cpu", dtype=torch.float32, what="dit")
 
 
 def test_a_part_that_ends_up_short_names_the_files_that_came_up_short(tmp_path):
@@ -108,7 +108,7 @@ def test_a_part_that_ends_up_short_names_the_files_that_came_up_short(tmp_path):
         module = torch.nn.Linear(2, 2)
     with pytest.raises(ValueError, match=r"leave missing=\['bias'\]"):
         load_selected_state(module, [(str(path), {"weight": "weight"})],
-                            cancel=lambda: None, dtype=torch.float32, what="vae")
+                            device="cpu", dtype=torch.float32, what="vae")
 
 
 def test_the_keys_it_was_given_are_the_keys_it_reads(tmp_path):
@@ -119,7 +119,7 @@ def test_the_keys_it_was_given_are_the_keys_it_reads(tmp_path):
     with torch.device("meta"):
         module = torch.nn.Linear(2, 2, bias=False)
     load_selected_state(module, [(str(path), {"want.weight": "weight"})],
-                        cancel=lambda: None, dtype=torch.float32, what="vae")
+                        device="cpu", dtype=torch.float32, what="vae")
     torch.testing.assert_close(module.weight, torch.full((2, 2), 3.))
 
 
@@ -132,7 +132,7 @@ def test_int8_without_its_scale_is_refused(tmp_path):
         module = torch.nn.ModuleDict({"layer": QuantizedLinear(4, 2, bias=False)})
     with pytest.raises(RuntimeError, match="missing its"):
         load_selected_state(module, [(str(path), {"layer.weight": "layer.weight"})],
-                            cancel=lambda: None, dtype=torch.bfloat16, what="dit")
+                            device="cpu", dtype=torch.bfloat16, what="dit")
 
 
 def test_buffers_and_parameters_both_arrive(tmp_path):
@@ -144,7 +144,7 @@ def test_buffers_and_parameters_both_arrive(tmp_path):
         module.register_buffer("running", torch.zeros(3))
     load_selected_state(module, [(str(path), {"weight": "weight", "bias": "bias",
                                               "running": "running"})],
-                        cancel=lambda: None, dtype=torch.float32, what="dit")
+                        device="cpu", dtype=torch.float32, what="dit")
     assert not any(x.is_meta for x in (*module.parameters(), *module.buffers()))
     torch.testing.assert_close(module(torch.ones(2)), torch.tensor([3., 3., 3.]))
     torch.testing.assert_close(module.running, torch.full((3,), 5.))

@@ -275,7 +275,7 @@ def _load_ltx_text_weights(module, path: Path, key_map, drop_keys: tuple[str, ..
 
 
 
-def load_ltx_gemma(path: str | Path, *, version: str, cancel):
+def load_ltx_gemma(path: str | Path, *, version: str):
     """Return `(GemmaFeatures, tokenizer, text_config)` on CPU.
 
     Model weights come from one safetensors file. Gemma3 uses local
@@ -288,7 +288,6 @@ def load_ltx_gemma(path: str | Path, *, version: str, cancel):
         raise RuntimeError("LTX text encoding requires transformers>=5.4") from e
 
     path = Path(path).expanduser()
-    cancel()
     if not path.is_file() or path.suffix != ".safetensors":
         raise ValueError(f"LTX {version} text encoder requires one existing .safetensors file: {path}")
     if version == "2.3":
