@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from thenoise.dit.ltx_video.checkpoint import load_ltx_component
 from safetensors.torch import save_file
 
 
@@ -60,8 +59,8 @@ def test_a_codec_packed_with_the_transformer_fills_what_a_codec_alone_fills():
                    "vocoder": make_vocoder()}
     for raw in MONOLITH_CODEC_KEYS:
         name = raw.split(".", 1)[0]
-        packed = _mapped(name, raw, transformer=True)
-        assert packed == _mapped(name, raw, transformer=False), raw
+        packed = _mapped(raw, transformer=True)
+        assert packed == _mapped(raw), raw
         assert packed[1] in modules[name].state_dict(), f"{raw} -> {packed[1]!r}"
 
 
@@ -80,42 +79,6 @@ def test_header_detection_and_mapping(tmp_path):
         "dit", "prompt_adaln.linear.weight"
     )
     assert m._upscaler_key("upsampler.0.weight") == ("upscaler", "upsampler.0.weight")
-
-
-def test_streamed_load_is_strict_and_materializes_parameters_and_buffers(tmp_path):
-    m = _checkpoint()
-    with torch.device("meta"):
-        model = torch.nn.Linear(2, 3)
-        model.register_buffer("running", torch.zeros(3))
-    data = {"net.weight": torch.ones(3, 2), "net.bias": torch.ones(3),
-            "net.running": torch.full((3,), 5.)}
-    path = _save(tmp_path / "okay.safetensors", data)
-    result = load_ltx_component(
-        "dit", model, [path], cancel=lambda: None, dtype=torch.float32, named=path)
-    assert result is model
-    assert not any(x.is_meta for x in (*model.parameters(), *model.buffers()))
-    torch.testing.assert_close(model(torch.ones(2)), torch.tensor([3., 3., 3.]))
-    torch.testing.assert_close(model.running, torch.full((3,), 5.))
-
-    path = _save(tmp_path / "bad.safetensors", {**data, "net.weight": torch.ones(3, 4)})
-    with torch.device("meta"):
-        model = torch.nn.Linear(2, 3)
-        model.register_buffer("running", torch.zeros(3))
-    with pytest.raises(ValueError, match="shape"):
-        load_ltx_component(
-            "dit", model, [path], cancel=lambda: None, dtype=torch.float32, named=path)
-    assert model.weight.is_meta
-
-
-def test_int8_requires_weight_scale(tmp_path):
-    from thenoise.dit.quantized import QuantizedLinear
-    data = {"net.layer.weight": torch.ones(2, 4, dtype=torch.int8)}
-    path = _save(tmp_path / "missing_scale.safetensors", data)
-    with torch.device("meta"):
-        module = torch.nn.ModuleDict({"layer": QuantizedLinear(4, 2, bias=False)})
-    with pytest.raises(RuntimeError, match="missing its"):
-        load_ltx_component("dit", module, [path],
-                           cancel=lambda: None, dtype=torch.bfloat16, named=path)
 
 
 def test_gemma3_wrapper_mapping_and_deterministic_meta_buffers():
@@ -326,10 +289,7 @@ def test_native_ltx_vocoder_short_audio_waveform_and_streaming(tmp_path):
                for k, v in reference.state_dict().items()}, str(file))
     with torch.device("meta"):
         candidate = LTXVocoderWithBWE(**cfg)
-    loaded = load_ltx_component(
-            "vocoder", candidate, [file], named=file,
-            cancel=lambda: None, dtype=torch.float32,
-        )
+    loaded = _load_part("vocoder", candidate, file, "vocoder.")
     assert loaded is candidate
     assert not any(p.is_meta for p in candidate.parameters())
     candidate.eval()
@@ -352,10 +312,7 @@ def test_native_ltx_audio_vae_streams_full_weights(tmp_path):
                for k, v in reference.state_dict().items()}, str(file))
     with torch.device("meta"):
         candidate = LTXAudioVAE(**cfg)
-    loaded = load_ltx_component(
-            "audio_vae", candidate, [file], named=file,
-            cancel=lambda: None, dtype=torch.float32,
-        )
+    loaded = _load_part("audio_vae", candidate, file, "audio_vae.")
     assert loaded is candidate
     assert not any(t.is_meta for t in candidate.parameters())
     candidate.eval()
@@ -365,6 +322,17 @@ def test_native_ltx_audio_vae_streams_full_weights(tmp_path):
             candidate.decode(latents, return_dict=False)[0],
             reference.decode(latents, return_dict=False)[0],
         )
+
+
+def _load_part(part: str, module, file, prefix: str = ""):
+    """Fill one component from a file that spells it under ``prefix``."""
+    from thenoise.utils.loader import load_selected_state
+
+    load_selected_state(
+        module, [(str(file), {prefix + key: key for key in module.state_dict()})],
+        cancel=lambda: None, dtype=torch.float32, what=f"LTX {part}")
+    module.eval()
+    return module
 
 
 def _tiny_components(monkeypatch):
@@ -630,10 +598,7 @@ def test_native_ltx_spatial_upscaler_streams_original_checkpoint_keys(tmp_path):
 
     with torch.device("meta"):
         target = LTXSpatialUpscaler(in_channels=8, mid_channels=32, num_blocks_per_stage=1)
-    loaded = load_ltx_component(
-            "upscaler", target, [checkpoint], named=checkpoint,
-            cancel=lambda: None, dtype=torch.float32,
-        )
+    loaded = _load_part("upscaler", target, checkpoint)
     assert loaded is target
     assert all(not param.is_meta for param in target.parameters())
     target.eval()

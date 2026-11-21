@@ -11,7 +11,6 @@ import dataclasses
 import logging
 import math
 from dataclasses import dataclass
-from pathlib import Path
 from typing import ClassVar, Iterator
 
 import torch
@@ -132,8 +131,7 @@ class LTXVideo(VideoModel):
             {"": self.dit_path, "vae": self.vae_path, **config.extra_paths,
              "text_encoder": self.text_encoder_path},
             version=self.version, gemma_text_config=text_cfg,
-            cancel=lambda: None,
-            header_cache={Path(self.dit_path).expanduser().resolve(): self.header},
+            cancel=lambda: None, headers=config.all_headers(),
         )
         # Connectors are part of the text-encoder residency role, not the DiT.
         self.dit = components["dit"].to(self._load_target(str(sources["dit"])))

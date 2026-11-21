@@ -10,11 +10,13 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Iterable
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 import torch
+
+from thenoise.utils.loader import load_selected_state, partition_keys
+from thenoise.utils.safetensors import unwrap_key
 
 log = logging.getLogger(__name__)
 
@@ -320,181 +322,44 @@ def _flag_for(name: str, version: str) -> str:
             "vocoder": "--audio-vae", "upscaler": "--spatial-upscaler"}.get(name, "")
 
 
-def _mapped(name: str, raw: str, *, transformer: bool) -> tuple[str, str | None]:
+def _mapped(raw: str, *, transformer: bool = False,
+            named: tuple[str, ...] = ()) -> tuple[str | None, str | None]:
     """Which component a checkpoint tensor spells, and the parameter it fills there.
 
-    A file holding the transformer spells every key as :func:`split_ltx_key` reads it; a
-    file holding one part spells it bare, so a prefix names the part instead.
+    A file holding the transformer spells every key as :func:`split_ltx_key` reads it,
+    prefixes included, and so does the connector pair wherever it is packed. A file
+    holding parts of its own names them by prefix, and a key with no prefix belongs to
+    ``named`` -- the parts this file was given for, whose only multi-part case (the audio
+    codec beside its vocoder) spells both by prefix. A file named for nothing, a text
+    encoder, answers for nothing.
     """
-    from thenoise.utils.safetensors import unwrap_key
-
     key = unwrap_key(raw)
-    if transformer or name in ("dit", "connectors"):
+    if transformer or _strip_dit_prefix(key).startswith(_CONNECTOR_PREFIXES):
         component, target = split_ltx_key(key) or ("", None)
         if target is not None and component in COMPONENT_PREFIXES:
-            # A codec packed with the transformer is spelled the original way, which
-            # ``split_ltx_key`` strips the prefix of but does not rename.
+            # A codec packed with the transformer is spelled the original way: the prefix
+            # comes off here, the codec's own map renames it.
             target = _map_component(component, target)
         return component, target
     head, _, rest = key.partition(".")
     if head in COMPONENT_PREFIXES:
         return head, _map_component(head, rest)
-    return name, _map_component(name, key)
-
-
-def select_ltx_keys(name: str, header, expected: dict[str, tuple[int, ...]],
-                    *, strict: bool = True, transformer: bool = False) -> dict[str, str]:
-    """The tensors of one file that fill component ``name``: raw key -> module key.
-
-    ``strict`` is for a file the request named for this part. Where the engine found the
-    file itself, a tensor that does not fit is skipped instead: a checkpoint carrying more
-    than this engine reads -- a codec of another generation, a repack's leftovers -- still
-    answers the parts it does fit, and the parts it does not are asked for by flag.
-    """
-    from thenoise.utils.checkpoint import CHECKPOINT_MARKER_KEYS
-    from thenoise.utils.loader import RUNTIME_STATE_SUFFIXES
-    from thenoise.utils.safetensors import unwrap_key
-
-    def refuse(reason):
-        if strict:
-            raise ValueError(reason)
-
-    selected: dict[str, str] = {}
-    for raw, entry in header.raw_entries.items():
-        if unwrap_key(raw) in CHECKPOINT_MARKER_KEYS or raw.endswith(RUNTIME_STATE_SUFFIXES):
-            continue
-        component, target = _mapped(name, raw, transformer=transformer)
-        if component != name or target is None:
-            continue
-        suffix = next((v for v in QUANT_SUFFIXES if target.endswith(v)), None)
-        if suffix:
-            if target[:-len(suffix)] + ".weight" not in expected:
-                refuse(f'{header.path}: unexpected quantization metadata {raw!r}')
-                continue
-        elif target not in expected:
-            # A multi-role file may carry an FP8 marker, not a model tensor.
-            if target == "scaled_fp8" or target.endswith(".scaled_fp8"):
-                continue
-            refuse(f'{header.path}: unexpected {name} tensor {raw!r} -> {target!r}')
-            continue
-        elif tuple(entry["shape"]) != expected[target]:
-            refuse(f'{header.path}: {raw!r} shape {entry["shape"]} != {expected[target]}')
-            continue
-        if target in selected.values():
-            refuse(f'{header.path}: duplicate {name} weight {target!r}')
-            continue
-        selected[raw] = target
-    return selected
-
-
-def _near_miss(name: str, paths: list[Path], header_cache, primary, module) -> str:
-    """What to add when a part was not found: files that name it without fitting it.
-
-    A checkpoint of another generation answers to the same prefixes, and "pass --vae"
-    alone sends a request looking for a file it already has.
-    """
-    expected = {key: tuple(t.shape) for key, t in module.state_dict().items()}
-    worst = None
-    for path in paths:
-        mismatched = [raw for raw, target in _spelled(name, path, header_cache, primary)
-                      if target not in expected]
-        if mismatched and (worst is None or len(mismatched) > worst[1]):
-            worst = (mismatched[0], len(mismatched), path)
-    if worst is None:
-        return ""
-    return (f" ({worst[2].name} spells {worst[1]} tensors as {name} that this release "
-            f"has no parameter for, e.g. {worst[0]!r})")
-
-
-def _spelled(name: str, path: Path, header_cache, primary):
-    """(raw key, module key) for every tensor of a file that names component ``name``."""
-    from thenoise.utils.checkpoint import CHECKPOINT_MARKER_KEYS
-    from thenoise.utils.loader import RUNTIME_STATE_SUFFIXES
-    from thenoise.utils.safetensors import unwrap_key
-
-    header = _header_of(path, header_cache)
-    for raw in header.raw_entries:
-        if unwrap_key(raw) in CHECKPOINT_MARKER_KEYS or raw.endswith(RUNTIME_STATE_SUFFIXES):
-            continue
-        component, target = _mapped(name, raw, transformer=(path == primary))
-        if component == name and target is not None:
-            yield raw, target
-
-
-def _header_of(path: Path, cache: dict[Path, object] | None):
-    """A file's header, parsed once per load however many components live in it."""
-    from thenoise.utils.safetensors import read_header
-
-    if cache is None:
-        return read_header(str(path))
-    if path not in cache:
-        cache[path] = read_header(str(path))
-    return cache[path]
-
-
-def load_ltx_component(
-    name: str, module: torch.nn.Module, paths: Iterable[Path],
-    *, cancel: Callable[[], None], dtype: torch.dtype, named: Path,
-    header_cache: dict[Path, object] | None = None, transformer: Path | None = None,
-) -> torch.nn.Module:
-    """Fill one component from the files that carry it, materializing only the selected
-    keys. ``transformer`` is the file holding the transformer, which spells its keys its
-    own way; ``named`` is the file the request gave for this part, and the only one
-    refused for carrying more than the module takes. Strict assignment and quantization
-    stay in ``thenoise.utils.loader``.
-    """
-    from thenoise.utils.loader import load_module_state, load_quantized_state_dict
-    from thenoise.utils.safetensors import load_safetensors
-
-    expected = {key: tuple(t.shape) for key, t in module.state_dict().items()}
-    weights: dict[str, torch.Tensor] = {}
-    used: list[str] = []
-
-    for path in paths:
-        cancel()
-        selected = select_ltx_keys(name, _header_of(path, header_cache), expected,
-                                   strict=(path == named),
-                                   transformer=(path == transformer))
-        if not selected:
-            continue
-        if any(target in weights for target in selected.values()):
-            raise ValueError(f"{path}: duplicate {name} weight")
-        data = load_safetensors(str(path), device="cpu", keys=set(selected))
-        for raw, tensor in data.items():
-            weights[selected[raw]] = tensor
-        used.append(str(path))
-
-    missing = set(expected) - set(weights)
-    if missing:
-        raise ValueError(f'LTX {name} weights in {", ".join(used)} leave '
-                         f'missing={sorted(missing)[:8]} (no random/meta weight fallback)')
-
-    quantized = (any(key.endswith((".weight_scale", ".scale_weight")) for key in weights)
-                 or any(t.dtype == torch.int8 or str(t.dtype).startswith("torch.float8")
-                        for t in weights.values()))
-    if quantized:
-        load_quantized_state_dict(module, weights, dtype=dtype)
-    else:
-        load_module_state(module, {k: v.to(dtype=dtype) if v.is_floating_point() else v
-                                   for k, v in weights.items()},
-                          ', '.join(used), what=f'LTX {name}')
-    leftover = [key for key, p in module.named_parameters() if p.is_meta]
-    leftover += [key for key, b in module.named_buffers() if b.is_meta]
-    if leftover:
-        raise RuntimeError(f'LTX {name} uninitialized tensors: {leftover[:8]}')
-    return module.eval()
+    if not named:
+        return None, None
+    return named[0], _map_component(named[0], key)
 
 
 def load_original_components(
-    files: dict[str, str | Path], *, version: str,
-    cancel: Callable[[], None], dtype=torch.bfloat16, gemma_text_config=None,
-    header_cache: dict[Path, object] | None = None,
+    files: dict[str, str | Path], *, version: str, cancel: Callable[[], None],
+    dtype=torch.bfloat16, gemma_text_config=None, headers: Mapping[str, object] | None = None,
 ) -> tuple[dict, dict[str, Path]]:
     """Build every LTX component from the files a request named by role (``""`` is the
     transformer), and answer where each one came from.
 
     A part comes from the file named for it, else from whichever named file carries its
-    tensors; the connector pair is read from every file that carries it.
+    tensors; the connector pair is read from every file that carries it. ``headers`` is
+    the runtime's own parsed headers by role, so a checkpoint is opened once however many
+    parts ask about it.
     """
     modules = dict(
         dit=make_transformer(version), vae=make_video_vae(),
@@ -503,33 +368,71 @@ def load_original_components(
     )
     if gemma_text_config is not None:
         modules["connectors"] = make_connectors(version, gemma_text_config)
-    if header_cache is None:
-        header_cache = {}
+    expected = {name: {key: tuple(t.shape) for key, t in module.state_dict().items()}
+                for name, module in modules.items()}
 
     given = {role: Path(path).expanduser().resolve()
              for role, path in files.items() if path}
     primary = given.get("")
-    order = [p for p in given.values()]
+    named_parts: dict[Path, tuple[str, ...]] = {}
+    for role, path in given.items():
+        named_parts[path] = named_parts.get(path, ()) + tuple(
+            name for name in ROLE_OF_COMPONENT if ROLE_OF_COMPONENT[name] == role)
+
+    picks: dict[str, dict[Path, dict[str, str]]] = {name: {} for name in modules}
+    misses: dict[str, list[tuple[Path, str]]] = {name: [] for name in modules}
+    for role, path in given.items():
+        cancel()
+        named = named_parts[path]
+        chosen, rejected = partition_keys(
+            _header(role, path, headers), expected,
+            part_of=lambda raw: _mapped(raw, transformer=(path == primary), named=named),
+            strict=frozenset(named))
+        for name in modules:
+            if chosen[name]:
+                picks[name][path] = chosen[name]
+            misses[name] += [(path, raw) for raw in rejected[name]]
+
     sources: dict[str, list[Path]] = {}
-    for name, module in modules.items():
-        expected = {key: tuple(t.shape) for key, t in module.state_dict().items()}
-        named = given.get(ROLE_OF_COMPONENT[name])
-        carriers = [p for p in ([named] if named else []) + order
-                    if select_ltx_keys(name, _header_of(p, header_cache), expected,
-                                       strict=False, transformer=(p == primary))]
-        chosen = carriers if name == "connectors" else carriers[:1]
+    for name in modules:
+        wanted = given.get(ROLE_OF_COMPONENT[name])
+        carriers = list(picks[name])
+        chosen = carriers if name == "connectors" else (
+            [wanted] if wanted in picks[name] else carriers[:1])
         if not chosen:
             raise ValueError(
                 f"LTX {name} weights are in none of the checkpoints given"
                 + (f"; pass {_flag_for(name, version)}" if _flag_for(name, version) else "")
-                + _near_miss(name, order, header_cache, primary, modules[name]))
+                + _near_miss(name, misses[name]))
         sources[name] = chosen
     log.info("LTX %s components: %s", version,
              ", ".join(f"{name} from {', '.join(p.name for p in paths)}"
                        for name, paths in sorted(sources.items())))
 
     for name, module in modules.items():
-        load_ltx_component(name, module, sources[name], cancel=cancel, dtype=dtype,
-                           header_cache=header_cache, transformer=primary,
-                           named=given.get(ROLE_OF_COMPONENT[name]))
+        load_selected_state(
+            module, [(str(path), picks[name][path]) for path in sources[name]],
+            cancel=cancel, dtype=dtype, what=f"LTX {name}")
+        module.eval()
     return modules, {name: paths[0] for name, paths in sources.items()}
+
+
+def _header(role: str, path: Path, headers: Mapping[str, object] | None):
+    """The parsed header for a file the request named under ``role``."""
+    from thenoise.utils.safetensors import read_header
+
+    given = (headers or {}).get(role)
+    return given if given is not None else read_header(str(path))
+
+
+def _near_miss(name: str, misses: list[tuple[Path, str]]) -> str:
+    """What to add when a part was not found: files that spelled it without fitting it.
+
+    A checkpoint of another generation answers to the same prefixes, and "pass --vae"
+    alone sends a request looking for a file it already has.
+    """
+    if not misses:
+        return ""
+    path, raw = misses[0]
+    return (f" ({path.name} spells {len(misses)} tensors as {name} that this release has "
+            f"no parameter for, e.g. {raw!r})")
