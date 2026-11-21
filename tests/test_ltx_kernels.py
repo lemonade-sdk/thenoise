@@ -5,7 +5,6 @@ migration-time reference model is required.
 """
 from __future__ import annotations
 
-from types import SimpleNamespace
 import pytest
 import torch
 from torch import nn
@@ -13,8 +12,7 @@ from torch import nn
 from thenoise.dit.ltx_video.connectors import LTX2TextConnectors
 from thenoise.dit.ltx_video.transformer import LTX2VideoTransformer3DModel
 from thenoise.dit.ltx_video.checkpoint import make_video_vae
-from thenoise.utils.rope import apply_rope_split_half, apply_ltx_rope_split_half
-from thenoise.vae.ltx_video import LTXVideoVAE
+from thenoise.utils.rope import apply_rope_split_half
 
 from conftest import tiny_ltx_video_vae
 
@@ -211,18 +209,36 @@ def test_ltx_text_connectors_ignore_padded_features():
     torch.testing.assert_close(audio, audio_changed)
 
 
-def test_ltx_batched_rope_preserves_shared_convention_and_dtype():
+def test_split_half_rope_rotates_broadcast_phases_in_the_query_dtype():
     torch.manual_seed(17)
     x = torch.randn(2, 3, 4, 8)
-    phases = torch.randn(2, 3, 4, 4)
-    cos, sin = phases.cos(), phases.sin()
-    expected = torch.cat((x[..., :4] * cos - x[..., 4:] * sin,
-                          x[..., 4:] * cos + x[..., :4] * sin), dim=-1)
-    torch.testing.assert_close(apply_ltx_rope_split_half(x, cos, sin), expected)
-    assert apply_ltx_rope_split_half(x.bfloat16(), cos, sin).dtype == torch.bfloat16
-    legacy_cos = torch.cat((cos[0, 0], cos[0, 0]), -1)[:, None, None, :]
-    legacy_sin = torch.cat((sin[0, 0], sin[0, 0]), -1)[:, None, None, :]
-    assert apply_rope_split_half(x[:1, :2], legacy_cos, legacy_sin).shape == (1, 2, 4, 8)
+    cos, sin = torch.randn(2, 3, 4, 4).cos(), torch.randn(2, 3, 4, 4).sin()
+    first, second = x[..., :4], x[..., 4:]
+    expected = torch.cat((first * cos - second * sin, second * cos + first * sin), -1)
+    torch.testing.assert_close(apply_rope_split_half(x, cos, sin), expected)
+    # fp32 phases beside bf16 weights: the rotation is fp32, the answer is not.
+    assert apply_rope_split_half(x.bfloat16(), cos, sin).dtype == torch.bfloat16
+
+    # One row per token, as the builders lay them out, broadcast over batch and heads.
+    shared = torch.randn(4, 4)
+    shared_pair = (shared.cos()[None, None], shared.sin()[None, None])
+    torch.testing.assert_close(apply_rope_split_half(x[:1, :2], *shared_pair),
+                               apply_rope_split_half(x[:1, :2],
+                                                     *tuple(t.expand(1, 2, 4, 4)
+                                                           for t in shared_pair)))
+
+    # A rope narrower than the head leaves its tail as it was handed over.
+    narrow = torch.randn(1, 1, 4, 2)
+    rotated = apply_rope_split_half(x[:1, :2], narrow.cos(), narrow.sin())
+    torch.testing.assert_close(rotated[..., 4:], x[:1, :2][..., 4:])
+
+    # The layout is the point: SDPA reads L-major operands and copies anything else.
+    packed = torch.randn(2, 4, 3, 8).transpose(1, 2)  # [B,H,L,D] out of a packed projection
+    assert apply_rope_split_half(packed, cos, sin).stride(-2) == x.shape[-1]
+
+    with pytest.raises(ValueError, match="does not fit"):
+        too_wide = torch.randn(2, 3, 4, 6)
+        apply_rope_split_half(x, too_wide.cos(), too_wide.sin())
 
 
 def test_native_video_vae_meta_layout_and_frame_grid():

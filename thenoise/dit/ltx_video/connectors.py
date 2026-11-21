@@ -16,7 +16,8 @@ from torch import nn
 
 from thenoise.dit.quantized import QuantizedLinear
 
-from thenoise.dit.ltx_video.transformer import _AVRoPE, _FeedForward, _LTXAttention
+from thenoise.dit.ltx_video.rope import AVRope
+from thenoise.dit.ltx_video.transformer import _FeedForward, _LTXAttention
 
 
 class _ConnectorBlock(nn.Module):
@@ -43,9 +44,9 @@ class _Connector(nn.Module):
         dim = heads * head_dim
         self.num_learnable_registers = registers
         self.learnable_registers = nn.Parameter(torch.rand(registers, dim) * 2 - 1)
-        # Connector positions use token index / 4096, without midpoint sampling.
-        # _AVRoPE implements exactly that fractional LTX split-half rotation.
-        self.rope = _AVRoPE(dim, heads, modality="audio", base_num_frames=rope_base,
+        # Connector positions are the token rank over the connector's own canvas, with
+        # no patch box to take the midpoint of.
+        self.rope = AVRope(dim, heads, modality="audio", base_num_frames=rope_base,
                             scale_factors=(1,), theta=theta,
                             double_precision=double_precision)
         self.transformer_blocks = nn.ModuleList([
@@ -69,8 +70,7 @@ class _Connector(nn.Module):
         registers = registers[None].expand(batch, -1, -1)
         x = torch.where(front, aligned, registers.to(x.dtype))
         mask = torch.zeros_like(mask)  # All tokens now usable, including the registers.
-        pos = torch.arange(seq, device=x.device, dtype=torch.float32)[None, None].expand(batch, 1, -1)
-        rope = self.rope(pos)
+        rope = self.rope.token_positions(batch, seq, x.device)
         for block in self.transformer_blocks:
             x = block(x, mask, rope)
         return self.norm_out(x), mask

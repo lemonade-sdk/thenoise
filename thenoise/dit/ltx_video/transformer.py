@@ -24,7 +24,8 @@ from thenoise.dit.quantized import QuantizedLinear
 
 from thenoise.utils.attention import AttentionParams, attention
 from thenoise.utils.qk_norm import QKNorm
-from thenoise.utils.rope import apply_ltx_rope_split_half
+from thenoise.dit.ltx_video.rope import AVRope
+from thenoise.utils.rope import apply_rope_split_half
 from thenoise.utils.timestep import timestep_embedding
 
 #: How each stream's trunk is divided. A checkpoint states the trunk; it never states
@@ -122,8 +123,8 @@ class _LTXAttention(nn.Module):
         k = k.reshape(b, k_tokens, self.heads, self.head_dim).transpose(1, 2)
         v = v.reshape(b, k_tokens, self.heads, self.head_dim).transpose(1, 2)
         if q_rope is not None:
-            q = apply_ltx_rope_split_half(q, *q_rope)
-            k = apply_ltx_rope_split_half(k, *(k_rope if k_rope is not None else q_rope))
+            q = apply_rope_split_half(q, *q_rope)
+            k = apply_rope_split_half(k, *(k_rope if k_rope is not None else q_rope))
         if mask is not None:
             if mask.ndim == 2:
                 mask = mask[:, None, None, :]
@@ -259,87 +260,6 @@ class _AVBlock(nn.Module):
         a = a + g_af * self.audio_ff(an)
         return v, a
 
-class _AVRoPE(nn.Module):
-    """LTX's fractional-coordinate split-half RoPE (no persistent weights).
-
-    This is not the usual integer-index RoPE: coordinates are patch midpoints
-    in seconds/pixels normalized by the original training canvas size. TheNoise
-    shared RoPE *application* is reused; only LTX's position construction lives
-    alongside its architecture.
-    """
-
-    def __init__(self, dim: int, heads: int, *, modality: str,
-                 base_num_frames: int = 20, base_height: int = 2048,
-                 base_width: int = 2048, sampling_rate: int = 16000,
-                 hop_length: int = 160, scale_factors=(8, 32, 32),
-                 patch_size: int = 1, patch_size_t: int = 1,
-                 causal_offset: int = 1, theta: float = 10000.0,
-                 double_precision: bool = True):
-        super().__init__()
-        self.dim = dim
-        self.heads = heads
-        self.modality = modality
-        self.base_num_frames = base_num_frames
-        self.base_height = base_height
-        self.base_width = base_width
-        self.scale_factors = tuple(scale_factors)
-        self.sampling_rate = sampling_rate
-        self.hop_length = hop_length
-        self.patch_size = patch_size
-        self.patch_size_t = patch_size_t
-        self.causal_offset = causal_offset
-        self.theta = theta
-        self.double_precision = double_precision
-
-    def video_coords(self, batch: int, frames: int, height: int, width: int,
-                     device: torch.device, fps: float):
-        axes = [torch.arange(0, end, step, device=device, dtype=torch.float32)
-                for end, step in ((frames, self.patch_size_t),
-                                  (height, self.patch_size),
-                                  (width, self.patch_size))]
-        grid = torch.stack(torch.meshgrid(*axes, indexing="ij"), dim=0)
-        increment = grid.new_tensor([self.patch_size_t, self.patch_size, self.patch_size])
-        corners = torch.stack((grid, grid + increment[:, None, None, None]), -1)
-        coords = corners.flatten(1, 3)[None].repeat(batch, 1, 1, 1)
-        scale = coords.new_tensor(self.scale_factors).reshape(1, 3, 1, 1)
-        coords = coords * scale
-        coords[:, 0] = ((coords[:, 0] + self.causal_offset - self.scale_factors[0])
-                         .clamp_min(0) / fps)
-        return coords
-
-    def audio_coords(self, batch: int, frames: int, device: torch.device):
-        grid = torch.arange(0, frames, self.patch_size_t,
-                            device=device, dtype=torch.float32)
-        scale = self.scale_factors[0]
-        start = (grid * scale + self.causal_offset - scale).clamp_min(0)
-        end = ((grid + self.patch_size_t) * scale + self.causal_offset - scale).clamp_min(0)
-        coords = torch.stack([start, end], -1) * (self.hop_length / self.sampling_rate)
-        return coords[None, None].expand(batch, 1, -1, -1)
-
-    def forward(self, coords: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        n_axes = coords.shape[1]
-        if coords.ndim == 4:
-            coords = coords.mean(dim=-1)
-        bases = ((self.base_num_frames, self.base_height, self.base_width)
-                 if self.modality == "video" else (self.base_num_frames,))
-        grid = torch.stack([coords[:, i] / bases[i] for i in range(n_axes)], dim=-1)
-        bins = n_axes * 2
-        precision = torch.float64 if self.double_precision else torch.float32
-        freqs = torch.pow(self.theta, torch.linspace(0, 1, self.dim // bins,
-                                                     dtype=precision, device=coords.device))
-        freqs = (freqs * math.pi / 2).float()
-        angles = ((grid.unsqueeze(-1) * 2 - 1) * freqs).transpose(-1, -2).flatten(2)
-        n_expected = self.dim // 2
-        pad = n_expected - angles.shape[-1]
-        cos, sin = angles.cos(), angles.sin()
-        if pad:
-            cos = torch.cat([cos.new_ones((*cos.shape[:-1], pad)), cos], -1)
-            sin = torch.cat([sin.new_zeros((*sin.shape[:-1], pad)), sin], -1)
-        b, t, _ = cos.shape
-        return (cos.reshape(b, t, self.heads, -1).transpose(1, 2),
-                sin.reshape(b, t, self.heads, -1).transpose(1, 2))
-
-
 @dataclass(frozen=True)
 class LTXParams:
     """A transformer's geometry, as a checkpoint header states it.
@@ -437,10 +357,10 @@ class LTX2VideoTransformer3DModel(nn.Module):
         base_rope = dict(base_num_frames=pos_embed_max_pos, theta=rope_theta,
                          double_precision=rope_double_precision,
                          causal_offset=causal_offset)
-        self.rope = _AVRoPE(vdim, num_attention_heads, modality="video",
+        self.rope = AVRope(vdim, num_attention_heads, modality="video",
                             base_height=base_height, base_width=base_width,
                             scale_factors=vae_scale_factors, **base_rope)
-        self.audio_rope = _AVRoPE(adim, audio_num_attention_heads, modality="audio",
+        self.audio_rope = AVRope(adim, audio_num_attention_heads, modality="audio",
                                   base_num_frames=audio_pos_embed_max_pos,
                                   scale_factors=(audio_scale_factor,),
                                   sampling_rate=audio_sampling_rate,
@@ -448,13 +368,17 @@ class LTX2VideoTransformer3DModel(nn.Module):
                                   theta=rope_theta, double_precision=rope_double_precision,
                                   causal_offset=causal_offset)
         base_cross = max(pos_embed_max_pos, audio_pos_embed_max_pos)
-        self.cross_attn_rope = _AVRoPE(audio_cross_attention_dim, num_attention_heads,
+        # Each one rotates a stream's own coordinates, so each carries that stream's
+        # geometry and not just the width it turns.
+        self.cross_attn_rope = AVRope(audio_cross_attention_dim, num_attention_heads,
                                       modality="video", base_num_frames=base_cross,
                                       base_height=base_height, base_width=base_width,
+                                      scale_factors=vae_scale_factors,
                                       theta=rope_theta, double_precision=rope_double_precision,
                                       causal_offset=causal_offset)
-        self.cross_attn_audio_rope = _AVRoPE(audio_cross_attention_dim, audio_num_attention_heads,
+        self.cross_attn_audio_rope = AVRope(audio_cross_attention_dim, audio_num_attention_heads,
                                             modality="audio", base_num_frames=base_cross,
+                                            scale_factors=(audio_scale_factor,),
                                             sampling_rate=audio_sampling_rate,
                                             hop_length=audio_hop_length,
                                             theta=rope_theta, double_precision=rope_double_precision,
@@ -492,8 +416,6 @@ class LTX2VideoTransformer3DModel(nn.Module):
         num_frames: int | None = None, height: int | None = None,
         width: int | None = None, fps: float = 24.0,
         audio_num_frames: int | None = None,
-        video_coords: torch.Tensor | None = None,
-        audio_coords: torch.Tensor | None = None,
         isolate_modalities: bool = False,
         spatio_temporal_guidance_blocks: list[int] | None = None,
         perturbation_mask: torch.Tensor | None = None,
@@ -515,14 +437,14 @@ class LTX2VideoTransformer3DModel(nn.Module):
                                             * -10000.0).unsqueeze(1)
         if video_self_attention_mask is not None:
             video_self_attention_mask = (1 - video_self_attention_mask.to(hidden_states.dtype)) * -10000.0
-        if video_coords is None:
-            video_coords = self.rope.video_coords(b, num_frames, height, width, hidden_states.device, fps)
-        if audio_coords is None:
-            audio_coords = self.audio_rope.audio_coords(b, audio_num_frames, audio_hidden_states.device)
-        v_rope = self.rope(video_coords)
-        a_rope = self.audio_rope(audio_coords)
-        v_ca_rope = self.cross_attn_rope(video_coords[:, 0:1, :])
-        a_ca_rope = self.cross_attn_audio_rope(audio_coords[:, 0:1, :])
+        v_rope = self.rope.video(b, num_frames, height, width, fps, hidden_states.device)
+        a_rope = self.audio_rope.audio(b, audio_num_frames, audio_hidden_states.device)
+        # Cross-modality attention has only time to align on, so each stream hands the
+        # other its time coordinate alone.
+        v_ca_rope = self.cross_attn_rope.video_time(b, num_frames, height, width, fps,
+                                                     hidden_states.device)
+        a_ca_rope = self.cross_attn_audio_rope.audio(b, audio_num_frames,
+                                                     audio_hidden_states.device)
         v = self.proj_in(hidden_states)
         a = self.audio_proj_in(audio_hidden_states)
         if self.config.use_keyframes_abs_pos_embedding and video_keyframes_mask is not None:

@@ -344,21 +344,18 @@ def test_video_rope_positions(seq_len, blocks, expected):
     for index, (t, h, w) in enumerate(expected):
         # The slow slots past the spatial band carry ``t``; inside it, even slots
         # carry ``h`` and odd ones ``w``.
-        assert round(_axis(cos[index], sin[index], SPATIAL_SLOTS)) == t, index
-        assert round(_axis(cos[index], sin[index], 0)) == h, index
-        assert round(_axis(cos[index], sin[index], 1)) == w, index
+        assert round(_axis(cos[0, 0, index], sin[0, 0, index], SPATIAL_SLOTS)) == t, index
+        assert round(_axis(cos[0, 0, index], sin[0, 0, index], 0)) == h, index
+        assert round(_axis(cos[0, 0, index], sin[0, 0, index], 1)) == w, index
 
 
-def test_video_rope_duplicates_the_rotary_band():
-    """``rotary_half=True``: the split-half helper rotates the first half of the head
-    dim against the second, so every frequency has to appear twice.
+def test_video_rope_carries_one_angle_per_frequency():
+    """The band is half the rotation it performs: the split-half helper reads each angle
+    once and turns ``2 * band`` channels of the head with it.
     """
     cos, sin = video_rope(5, [(1, 1, 2)], ROTARY_DIM, ROPE_THETA, torch.device("cpu"))
 
-    assert cos.shape == sin.shape == (5, 1, 1, ROTARY_DIM)
-    half = ROTARY_DIM // 2
-    assert torch.equal(cos[..., :half], cos[..., half:])
-    assert torch.equal(sin[..., :half], sin[..., half:])
+    assert cos.shape == sin.shape == (1, 1, 5, ROTARY_DIM // 2)
 
 
 # ------------------------------------------------------------------ expert banks

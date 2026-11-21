@@ -339,7 +339,7 @@ def test_rope_rotates_part_of_the_head_and_passes_the_rest():
     dit = _tiny_dit()
     cos, sin = dit.pe_embedder.store("t", torch.rand(4, 3, dtype=torch.float64),
                                      dtype=torch.float32)
-    assert cos.shape == (4, 1, 1, dit.params.rope_dim)
+    assert cos.shape == (1, 1, 4, dit.params.rope_dim // 2)
     assert dit.params.rope_dim < dit.params.head_dim  # a partial rotation
     assert torch.allclose(cos.pow(2) + sin.pow(2), torch.ones_like(cos), atol=1e-5)
 
@@ -420,7 +420,7 @@ def test_a_bf16_run_keeps_the_stream_at_bf16(tmp_path):
     assert modulation[0].dtype == torch.bfloat16
 
     spans = _spans([(0, 6, 1), (6, 8, 3)], modulation)
-    cos = torch.ones(8, 1, 1, loaded.params.rope_dim, dtype=torch.bfloat16)
+    cos = torch.ones(1, 1, 8, loaded.params.rope_dim // 2, dtype=torch.bfloat16)
     out = block(torch.randn(1, 8, loaded.params.hidden_size, dtype=torch.bfloat16),
                 spans, (cos, torch.zeros_like(cos)), None)
     assert out.dtype == torch.bfloat16

@@ -90,7 +90,7 @@ class Attention(nn.Module):
     def forward(self, x: torch.Tensor,
                 rope: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
                 bufs: Optional[KVBuffers] = None) -> torch.Tensor:
-        """``x`` is ``[B, S, hidden]``; ``rope`` the run's ``(cos, sin)``, ``[S, 1, 1, rot]``;
+        """``x`` is ``[B, S, hidden]``; ``rope`` the run's ``(cos, sin)``, ``[1, 1, S, rot/2]``;
         ``bufs`` this block's run-long K/V (see :func:`.kvcache.attend`).
         """
         batch, rows, _ = x.shape
@@ -340,7 +340,7 @@ class H3ImageDiT(nn.Module):
         return self.token_refiner(self.condition_proj(text_states))
 
     def _rope_table(self, position_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """``[S, 3]`` coordinates -> ``(cos, sin)``, each ``[S, 1, 1, rope_dim]``, in
+        """``[S, 3]`` coordinates -> ``(cos, sin)``, each ``[1, 1, S, rope_dim/2]``, in
         float32 on the model's device: a coordinate is multiplied by an inverse
         frequency long before anything is rounded down to the compute dtype.
         """
@@ -432,7 +432,7 @@ class H3ImageDiT(nn.Module):
         if mode == "read":
             n_rows = layout.target_span[1]
             rows = [row for row in rows if row[0] < n_rows]
-            cos, sin = cos[:n_rows], sin[:n_rows]
+            cos, sin = cos[..., :n_rows, :], sin[..., :n_rows, :]
             patched = self.video_patch_proj(self.patchify(padded)).to(dtype)
             h = torch.cat([context, patched.unsqueeze(0)], dim=1)
         else:
@@ -454,7 +454,7 @@ class H3ImageDiT(nn.Module):
         t_emb = self.time_embedding((t, max(t, COND_TIMESTEP)), device)
         kv_shape = (1, self.params.num_heads, layout.seq_len, self.params.head_dim)
         mark_token_axis(h, dim=1)
-        mark_token_axis(cos, sin, dim=0)
+        mark_token_axis(cos, sin, dim=-2)
         for i, block in enumerate(self.blocks):
             # Buffers take the stream's dtype: ``attend`` copies k/v into them, and a
             # narrower buffer would hand attention a key narrower than the query.
