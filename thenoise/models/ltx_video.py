@@ -18,8 +18,9 @@ import torch.nn.functional as F
 from torch import nn
 
 from thenoise.dit.ltx_video.checkpoint import (
-    SIGNATURE_23, SIGNATURE_25, VERSION_23, VERSION_25, load_original_components,
+    VERSION_23, VERSION_25, load_original_components,
 )
+from thenoise.dit.ltx_video.keys import SIGNATURE_23, SIGNATURE_25
 from thenoise.dit.ltx_video.sampling import REFINE_GRID, stage_grids
 from thenoise.models.config import EncodePromptArgs, VideoSamplingParams
 from thenoise.models.video_base import Segment, VideoModel, Waveform

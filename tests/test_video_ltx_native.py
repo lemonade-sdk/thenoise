@@ -43,15 +43,16 @@ def test_a_codec_packed_with_the_transformer_fills_what_a_codec_alone_fills():
     the checkpoint does have.
     """
     from thenoise.dit.ltx_video.checkpoint import (make_audio_vae, make_vocoder,
-                                                   make_video_vae, _mapped)
+                                                   make_video_vae)
+    from thenoise.dit.ltx_video.keys import component_for
 
     with torch.device("meta"):
         modules = {"vae": make_video_vae(), "audio_vae": make_audio_vae(),
                    "vocoder": make_vocoder()}
     for raw in MONOLITH_CODEC_KEYS:
         name = raw.split(".", 1)[0]
-        packed = _mapped(raw, transformer=True)
-        assert packed == _mapped(raw), raw
+        packed = component_for(raw, transformer=True)
+        assert packed == component_for(raw), raw
         assert packed[1] in modules[name].state_dict(), f"{raw} -> {packed[1]!r}"
 
 
@@ -156,11 +157,14 @@ def test_a_trunk_that_is_not_a_whole_number_of_heads_is_refused(tmp_path):
 
 
 def test_a_checkpoint_key_reaches_the_parameter_it_fills():
-    m = checkpoint
-    assert m.split_ltx_key("model.diffusion_model.prompt_adaln_single.linear.weight") == (
+    from thenoise.dit.ltx_video import keys
+
+    assert keys.split_ltx_key("model.diffusion_model.prompt_adaln_single.linear.weight") == (
         "dit", "prompt_adaln.linear.weight"
     )
-    assert m._upscaler_key("upsampler.0.weight") == ("upscaler", "upsampler.0.weight")
+    # A file named for one part spells nothing, so its keys are the module's own.
+    assert keys.component_for("upsampler.0.weight", named=("upscaler",)) == (
+        "upscaler", "upsampler.0.weight")
 
 
 def test_a_gemma4_key_lands_where_the_built_model_keeps_it():
