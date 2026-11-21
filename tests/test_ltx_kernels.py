@@ -64,14 +64,54 @@ def test_a_prompt_arrives_as_bos_first_ids_truncated_to_the_context():
             self.ids, self.bos_token_id = ids, bos
 
         def __call__(self, text, **options):
-            assert options["padding"] is False and options["truncation"] is True
+            assert options["add_special_tokens"] is False, "the prompter adds the BOS"
             return {"input_ids": list(self.ids)}
 
-    assert GemmaPrompter(Tokens([3, 4, 5])).encode("  a red fox  ").tolist() == [[2, 3, 4, 5]]
-    assert GemmaPrompter(Tokens([2, 3])).encode("fox").tolist() == [[2, 3]]
-    assert len(GemmaPrompter(Tokens([3] * 4000)).encode("fox")[0]) == PROMPT_CONTEXT
-    with pytest.raises(ValueError, match="no BOS token"):
-        GemmaPrompter(Tokens([3], bos=None)).encode("fox")
+    def prompter(ids, bos=2):
+        return GemmaPrompter.from_transformers(Tokens(ids, bos))
+
+    assert prompter([3, 4, 5]).encode("  a red fox  ").tolist() == [[2, 3, 4, 5]]
+    assert prompter([2, 3]).encode("fox").tolist() == [[2, 3]]
+    assert len(prompter([3] * 4000).encode("fox")[0]) == PROMPT_CONTEXT
+    for bos in (None, -1):  # SentencePiece reports a missing BOS as -1
+        with pytest.raises(ValueError, match="no BOS token"):
+            prompter([3], bos)
+
+
+def test_a_gemma3_file_carries_its_own_tokenizer(tmp_path):
+    """Nothing is vendored for Gemma 3: the encoder file supplies the pieces.
+
+    The released single-file checkpoints hold no config metadata and keep their
+    SentencePiece proto among the weights, so a file without one is refused -- a
+    vendored copy would be free to drift from the model it conditions.
+    """
+    import sentencepiece as spm
+    from safetensors.torch import save_file
+    from thenoise.text_encoders.ltx_video import GemmaPrompter
+    from thenoise.utils.loader import spiece_model
+
+    corpus = tmp_path / "corpus.txt"
+    corpus.write_text("A red fox walks through the snow. A cat sits on a chair.\n" * 30,
+                      encoding="utf-8")
+    spm.SentencePieceTrainer.train(input=str(corpus), model_prefix=str(tmp_path / "sp"),
+                                   vocab_size=64, hard_vocab_limit=False,
+                                   pad_id=0, eos_id=1, unk_id=3, bos_id=2)
+    proto = (tmp_path / "sp.model").read_bytes()
+    weights = {"model.embed_tokens.weight": torch.zeros(4, 4)}
+    with_proto = tmp_path / "gemma3.safetensors"
+    save_file({**weights,
+               "spiece_model": torch.tensor(list(proto), dtype=torch.uint8)}, str(with_proto))
+    assert spiece_model(with_proto) == proto
+
+    processor = spm.SentencePieceProcessor(model_proto=proto)
+    ids = GemmaPrompter.from_sentencepiece(processor).encode("a red fox").tolist()[0]
+    assert ids[0] == processor.bos_id()
+    assert ids[1:] == processor.encode("a red fox", out_type=int)
+
+    bare = tmp_path / "bare.safetensors"
+    save_file(weights, str(bare))
+    with pytest.raises(ValueError, match="no SentencePiece tokenizer"):
+        spiece_model(bare)
 
 
 @pytest.mark.parametrize("ltx25", [False, True])

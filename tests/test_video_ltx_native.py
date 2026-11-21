@@ -175,6 +175,61 @@ def test_a_checkpoint_key_reaches_the_parameter_it_fills():
     assert m._upscaler_key("upsampler.0.weight") == ("upscaler", "upsampler.0.weight")
 
 
+def test_a_gemma4_key_lands_where_the_built_model_keeps_it():
+    """The released 2.5 files spell their keys one way; the model nests them deeper.
+
+    Checked against the official BF16 text encoder and the BF16 and INT8 ConvRot builds
+    `scripts/download.py` installs, whose key sets are identical bar the quantization
+    sidecars: these are the prefixes they use, and the module each file's own
+    `gemma_config` metadata builds for them.
+    """
+    from thenoise.text_encoders.ltx_video import _gemma4_key
+
+    for raw, want in (
+        ("model.layers.0.mlp.down_proj.weight",
+         "model.model.language_model.layers.0.mlp.down_proj.weight"),
+        ("model.norm.weight", "model.model.language_model.norm.weight"),
+        ("vision_model.patch_dense.weight", "model.model.embed_vision.patch_dense.weight"),
+        ("multi_modal_projector.embedding_projection.weight",
+         "model.model.embed_vision.multimodal_embedder.embedding_projection.weight"),
+        ("audio_projector.embedding_projection.weight",
+         "model.model.embed_audio.embedding_projection.weight"),
+    ):
+        assert _gemma4_key(raw) == ("gemma", want)
+
+    # Assets, and the LTX connectors that load as a component of their own.
+    for raw in ("tokenizer_json", "hf_asset__tokenizer_config.json",
+                "text_embedding_projection.video_aggregate_embed.weight"):
+        assert _gemma4_key(raw) is None
+    # An unmapped learned key also comes back None, and the loader refuses it rather
+    # than skipping a tensor; only the generation head is dropped without a word.
+    assert _gemma4_key("vision_tower.blocks.0.attn.qkv.weight") is None
+    assert _gemma4_key("lm_head.weight") is None
+
+
+def test_a_packed_gemma_asset_is_read_whichever_way_the_packer_stored_it(tmp_path):
+    from safetensors.torch import save_file
+    from thenoise.text_encoders.ltx_video import _read_asset
+    from thenoise.utils.safetensors import MemoryEfficientSafeOpen
+
+    config = b'{"bos_token": "<bos>"}'
+    packed = tmp_path / "packed.safetensors"
+    save_file({"tokenizer_json": torch.tensor(list(b"{}"), dtype=torch.uint8),
+               "hf_asset__tokenizer_config.json": torch.tensor(list(config), dtype=torch.uint8)},
+              str(packed))
+    with MemoryEfficientSafeOpen(str(packed)) as f:
+        assert _read_asset(f, f.metadata(), "tokenizer_json") == b"{}"
+        assert _read_asset(f, f.metadata(), "tokenizer_config.json") == config
+
+    described = tmp_path / "described.safetensors"
+    save_file({"model.embed_tokens.weight": torch.zeros(2, 2)}, str(described),
+              metadata={"tokenizer_config.json": config.decode()})
+    with MemoryEfficientSafeOpen(str(described)) as f:
+        assert _read_asset(f, f.metadata(), "tokenizer_config.json") == config
+        with pytest.raises(ValueError, match="lacks required"):
+            _read_asset(f, f.metadata(), "chat_template.jinja")
+
+
 def test_a_gemma3_checkpoint_key_reaches_the_model():
     from thenoise.text_encoders.ltx_video import _gemma3_key
 
@@ -760,20 +815,6 @@ def test_ltx_gemma3_requires_single_safetensors_file(tmp_path):
     with pytest.raises(ValueError, match="one existing"):
         load_ltx_gemma(tmp_path / "model-00001-of-00005.safetensors",
                        version="2.3")
-
-
-def test_ltx_gemma3_vendored_minimal_assets():
-    from transformers import GemmaTokenizer
-    from thenoise.utils.text_encoder import GEMMA3_CONFIG_DIR
-    from pathlib import Path
-    import json
-    assets = Path(GEMMA3_CONFIG_DIR)
-    cfg = json.loads((assets / "text_config.json").read_text())
-    assert cfg["hidden_size"] == 3840 and cfg["num_hidden_layers"] == 48
-    assert cfg["rope_scaling"] == {"factor": 8.0, "rope_type": "linear"}
-    tokenizer = GemmaTokenizer(tokenizer_file=str(assets / "tokenizer.json"),
-                               add_bos_token=True, add_eos_token=False)
-    assert tokenizer("A red fox")["input_ids"][0] == tokenizer.bos_token_id
 
 
 def test_ltx_component_roles_and_lora_contract():

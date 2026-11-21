@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence, Union
 
 import torch
@@ -401,6 +402,21 @@ def load_dit(
         allow_missing=expected_missing,
         quantized_restore=True,
     )
+
+
+def spiece_model(checkpoint: Union[str, Path]) -> bytes:
+    """The serialized SentencePiece proto a text-encoder file ships beside its weights.
+
+    It is tokenizer payload rather than module state, so the weight load drops the key
+    and a tokenizer is built from these bytes instead of a vendored copy of them.
+    """
+    with MemoryEfficientSafeOpen(str(checkpoint)) as f:
+        names = sorted(k for k in f.keys() if k.rsplit(".", 1)[-1] == "spiece_model")
+        if not names:
+            raise ValueError(f"{checkpoint} carries no SentencePiece tokenizer")
+        if f.header[names[0]]["dtype"] != "U8":
+            raise ValueError(f"{checkpoint} stores its spiece_model as something else")
+        return f.get_tensor(names[0]).numpy().tobytes()
 
 
 def load_text_encoder_weights(
