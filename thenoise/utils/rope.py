@@ -71,9 +71,11 @@ def apply_rope_split_half(xq: torch.Tensor, cos: torch.Tensor,
     rotation a single elementwise chain on its way into attention. On gfx1151 a ``cat``
     joining two *computed* operands costs 1.6x to 3.4x at 16k tokens (measured on blocks
     of three models, where gfx1150 does not notice), whereas a ``cat`` appending an idle
-    tail — one computed operand and a view of the query — is free. Doubling the stored
-    table would buy the same chain at the price of phases twice as wide, so the doubling
-    happens on the way past.
+    tail — one computed operand and a view of the query — is free. The doubling pays for
+    itself even where the band is per-head and therefore as wide as the rotation it
+    feeds: 5-6% ahead of the concatenation on a two-stream block, measured at both 9k
+    and 16k tokens. Carrying the band doubled in the table would buy the same chain at
+    the price of phases twice as wide, so the doubling happens on the way past.
 
     The answer comes back in the query's dtype. Leaving a promotion in place — fp32
     phases beside bf16 weights — hands SDPA operands of mixed dtype, and it answers
