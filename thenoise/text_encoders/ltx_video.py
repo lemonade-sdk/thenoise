@@ -225,6 +225,34 @@ def _load_ltx_text_weights(module, path: Path, key_map,
 
 
 
+#: Gemma 4 widens every sixth attention to ``head_dim`` 512, and as of ROCm 10.1.0rc2 the
+#: fused SDPA backends answer that width with NaN -- over different tokens, layers and
+#: sequence lengths on every run, so the encoder loses a few rows of a short prompt or
+#: all of it. 256 measures clean on the same kernels, which is why Gemma 3 keeps them.
+#: The reference implementation costs nothing here: one call per prompt, over at most the
+#: connectors' 1024 rows.
+GEMMA4_ATTENTION = "eager"
+
+
+def build_gemma4(hf_config) -> "GemmaFeatures":
+    """The Gemma 4 body of an LTX-2.5 encoder, empty and ready for quantized weights.
+
+    Built through ``AutoModelForImageTextToText`` because that is how the unified
+    checkpoint is registered. The vocab logits are removed: the connectors read hidden
+    states, and the projection costs about 2 GiB to never be run.
+    """
+    from transformers import AutoModelForImageTextToText
+
+    from thenoise.dit.quantized import replace_linears
+
+    with init_empty_weights():
+        model = AutoModelForImageTextToText.from_config(
+            hf_config, attn_implementation=GEMMA4_ATTENTION)
+        del model.lm_head
+        replace_linears(model)
+    return GemmaFeatures(model)
+
+
 def load_ltx_gemma(path: str | Path, *, version: str, device: str):
     """Return `(GemmaFeatures, prompter, text_config)` built on ``device``.
 
@@ -236,7 +264,7 @@ def load_ltx_gemma(path: str | Path, *, version: str, device: str):
     parameter that is already where it belongs.
     """
     try:
-        from transformers import AutoModelForImageTextToText, PreTrainedTokenizerFast
+        from transformers import PreTrainedTokenizerFast
         from transformers.models.auto.configuration_auto import CONFIG_MAPPING
     except ImportError as e:
         raise RuntimeError("LTX text encoding requires transformers>=5.4") from e
@@ -288,14 +316,7 @@ def load_ltx_gemma(path: str | Path, *, version: str, device: str):
             **{k: v for k, v in json.loads(_read_asset(f, meta, "tokenizer_config.json")).items()
                if k not in _TOKENIZER_FILE_FIELDS},
         )
-        from thenoise.dit.quantized import replace_linears
-        with init_empty_weights():
-            model = AutoModelForImageTextToText.from_config(hf_config)
-            # The wrapper's vocab logits are never run, and building them for a
-            # 262144-token vocabulary costs about 2 GiB of weights to drop.
-            del model.lm_head
-            replace_linears(model)
-        wrapper = GemmaFeatures(model)
+    wrapper = build_gemma4(hf_config)
     _load_ltx_text_weights(
         wrapper, path, _gemma4_key,
         ("tokenizer_json", "hf_asset__", "text_embedding_projection.",

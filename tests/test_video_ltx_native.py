@@ -829,6 +829,35 @@ def test_ltx_gemma3_requires_single_safetensors_file(tmp_path):
                        version="2.3", device="cpu")
 
 
+def test_gemma4_attention_is_the_reference_implementation():
+    """Gemma 4 goes to eager attention because the fused kernels are wrong for it.
+
+    Every sixth layer of Gemma 4 is 512 wide, and the fused ROCm SDPA backends return NaN
+    at that width -- over different rows, layers and lengths from run to run, which reads
+    as a prompt being ignored rather than as a failure. 256 measures clean on the same
+    kernels, so Gemma 3 keeps them.
+    """
+    from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+    from thenoise.text_encoders.ltx_video import GEMMA4_ATTENTION, build_gemma4
+
+    config = CONFIG_MAPPING["gemma4_unified"]()
+    text = config.text_config
+    text.num_hidden_layers = 2
+    text.hidden_size = 64
+    text.intermediate_size = 128
+    text.num_attention_heads = 4
+    text.num_key_value_heads = 2
+    text.head_dim = 32
+    text.layer_types = ["sliding_attention", "full_attention"]
+    text.sliding_window = 4
+
+    used = {c._attn_implementation for module in build_gemma4(config).modules()
+            if (c := getattr(module, "config", None)) is not None
+            and hasattr(c, "_attn_implementation")}
+    assert used == {GEMMA4_ATTENTION}
+
+
 def test_the_text_encoder_is_built_where_the_manager_says(monkeypatch):
     """Its weights are written at the residency device, not read onto CPU and carried
     back afterwards: that round trip holds the whole encoder in host RAM while the
