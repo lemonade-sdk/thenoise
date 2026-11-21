@@ -199,6 +199,7 @@ class VideoPipelineController:
             if roles:
                 audio = stages.run(
                     model.decode_audio, x,
+                    params,
                     resident=roles,
                     pixels=pixels,
                 )
