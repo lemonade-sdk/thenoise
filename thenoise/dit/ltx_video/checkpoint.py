@@ -332,8 +332,8 @@ def _mapped(name: str, raw: str, *, transformer: bool) -> tuple[str, str | None]
     if transformer or name in ("dit", "connectors"):
         component, target = split_ltx_key(key) or ("", None)
         if target is not None and component in COMPONENT_PREFIXES:
-            # A codec packed with the transformer is spelled the original way:
-            # ``split_ltx_key`` strips its prefix, and the codec's own map renames it.
+            # A codec packed with the transformer is spelled the original way, which
+            # ``split_ltx_key`` strips the prefix of but does not rename.
             target = _map_component(component, target)
         return component, target
     head, _, rest = key.partition(".")
@@ -346,8 +346,10 @@ def select_ltx_keys(name: str, header, expected: dict[str, tuple[int, ...]],
                     *, strict: bool = True, transformer: bool = False) -> dict[str, str]:
     """The tensors of one file that fill component ``name``: raw key -> module key.
 
-    Lenient skips what the component has no parameter for instead of refusing it, so a
-    file can be asked whether it carries the part at all.
+    ``strict`` is for a file the request named for this part. Where the engine found the
+    file itself, a tensor that does not fit is skipped instead: a checkpoint carrying more
+    than this engine reads -- a codec of another generation, a repack's leftovers -- still
+    answers the parts it does fit, and the parts it does not are asked for by flag.
     """
     from thenoise.utils.checkpoint import CHECKPOINT_MARKER_KEYS
     from thenoise.utils.loader import RUNTIME_STATE_SUFFIXES
@@ -385,6 +387,40 @@ def select_ltx_keys(name: str, header, expected: dict[str, tuple[int, ...]],
     return selected
 
 
+def _near_miss(name: str, paths: list[Path], header_cache, primary, module) -> str:
+    """What to add when a part was not found: files that name it without fitting it.
+
+    A checkpoint of another generation answers to the same prefixes, and "pass --vae"
+    alone sends a request looking for a file it already has.
+    """
+    expected = {key: tuple(t.shape) for key, t in module.state_dict().items()}
+    worst = None
+    for path in paths:
+        mismatched = [raw for raw, target in _spelled(name, path, header_cache, primary)
+                      if target not in expected]
+        if mismatched and (worst is None or len(mismatched) > worst[1]):
+            worst = (mismatched[0], len(mismatched), path)
+    if worst is None:
+        return ""
+    return (f" ({worst[2].name} spells {worst[1]} tensors as {name} that this release "
+            f"has no parameter for, e.g. {worst[0]!r})")
+
+
+def _spelled(name: str, path: Path, header_cache, primary):
+    """(raw key, module key) for every tensor of a file that names component ``name``."""
+    from thenoise.utils.checkpoint import CHECKPOINT_MARKER_KEYS
+    from thenoise.utils.loader import RUNTIME_STATE_SUFFIXES
+    from thenoise.utils.safetensors import unwrap_key
+
+    header = _header_of(path, header_cache)
+    for raw in header.raw_entries:
+        if unwrap_key(raw) in CHECKPOINT_MARKER_KEYS or raw.endswith(RUNTIME_STATE_SUFFIXES):
+            continue
+        component, target = _mapped(name, raw, transformer=(path == primary))
+        if component == name and target is not None:
+            yield raw, target
+
+
 def _header_of(path: Path, cache: dict[Path, object] | None):
     """A file's header, parsed once per load however many components live in it."""
     from thenoise.utils.safetensors import read_header
@@ -398,12 +434,14 @@ def _header_of(path: Path, cache: dict[Path, object] | None):
 
 def load_ltx_component(
     name: str, module: torch.nn.Module, paths: Iterable[Path],
-    *, cancel: Callable[[], None], dtype: torch.dtype,
+    *, cancel: Callable[[], None], dtype: torch.dtype, named: Path,
     header_cache: dict[Path, object] | None = None, transformer: Path | None = None,
 ) -> torch.nn.Module:
     """Fill one component from the files that carry it, materializing only the selected
     keys. ``transformer`` is the file holding the transformer, which spells its keys its
-    own way. Strict assignment and quantization stay in ``thenoise.utils.loader``.
+    own way; ``named`` is the file the request gave for this part, and the only one
+    refused for carrying more than the module takes. Strict assignment and quantization
+    stay in ``thenoise.utils.loader``.
     """
     from thenoise.utils.loader import load_module_state, load_quantized_state_dict
     from thenoise.utils.safetensors import load_safetensors
@@ -415,7 +453,8 @@ def load_ltx_component(
     for path in paths:
         cancel()
         selected = select_ltx_keys(name, _header_of(path, header_cache), expected,
-                              transformer=(path == transformer))
+                                   strict=(path == named),
+                                   transformer=(path == transformer))
         if not selected:
             continue
         if any(target in weights for target in selected.values()):
@@ -427,8 +466,8 @@ def load_ltx_component(
 
     missing = set(expected) - set(weights)
     if missing:
-        raise ValueError(f'LTX {name} checkpoint missing={sorted(missing)[:8]} '
-                         '(no random/meta weight fallback)')
+        raise ValueError(f'LTX {name} weights in {", ".join(used)} leave '
+                         f'missing={sorted(missing)[:8]} (no random/meta weight fallback)')
 
     quantized = (any(key.endswith((".weight_scale", ".scale_weight")) for key in weights)
                  or any(t.dtype == torch.int8 or str(t.dtype).startswith("torch.float8")
@@ -480,10 +519,10 @@ def load_original_components(
                                        strict=False, transformer=(p == primary))]
         chosen = carriers if name == "connectors" else carriers[:1]
         if not chosen:
-            flag = _flag_for(name, version)
             raise ValueError(
                 f"LTX {name} weights are in none of the checkpoints given"
-                + (f"; pass {flag}" if flag else ""))
+                + (f"; pass {_flag_for(name, version)}" if _flag_for(name, version) else "")
+                + _near_miss(name, order, header_cache, primary, modules[name]))
         sources[name] = chosen
     log.info("LTX %s components: %s", version,
              ", ".join(f"{name} from {', '.join(p.name for p in paths)}"
@@ -491,5 +530,6 @@ def load_original_components(
 
     for name, module in modules.items():
         load_ltx_component(name, module, sources[name], cancel=cancel, dtype=dtype,
-                           header_cache=header_cache, transformer=primary)
+                           header_cache=header_cache, transformer=primary,
+                           named=given.get(ROLE_OF_COMPONENT[name]))
     return modules, {name: paths[0] for name, paths in sources.items()}

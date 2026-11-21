@@ -91,7 +91,7 @@ def test_streamed_load_is_strict_and_materializes_parameters_and_buffers(tmp_pat
             "net.running": torch.full((3,), 5.)}
     path = _save(tmp_path / "okay.safetensors", data)
     result = load_ltx_component(
-        "dit", model, [path], cancel=lambda: None, dtype=torch.float32)
+        "dit", model, [path], cancel=lambda: None, dtype=torch.float32, named=path)
     assert result is model
     assert not any(x.is_meta for x in (*model.parameters(), *model.buffers()))
     torch.testing.assert_close(model(torch.ones(2)), torch.tensor([3., 3., 3.]))
@@ -103,7 +103,7 @@ def test_streamed_load_is_strict_and_materializes_parameters_and_buffers(tmp_pat
         model.register_buffer("running", torch.zeros(3))
     with pytest.raises(ValueError, match="shape"):
         load_ltx_component(
-            "dit", model, [path], cancel=lambda: None, dtype=torch.float32)
+            "dit", model, [path], cancel=lambda: None, dtype=torch.float32, named=path)
     assert model.weight.is_meta
 
 
@@ -115,7 +115,7 @@ def test_int8_requires_weight_scale(tmp_path):
         module = torch.nn.ModuleDict({"layer": QuantizedLinear(4, 2, bias=False)})
     with pytest.raises(RuntimeError, match="missing its"):
         load_ltx_component("dit", module, [path],
-                           cancel=lambda: None, dtype=torch.bfloat16)
+                           cancel=lambda: None, dtype=torch.bfloat16, named=path)
 
 
 def test_gemma3_wrapper_mapping_and_deterministic_meta_buffers():
@@ -327,7 +327,7 @@ def test_native_ltx_vocoder_short_audio_waveform_and_streaming(tmp_path):
     with torch.device("meta"):
         candidate = LTXVocoderWithBWE(**cfg)
     loaded = load_ltx_component(
-            "vocoder", candidate, [file],
+            "vocoder", candidate, [file], named=file,
             cancel=lambda: None, dtype=torch.float32,
         )
     assert loaded is candidate
@@ -353,7 +353,7 @@ def test_native_ltx_audio_vae_streams_full_weights(tmp_path):
     with torch.device("meta"):
         candidate = LTXAudioVAE(**cfg)
     loaded = load_ltx_component(
-            "audio_vae", candidate, [file],
+            "audio_vae", candidate, [file], named=file,
             cancel=lambda: None, dtype=torch.float32,
         )
     assert loaded is candidate
@@ -457,6 +457,29 @@ def test_a_named_file_takes_its_part_from_the_all_in_one(tmp_path, monkeypatch):
     torch.testing.assert_close(parts["vae"].weight, weight)
 
 
+def test_a_file_naming_a_part_without_fitting_it_is_not_taken_for_it(tmp_path, monkeypatch):
+    """A codec the release is not does not become the codec because it shares a prefix.
+
+    Only the file the request named for a part is held to it; where the engine went
+    looking, tensors that do not fit are skipped, and what is left over is asked for by
+    flag -- with the near miss named, since "pass --vae" is no help to a request that
+    already passed a file with ``vae`` all over it.
+    """
+    m = _tiny_components(monkeypatch)
+    weight = torch.ones(2, 2)
+    keys = _monolith_keys(weight)
+    del keys["vae.weight"]
+    keys["vae.encoder.conv_in.weight"] = torch.ones(7, 7)
+    monolith = _save(tmp_path / "all-in-one.safetensors", keys)
+    upscaler = _upscaler_file(tmp_path, weight)
+    parts, sources = _load(m, {"": monolith, "vae": _save(
+        tmp_path / "video-vae.safetensors", {"vae.weight": weight}), "upscaler": upscaler})
+    assert sources["vae"].name == "video-vae.safetensors"
+    with pytest.raises(ValueError,
+                       match=r"pass --vae \(all-in-one\.safetensors spells 1 tensors as vae"):
+        _load(m, {"": monolith, "upscaler": upscaler})
+
+
 def test_a_part_no_given_file_holds_names_the_flag(tmp_path, monkeypatch):
     m = _tiny_components(monkeypatch)
     weight = torch.ones(2, 2)
@@ -506,7 +529,7 @@ def test_split_connectors_are_complete_across_dit_and_text_file(tmp_path, monkey
     assert all(not t.is_meta for module in parts.values() for t in module.parameters())
 
     _save(path_text, {"text_embedding_projection.video_aggregate_embed.weight": weight})
-    with pytest.raises(ValueError, match="checkpoint missing="):
+    with pytest.raises(ValueError, match="leave missing="):
         load()
 
 
@@ -608,7 +631,7 @@ def test_native_ltx_spatial_upscaler_streams_original_checkpoint_keys(tmp_path):
     with torch.device("meta"):
         target = LTXSpatialUpscaler(in_channels=8, mid_channels=32, num_blocks_per_stage=1)
     loaded = load_ltx_component(
-            "upscaler", target, [checkpoint],
+            "upscaler", target, [checkpoint], named=checkpoint,
             cancel=lambda: None, dtype=torch.float32,
         )
     assert loaded is target
