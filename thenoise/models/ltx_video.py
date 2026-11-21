@@ -27,7 +27,8 @@ from thenoise.samplers import Step, sigma_steps
 from thenoise.text_encoders.ltx_video import PROMPT_CONTEXT, load_ltx_gemma
 from thenoise.utils.image_tensor import cover_crop
 from thenoise.vae.ltx_audio import LATENT_TOKENS_PER_SECOND
-from thenoise.video.spec import ResolvedVideo, VideoSpec
+from thenoise.vae.ltx_video import TEMPORAL_COMPRESSION
+from thenoise.video.spec import ResolvedVideo, VideoSpec, frame_grid
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +36,6 @@ logger = logging.getLogger(__name__)
 #: renders and the first stage renders half of it.
 UPSCALER_FACTOR = 2
 
-
-def frame_grid(requested: float, *, explicit: bool) -> int:
-    """Causal first frame followed by groups of eight; explicit counts round up."""
-    q = (requested - 1) / 8
-    return max(9, 8 * (math.ceil(q) if explicit else math.floor(q + 0.5)) + 1)
 
 
 def _pack(x: torch.Tensor) -> torch.Tensor:
@@ -184,8 +180,8 @@ class LTXVideo(VideoModel):
         # Step count, guidance and solver are the request's: the released recipe is
         # DEFAULT_PREFS, and the schedule resamples the published grid to whatever else
         # is asked for. Mode/LoRA support is validated by the shared controller.
-        return dataclasses.replace(r, frame_count=frame_grid(r.frame_count,
-                                                            explicit=r.explicit_frames))
+        return dataclasses.replace(r, frame_count=frame_grid(
+            r.frame_count, compression=TEMPORAL_COMPRESSION, upward=r.explicit_frames))
 
     def encode_prompt(self, args: EncodePromptArgs) -> AVConditioning:
         """Both connector streams, and the unconditional halves guidance needs.

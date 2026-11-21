@@ -28,7 +28,7 @@ from thenoise.utils.image_tensor import cover_crop
 from thenoise.utils.safetensors import Header
 from thenoise.utils.wan_weights import wan_dit_key
 from thenoise.vae.wan_video import detect_latent_width, load_wan_video_vae, TEMPORAL_COMPRESSION
-from thenoise.video.spec import ResolvedVideo, VideoSpec
+from thenoise.video.spec import ResolvedVideo, VideoSpec, frame_grid
 
 logger = logging.getLogger(__name__)
 
@@ -267,7 +267,7 @@ class Wan22Model(VideoModel):
         resolved = super().resolve_video(spec)
         return dataclasses.replace(
             resolved,
-            frame_count=wan_sampling.wan_frame_grid(
+            frame_count=frame_grid(
                 resolved.frame_count, compression=TEMPORAL_COMPRESSION,
                 upward=resolved.explicit_frames),
         )

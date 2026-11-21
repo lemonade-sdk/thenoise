@@ -150,3 +150,24 @@ def test_shared_controller_cleans_video_state_on_failure(tmp_path, monkeypatch):
         controller.render(spec, Cancellation(), lambda *_: None,
                           tmp_path / "failed.webm")
     assert cleared == [True]
+
+
+def test_a_frame_count_lands_on_the_grid_a_codec_can_pack():
+    """One causal-clip grid, whatever the codec's temporal compression is.
+
+    A codec packs `compression*n+1` frames -- a first frame, then whole groups -- so the
+    shortest clip it can hold is one group, and the nearest grid point to a single frame
+    is a whole group rather than nothing.
+    """
+    from thenoise.video.spec import frame_grid
+
+    assert frame_grid(9, compression=8, upward=True) == 9
+    assert [frame_grid(n, compression=8, upward=True) for n in (1, 2, 8)] == [9, 9, 9]
+    assert [frame_grid(n, compression=8, upward=True) for n in (10, 17)] == [17, 17]
+    # A duration may round down, and a half goes up: 12 is nearer 9, 13 nearer 17.
+    assert [frame_grid(n, compression=8, upward=False) for n in (12, 13, 20)] == [9, 17, 17]
+    assert frame_grid(1.2 * 24, compression=4, upward=False) == 29  # the other codec, same rule
+
+    for wanted in (0, -3, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="positive and finite"):
+            frame_grid(wanted, compression=8, upward=True)

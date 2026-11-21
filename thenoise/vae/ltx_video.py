@@ -269,6 +269,13 @@ class _Decoder(nn.Module):
         return x.permute(0, 1, 5, 2, 6, 4, 7, 3).flatten(6, 7).flatten(4, 5).flatten(2, 3)
 
 
+#: What one latent cell of the released codec stands for: 32x32 pixels and 8 frames. The
+#: frame count a request is rounded to is derived from the second of these, so it is the
+#: codec that states it and not the adapter that remembers it.
+SPATIAL_COMPRESSION = 32
+TEMPORAL_COMPRESSION = 8
+
+
 class LTXVideoVAE(nn.Module):
     """LTX video codec: the encoder and decoder, and the statistics either side of them.
 
@@ -296,8 +303,8 @@ class LTXVideoVAE(nn.Module):
                  decoder_causal: bool = False,
                  encoder_spatial_padding_mode: str = "zeros",
                  decoder_spatial_padding_mode: str = "zeros",
-                 spatial_compression_ratio: int = 32,
-                 temporal_compression_ratio: int = 8,
+                 spatial_compression_ratio: int = SPATIAL_COMPRESSION,
+                 temporal_compression_ratio: int = TEMPORAL_COMPRESSION,
                  timestep_conditioning: bool = False,
                  **kwargs):
         super().__init__()
