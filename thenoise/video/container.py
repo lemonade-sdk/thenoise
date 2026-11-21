@@ -16,6 +16,10 @@ import numpy as np
 from thenoise.jobs import Cancellation
 from .spec import ResolvedVideo
 
+#: The audio codec each container carries, with the frame length its encoder consumes:
+#: AAC frames are 1024 samples, Opus in WebM is 20 ms.
+AUDIO_CODECS = {"mp4": ("aac", 1024), "webm": ("libopus", 960)}
+
 
 def _prepare_audio(audio, sample_rate, np):
     if not isinstance(sample_rate, int) or not 8000 <= sample_rate <= 192000:
@@ -36,9 +40,8 @@ def _prepare_audio(audio, sample_rate, np):
 
 def encode_video(frames: Iterable, spec: ResolvedVideo, token: Cancellation, out: Path,
                  progress, *, audio=None, sample_rate: int | None = None) -> None:
-    if audio is not None and spec.output_format != "mp4":
-        raise ValueError("synchronized audio currently requires MP4")
     samples = _prepare_audio(audio, sample_rate, np) if audio is not None else None
+    audio_codec, audio_frame = AUDIO_CODECS[spec.output_format]
     if samples is not None:
         # Pad/trim the generated audio to the requested video timeline.
         wanted = round(spec.frame_count * sample_rate / spec.fps)
@@ -59,7 +62,7 @@ def encode_video(frames: Iterable, spec: ResolvedVideo, token: Cancellation, out
             audio_stream = None
             audio_pos = 0
             if samples is not None:
-                audio_stream = container.add_stream("aac", rate=sample_rate)
+                audio_stream = container.add_stream(audio_codec, rate=sample_rate)
                 audio_layout = "mono" if samples.shape[0] == 1 else "stereo"
                 audio_stream.layout = audio_layout
                 audio_timebase = Fraction(1, sample_rate)
@@ -72,13 +75,13 @@ def encode_video(frames: Iterable, spec: ResolvedVideo, token: Cancellation, out
                 while audio_pos < limit:
                     token.check()
                     remaining = samples.shape[1] - audio_pos
-                    if remaining < 1024:
-                        chunk = np.zeros((samples.shape[0], 1024), dtype=np.float32)
+                    if remaining < audio_frame:
+                        chunk = np.zeros((samples.shape[0], audio_frame), dtype=np.float32)
                         chunk[:, :remaining] = samples[:, audio_pos:]
                         count = remaining
-                    elif limit - audio_pos >= 1024:
-                        chunk = np.ascontiguousarray(samples[:, audio_pos:audio_pos + 1024])
-                        count = 1024
+                    elif limit - audio_pos >= audio_frame:
+                        chunk = np.ascontiguousarray(samples[:, audio_pos:audio_pos + audio_frame])
+                        count = audio_frame
                     else:
                         break
                     aframe = av.AudioFrame.from_ndarray(chunk, format="fltp", layout=audio_layout)

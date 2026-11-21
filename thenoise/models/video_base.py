@@ -34,6 +34,18 @@ class Segment:
     guidance_scale: float
 
 
+@dataclass(frozen=True)
+class Waveform:
+    """PCM a model decoded for a clip: ``[channels, samples]``, float in [-1, 1].
+
+    The rate travels with the audio because it is a property of the model's codec, not
+    of the container: the muxer must never infer it from the clip length.
+    """
+
+    samples: torch.Tensor
+    sample_rate: int
+
+
 class VideoModel(PixelModel):
     MEDIUM = "video"
 
@@ -98,8 +110,8 @@ class VideoModel(PixelModel):
         """Extra MemoryManager roles needed to decode audio, if this codec has any."""
         return ()
 
-    def decode_audio(self, latents: torch.Tensor):
-        """Optional ``(waveform, sample_rate)`` for the AV muxer."""
+    def decode_audio(self, latents: torch.Tensor) -> Optional["Waveform"]:
+        """Canonical clip latent -> the sound to mux beside its frames, if this codec has one."""
         return None
 
     @abstractmethod

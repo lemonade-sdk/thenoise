@@ -4,12 +4,13 @@ from __future__ import annotations
 import types
 from pathlib import Path
 
+import av
 import numpy as np
 import pytest
 
-from thenoise.video.container import encode_video
+from thenoise.video.container import AUDIO_CODECS, encode_video
 from thenoise.jobs import Cancellation, JobCancelled
-from thenoise.video.spec import VideoSpec
+from thenoise.video.spec import OUTPUT_FORMATS, VideoSpec
 from conftest import wan_prefs
 
 
@@ -116,6 +117,41 @@ def test_mp4_audio_video_mux_and_atomic_publish(tmp_path, monkeypatch):
     assert data.endswith(b"ez")  # both encoder streams flushed before publication
     assert not target.with_name(target.name + ".part").exists()
     assert progress[-1] == ("encoding", clip.frame_count, clip.frame_count)
+
+
+def test_every_container_the_request_allows_carries_sound():
+    """``encode_video`` indexes the codec table directly, so it must stay total."""
+    assert set(OUTPUT_FORMATS) == set(AUDIO_CODECS)
+
+
+@pytest.mark.parametrize("container", OUTPUT_FORMATS)
+def test_generated_sound_is_demuxable_from_every_container(tmp_path, container):
+    """PyAV for real: the sound must survive a container, not just reach a muxer.
+
+    The fake-AV tests check the calls; only a real container proves the codec the table
+    names exists in this build and that the timestamps land where the clip ends.
+    """
+    rate = 48000
+    clip = VideoSpec(prompt="fox", width=64, height=64, frames=9, fps=24,
+                     output_format=container).resolve(wan_prefs())
+    target = tmp_path / f"clip.{container}"
+    frames = (np.zeros((clip.height, clip.width, 3), dtype=np.uint8)
+              for _ in range(clip.frame_count))
+    ramp = np.arange(int(clip.frame_count / clip.fps * rate), dtype=np.float32)
+    sound = np.sin(2 * np.pi * 440 * ramp / rate)[None, :]
+    encode_video(frames, clip, Cancellation(), target, lambda *_: None,
+                 audio=sound, sample_rate=rate)
+
+    expected, _ = AUDIO_CODECS[container]
+    with av.open(str(target)) as media:
+        assert sorted(stream.type for stream in media.streams) == ["audio", "video"]
+        audio, = [stream for stream in media.streams if stream.type == "audio"]
+        # The decoder names Opus without the encoder's libprefix.
+        assert audio.codec_context.name in (expected, expected.removeprefix("lib"))
+        demuxed = sum(frame.samples for frame in media.decode(audio))
+    # The tail is padded out to a whole codec frame, never trimmed short of the clip.
+    wanted = clip.frame_count * rate / clip.fps
+    assert wanted <= demuxed < wanted + 960
 
 
 def test_bad_audio_does_not_replace_existing_video(tmp_path):

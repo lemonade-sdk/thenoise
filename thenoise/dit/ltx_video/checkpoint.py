@@ -219,7 +219,6 @@ def make_audio_vae():
         num_res_blocks=2, attn_resolutions=None, in_channels=2,
         resolution=256, latent_channels=8, norm_type="pixel",
         causality_axis="height", dropout=0.0, mid_block_add_attention=False,
-        sample_rate=16000, mel_hop_length=160, is_causal=True,
         mel_bins=64, double_z=True,
     )
     with torch.device("meta"):

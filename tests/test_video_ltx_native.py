@@ -459,8 +459,12 @@ def test_ltx_variants_resolve_with_shared_video_contract_and_fixed_refinement():
         guided = model.resolve_video(VideoSpec(prompt="moving fox",
                                                negative_prompt="blurry", guidance_scale=3.5))
         assert (guided.guidance_scale, guided.negative_prompt) == (3.5, "blurry")
-        with pytest.raises(ValueError, match="mp4"):
-            VideoPipelineController(model).resolve(VideoSpec(prompt="moving fox", output_format="webm"))
+        # Sound rides in either container, so neither format is refused.
+        for container in ("mp4", "webm"):
+            clip = VideoPipelineController(model).resolve(
+                VideoSpec(prompt="moving fox", output_format=container))
+            assert clip.output_format == container
+
 
 def test_native_ltx_spatial_upscaler_weights_and_forward():
     """x2 spatial, temporal length unchanged, original checkpoint state names."""

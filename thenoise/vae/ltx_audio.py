@@ -15,6 +15,10 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+#: Audio latent tokens per second of clip: mel frames per second (16 kHz at hop 160)
+#: over the codec's 4x temporal compression.
+LATENT_TOKENS_PER_SECOND = (16000 / 160) / 4
+
 
 class _CausalConv2d(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, kernel_size: int = 3,
@@ -250,8 +254,7 @@ class LTXAudioVAE(nn.Module):
                  resolution: int = 256, latent_channels: int = 8,
                  norm_type: str = "pixel", causality_axis: str = "height",
                  dropout: float = 0.0, mid_block_add_attention: bool = False,
-                 sample_rate: int = 16000, mel_hop_length: int = 160,
-                 is_causal: bool = True, mel_bins: int = 64, double_z: bool = True):
+                 mel_bins: int = 64, double_z: bool = True):
         super().__init__()
         if causality_axis not in {"none", "width", "height", "width-compatibility"}:
             raise ValueError(f"unsupported audio VAE causal axis: {causality_axis}")
@@ -265,7 +268,6 @@ class LTXAudioVAE(nn.Module):
         self.decoder = _Decoder(**cfg, mel_bins=mel_bins)
         self.register_buffer("latents_mean", torch.zeros(base_channels))
         self.register_buffer("latents_std", torch.ones(base_channels))
-        self.temporal_compression_ratio = 4
 
     @property
     def dtype(self) -> torch.dtype:

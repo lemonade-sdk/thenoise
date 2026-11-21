@@ -52,9 +52,6 @@ class VideoPipelineController:
         if not model.capability("video")[mode]:
             raise ValueError(f"model '{model.name}' does not support {mode}")
         resolved = model.resolve_video(spec)
-        # The shared container can mux audio only with MP4.
-        if model.audio_components() and resolved.output_format != "mp4":
-            raise ValueError("audiovisual output requires mp4")
         # After the merge: a preference can name a solver or a role too.
         check_sampler(resolved.sampler)
         check_lora_roles(resolved.lora_specs, model.lora_components())
@@ -260,9 +257,8 @@ class VideoPipelineController:
             # WAN and other video-only adapters keep their existing call.
             encode_video(frames(), spec, token, output, progress)
         else:
-            sound, sample_rate = audio
             encode_video(frames(), spec, token, output, progress,
-                         audio=sound, sample_rate=sample_rate)
+                         audio=audio.samples, sample_rate=audio.sample_rate)
 
 
 __all__ = ["VideoPipelineController"]

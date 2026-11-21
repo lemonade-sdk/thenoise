@@ -23,10 +23,11 @@ from thenoise.dit.ltx_video.checkpoint import (
 )
 from thenoise.dit.ltx_video.sampling import REFINE_GRID, stage_grids
 from thenoise.models.config import EncodePromptArgs, VideoSamplingParams
-from thenoise.models.video_base import Segment, VideoModel
+from thenoise.models.video_base import Segment, VideoModel, Waveform
 from thenoise.samplers import Step, sigma_steps
 from thenoise.text_encoders.ltx_video import load_ltx_gemma
 from thenoise.utils.image_tensor import cover_crop
+from thenoise.vae.ltx_audio import LATENT_TOKENS_PER_SECOND
 from thenoise.video.spec import ResolvedVideo, VideoSpec
 
 logger = logging.getLogger(__name__)
@@ -274,7 +275,7 @@ class LTXVideo(VideoModel):
     def init_latents(self, params: VideoSamplingParams):
         self._params = params
         t, h, w = self._geometry(params, False)
-        audio_length = max(1, round((params.frames / params.fps) * 25.0))
+        audio_length = max(1, round(params.frames / params.fps * LATENT_TOKENS_PER_SECOND))
         seed = torch.Generator(device="cpu").manual_seed(params.seed)
         video = torch.randn((1, 128, t, h, w), generator=seed, dtype=torch.float32)
         audio = torch.randn((1, audio_length, 128), generator=seed, dtype=torch.float32)
@@ -419,7 +420,7 @@ class LTXVideo(VideoModel):
         a = (a * std + mean).unflatten(2, (8, 16)).transpose(1, 2)
         mel = self.audio_vae.decode(a.to(self.audio_vae.dtype), return_dict=False)[0]
         sound = self.vocoder(mel.to(self.vocoder.dtype))
-        return sound, 48000
+        return Waveform(sound, self.vocoder.output_sampling_rate)
 
     def decode_frames(self, latents) -> Iterator[torch.Tensor]:
         params = self._params
