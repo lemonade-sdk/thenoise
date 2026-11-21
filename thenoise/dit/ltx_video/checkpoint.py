@@ -7,7 +7,6 @@ dependency. ComfyUI is used only as a checkpoint-layout reference.
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 from pathlib import Path
@@ -16,35 +15,23 @@ from typing import Callable, Mapping
 import torch
 
 from thenoise.utils.loader import load_selected_state, partition_keys
-from thenoise.utils.safetensors import unwrap_key
+from thenoise.utils.safetensors import Signature, unwrap_key
 
 log = logging.getLogger(__name__)
 
 VERSION_23 = "2.3"
 VERSION_25 = "2.5"
 
-
-def version_from_checkpoint(path: str | Path) -> str | None:
-    """Identify a released LTX file using the shared header representation."""
-    from thenoise.utils.safetensors import read_header
-
-    path = Path(path).expanduser()
-    if not path.is_file():
-        return None
-    header = read_header(str(path))
-    cfg = header.metadata_json("config")
-    version = str(header.metadata.get("model_version", "") or cfg.get("model_version", ""))
-    if version.startswith("2.5"):
-        return VERSION_25
-    if version.startswith("2.3"):
-        return VERSION_23
-    keys = header.names
-    if "keyframes_abs_pos_embedding" in keys:
-        return VERSION_25
-    if "patchify_proj.weight" in keys and "audio_patchify_proj.weight" in keys:
-        return VERSION_23
-    return None
-
+#: Both streams' patch projections are what makes a released file an LTX 2.x transformer.
+#: 2.5 adds one embedding that 2.3 cannot have, and each version asks for the other's
+#: answer, so no file is claimed by the version that would build it wrong. Checkpoint
+#: names, not module names: see :func:`split_ltx_key`.
+_AV_KEYS = ("patchify_proj.weight", "audio_patchify_proj.weight")
+_KEYFRAME_EMBEDDING = "keyframes_abs_pos_embedding"
+SIGNATURE_23 = Signature("LTX-2.3 transformer", keys=_AV_KEYS,
+                         absent=(_KEYFRAME_EMBEDDING,))
+SIGNATURE_25 = Signature("LTX-2.5 transformer",
+                         keys=(*_AV_KEYS, _KEYFRAME_EMBEDDING))
 
 # Explicit transformations derived from the Apache-2 reference converter.
 _COMMON_TRANSFORMER_RENAMES = (

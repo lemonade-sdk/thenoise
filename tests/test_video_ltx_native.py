@@ -22,8 +22,9 @@ def _checkpoint():
     return module
 
 
-def _save(path, tensors):
-    save_file({name: tensor.clone() for name, tensor in tensors.items()}, str(path))
+def _save(path, tensors, metadata=None):
+    save_file({name: tensor.clone() for name, tensor in tensors.items()}, str(path),
+              metadata=metadata)
     return path
 
 
@@ -64,17 +65,45 @@ def test_a_codec_packed_with_the_transformer_fills_what_a_codec_alone_fills():
         assert packed[1] in modules[name].state_dict(), f"{raw} -> {packed[1]!r}"
 
 
-def test_header_detection_and_mapping(tmp_path):
-    m = _checkpoint()
-    for version in ("2.3", "2.5"):
-        data = {
-            "model.diffusion_model.patchify_proj.weight": torch.ones(2, 2),
-            "model.diffusion_model.audio_patchify_proj.weight": torch.ones(2, 2),
-        }
+def test_a_transformer_is_claimed_by_exactly_one_version(tmp_path):
+    """Two declarations do what a hand-written detector did, and rule out the other way
+    too: the version a file is not cannot claim it and then build it wrong."""
+    from thenoise.models.ltx_video import LTX23Video, LTX25Video
+    from thenoise.utils.safetensors import read_header
+
+    for version, winner, loser in (("2.3", LTX23Video, LTX25Video),
+                                   ("2.5", LTX25Video, LTX23Video)):
+        data = {"model.diffusion_model.patchify_proj.weight": torch.ones(2, 2),
+                "model.diffusion_model.audio_patchify_proj.weight": torch.ones(2, 2)}
         if version == "2.5":
             data["model.diffusion_model.keyframes_abs_pos_embedding"] = torch.ones(1, 2)
-        path = _save(tmp_path / f"ltx-{version}-test.safetensors", data)
-        assert m.version_from_checkpoint(path) == version
+        header = read_header(str(_save(tmp_path / f"ltx-{version}.safetensors", data)))
+        assert winner.detect(header), version
+        assert not loser.detect(header), version
+
+
+def test_a_file_stating_another_version_is_refused_by_the_model_it_was_given_to(tmp_path):
+    """Metadata cannot move a tensor, so it is not the detector. It is still what a file
+    says about itself, and a request that named one model and handed over the other's
+    file is a mistake worth naming -- from the header the runtime already parsed."""
+    from thenoise.models.ltx_video import LTX23Video, LTX25Video
+    from thenoise.utils.safetensors import read_header
+
+    tensors = {"patchify_proj.weight": torch.ones(2, 2),
+               "audio_patchify_proj.weight": torch.ones(2, 2)}
+    stated = read_header(str(_save(
+        tmp_path / "stated.safetensors", tensors, metadata={"model_version": "2.5.0"})))
+    silent = read_header(str(_save(tmp_path / "silent.safetensors", tensors)))
+
+    LTX25Video.validate_paths({"": stated})
+    # A file that states nothing about itself is not a lie either.
+    LTX23Video.validate_paths({"": silent})
+    with pytest.raises(ValueError, match=r"states model_version 2\.5\.0"):
+        LTX23Video.validate_paths({"": stated})
+
+
+def test_a_checkpoint_key_reaches_the_parameter_it_fills():
+    m = _checkpoint()
     assert m.split_ltx_key("model.diffusion_model.prompt_adaln_single.linear.weight") == (
         "dit", "prompt_adaln.linear.weight"
     )

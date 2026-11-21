@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from thenoise.dit.ltx_video.checkpoint import (
-    VERSION_23, VERSION_25, load_original_components,
+    SIGNATURE_23, SIGNATURE_25, VERSION_23, VERSION_25, load_original_components,
 )
 from thenoise.dit.ltx_video.sampling import REFINE_GRID, stage_grids
 from thenoise.models.config import EncodePromptArgs, VideoSamplingParams
@@ -104,16 +104,13 @@ class LTXVideo(VideoModel):
     }
 
     @classmethod
-    def detect(cls, source) -> bool:
-        # Match the shared, keys-only model detection contract.
-        keys = set(source.names)
-        is_av = (any(k.endswith("patchify_proj.weight") for k in keys) and
-                 any(k.endswith("audio_patchify_proj.weight") for k in keys))
-        has_keyframe = any(k.endswith("keyframes_abs_pos_embedding") for k in keys)
-        return is_av and (has_keyframe == (cls.version == VERSION_25))
-
-    @classmethod
     def validate_paths(cls, checkpoints: dict[str, object]) -> None:
+        for header in checkpoints.values():
+            stated = str(header.metadata.get("model_version", "")
+                         or header.metadata_json("config").get("model_version", ""))
+            if stated and not stated.startswith(cls.version):
+                raise ValueError(f"{header.path} states model_version {stated}, "
+                                 f"which {cls.name} is not")
         if cls.version == VERSION_25 and "text_projection" in checkpoints:
             raise ValueError("LTX 2.5 keeps its text projections with --text-encoder")
 
@@ -415,6 +412,7 @@ class LTXVideo(VideoModel):
 class LTX23Video(LTXVideo):
     name = "LTX-2.3-Distilled"
     version = VERSION_23
+    SIGNATURE = SIGNATURE_23
     #: Its codecs, vocoder and projections ship inside the transformer file -- in BF16
     #: and in the quantised releases that pack the same way.
     REQUIRED_COMPONENTS = ("text_encoder",)
@@ -423,5 +421,6 @@ class LTX23Video(LTXVideo):
 class LTX25Video(LTXVideo):
     name = "LTX-2.5-Distilled"
     version = VERSION_25
+    SIGNATURE = SIGNATURE_25
     #: No all-in-one 2.5 release: its codecs and upscaler ship apart.
     REQUIRED_COMPONENTS = ("vae", "text_encoder")
