@@ -1,7 +1,6 @@
 """Small CPU contract tests for native LTX checkpoint loading and sampling."""
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,17 +10,7 @@ import torch
 from safetensors.torch import save_file
 
 from conftest import tiny_ltx_video_vae
-
-
-ROOT = Path(__file__).resolve().parents[1]
-
-
-def _checkpoint():
-    path = ROOT / "thenoise/dit/ltx_video/checkpoint.py"
-    spec = importlib.util.spec_from_file_location("_ltx_native_checkpoint_test", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+from thenoise.dit.ltx_video import checkpoint
 
 
 def _save(path, tensors, metadata=None):
@@ -168,7 +157,7 @@ def test_a_trunk_that_is_not_a_whole_number_of_heads_is_refused(tmp_path):
 
 
 def test_a_checkpoint_key_reaches_the_parameter_it_fills():
-    m = _checkpoint()
+    m = checkpoint
     assert m.split_ltx_key("model.diffusion_model.prompt_adaln_single.linear.weight") == (
         "dit", "prompt_adaln.linear.weight"
     )
@@ -367,7 +356,7 @@ def test_native_ltx_vocoder_checkpoint_layout_and_hann_filter():
     from thenoise.dit.ltx_video.vocoder import LTXVocoderWithBWE
 
     with torch.device("meta"):
-        model = _checkpoint().make_vocoder()
+        model = checkpoint.make_vocoder()
     assert isinstance(model, LTXVocoderWithBWE)
     assert model.vocoder.conv_in.weight.shape == (1536, 128, 7)
     assert model.bwe_generator.conv_in.weight.shape == (512, 128, 7)
@@ -386,7 +375,7 @@ def test_native_ltx_audio_vae_checkpoint_layout_and_forward():
     from thenoise.vae.ltx_audio import LTXAudioVAE
 
     with torch.device("meta"):
-        model = _checkpoint().make_audio_vae()
+        model = checkpoint.make_audio_vae()
     assert isinstance(model, LTXAudioVAE)
     assert model.encoder.conv_in.conv.weight.shape == (128, 2, 3, 3)
     assert model.decoder.conv_in.conv.weight.shape == (512, 8, 3, 3)
@@ -499,13 +488,13 @@ def _tiny_components(monkeypatch):
     not built to the names a real transformer uses, so the read is replaced with the
     numbers a two-parameter module wants.
     """
-    m = _checkpoint()
+    m = checkpoint
 
     def linear():
         with torch.device("meta"):
             return torch.nn.Linear(2, 2, bias=False)
 
-    def geometry(_checkpoint):
+    def geometry(_header):
         return m.LTXParams(
             in_channels=2, out_channels=2, dim=128, num_layers=1,
             cross_attention_dim=2, audio_in_channels=2, audio_out_channels=2,
