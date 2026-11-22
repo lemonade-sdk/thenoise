@@ -5,8 +5,7 @@ Use the normal `/video` or `/jobs/video` endpoints. Supported: T2V, first-frame
 I2V, and the released recipe of eight Euler sampling steps plus a three-step
 spatial refinement. Ask for another step count, solver, guidance scale or
 negative prompt and you get that instead: the released numbers are the default,
-not a floor. Sound lands in `mp4` as AAC and in `webm` as Opus. A single
-starting image only; last-frame guidance and runtime LoRAs are not supported.
+not a floor. Sound lands in `mp4` as AAC and in `webm` as Opus.
 
 ## Download models
 
