@@ -229,6 +229,66 @@ def test_a_second_component_is_undone_from_the_file_it_came_from(tmp_path):
     assert torch.equal(low_dit.q.weight._qdata, originals)
 
 
+def _compiled_dit(tmp_path, kind: str):
+    """A loaded TinyDiT whose ``q`` layer carries ``kind``'s weights."""
+    kwargs = {"fp8": {"weight_dtype": torch.float8_e4m3fn}}.get(kind, {})
+    if kind == "bf16":
+        path = write_safetensors(tmp_path / "bf16.safetensors", bf16_tensors())
+    elif kind == "w4a8":
+        path, _ = w4a8_checkpoint(tmp_path / "w4a8.safetensors")
+    else:
+        path, _ = int8_checkpoint(tmp_path / f"{kind}.safetensors", **kwargs)
+    model = TinyDiT()
+    load_dit(model, path, device="cpu", dtype=torch.bfloat16)
+    return model
+
+
+@pytest.mark.parametrize("kind", ["int8", "fp8", "w4a8", "bf16"])
+def test_a_compiled_layer_never_traces_into_a_device_kernel(kind, tmp_path, request):
+    """The kernels take raw pointers, so dynamo has to be stopped before them.
+
+    INT8 reaches its kernel through a fake-registered op of comfy_kitchen's own, so one
+    ``F.linear`` is already opaque. W4A8 and FP8 reach theirs through plain functions,
+    where the HIP backend then asks a FakeTensor for a data pointer: W4A8 dies there and
+    FP8's handler swallows the error, leaving a permanently dequantized graph. Both are
+    wrapped here. A BF16 layer must stay a plain ``F.linear`` -- wrapping it would cut the
+    layer off from the elementwise fusion around it for nothing.
+
+    The traced graph is asked for rather than a compiled run: ``export`` traces without
+    executing, so this holds with Inductor off, as the suite runs it.
+    """
+    request.addfinalizer(torch._dynamo.reset)
+    torch._dynamo.reset()
+    layer = _compiled_dit(tmp_path, kind).q
+    assert layer._quantized == (kind != "bf16")
+    x = torch.randn(3, TINY_DIM[1], dtype=torch.bfloat16)
+    layer(x)
+
+    graph = torch._dynamo.export(layer)(x).graph_module
+    targets = [str(node.target) for node in graph.graph.nodes if node.op == "call_function"]
+    if kind == "w4a8":
+        assert targets == [str(torch.ops.thenoise.w4a8_linear)]
+    elif kind == "fp8":
+        assert targets == [str(torch.ops.thenoise.fp8_linear)]
+    else:
+        assert not any("thenoise." in target for target in targets), targets
+
+
+def test_a_calibrated_fp8_layer_keeps_both_halves_of_its_gemm(tmp_path, request):
+    """Quantizing the activations stays comfy_kitchen's; only the GEMM is wrapped."""
+    request.addfinalizer(torch._dynamo.reset)
+    torch._dynamo.reset()
+    layer = QuantizedLinear(TINY_DIM[1], TINY_DIM[0], bias=False).to(torch.bfloat16)
+    layer.load_quantized(fp8_qt(*fp8_pair()), input_scale=torch.tensor(0.25))
+    x = torch.randn(3, TINY_DIM[1], dtype=torch.bfloat16)
+    layer(x)
+
+    graph = torch._dynamo.export(layer)(x).graph_module
+    targets = [str(node.target) for node in graph.graph.nodes if node.op == "call_function"]
+    assert str(torch.ops.comfy_kitchen.quantize_fp8) in targets
+    assert str(torch.ops.thenoise.fp8_linear) in targets
+
+
 def test_a_component_cut_out_of_a_multi_component_file_undoes_from_that_file(tmp_path):
     """LTX reads its transformer out of a file that also holds the codecs and projections.
 

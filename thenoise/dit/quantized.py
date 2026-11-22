@@ -5,8 +5,11 @@ BF16 (``weight`` is an ``nn.Parameter``) or a quantized scheme, in which case
 ``weight`` is a ``comfy_kitchen.tensor.QuantizedTensor`` buffer — it cannot be a
 Parameter, since PyTorch forbids gradients on integer tensors.
 
-The module is layout-agnostic: ``forward`` calls ``F.linear`` and the tensor's
-``__torch_dispatch__`` routes the GEMM to the right kernel for its layout.
+The module is layout-agnostic: the GEMM goes to whichever kernel the weight's layout
+answers with. Two of those answers are plain Python functions whose device backends
+take raw pointers, so they run inside a ``torch.library`` op here rather than under
+``torch.compile``'s trace -- see ``_LINEAR_OPS``. A full-precision weight stays an
+ordinary ``F.linear``, where inductor can fuse it with its neighbours.
 """
 from __future__ import annotations
 
@@ -17,11 +20,113 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from comfy_kitchen.tensor import QuantizedTensor, TensorWiseINT8Layout
-from comfy_kitchen.tensor.w4a8_int8 import AsymW4A8Int8Layout
+from comfy_kitchen.tensor import (
+    AsymW4A8Int8Layout,
+    QuantizedTensor,
+    TensorCoreFP8Layout,
+    TensorWiseINT8Layout,
+    w4a8_int8_linear,
+)
 
 from thenoise.utils.loader import restore_quantized_layer
 from thenoise.utils.lora import LoraFactors, LoraMode
+
+#: What a quantized GEMM emits, carried across the op boundary as an index because
+#: ``torch.library`` has no schema type for ``torch.dtype``.
+GEMM_DTYPES: tuple[torch.dtype, ...] = (torch.bfloat16, torch.float16, torch.float32)
+
+
+@torch.library.custom_op("thenoise::w4a8_linear", mutates_args=())
+def _w4a8_linear(
+    x: torch.Tensor,
+    qdata: torch.Tensor,
+    s_rel: torch.Tensor,
+    s_channel: torch.Tensor,
+    codebook: Optional[torch.Tensor],
+    correction: Optional[torch.Tensor],
+    decode_lut: Optional[torch.Tensor],
+    bias: Optional[torch.Tensor],
+    out_dtype: int,
+    group_size: int,
+    convrot_groupsize: int,
+    mma_packed: bool,
+) -> torch.Tensor:
+    """The grouped W4A8 GEMM, opaque to dynamo (see ``_LINEAR_OPS``)."""
+    return w4a8_int8_linear(
+        x, qdata, s_rel, s_channel, codebook=codebook, correction=correction, bias=bias,
+        group_size=group_size, convrot_groupsize=convrot_groupsize,
+        out_dtype=GEMM_DTYPES[out_dtype], mma_packed=mma_packed, decode_lut=decode_lut,
+    )
+
+
+@_w4a8_linear.register_fake
+def _(
+    x: torch.Tensor,
+    qdata: torch.Tensor,
+    s_rel: torch.Tensor,
+    s_channel: torch.Tensor,
+    codebook: Optional[torch.Tensor],
+    correction: Optional[torch.Tensor],
+    decode_lut: Optional[torch.Tensor],
+    bias: Optional[torch.Tensor],
+    out_dtype: int,
+    group_size: int,
+    convrot_groupsize: int,
+    mma_packed: bool,
+) -> torch.Tensor:
+    return torch.empty(*x.shape[:-1], qdata.shape[0],
+                       dtype=GEMM_DTYPES[out_dtype], device=x.device)
+
+
+def _fp8_tensor(data: torch.Tensor, scale: torch.Tensor, dtype: torch.dtype) -> QuantizedTensor:
+    """Re-wrap FP8 storage so the layout's own linear dispatch answers for it."""
+    return QuantizedTensor(data, "TensorCoreFP8Layout", TensorCoreFP8Layout.Params(
+        scale=scale, orig_dtype=dtype, orig_shape=tuple(data.shape)))
+
+
+@torch.library.custom_op("thenoise::fp8_linear", mutates_args=())
+def _fp8_linear(
+    x: torch.Tensor,
+    x_scale: Optional[torch.Tensor],
+    qdata: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    out_dtype: int,
+) -> torch.Tensor:
+    """The FP8 GEMM, opaque to dynamo (see ``_LINEAR_OPS``). ``x`` is FP8 storage under
+    ``x_scale`` when the activations were quantized, and the activation itself when they
+    were not -- which is what decides between the FP8 kernel and a dequantized matmul."""
+    dtype = GEMM_DTYPES[out_dtype]
+    if x_scale is not None:
+        x = _fp8_tensor(x, x_scale, dtype)
+    return F.linear(x, _fp8_tensor(qdata, weight_scale, dtype), bias)
+
+
+@_fp8_linear.register_fake
+def _(
+    x: torch.Tensor,
+    x_scale: Optional[torch.Tensor],
+    qdata: torch.Tensor,
+    weight_scale: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    out_dtype: int,
+) -> torch.Tensor:
+    return torch.empty(*x.shape[:-1], qdata.shape[0],
+                       dtype=GEMM_DTYPES[out_dtype], device=x.device)
+
+
+#: Layouts whose GEMM this module hides from dynamo.
+#:
+#: comfy_kitchen already exposes INT8 as a fake-registered custom op
+#: (``comfy_kitchen::int8_linear``), so an INT8 weight is one opaque node on its own and
+#: stays on ``F.linear``. W4A8 and FP8 reach their kernels through plain functions: under
+#: ``torch.compile`` dynamo inlines them and the backend then asks a FakeTensor for its
+#: data pointer -- a hard error for W4A8, and for FP8 an exception their own handler
+#: swallows into a permanently dequantized graph.
+#:
+#: The ops take storage tensors, never the ``QuantizedTensor``: a tensor subclass crossing
+#: a custom-op boundary arrives already dequantized, which would defeat the point silently.
+_LINEAR_OPS = (AsymW4A8Int8Layout, TensorCoreFP8Layout)
 
 
 class QuantizedLinear(nn.Module):
@@ -193,11 +298,44 @@ class QuantizedLinear(nn.Module):
         x = x.to(self._lora_down.dtype)
         return F.linear(F.linear(x, self._lora_down), self._lora_up)
 
+    def _gemm(self, x: torch.Tensor, weight: QuantizedTensor, bias: Optional[torch.Tensor],
+              out_dtype: torch.dtype) -> torch.Tensor:
+        """``x @ weight.T + bias`` for a quantized weight, opaque where dynamo needs it.
+
+        A layout outside ``_LINEAR_OPS`` (or one the file stored transposed, which no op
+        here reads) keeps the plain dispatch, which is correct in eager and fails loudly
+        under ``torch.compile`` rather than building the wrong graph.
+        """
+        params = weight.params
+        if weight.layout_cls not in _LINEAR_OPS or getattr(params, "transposed", False):
+            return F.linear(x, weight, bias)
+        if weight.layout_cls is AsymW4A8Int8Layout:
+            qdata, s_rel, s_channel, correction, codebook = (
+                AsymW4A8Int8Layout.get_plain_tensors(weight))
+            return torch.ops.thenoise.w4a8_linear(
+                x, qdata, s_rel, s_channel, codebook, correction, params.decode_lut, bias,
+                GEMM_DTYPES.index(out_dtype), params.group_size, params.convrot_groupsize,
+                params.mma_packed)
+        if weight.layout_cls is TensorCoreFP8Layout:
+            qdata, weight_scale = TensorCoreFP8Layout.get_plain_tensors(weight)
+            activations, x_scale = (x, None)
+            if isinstance(x, QuantizedTensor) and x.layout_cls is TensorCoreFP8Layout:
+                activations, x_scale = TensorCoreFP8Layout.get_plain_tensors(x)
+            return torch.ops.thenoise.fp8_linear(
+                activations, x_scale, qdata, weight_scale, bias,
+                GEMM_DTYPES.index(out_dtype))
+        return F.linear(x, weight, bias)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Only quantized layers loaded with calibrated FP8 input scaling take
-        # this path; all others use the standard linear dispatch.
-        scale = self.input_scale
-        if scale is not None:
+        weight = self.weight
+        if not isinstance(weight, QuantizedTensor):
+            # Full precision stays an ordinary ``F.linear``: an op boundary here would cut
+            # the layer off from the elementwise fusion around it.
+            y = F.linear(x, weight, self.bias)
+        elif self.input_scale is not None:
+            # Only quantized layers loaded with calibrated FP8 input scaling take
+            # this path; all others use the standard linear dispatch.
+            scale = self.input_scale
             original_shape = x.shape
             flat = x.reshape(-1, original_shape[-1])
             # FP8 matrix kernels require FP16/BF16 bias, independent of
@@ -210,11 +348,12 @@ class QuantizedLinear(nn.Module):
                 flat.to(compute_dtype), "TensorCoreFP8Layout", scale=scale
             )
             bias = self.bias.to(compute_dtype) if self.bias is not None else None
-            y = F.linear(qx, self.weight, bias)
+            y = self._gemm(qx, weight, bias, compute_dtype)
             if self._lora_down is not None:
                 y = y + self._lora_branch(flat)
             return y.to(x.dtype).reshape(*original_shape[:-1], self.out_features)
-        y = F.linear(x, self.weight, self.bias)
+        else:
+            y = self._gemm(x, weight, self.bias, weight.params.orig_dtype)
         if self._lora_down is not None:
             y = y + self._lora_branch(x)
         return y
