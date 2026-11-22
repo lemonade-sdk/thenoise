@@ -39,15 +39,27 @@ UPSCALER_FACTOR = 2
 
 
 @dataclasses.dataclass(frozen=True)
-class Clip:
-    """An image condition's first frames, one per stage of the schedule.
+class Frame:
+    """One condition frame at each of the two stages' grids.
 
-    One object rather than two attributes because both are written and dropped together,
-    and a clip left holding the previous clip's frame is a silent wrong answer.
+    Both are written together because a refine pass handed the frame its own resolution
+    has never seen is a silent wrong answer.
     """
 
-    reference_low: torch.Tensor | None = None
-    reference_high: torch.Tensor | None = None
+    low: torch.Tensor | None = None
+    high: torch.Tensor | None = None
+
+
+@dataclasses.dataclass(frozen=True)
+class Clip:
+    """The frames a request pins the clip to: its first, and optionally its last.
+
+    One object rather than loose attributes because both ends are written and dropped
+    together, and a clip left holding the previous clip's frame is a silent wrong answer.
+    """
+
+    start: Frame = Frame()
+    end: Frame = Frame()
 
 
 def _pack(x: torch.Tensor) -> torch.Tensor:
@@ -106,7 +118,7 @@ class LTXVideo(VideoModel):
     COMPONENT_ROLES: ClassVar[tuple[str, ...]] = ("audio_vae", "upscaler",
                                                   "text_projection")
     CAPABILITIES = {**VideoModel.CAPABILITIES, "upscale": False,
-                    "video": {"t2v": True, "i2v": True, "flf2v": False}}
+                    "video": {"t2v": True, "i2v": True, "flf2v": True}}
     DEFAULT_PREFS = {
         **VideoModel.DEFAULT_PREFS,
         "width": 768, "height": 512, "frames": 33, "fps": 24,
@@ -203,22 +215,27 @@ class LTXVideo(VideoModel):
         return AVConditioning(*rows[0], *rows[1])
 
     def fit_references(self, images, target):
-        if len(images) != 1:
-            raise ValueError("LTX I2V accepts exactly one starting image")
-        return [cover_crop(images[0], target[0], target[1])]
+        if len(images) > 2:
+            raise ValueError("LTX pins a clip on its first frame and, at most, its last")
+        return [cover_crop(image, target[0], target[1]) for image in images]
 
     def encode_references(self, pixels, frames=1):
-        if len(pixels) != 1:
-            raise ValueError("LTX I2V accepts exactly one starting image")
-        # One frame, encoded twice: at full resolution for the refine pass' grid, and at
-        # half resolution for the grid the first half of the clip runs on. The resample is
-        # fp32 and the codec casts to its own dtype at its own boundary, as on decode.
-        frame = pixels[0][None, :, None].to(self.device)
-        small = F.interpolate(frame[:, :, 0], scale_factor=0.5,
-                              mode="bilinear", align_corners=False)[:, :, None]
-        with torch.no_grad():
-            return [self.vae.encode_pixels_to_latents(small),
-                    self.vae.encode_pixels_to_latents(frame)]
+        """Each endpoint twice, low resolution first: ``[start_low, start_high,
+        end_low, end_high]``, which :meth:`prepare_latent` reads in pairs.
+
+        Twice because the two stages sample on different grids: half the delivered picture
+        before the spatial upscaler, all of it after. The resample is fp32 and the codec
+        casts to its own dtype at its own boundary, as on decode.
+        """
+        encoded = []
+        for image in pixels:
+            frame = image[None, :, None].to(self.device)
+            small = F.interpolate(frame[:, :, 0], scale_factor=0.5,
+                                  mode="bilinear", align_corners=False)[:, :, None]
+            with torch.no_grad():
+                encoded += [self.vae.encode_pixels_to_latents(small),
+                            self.vae.encode_pixels_to_latents(frame)]
+        return encoded
 
     def _geometry(self, params: VideoSamplingParams, high: bool):
         """Latent (frames, height, width).
@@ -246,17 +263,31 @@ class LTXVideo(VideoModel):
         return torch.cat((_pack(video), audio), dim=1).to(self.device)
 
     def prepare_latent(self, latents, cond, params, ref=None, ref_method="index"):
-        low = high = None
+        """Overwrite the clip's endpoints once, and keep both resolutions for the boundary.
+
+        A pinned frame is never denoised rather than re-injected every step: the per-token
+        timestep :meth:`_velocity` takes from the same mask makes its velocity come back
+        zero, so the solver leaves it where it was written.
+        """
+        clip = Clip()
         if ref:
-            if ref_method != "index_timestep_zero" or len(ref) != 2:
-                raise ValueError("LTX I2V requires one image and index_timestep_zero")
-            low, high = ref
-            h, w = self._geometry(params, False)[1:]
-            if low.shape != (1, 128, 1, h, w):
-                raise ValueError("LTX I2V low-frame latent geometry mismatch")
+            if ref_method != "index_timestep_zero":
+                raise ValueError("LTX pins a condition frame at timestep zero; it has no"
+                                 f" '{ref_method}' path")
+            if len(ref) not in (2, 4):
+                raise ValueError("LTX takes each condition frame as a low- and a "
+                                 "high-resolution latent, in that order")
+            clip = Clip(start=Frame(*ref[:2]),
+                        end=Frame(*ref[2:]) if len(ref) > 2 else Frame())
+            t, h, w = self._geometry(params, False)
             latents = latents.clone()
-            latents[:, :h * w] = _pack(low)
-        self._clip = dataclasses.replace(self._clip, reference_low=low, reference_high=high)
+            for index, frame in ((0, clip.start), (t - 1, clip.end)):
+                if frame.low is None:
+                    continue
+                if frame.low.shape != (1, self.vae.latent_channels, 1, h, w):
+                    raise ValueError("LTX condition-frame latent geometry mismatch")
+                latents[:, index * h * w:(index + 1) * h * w] = _pack(frame.low)
+        self._clip = clip
         return latents
 
     def schedule(self, params: VideoSamplingParams) -> list[Step]:
@@ -298,8 +329,10 @@ class LTXVideo(VideoModel):
         anoise = torch.randn(audio.shape, generator=gen, dtype=torch.float32).to(self.device)
         v = (1 - sigma) * upscale + sigma * vnoise
         a = (1 - sigma) * audio + sigma * anoise
-        if self._clip.reference_high is not None:
-            v[:, :, :1] = self._clip.reference_high
+        if self._clip.start.high is not None:
+            v[:, :, :1] = self._clip.start.high
+        if self._clip.end.high is not None:
+            v[:, :, -1:] = self._clip.end.high
         token.check()
         return torch.cat((_pack(v), a), dim=1)
 
@@ -338,13 +371,23 @@ class LTXVideo(VideoModel):
         )
         vtime = scaled_t
         mask = None
-        ref = self._clip.reference_high if refine else self._clip.reference_low
-        if ref is not None:
+        pinned = [(index, frame.high if refine else frame.low)
+                  for index, frame in ((0, self._clip.start), (lt - 1, self._clip.end))]
+        pinned = [(index, ref) for index, ref in pinned if ref is not None]
+        if pinned:
             mask = torch.zeros((1, nv), device=self.device, dtype=torch.float32)
-            mask[:, :h*w] = 1.0
             video = video.clone()
-            video[:, :h*w] = _pack(ref).to(video.dtype)
+            for index, ref in pinned:
+                mask[:, index*h*w:(index + 1)*h*w] = 1.0
+                video[:, index*h*w:(index + 1)*h*w] = _pack(ref).to(video.dtype)
             vtime = scaled_t[:, None] * (1 - mask)
+        # 2.5's learned marker names the latent frame carrying a single pixel frame -- the
+        # causal codec's first -- which is what ComfyUI adds it to on every run. A pinned
+        # ending sits inside a whole temporal window, so it is not one of those.
+        keyframes = None
+        if self.dit.config.use_keyframes_abs_pos_embedding:
+            keyframes = torch.zeros((1, nv), device=self.device, dtype=torch.float32)
+            keyframes[:, :h*w] = 1.0
         dtype = self.dit.dtype
         pv, pa = self.dit(
             hidden_states=video.to(dtype),
@@ -359,7 +402,7 @@ class LTXVideo(VideoModel):
             audio_sigma=scaled_t,
             num_frames=lt, height=h, width=w, fps=params.fps,
             audio_num_frames=audio.shape[1],
-            video_keyframes_mask=None,
+            video_keyframes_mask=keyframes,
             use_cross_timestep=True,
         )
         if mask is not None:

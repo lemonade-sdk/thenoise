@@ -12,7 +12,9 @@ from comfy_kitchen.tensor import QuantizedTensor
 
 from conftest import (
     StubModel,
+    TINY_DIM,
     TinyDiT,
+    W4A8_GROUP,
     bf16_tensors,
     comfy_quant,
     fp8_pair,
@@ -21,17 +23,24 @@ from conftest import (
     int8_lora_state_dict,
     int8_pair,
     int8_qt,
+    int8_realistic_pair,
     int8_tensors,
+    w4a8_checkpoint,
+    w4a8_marker,
+    w4a8_qt,
+    w4a8_tensors,
     write_safetensors,
     wrapped_fp8_tensor,
     wrapped_int8_tensor,
 )
+from comfy_kitchen.tensor.w4a8_int8 import AsymW4A8Int8Layout
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.lora import LoraFactors, LoraMode
 from thenoise.utils.loader import (
     is_quantized_checkpoint,
     load_dit,
     load_quantized_state_dict,
+    load_selected_state,
 )
 
 OUT_F, IN_F = 512, 256
@@ -220,6 +229,97 @@ def test_a_second_component_is_undone_from_the_file_it_came_from(tmp_path):
     assert torch.equal(low_dit.q.weight._qdata, originals)
 
 
+def _compiled_dit(tmp_path, kind: str):
+    """A loaded TinyDiT whose ``q`` layer carries ``kind``'s weights."""
+    kwargs = {"fp8": {"weight_dtype": torch.float8_e4m3fn}}.get(kind, {})
+    if kind == "bf16":
+        path = write_safetensors(tmp_path / "bf16.safetensors", bf16_tensors())
+    elif kind == "w4a8":
+        path, _ = w4a8_checkpoint(tmp_path / "w4a8.safetensors")
+    else:
+        path, _ = int8_checkpoint(tmp_path / f"{kind}.safetensors", **kwargs)
+    model = TinyDiT()
+    load_dit(model, path, device="cpu", dtype=torch.bfloat16)
+    return model
+
+
+@pytest.mark.parametrize("kind", ["int8", "fp8", "w4a8", "bf16"])
+def test_a_compiled_layer_never_traces_into_a_device_kernel(kind, tmp_path, request):
+    """The kernels take raw pointers, so dynamo has to be stopped before them.
+
+    INT8 reaches its kernel through a fake-registered op of comfy_kitchen's own, so one
+    ``F.linear`` is already opaque. W4A8 and FP8 reach theirs through plain functions,
+    where the HIP backend then asks a FakeTensor for a data pointer: W4A8 dies there and
+    FP8's handler swallows the error, leaving a permanently dequantized graph. Both are
+    wrapped here. A BF16 layer must stay a plain ``F.linear`` -- wrapping it would cut the
+    layer off from the elementwise fusion around it for nothing.
+
+    The traced graph is asked for rather than a compiled run: ``export`` traces without
+    executing, so this holds with Inductor off, as the suite runs it.
+    """
+    request.addfinalizer(torch._dynamo.reset)
+    torch._dynamo.reset()
+    layer = _compiled_dit(tmp_path, kind).q
+    assert layer._quantized == (kind != "bf16")
+    x = torch.randn(3, TINY_DIM[1], dtype=torch.bfloat16)
+    layer(x)
+
+    graph = torch._dynamo.export(layer)(x).graph_module
+    targets = [str(node.target) for node in graph.graph.nodes if node.op == "call_function"]
+    if kind == "w4a8":
+        assert targets == [str(torch.ops.thenoise.w4a8_linear)]
+    elif kind == "fp8":
+        assert targets == [str(torch.ops.thenoise.fp8_linear)]
+    else:
+        assert not any("thenoise." in target for target in targets), targets
+
+
+def test_a_calibrated_fp8_layer_keeps_both_halves_of_its_gemm(tmp_path, request):
+    """Quantizing the activations stays comfy_kitchen's; only the GEMM is wrapped."""
+    request.addfinalizer(torch._dynamo.reset)
+    torch._dynamo.reset()
+    layer = QuantizedLinear(TINY_DIM[1], TINY_DIM[0], bias=False).to(torch.bfloat16)
+    layer.load_quantized(fp8_qt(*fp8_pair()), input_scale=torch.tensor(0.25))
+    x = torch.randn(3, TINY_DIM[1], dtype=torch.bfloat16)
+    layer(x)
+
+    graph = torch._dynamo.export(layer)(x).graph_module
+    targets = [str(node.target) for node in graph.graph.nodes if node.op == "call_function"]
+    assert str(torch.ops.comfy_kitchen.quantize_fp8) in targets
+    assert str(torch.ops.thenoise.fp8_linear) in targets
+
+
+def test_a_component_cut_out_of_a_multi_component_file_undoes_from_that_file(tmp_path):
+    """LTX reads its transformer out of a file that also holds the codecs and projections.
+
+    That route hands over a slice rather than a whole file, and it alone knows the raw
+    names behind the slice, so it is the one that has to record them: without it a baked
+    layer had nowhere to reload from and no LoRA switch on those checkpoints could end.
+    """
+    from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
+
+    prefix = "model.diffusion_model."
+    tensors = int8_tensors(prefix=prefix,
+                           extra={"vae.conv.weight": torch.zeros(2, 2, dtype=torch.bfloat16)})
+    path = write_safetensors(tmp_path / "all-in-one.safetensors", tensors)
+    model = TinyDiT()
+    load_selected_state(
+        model,
+        [(path, {raw: raw[len(prefix):] for raw in tensors if raw.startswith(prefix)})],
+        dtype=torch.bfloat16, device="cpu", what="dit")
+
+    assert model.q._quantized
+    assert model._quantized_restore_map == {"q": (path, f"{prefix}q.weight")}
+    original = model.q.weight._qdata.clone()
+
+    result = apply_lora_to_model(model, [int8_lora_state_dict()])
+    assert _modes(result) == {"q": LoraMode.BAKED_QUANTIZED}
+    assert not torch.equal(model.q.weight._qdata, original)
+
+    undo_lora_on_model(model, result)
+    assert torch.equal(model.q.weight._qdata, original)
+
+
 def test_undoing_a_bake_of_a_layer_with_no_checkpoint_raises():
     """A quantized layer with no file behind it has nothing to reload, and undo says so."""
     from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
@@ -267,6 +367,18 @@ def test_quant_step_reads_a_scale_that_actually_is_one():
 
     layer.load_quantized(int8_qt(qweight, torch.tensor([0.25], dtype=torch.float32)))
     assert torch.allclose(layer.quant_step(), torch.full((OUT_F,), 0.25))
+
+
+def test_quant_step_reports_a_step_for_a_packed_layer():
+    """A packed layer the loader cannot measure would bake every LoRA by default, so
+    the step has to be readable from the tensors the export stored.
+    """
+    layer = QuantizedLinear(IN_F, OUT_F, bias=False)
+    layer.load_quantized(w4a8_qt())
+    step = layer.quant_step()
+    assert step is not None
+    assert step.shape == (OUT_F,)
+    assert bool((step > 0).all())
 
 
 @pytest.mark.parametrize("scale", [torch.rand(OUT_F, 4), torch.rand(3), None])
@@ -424,6 +536,53 @@ def test_baking_after_a_runtime_branch_clears_it():
     assert model.q._lora_down is None
 
 
+def test_a_delta_the_four_bit_grid_would_erase_stays_at_runtime():
+    """One LoRA, two grids: baked into INT8, kept as a branch on the packed weight.
+
+    A 16-level codebook makes a packed step about ten times the INT8 one for a layer of
+    the same width, and style LoRAs were measured at ~1% of a weight's rms — a fraction
+    of that step. Baking such a delta into W4A8 leaves the layer moved mainly by
+    requantization noise, so the measured step is what routes it away.
+    """
+    from thenoise.utils.lora import LoraFactors
+
+    stored = int8_lora_state_dict("q", gain=1e-3)
+    factors = LoraFactors(stored["q.lora_down.weight"], stored["q.lora_up.weight"])
+    int8_layer = QuantizedLinear(IN_F, OUT_F, bias=False)
+    int8_layer.load_quantized(int8_qt(*int8_realistic_pair()))
+    packed = QuantizedLinear(IN_F, OUT_F, bias=False)
+    packed.load_quantized(w4a8_qt())
+    assert float(int8_layer.quant_step().mean()) < float(packed.quant_step().mean()) / 4
+
+    assert int8_layer.apply_lora(factors) is LoraMode.BAKED_QUANTIZED
+    assert packed.apply_lora(factors) is LoraMode.RUNTIME
+    assert packed._lora_down is not None
+
+
+def test_a_wide_delta_still_bakes_into_a_packed_layer_and_undo_reloads_every_scale(tmp_path):
+    """Baking is free per step and survives a W4A8 requantize when the delta is wide
+    enough; undoing it has to reload the group scales, row scales and codebook too, or
+    the layer comes back decoded through the wrong grid.
+    """
+    from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
+
+    path, _ = w4a8_checkpoint(tmp_path / "w4a8.safetensors")
+    model = load_dit(TinyDiT(), path, device="cpu", dtype=torch.bfloat16)
+    originals = {name: tensor.clone()
+                 for name, tensor in model.q.weight.state_dict("weight").items()}
+    assert len(originals) == 4  # codes, group scales, row scales, codebook
+
+    result = apply_lora_to_model(model, [int8_lora_state_dict("q")])
+    assert _modes(result) == {"q": LoraMode.BAKED_QUANTIZED}
+    assert not torch.equal(model.q.weight._qdata, originals["weight"])
+
+    undo_lora_on_model(model, result)
+    restored = model.q.weight.state_dict("weight")
+    assert set(restored) == set(originals)
+    for name, tensor in restored.items():
+        assert torch.equal(tensor, originals[name]), name
+
+
 # ------------------------------------------------------- the routing metric
 
 
@@ -469,6 +628,7 @@ def test_a_lora_the_layer_cannot_measure_bakes():
         # INT8 and FP8 both carry a ``.weight_scale`` next to the low-bit weight.
         (int8_tensors(), True),
         (int8_tensors(weight_dtype=torch.float8_e4m3fn), True),
+        (w4a8_tensors(), True),
         # A wrapped INT8 file is still quantized (the prefix is stripped first).
         (int8_tensors(prefix="model.diffusion_model."), True),
         (bf16_tensors(), False),
@@ -477,7 +637,7 @@ def test_a_lora_the_layer_cannot_measure_bakes():
         # weight owns it, rather than silently loading garbage).
         ({"blocks.0.attn.q_proj.weight_scale": torch.zeros(16, 1)}, True),
     ],
-    ids=["int8", "fp8", "int8-wrapped", "bf16", "scale-only"],
+    ids=["int8", "fp8", "packed-w4a8", "int8-wrapped", "bf16", "scale-only"],
 )
 def test_is_quantized_checkpoint(tmp_path, tensors, expected):
     path = write_safetensors(tmp_path / "ckpt.safetensors", tensors)
@@ -510,6 +670,50 @@ def test_comfy_quant_marker_drives_the_inference_profile(tmp_path, marker, convr
     assert model.q._quantized is True
     assert model.q.weight.params.convrot is convrot
     assert model.q.weight.params.convrot_groupsize == groupsize
+
+
+# --------------------------------------------------- packed W4A8 / W6A8 loads
+
+
+def test_a_packed_checkpoint_loads_and_runs(tmp_path):
+    """A 4-bit export arrives as codes at half width plus the tensors that decode them."""
+    path, _ = w4a8_checkpoint(tmp_path / "w4a8.safetensors")
+    model = load_dit(TinyDiT(), path, device="cpu", dtype=torch.bfloat16)
+
+    assert model.q._quantized is True
+    assert model.q.weight.layout_cls is AsymW4A8Int8Layout
+    assert tuple(model.q.weight.shape) == TINY_DIM  # what the module was built for
+    assert tuple(model.q.weight.storage_shape) == (OUT_F, IN_F // 2)  # what the file had
+    assert model.q.weight.params.group_size == W4A8_GROUP
+    # A packed layer quantizes its own activations, so it has no calibrated input scale.
+    assert model.q.input_scale is None
+    assert model.plain.weight.dtype == torch.bfloat16  # the full-precision part still fits
+    assert model.q(_bf16_x()).dtype == torch.bfloat16
+
+
+def test_a_packed_weight_stated_as_another_format_is_refused(tmp_path):
+    """The marker is the only claim a packed weight has; contradicting it is not a hint
+    that can be quietly loaded as the older layout.
+    """
+    path, _ = w4a8_checkpoint(tmp_path / "mixed.safetensors",
+                              marker=w4a8_marker(format="int8_tensorwise"))
+    with pytest.raises(RuntimeError, match="packed scales while"):
+        load_dit(TinyDiT(), path, device="cpu", dtype=torch.bfloat16)
+
+
+@pytest.mark.parametrize("missing", ["q.weight_s_rel", "q.weight_s_channel"])
+def test_a_packed_weight_missing_a_scale_raises(missing):
+    sd = w4a8_tensors()
+    del sd[missing]
+    with pytest.raises(RuntimeError, match=f"carries no \\['{missing}'\\]"):
+        load_quantized_state_dict(TinyDiT(), sd)
+
+
+def test_a_packed_scale_with_no_weight_of_its_own_raises():
+    sd = w4a8_tensors()
+    sd["plain.weight_s_channel"] = torch.zeros(OUT_F, dtype=torch.float32)
+    with pytest.raises(RuntimeError, match="orphan packed scale"):
+        load_quantized_state_dict(TinyDiT(), sd)
 
 
 # --------------------------------------------------- load_quantized_state_dict

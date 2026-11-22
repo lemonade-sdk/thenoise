@@ -1,11 +1,13 @@
 """Small CPU contract tests for native LTX checkpoint loading and sampling."""
 from __future__ import annotations
 
+import io
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
+from PIL import Image
 from safetensors.torch import save_file
 
 from conftest import tiny_ltx_video_vae
@@ -255,37 +257,38 @@ def test_a_gemma_built_on_meta_keeps_the_buffers_no_checkpoint_carries():
     assert frequencies and not any(freq.is_meta for freq in frequencies)
 
 
-def test_denoise_scales_timesteps_and_does_not_mark_regular_frames():
-    from thenoise.models.ltx_video import Clip, LTXVideo
+def test_denoise_holds_its_pinned_frames_and_marks_only_a_standalone_one():
+    from thenoise.models.ltx_video import Clip, Frame, LTXVideo
     from thenoise.models.video_base import Segment
     from thenoise.samplers import Step
 
     class RecordingDiT:
         dtype = torch.float32
-        config = SimpleNamespace(timestep_scale_multiplier=1000)
 
-        def __init__(self):
+        def __init__(self, keyframes: bool):
+            self.config = SimpleNamespace(timestep_scale_multiplier=1000,
+                                          use_keyframes_abs_pos_embedding=keyframes)
             self.arguments = None
 
         def __call__(self, **kwargs):
             self.arguments = kwargs
-            return (torch.zeros_like(kwargs["hidden_states"]),
-                    torch.zeros_like(kwargs["audio_hidden_states"]))
+            return (torch.ones_like(kwargs["hidden_states"]),
+                    torch.ones_like(kwargs["audio_hidden_states"]))
 
-    for version, i2v in (("2.3", False), ("2.5", False), ("2.5", True)):
-        dit = RecordingDiT()
-        ref = torch.rand(1, 128, 1, 2, 3) if i2v else None
+    # A clip of two latent frames of 2x3 tokens each, then four audio tokens.
+    for keyframes, ends in ((False, 0), (False, 1), (True, 1), (True, 2)):
+        dit = RecordingDiT(keyframes)
+        written = [torch.rand(1, 128, 1, 2, 3) for _ in range(ends)]
         fake = object.__new__(LTXVideo)
         fake.device = "cpu"
         fake.dit = dit
-        fake.version = version
-        fake._clip = Clip(reference_low=ref)
+        fake._clip = Clip(start=Frame(low=written[0] if ends else None),
+                          end=Frame(low=written[-1] if ends > 1 else None))
         # A step of the main half: its first sigma is still pure noise.
         fake._segment = Segment("dit", None, (Step(t=1.0, delta=0.25),), 1.0,
                                 SimpleNamespace(fps=24))
         fake._geometry = lambda *_: (2, 2, 3)
-        nv = 12
-        x = torch.randn(1, nv + 4, 128)
+        x = torch.randn(1, 16, 128)
         cond = SimpleNamespace(video=torch.randn(1, 2, 4096),
                                audio=torch.randn(1, 2, 2048), mask=torch.ones(1, 2),
                                null_video=None, null_audio=None, null_mask=None)
@@ -295,14 +298,74 @@ def test_denoise_scales_timesteps_and_does_not_mark_regular_frames():
         assert args["sigma"].item() == 750
         assert args["audio_sigma"].item() == 750
         assert args["audio_timestep"].item() == 750
-        # Plain T2V tokens and I2V reference latents are not standalone
-        # generated keyframe slots; only those slots receive a keyframe mask.
-        assert args["video_keyframes_mask"] is None
-        if i2v:
-            assert torch.all(args["timestep"][:, :6] == 0)
-            assert torch.all(args["timestep"][:, 6:] == 750)
+
+        held = torch.zeros(1, 12)
+        if ends:
+            held[:, :6] = 1.0
+        if ends > 1:
+            held[:, 6:] = 1.0
+        if ends:
+            assert torch.equal(args["timestep"], 750.0 * (1 - held))
         else:
             assert args["timestep"].item() == 750
+        # A held token answers a velocity of zero, so the solver's `x - delta * v` leaves
+        # the frame ``prepare_latent`` wrote where it wrote it. Sound shares no mask.
+        # (The fake answers every channel with the same number.)
+        assert torch.equal(out[:, :12, 0], 1.0 - held)
+        assert torch.equal(out[:, 12:, 0], torch.ones(1, 4))
+        # 2.5's marker names the latent frame the causal codec made from one pixel frame,
+        # which is where a clip starts and nowhere a request can pin a frame.
+        if keyframes:
+            assert torch.equal(args["video_keyframes_mask"],
+                               torch.cat((torch.ones(1, 6), torch.zeros(1, 6)), dim=1))
+        else:
+            assert args["video_keyframes_mask"] is None
+
+
+def test_the_real_trunk_takes_the_pins_and_the_marker():
+    """The adapter's masks are per token; only the trunk says whether that shape is right.
+
+    The fakes above record what was passed. This is the one call where the conditioning
+    mask, the keyframe marker and the video/audio split meet the module that has to agree
+    with them -- which is exactly what a shape error used to reach hardware unnoticed.
+    """
+    from thenoise.dit.ltx_video.transformer import LTX2VideoTransformer3DModel
+    from thenoise.models.ltx_video import AVConditioning, Clip, Frame, LTXVideo
+    from thenoise.models.video_base import Segment
+    from thenoise.samplers import Step
+
+    torch.manual_seed(3)
+    dit = LTX2VideoTransformer3DModel(
+        in_channels=128, out_channels=128, num_attention_heads=4, attention_head_dim=16,
+        cross_attention_dim=64, audio_in_channels=128, audio_out_channels=128,
+        audio_num_attention_heads=4, audio_attention_head_dim=16,
+        audio_cross_attention_dim=64, num_layers=1, ff_bias=False, audio_ff_bias=True,
+        gated_attn=True, audio_gated_attn=True, cross_attn_mod=True,
+        audio_cross_attn_mod=True, use_keyframes_abs_pos_embedding=True,
+    ).eval()
+    dit.keyframes_abs_pos_embedding.data.normal_(0, 0.01)
+
+    model = object.__new__(LTXVideo)
+    model.device = "cpu"
+    model.dit = dit
+    model._clip = Clip(start=Frame(low=torch.ones(1, 128, 1, 2, 2)),
+                       end=Frame(low=torch.full((1, 128, 1, 2, 2), -1.0)))
+    model._segment = Segment("dit", None, (Step(t=1.0, delta=0.25),), 1.0,
+                             SimpleNamespace(fps=24))
+    model._geometry = lambda *_: (2, 2, 2)
+    both = torch.cat((torch.ones(1, 4, 128), torch.full((1, 4, 128), -1.0),
+                      torch.randn(1, 3, 128)), dim=1)
+    cond = AVConditioning(torch.randn(1, 4, 64), torch.randn(1, 4, 64),
+                          torch.ones(1, 4))
+
+    with torch.inference_mode():
+        out = model.denoise_step(both, torch.tensor(0.75), cond, 1.0, 0)
+
+    assert out.shape == both.shape and out.isfinite().all()
+    # Both endpoints answer a velocity of zero; the frames between them do not.
+    assert torch.equal(out[:, :4], torch.zeros(1, 4, 128))
+    assert torch.equal(out[:, 4:8], torch.zeros(1, 4, 128))
+    assert out[:, 8:].abs().sum() > 0
 
 
 def test_starting_frame_is_encoded_in_the_codecs_own_dtype():
@@ -322,6 +385,156 @@ def test_starting_frame_is_encoded_in_the_codecs_own_dtype():
     assert (low.shape, high.shape) == ((1, 8, 1, 4, 4), (1, 8, 1, 8, 8))
 
 
+def test_each_endpoint_is_encoded_at_the_grids_that_render_it():
+    """Low resolution first, then high, per frame: what ``prepare_latent`` reads in pairs.
+
+    The two stages of the released recipe sample on different grids, so each frame has to
+    reach the codec twice -- and the second frame has to be the second frame.
+    """
+    from thenoise.models.ltx_video import LTXVideo
+
+    model = object.__new__(LTXVideo)
+    model.device = "cpu"
+    model.vae = tiny_ltx_video_vae()
+    start_low, start_high, end_low, end_high = model.encode_references(
+        [torch.zeros(3, 64, 64), torch.ones(3, 64, 64)])
+    assert (start_low.shape, start_high.shape) == ((1, 8, 1, 4, 4), (1, 8, 1, 8, 8))
+    assert (end_low.shape, end_high.shape) == ((1, 8, 1, 4, 4), (1, 8, 1, 8, 8))
+    assert not torch.equal(start_high, end_high)
+
+
+def _png(color, size=(64, 64)) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", size, color).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_a_frame_beyond_the_two_ends_has_nowhere_to_go():
+    from thenoise.models.ltx_video import LTX25Video
+
+    model = object.__new__(LTX25Video)
+    with pytest.raises(ValueError, match="at most, its last"):
+        model.fit_references([Image.new("RGB", (8, 8))] * 3, (64, 64))
+
+
+def test_the_two_ends_are_written_and_the_clip_between_them_is_left_alone():
+    from thenoise.models.ltx_video import Frame, LTX25Video
+
+    model = object.__new__(LTX25Video)
+    model.vae = SimpleNamespace(latent_channels=2, spatial_compression_ratio=8,
+                                temporal_compression_ratio=8)
+    params = SimpleNamespace(frames=17, height=32, width=32)
+    # Three latent frames of 2x2 tokens, then five audio tokens.
+    wanted = torch.arange(17 * 2, dtype=torch.float32).reshape(1, 17, 2)
+    clip = wanted.clone()
+    start_low, start_high = (torch.full((1, 2, 1, 2, 2), 3.0),
+                             torch.full((1, 2, 1, 4, 4), 3.0))
+    end_low, end_high = (torch.full((1, 2, 1, 2, 2), 7.0),
+                         torch.full((1, 2, 1, 4, 4), 7.0))
+
+    out = model.prepare_latent(clip, None, params,
+                               ref=[start_low, start_high, end_low, end_high],
+                               ref_method="index_timestep_zero")
+    assert torch.equal(out[:, :4], torch.full((1, 4, 2), 3.0))
+    assert torch.equal(out[:, 8:12], torch.full((1, 4, 2), 7.0))
+    assert torch.equal(out[:, 4:8], clip[:, 4:8])
+    assert torch.equal(out[:, 12:], clip[:, 12:])
+    assert torch.equal(clip, wanted), "the run's latent is copied, not written through"
+    assert torch.equal(model._clip.start.high, start_high)
+    assert torch.equal(model._clip.end.high, end_high)
+
+    # A request that names no ending frame leaves the clip's last frame to the run.
+    one = model.prepare_latent(clip.clone(), None, params,
+                               ref=[start_low, start_high],
+                               ref_method="index_timestep_zero")
+    assert torch.equal(one[:, 8:12], clip[:, 8:12])
+    assert model._clip.end == Frame()
+
+
+def test_the_frame_that_ends_the_clip_is_the_second_one_the_controller_reads():
+    """The reference latents are one flat positional list, so their order is a contract.
+
+    The controller reads ``image`` then ``end_image``; the pairs have to follow it, or a
+    clip silently ends on the frame it was meant to start from.
+    """
+    from thenoise.models.ltx_video import LTX25Video
+    from thenoise.video.controller import VideoPipelineController
+    from thenoise.video.spec import VideoSpec
+
+    model = object.__new__(LTX25Video)
+    model.device = "cpu"
+    model.vae = SimpleNamespace(
+        latent_channels=2, spatial_compression_ratio=8, temporal_compression_ratio=8,
+        encode_pixels_to_latents=lambda pixels: pixels[:, :1, :, :1, :1])
+    spec = model.resolve_video(VideoSpec(prompt="arriving and leaving", width=64, height=64,
+                                         frames=9, image=_png("red"), end_image=_png("blue")))
+    controller = VideoPipelineController(model)
+
+    encoded = controller._encode_references(controller._reference_images(spec), spec)
+    assert [latent.item() for latent in encoded] == [1.0, 1.0, -1.0, -1.0]
+
+
+def test_a_reference_the_adapter_cannot_place_is_refused():
+    from thenoise.models.ltx_video import Clip, LTX25Video
+
+    model = object.__new__(LTX25Video)
+    model._clip = Clip()
+    model.vae = SimpleNamespace(latent_channels=2, spatial_compression_ratio=8,
+                                temporal_compression_ratio=8)
+    params = SimpleNamespace(frames=17, height=32, width=32)
+    with pytest.raises(ValueError, match="no 'index' path"):
+        model.prepare_latent(torch.zeros(1, 12, 2), None, params,
+                             ref=[torch.zeros(1, 2, 1, 2, 2)] * 2, ref_method="index")
+    with pytest.raises(ValueError, match="low- and a"):
+        model.prepare_latent(torch.zeros(1, 12, 2), None, params,
+                             ref=[torch.zeros(1, 2, 1, 2, 2)] * 3,
+                             ref_method="index_timestep_zero")
+    with pytest.raises(ValueError, match="geometry mismatch"):
+        model.prepare_latent(torch.zeros(1, 12, 2), None, params,
+                             ref=[torch.zeros(1, 2, 1, 3, 3)] * 2,
+                             ref_method="index_timestep_zero")
+    assert model._clip == Clip(), "a refused reference leaves no half-written clip"
+
+
+def test_the_refine_pass_is_handed_both_pinned_frames():
+    """The stage boundary upsamples and re-noises, then writes the endpoints again."""
+    from thenoise.models.ltx_video import Clip, Frame, LTX25Video, _unpack
+
+    class Stage:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def run(self, _module, raw):
+            return torch.nn.functional.interpolate(raw, scale_factor=(1, 2, 2),
+                                                   mode="nearest")
+
+    model = object.__new__(LTX25Video)
+    model.device = "cpu"
+    model.vae = SimpleNamespace(latent_channels=2, spatial_compression_ratio=8,
+                                temporal_compression_ratio=8,
+                                from_canonical=lambda x: x, to_canonical=lambda x: x)
+    model.upscaler = SimpleNamespace(dtype=torch.float32)
+    model.memory = SimpleNamespace(stage=lambda *names, **kw: Stage())
+    params = SimpleNamespace(frames=17, height=32, width=32, seed=0)
+    low = torch.randn(1, 2, 3, 2, 2)
+    audio = torch.randn(1, 5, 2)
+    x = torch.cat((low.permute(0, 2, 3, 4, 1).flatten(1, 3), audio), dim=1)
+    model._clip = Clip(start=Frame(high=torch.full((1, 2, 1, 4, 4), 3.0)),
+                       end=Frame(high=torch.full((1, 2, 1, 4, 4), 7.0)))
+
+    out = model.transition_segment(x, None, None, params,
+                                   SimpleNamespace(check=lambda: None))
+
+    video = _unpack(out[:, :3 * 4 * 4], 3, 4, 4)
+    assert torch.equal(video[:, :, :1], model._clip.start.high)
+    assert torch.equal(video[:, :, -1:], model._clip.end.high)
+    assert (video[:, :, 1] != 3.0).any() and (video[:, :, 1] != 7.0).any()
+    assert out[:, 3 * 4 * 4:].shape == audio.shape
+
+
 def test_denoise_guidance_runs_both_branches_with_one_scale():
     """One ``guidance_scale`` over the joined stream, combined like every other adapter."""
     from thenoise.models.ltx_video import AVConditioning, Clip, LTXVideo
@@ -330,7 +543,8 @@ def test_denoise_guidance_runs_both_branches_with_one_scale():
 
     class TwoBranchDiT:
         dtype = torch.float32
-        config = SimpleNamespace(timestep_scale_multiplier=1000)
+        config = SimpleNamespace(timestep_scale_multiplier=1000,
+                                 use_keyframes_abs_pos_embedding=False)
 
         def __init__(self):
             self.calls = 0
@@ -568,6 +782,19 @@ def _upscaler_file(tmp_path, weight):
     return _save(tmp_path / "upscaler.safetensors", {"upsampler.0.weight": weight})
 
 
+def _load_ltx(m, tmp_path, *, dit, text):
+    """The 2.5 request shape: transformer, both codecs, upscaler and Gemma apart."""
+    weight = torch.ones(2, 2)
+    return m.load_original_components(
+        {"": dit, "vae": _save(tmp_path / "video-vae.safetensors", {"vae.weight": weight}),
+         "audio_vae": _save(tmp_path / "audio-vae.safetensors",
+                            {"audio_vae.weight": weight, "vocoder.weight": weight}),
+         "upscaler": _upscaler_file(tmp_path, weight), "text_encoder": text},
+        version="2.5", gemma_text_config=object(),
+        device_for=lambda paths: "cpu", dtype=torch.float32,
+    )
+
+
 def test_one_file_answers_for_every_part_it_holds(tmp_path, monkeypatch):
     m = _tiny_components(monkeypatch)
     weight = torch.ones(2, 2)
@@ -696,6 +923,54 @@ def test_split_connectors_are_complete_across_dit_and_text_file(tmp_path, monkey
         load()
 
 
+def test_a_connector_pair_two_files_both_carry_is_read_from_the_one_it_belongs_to(
+        tmp_path, monkeypatch):
+    """The 2.5 Gemma ships the projections, and a repackaged transformer carries a copy.
+
+    Both files spell the same pair, which is not a collision to refuse; the file the
+    request named for the text encoder decides, or the load stops on a duplicate weight
+    and no LTX 2.5 request with a repacked transformer can start at all.
+    """
+    m = _tiny_components(monkeypatch)
+    weight = torch.ones(2, 2)
+    copy = torch.full((2, 2), 7.0)
+    path_dit = _save(tmp_path / "dit.safetensors", {
+        "model.diffusion_model.patchify_proj.weight": weight,
+        "model.diffusion_model.video_embeddings_connector.learnable_registers": torch.ones(1, 2),
+        "model.diffusion_model.audio_embeddings_connector.learnable_registers": torch.ones(1, 2),
+        "text_embedding_projection.video_aggregate_embed.weight": copy,
+        "text_embedding_projection.audio_aggregate_embed.weight": copy,
+    })
+    path_text = _save(tmp_path / "text.safetensors", {
+        "text_embedding_projection.video_aggregate_embed.weight": weight,
+        "text_embedding_projection.audio_aggregate_embed.weight": weight,
+    })
+    parts, sources = _load_ltx(m, tmp_path, dit=path_dit, text=path_text)
+
+    assert sources["connectors"] == path_text.resolve()
+    torch.testing.assert_close(parts["connectors"].video_text_proj_in.weight, weight)
+
+
+def test_a_connector_pair_split_across_two_files_is_still_completed(tmp_path, monkeypatch):
+    """The other file still supplies what the authoritative one does not hold."""
+    m = _tiny_components(monkeypatch)
+    weight = torch.ones(2, 2)
+    copy = torch.full((2, 2), 7.0)
+    path_dit = _save(tmp_path / "dit.safetensors", {
+        "model.diffusion_model.patchify_proj.weight": weight,
+        "model.diffusion_model.video_embeddings_connector.learnable_registers": torch.ones(1, 2),
+        "model.diffusion_model.audio_embeddings_connector.learnable_registers": torch.ones(1, 2),
+        "text_embedding_projection.audio_aggregate_embed.weight": copy,
+    })
+    path_text = _save(tmp_path / "text.safetensors", {
+        "text_embedding_projection.video_aggregate_embed.weight": weight,
+    })
+    parts, _ = _load_ltx(m, tmp_path, dit=path_dit, text=path_text)
+
+    torch.testing.assert_close(parts["connectors"].video_text_proj_in.weight, weight)
+    torch.testing.assert_close(parts["connectors"].audio_text_proj_in.weight, copy)
+
+
 def test_released_grids_survive_their_own_resampling():
     """The default step count must reproduce the published ladder, not approximate it."""
     from thenoise.dit.ltx_video.sampling import MAIN_GRID, REFINE_GRID, stage_grids
@@ -768,6 +1043,11 @@ def test_ltx_variants_resolve_with_shared_video_contract_and_fixed_refinement():
         guided = model.resolve_video(VideoSpec(prompt="moving fox",
                                                negative_prompt="blurry", guidance_scale=3.5))
         assert (guided.guidance_scale, guided.negative_prompt) == (3.5, "blurry")
+        # Either release can be told where its clip ends.
+        assert model.capability("video") == {"t2v": True, "i2v": True, "flf2v": True}
+        ends = VideoPipelineController(model).resolve(VideoSpec(
+            prompt="a fox arrives and leaves", image=_png("red"), end_image=_png("blue")))
+        assert ends.mode == "flf2v"
         # Sound rides in either container, so neither format is refused.
         for container in ("mp4", "webm"):
             clip = VideoPipelineController(model).resolve(

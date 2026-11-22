@@ -315,18 +315,51 @@ def tiny_ltx_video_vae():
     ).eval()
 
 
+#: The W4A8 group width these fixtures quantize at, and that a test divides by to ask
+#: how wide a group scale should be.
+W4A8_GROUP = 16
+
+
+def quant_marker(conf: dict) -> torch.Tensor:
+    """A ``comfy_quant`` marker tensor: the JSON profile an exporter writes per layer."""
+    return torch.tensor(list(json.dumps(conf).encode("utf-8")), dtype=torch.uint8)
+
+
 def comfy_quant(convrot: bool = True, groupsize: int = 256) -> torch.Tensor:
     """Build a ``comfy_quant`` marker tensor like ComfyUI's INT8 exporter."""
     conf = {"convrot": bool(convrot)}
     if convrot:
         conf["convrot_groupsize"] = int(groupsize)
     conf["per_row"] = True
-    return torch.tensor(list(json.dumps(conf).encode("utf-8")), dtype=torch.uint8)
+    return quant_marker(conf)
+
+
+def w4a8_marker(group_size: int = W4A8_GROUP, convrot_groupsize: int = 256,
+                **overrides) -> torch.Tensor:
+    """The marker a packed ConvRot W4A8 export writes for one weight.
+
+    ``group_size`` is what says how wide the packed codes really are, so it is the one
+    field a packed fixture cannot leave out.
+    """
+    return quant_marker({"format": "asym_w4a8_int8", "group_size": group_size,
+                         "convrot_groupsize": convrot_groupsize, **overrides})
 
 
 # The canonical tiny DiT layout used across the quantized tests: one layer that
 # loads quantized (``q``) and one that stays full precision (``plain``).
 TINY_DIM = (512, 256)  # (out_features, in_features)
+
+
+def _repackaged(tensors: dict, *, prefix: str = "", extra: Optional[dict] = None,
+                 drop: tuple[str, ...] = ()) -> dict:
+    """Prefix every name, add ``extra``, drop ``drop``: the tail each tensor-set shares."""
+    if prefix:
+        tensors = {f"{prefix}{k}": v for k, v in tensors.items()}
+    if extra:
+        tensors.update(extra)
+    for key in drop:
+        tensors.pop(key, None)
+    return tensors
 
 
 def int8_tensors(
@@ -357,13 +390,7 @@ def int8_tensors(
         tensors["q.comfy_quant"] = comfy_quant(convrot=convrot, groupsize=groupsize)
     elif marker is not None:
         tensors["q.comfy_quant"] = marker
-    if prefix:
-        tensors = {f"{prefix}{k}": v for k, v in tensors.items()}
-    if extra:
-        tensors.update(extra)
-    for key in drop:
-        tensors.pop(key, None)
-    return tensors
+    return _repackaged(tensors, prefix=prefix, extra=extra, drop=drop)
 
 
 def int8_checkpoint(path, **kwargs) -> tuple[str, dict]:
@@ -373,6 +400,46 @@ def int8_checkpoint(path, **kwargs) -> tuple[str, dict]:
     an FP8 / unparseable-marker / wrapper-prefixed variant of the same fixture.
     """
     tensors = int8_tensors(**kwargs)
+    return write_safetensors(path, tensors), tensors
+
+
+def w4a8_qt(**quant_kwargs):
+    """A real packed ConvRot W4A8 weight for :data:`TINY_DIM`, quantized by the layout.
+
+    Quantizing a random weight rather than inventing codes keeps the fixture loadable:
+    a packed layout recovers the true width from its group scale, so codes and scales
+    have to belong to one export.
+    """
+    from comfy_kitchen.tensor import QuantizedTensor
+
+    quant_kwargs.setdefault("group_size", W4A8_GROUP)
+    quant_kwargs.setdefault("convrot_groupsize", 256)
+    return QuantizedTensor.from_float(torch.randn(*TINY_DIM, dtype=torch.bfloat16),
+                                      "AsymW4A8Int8Layout", **quant_kwargs)
+
+
+def w4a8_tensors(*, marker="default", prefix: str = "",
+                 drop: tuple[str, ...] = ()) -> dict:
+    """Tensor set of a packed W4A8 mini checkpoint: codes at half width, plus scales.
+
+    The counterpart of :func:`int8_tensors` for the format whose weight cannot state its
+    own shape: the group grid, the row scale and the codebook are what make it readable.
+    """
+    tensors = {
+        **w4a8_qt().state_dict("q.weight"),
+        "plain.weight": torch.randn(*TINY_DIM, dtype=torch.bfloat16),
+        "plain.bias": torch.randn(TINY_DIM[0], dtype=torch.bfloat16),
+    }
+    if marker == "default":
+        tensors["q.comfy_quant"] = w4a8_marker()
+    elif marker is not None:
+        tensors["q.comfy_quant"] = marker
+    return _repackaged(tensors, prefix=prefix, drop=drop)
+
+
+def w4a8_checkpoint(path, **kwargs) -> tuple[str, dict]:
+    """Write :func:`w4a8_tensors` to ``path``; return ``(path, tensors)``."""
+    tensors = w4a8_tensors(**kwargs)
     return write_safetensors(path, tensors), tensors
 
 

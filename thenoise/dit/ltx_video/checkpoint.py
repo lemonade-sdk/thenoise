@@ -223,7 +223,8 @@ def load_original_components(
     transformer), and answer where each one came from.
 
     A part comes from the file named for it, else from whichever named file carries its
-    tensors; the connector pair is read from every file that carries it. ``headers`` is
+    tensors; a part two files both carry (the connector pair) is read from the file it
+    belongs to, the others filling only what it leaves out. ``headers`` is
     the runtime's own parsed headers by role, so a checkpoint is opened once however many
     parts ask about it.
 
@@ -266,28 +267,54 @@ def load_original_components(
             misses[name] += [(path, raw) for raw in rejected[name]]
 
     sources: dict[str, list[Path]] = {}
+    claims: dict[str, dict[Path, dict[str, str]]] = {}
     for name in modules:
-        wanted = given.get(ROLE_OF_COMPONENT[name])
-        carriers = list(picks[name])
-        chosen = carriers if name == "connectors" else (
-            [wanted] if wanted in picks[name] else carriers[:1])
-        if not chosen:
+        taken: set[str] = set()
+        per_file: dict[Path, dict[str, str]] = {}
+        for path in _carriers_for(name, given, list(picks[name])):
+            selected = {raw: target for raw, target in picks[name][path].items()
+                        if target not in taken}
+            taken |= set(selected.values())
+            if selected:
+                per_file[path] = selected
+        if not per_file:
             raise ValueError(
                 f"LTX {name} weights are in none of the checkpoints given"
                 + (f"; pass {_flag_for(name, version)}" if _flag_for(name, version) else "")
                 + _near_miss(name, misses[name]))
-        sources[name] = chosen
+        sources[name] = list(per_file)
+        claims[name] = per_file
     log.info("LTX %s components: %s", version,
              ", ".join(f"{name} from {', '.join(p.name for p in paths)}"
                        for name, paths in sorted(sources.items())))
 
     for name, module in modules.items():
         load_selected_state(
-            module, [(str(path), picks[name][path]) for path in sources[name]],
+            module, [(str(path), selected) for path, selected in claims[name].items()],
             dtype=dtype, device=device_for(sources[name]),
             what=f"LTX {name}")
         module.eval()
     return modules, {name: paths[0] for name, paths in sources.items()}
+
+
+def _carriers_for(name: str, given: Mapping[str, Path],
+                  carriers: list[Path]) -> list[Path]:
+    """The files to read one part from, most authoritative first.
+
+    The connector pair is the one part two released files both carry: 2.5 ships it with
+    the text encoder, 2.3 as its own file, and a repackaged transformer holds a copy of
+    whichever it was made from. Two files holding the same pair is not a mistake, so the
+    file the request named for the part decides and the rest only supply what it left
+    out -- which is also how a pair legitimately split across two files still completes.
+
+    Every other part is answered by exactly one file.
+    """
+    wanted = given.get(ROLE_OF_COMPONENT[name])
+    if name != "connectors":
+        return [wanted] if wanted in carriers else carriers[:1]
+    own = [given[role] for role in ("text_projection", "text_encoder")
+           if given.get(role) in carriers]
+    return own + [path for path in carriers if path not in own]
 
 
 def _header(role: str, path: Path, headers: Mapping[str, object] | None):

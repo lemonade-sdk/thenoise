@@ -339,8 +339,8 @@ def apply_lora_to_model(
     layer is handed one LoRA and answers with the ``LoraMode`` it used. ``key_map``
     and ``fusions`` are the model's own naming corrections.
 
-    A baked quantized layer reloads its originals from the checkpoint ``load_dit``
-    recorded on it, not from one the caller names: components share their key names.
+    A baked quantized layer reloads its originals from the file the loader recorded for
+    it, not from one the caller names: components share their key names.
     """
     base_model = _unwrap_compiled(model)
     lora_sds = [_normalize_lora_sd(sd, key_map, fusions) for sd in lora_sds]
@@ -350,7 +350,6 @@ def apply_lora_to_model(
 
     lora_keys = [set(sd.keys()) for sd in lora_sds]
     restore_map = getattr(base_model, "_quantized_restore_map", {})
-    restore_path = getattr(base_model, "_quantized_restore_path", None)
     targets: Dict[str, _Undo] = {}
 
     with inference():
@@ -360,12 +359,12 @@ def apply_lora_to_model(
                 continue
             factors = _fold(pairs)
             mode = module.apply_lora(factors)
-            baked = mode is LoraMode.BAKED_QUANTIZED
+            source = restore_map.get(path) if mode is LoraMode.BAKED_QUANTIZED else None
             targets[path] = _Undo(
                 mode,
                 factors if mode is LoraMode.BAKED else None,
-                restore_path if baked else None,
-                restore_map.get(path) if baked else None,
+                source[0] if source else None,
+                source[1] if source else None,
             )
 
     for i, unused in enumerate(lora_keys):

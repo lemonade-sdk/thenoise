@@ -8,7 +8,6 @@ geometry the header gave, then load into it.
 from __future__ import annotations
 
 import dataclasses
-import json
 import logging
 from pathlib import Path
 from typing import Callable, Mapping, Optional, Sequence, Union
@@ -19,6 +18,7 @@ from accelerate import init_empty_weights
 from comfy_kitchen.tensor import QuantizedTensor
 from comfy_kitchen.tensor.int8 import TensorWiseINT8Layout
 from comfy_kitchen.tensor.fp8 import TensorCoreFP8Layout
+from comfy_kitchen.tensor.w4a8_int8 import AsymW4A8Int8Layout
 
 from thenoise.utils.checkpoint import CHECKPOINT_MARKER_KEYS
 from thenoise.utils.safetensors import (
@@ -27,6 +27,9 @@ from thenoise.utils.safetensors import (
     MemoryEfficientSafeOpen,
     as_header,
     load_safetensors,
+    COMFY_QUANT_SUFFIX,
+    PACKED_GROUPS_SUFFIX,
+    parse_comfy_quant,
     strip_wrap_prefixes,
     unwrap_key,
 )
@@ -41,8 +44,29 @@ logger = logging.getLogger(__name__)
 _WEIGHT_SCALE_SUFFIXES = (".weight_scale", ".scale_weight")
 _INPUT_SCALE_SUFFIXES = (".scale_input", ".input_scale")
 _WEIGHT_SCALE_SUFFIX = _WEIGHT_SCALE_SUFFIXES[0]
-_COMFY_QUANT_SUFFIX = ".comfy_quant"
 _SCALED_FP8_MARKER = "scaled_fp8"
+
+#: The activation rotation block both quantized exports mean when a layer's marker
+#: leaves it out.
+_CONVROT_GROUPSIZE = 256
+
+#: The packed ConvRot W4A8/W6A8 export pairs its reduced-width codes with a group scale,
+#: a per-row scale and the codebook the codes decode through, under comfy_kitchen's own
+#: ``QuantizedTensor.state_dict`` suffixes. The marker's ``format`` is what says a weight
+#: is this one: unlike INT8 and FP8, which circulated before the marker was settled, a
+#: packed export always states itself.
+_W4A8_FORMAT = "asym_w4a8_int8"
+_W4A8_FIELDS = ((PACKED_GROUPS_SUFFIX, "scale"), (".weight_s_channel", "s_channel"),
+                (".weight_codebook", "codebook"), (".weight_correction", "correction"))
+#: The two scales a packed weight cannot be read without. The codebook is absent at
+#: 6 bits and the correction only when the export was asymmetric.
+_W4A8_REQUIRED = _W4A8_FIELDS[:2]
+_W4A8_SUFFIXES = tuple(suffix for suffix, _ in _W4A8_FIELDS)
+
+#: Every checkpoint suffix that fills one layout parameter, first match winning where a
+#: scale has two spellings. One table serves the partition (a scale follows its weight),
+#: the restore map (a weight is quantized when it has one) and the restore itself.
+_QUANT_PARAM_FIELDS = tuple((suffix, "scale") for suffix in _WEIGHT_SCALE_SUFFIXES) + _W4A8_FIELDS
 
 RUNTIME_STATE_SUFFIXES: tuple[str, ...] = (".comfy_attention.config",)
 
@@ -65,7 +89,7 @@ def _build_int8_qt(qweight: torch.Tensor, scale: torch.Tensor, marker: dict) -> 
         orig_shape=tuple(qweight.shape),
         is_weight=True,
         convrot=bool(marker.get("convrot", False)),
-        convrot_groupsize=marker.get("convrot_groupsize", 256),
+        convrot_groupsize=marker.get("convrot_groupsize", _CONVROT_GROUPSIZE),
     )
     return QuantizedTensor(qweight, "TensorWiseINT8Layout", params)
 
@@ -82,6 +106,35 @@ def _build_fp8_qt(qweight: torch.Tensor, scale: torch.Tensor, marker: dict) -> Q
         orig_shape=tuple(qweight.shape),
     )
     return QuantizedTensor(qweight, "TensorCoreFP8Layout", params)
+
+
+def _build_w4a8_qt(qweight: torch.Tensor, parts: dict, marker: dict, key: str) -> QuantizedTensor:
+    """Reconstruct a grouped W4A8/W6A8 weight from its codes and scale tensors.
+
+    The group-scale grid states what the packed row width cannot: the true K. So
+    ``orig_shape`` is rebuilt from it, the same way the header derived the shape it
+    reports for a packed weight.
+    """
+    missing = [key[: -len(".weight")] + suffix
+               for suffix, field in _W4A8_REQUIRED if field not in parts]
+    if missing:
+        raise RuntimeError(f"packed quantized weight {key!r} carries no {missing}")
+    group_size = marker.get("group_size")
+    if not isinstance(group_size, int) or group_size < 1:
+        raise RuntimeError(
+            f"packed quantized weight {key!r} has no group size in its comfy_quant marker")
+    rows, grids = parts["scale"].shape
+    params = AsymW4A8Int8Layout.Params(
+        scale=parts["scale"],
+        s_channel=parts["s_channel"],
+        correction=parts.get("correction"),
+        codebook=parts.get("codebook"),
+        group_size=group_size,
+        convrot_groupsize=marker.get("convrot_groupsize", _CONVROT_GROUPSIZE),
+        orig_dtype=torch.bfloat16,
+        orig_shape=(rows, grids * group_size),
+    )
+    return QuantizedTensor(qweight, "AsymW4A8Int8Layout", params)
 
 
 # Storage dtype -> (safetensors header dtype, layout builder).
@@ -182,12 +235,25 @@ def load_module_state(
 
 def _quantized_owner(key: str) -> Optional[str]:
     """The weight a quantization key describes, or None when it describes none."""
-    for suffixes in (_WEIGHT_SCALE_SUFFIXES, _INPUT_SCALE_SUFFIXES):
+    for suffixes in (_WEIGHT_SCALE_SUFFIXES, _INPUT_SCALE_SUFFIXES, _W4A8_SUFFIXES):
         stem = _strip_suffix(key, suffixes)
         if stem is not None:
             return stem + ".weight"
-    if key.endswith(_COMFY_QUANT_SUFFIX):
-        return key[:-len(_COMFY_QUANT_SUFFIX)] + ".weight"
+    if key.endswith(COMFY_QUANT_SUFFIX):
+        return key[:-len(COMFY_QUANT_SUFFIX)] + ".weight"
+    return None
+
+
+def _is_quant_metadata(key: str) -> bool:
+    """True for the checkpoint keys that describe a quantized layer instead of being one."""
+    return _quantized_owner(key) is not None or _is_scaled_fp8_marker(key)
+
+
+def _packed_part(key: str) -> Optional[tuple[str, str]]:
+    """``(weight path, layout field)`` for a packed layout's scale tensor, else None."""
+    for suffix, field in _W4A8_FIELDS:
+        if key.endswith(suffix):
+            return key[: -len(suffix)], field
     return None
 
 
@@ -217,7 +283,7 @@ def partition_keys(
         if name in strict:
             raise ValueError(reason)
 
-    for raw, entry in header.raw_entries.items():
+    for raw in header.raw_entries:
         if unwrap_key(raw) in CHECKPOINT_MARKER_KEYS or raw.endswith(RUNTIME_STATE_SUFFIXES):
             continue
         name, target = part_of(raw)
@@ -237,9 +303,10 @@ def partition_keys(
             rejected[name][raw] = target
             refuse(name, f"{header.path}: unexpected {name} tensor {raw!r} -> {target!r}")
             continue
-        elif tuple(entry["shape"]) != expected[target]:
+        elif header.logical_shape(raw) != expected[target]:
             rejected[name][raw] = target
-            refuse(name, f"{header.path}: {raw!r} shape {entry['shape']} != {expected[target]}")
+            refuse(name, f"{header.path}: {raw!r} shape {header.logical_shape(raw)} "
+                         f"!= {expected[target]}")
             continue
         if target in picked[name].values():
             refuse(name, f"{header.path}: duplicate {name} weight {target!r}")
@@ -269,6 +336,7 @@ def load_selected_state(
     """
     device = torch.device(device)
     weights: dict[str, torch.Tensor] = {}
+    origin: dict[str, tuple[str, str]] = {}
     used: list[str] = []
     for path, selected in sources:
         if not selected:
@@ -278,7 +346,10 @@ def load_selected_state(
         if clash:
             raise ValueError(f"{path}: duplicate {what} weight {sorted(clash)[:3]}")
         for raw, tensor in data.items():
-            weights[selected[raw]] = tensor
+            target = selected[raw]
+            weights[target] = tensor
+            if target.endswith(".weight") and tensor.dtype in _QUANT_DTYPES:
+                origin[target[: -len(".weight")]] = (path, raw)
         used.append(path)
 
     expected = model.state_dict()
@@ -286,9 +357,8 @@ def load_selected_state(
     if missing:
         raise ValueError(f"{what} weights in {', '.join(used)} leave missing={missing[:8]}"
                          " (no random/meta weight fallback)")
-    if any(key.endswith(_WEIGHT_SCALE_SUFFIXES) for key in weights) or any(
-            t.dtype == torch.int8 or str(t.dtype).startswith("torch.float8")
-            for t in weights.values()):
+    if any(_is_quant_metadata(key) for key in weights) or any(
+            tensor.dtype in _QUANT_DTYPES for tensor in weights.values()):
         load_quantized_state_dict(model, weights, dtype=dtype)
     else:
         load_module_state(model, {k: v.to(dtype=dtype) if v.is_floating_point() else v
@@ -298,6 +368,9 @@ def load_selected_state(
     leftover += [key for key, b in model.named_buffers() if b.is_meta]
     if leftover:
         raise RuntimeError(f"{what} left uninitialized: {leftover[:8]}")
+    # A baked quantized LoRA is undone by reloading this component's originals, and only
+    # this route knows the name each weight arrived under in the file it was sliced from.
+    model._quantized_restore_map = origin
     model.to(device)
 
 
@@ -362,7 +435,6 @@ def _load_into(
             # from: a LoRA undo reads the component's own, since two experts share
             # every key name.
             model._quantized_restore_map = build_quantized_restore_map(header, key_map)
-            model._quantized_restore_path = header.path
         logger.info("Loaded quantized %s from %s", what, header.path)
     else:
         if dtype is not None:
@@ -527,43 +599,14 @@ QUANTIZED_COMPUTE_DTYPE = torch.bfloat16
 
 
 def is_quantized_checkpoint(checkpoint: Union[str, Header]) -> bool:
-    """Return True if ``checkpoint`` is a quantized (INT8 or FP8) checkpoint.
+    """Return True if ``checkpoint`` stores its weights quantized.
 
-    Looks for any weight-scale key in the header; both spellings count, because
-    ComfyUI's quantizer wrote ``.scale_weight`` before it wrote ``.weight_scale``, and
-    missing the older one would read a low-bit file as if it were BF16.
+    Any key that describes a quantized weight rather than being one answers here: a
+    weight-scale key in either spelling ComfyUI's quantizer used, a packed layout's
+    group or row scale, or a per-layer ``comfy_quant`` profile. Missing one would read
+    a low-bit file as if it were BF16.
     """
-    return any(
-        _strip_suffix(name, _WEIGHT_SCALE_SUFFIXES) is not None
-        for name in as_header(checkpoint).names
-    )
-
-
-def _parse_comfy_quant(tensor: torch.Tensor) -> dict:
-    """Decode a per-layer ``comfy_quant`` marker tensor into its JSON dict.
-
-    The marker is a small U8 tensor holding the JSON payload, e.g.
-    ``{"convrot": true, "convrot_groupsize": 256, "per_row": true}`` for INT8 or
-    ``{"format": "float8_e4m3fn", "full_precision_matrix_mult": true}`` for FP8.
-    """
-    try:
-        data = json.loads(tensor.detach().cpu().numpy().tobytes().decode("utf-8"))
-    except (TypeError, ValueError, UnicodeDecodeError):
-        logger.warning(
-            "Could not parse a comfy_quant marker; using default quantized profile"
-        )
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _is_quant_metadata(key: str) -> bool:
-    """True for the checkpoint keys that describe a quantized layer instead of being one."""
-    return (
-        _strip_suffix(key, _WEIGHT_SCALE_SUFFIXES) is not None
-        or _strip_suffix(key, _INPUT_SCALE_SUFFIXES) is not None
-        or key.endswith(_COMFY_QUANT_SUFFIX)
-        or _is_scaled_fp8_marker(key)
-    )
+    return any(_is_quant_metadata(name) for name in as_header(checkpoint).names)
 
 
 def _take_input_scale(
@@ -585,19 +628,21 @@ def load_quantized_state_dict(
     state_dict: dict[str, torch.Tensor],
     dtype: Optional[torch.dtype] = None,
 ) -> None:
-    """Populate ``model`` from a quantized (INT8/FP8) state dict.
+    """Populate ``model`` from a quantized state dict.
 
-    Quantized linear weights (a low-bit ``.weight`` paired with a
-    ``.weight_scale``) land on modules that implement ``load_quantized``; every
-    other leaf parameter is replaced with the loaded tensor, cast to ``dtype`` when
-    given (quantized kernels emit BF16, so full-precision params must match).
+    Quantized linear weights (a low-bit ``.weight`` paired with its scales) land on
+    modules that implement ``load_quantized``; every other leaf parameter is replaced
+    with the loaded tensor, cast to ``dtype`` when given (quantized kernels emit BF16,
+    so full-precision params must match).
 
     A calibrated FP8 ``.scale_input`` goes to the same ``load_quantized`` call, so
     the whole-state and streaming loaders honour activation scaling identically.
 
-    The per-layer ``.comfy_quant`` JSON marker is carried into the
-    ``QuantizedTensor`` so each module rotates activations with the exact group size
-    it was quantized at, and only when the layer was actually ConvRot-rotated.
+    The per-layer ``.comfy_quant`` JSON marker says which layout a weight is and is
+    carried into the ``QuantizedTensor``, so each module rotates activations with the
+    exact group size it was quantized at, and only when the layer was actually
+    ConvRot-rotated. A packed layout also pairs its codes with a group scale, a row
+    scale and a codebook, which travel to the same call.
 
     ``state_dict`` must already have generic wrapper prefixes stripped.
     """
@@ -605,6 +650,7 @@ def load_quantized_state_dict(
     # guarantee they come first.
     scales: dict[str, torch.Tensor] = {}
     input_scales: dict[str, torch.Tensor] = {}
+    packed: dict[str, dict[str, torch.Tensor]] = {}
     markers: dict[str, dict] = {}
     full_precision_mm = False
     for key, tensor in state_dict.items():
@@ -616,8 +662,10 @@ def load_quantized_state_dict(
         elif (stem := _strip_suffix(key, _INPUT_SCALE_SUFFIXES)) is not None:
             if not _is_input_scale_placeholder(tensor):
                 input_scales[stem] = tensor
-        elif key.endswith(_COMFY_QUANT_SUFFIX):
-            markers[key[: -len(_COMFY_QUANT_SUFFIX)]] = _parse_comfy_quant(tensor)
+        elif (part := _packed_part(key)) is not None:
+            packed.setdefault(part[0], {})[part[1]] = tensor
+        elif key.endswith(COMFY_QUANT_SUFFIX):
+            markers[key[: -len(COMFY_QUANT_SUFFIX)]] = parse_comfy_quant(tensor)
         elif _is_scaled_fp8_marker(key):
             full_precision_mm = _scaled_fp8_disables_activation_scale(tensor)
 
@@ -634,7 +682,9 @@ def load_quantized_state_dict(
             )
             _switch_to_quantized(
                 module,
-                _build_quantized_tensor(tensor, scales.pop(module_path, None), markers.get(module_path, {}), key),
+                _build_quantized_tensor(
+                    tensor, scales.pop(module_path, None), markers.get(module_path, {}),
+                    key, packed.pop(module_path, None)),
                 key,
                 dtype,
                 activation_scale,
@@ -661,6 +711,10 @@ def load_quantized_state_dict(
             f"orphan {_INPUT_SCALE_SUFFIXES[0]} keys in quantized checkpoint: "
             f"{list(input_scales)[:5]}"
         )
+    if packed:
+        raise RuntimeError(
+            f"orphan packed scale keys in quantized checkpoint: {list(packed)[:5]}"
+        )
     # A parameter still on meta is a weight the checkpoint never carried: the
     # state-dict walk above only sees what the file has.
     if any(p.is_meta for p in model.parameters()):
@@ -673,13 +727,23 @@ def _build_quantized_tensor(
     scale,
     marker: dict,
     key: str,
+    parts: Optional[dict] = None,
 ) -> QuantizedTensor:
-    """Wrap a stored low-bit ``weight`` + ``scale`` into a ``QuantizedTensor``.
+    """Wrap a stored low-bit ``weight`` and its scales into a ``QuantizedTensor``.
 
-    Dispatches on the stored weight dtype to the registered layout builder (see
-    ``_QUANT_FORMATS``), which reads the ``comfy_quant`` marker profile. Quantized
-    kernels emit BF16, so ``orig_dtype`` is bf16.
+    A packed layout states itself in the ``comfy_quant`` marker and carries its scales
+    as separate tensors; the INT8 and FP8 exports are read off the stored weight dtype,
+    because files circulated that state no format at all (see ``_QUANT_FORMATS``). Both
+    builders read the marker profile. Quantized kernels emit BF16, so ``orig_dtype`` is
+    bf16.
     """
+    fmt = marker.get("format")
+    if parts is not None or fmt == _W4A8_FORMAT:
+        if fmt != _W4A8_FORMAT:
+            raise RuntimeError(
+                f"quantized weight {key!r} carries packed scales while its comfy_quant "
+                f"marker states format {fmt!r}")
+        return _build_w4a8_qt(qweight, parts or {}, marker, key)
     if scale is None:
         raise RuntimeError(f"quantized weight {key!r} is missing its {_WEIGHT_SCALE_SUFFIX}")
     entry = _QUANT_FORMATS.get(qweight.dtype)
@@ -733,26 +797,26 @@ def _submodule(model: torch.nn.Module, module_path: str, key: str) -> torch.nn.M
 def build_quantized_restore_map(
     checkpoint: Union[str, Header],
     key_map: Optional[Callable[[str], str]] = None,
-) -> dict[str, str]:
-    """Map quantized module paths (post key-map) to their raw checkpoint weight keys.
+) -> dict[str, tuple[str, str]]:
+    """Map quantized module paths (post key-map) to the file and raw key behind them.
 
     So a later LoRA undo can reload the original quantized weights from disk by raw
     key: wrapper-prefix stripping and ``key_map`` are already resolved here, but the
     file is spelled under the raw name, which is why the header's own spelling is kept.
     """
     header = as_header(checkpoint)
-    restore: dict[str, str] = {}
+    restore: dict[str, tuple[str, str]] = {}
     for raw_key, entry in header.raw_entries.items():
-        if entry["dtype"] not in _QUANT_HEADER_DTYPES:
+        if entry["dtype"] not in _QUANT_HEADER_DTYPES or not raw_key.endswith(".weight"):
             continue
-        if not raw_key.endswith(".weight"):
-            continue
-        if raw_key[: -len(".weight")] + _WEIGHT_SCALE_SUFFIX not in header.raw_entries:
+        stem = raw_key[: -len(".weight")]
+        if not any(stem + suffix in header.raw_entries
+                   for suffix, _ in _QUANT_PARAM_FIELDS):
             continue
         mapped = key_map(unwrap_key(raw_key)) if key_map is not None else unwrap_key(raw_key)
         if not mapped.endswith(".weight"):
             continue
-        restore[mapped[: -len(".weight")]] = raw_key
+        restore[mapped[: -len(".weight")]] = (str(header.path), raw_key)
     return restore
 
 
@@ -763,22 +827,26 @@ def restore_quantized_layer(
 ) -> None:
     """Restore a quantized layer's weight from a checkpoint by raw key.
 
-    Reads only the low-bit ``weight`` and its ``.weight_scale`` straight from the
-    file, and rebuilds a ``QuantizedTensor`` in the layer's existing layout profile.
+    Reads the low-bit ``weight`` and every scale tensor the file pairs with it straight
+    from disk, and rebuilds a ``QuantizedTensor`` in the layer's existing layout profile.
     """
+    qt = module.weight
+    stem = raw_key[: -len(".weight")]
     with MemoryEfficientSafeOpen(path) as f:
-        qdata = f.get_tensor(
-            raw_key,
-            device=module.weight.device,
-            dtype=module.weight.storage_dtype,
-        )
-        scale = f.get_tensor(
-            raw_key[: -len(".weight")] + _WEIGHT_SCALE_SUFFIX,
-            device=module.weight.params.scale.device,
-        )
-    qt = module.weight._copy_with(
+        qdata = f.get_tensor(raw_key, device=qt.device, dtype=qt.storage_dtype)
+        fields = {}
+        for suffix, field in _QUANT_PARAM_FIELDS:
+            raw = stem + suffix
+            if field in fields or raw not in f.header:
+                continue
+            stored = getattr(qt.params, field, None)
+            fields[field] = f.get_tensor(
+                raw, device=stored.device if stored is not None else qt.device)
+    if "scale" not in fields:
+        raise RuntimeError(f"{path} carries no scale for {raw_key!r}, so it cannot be restored")
+    qt = qt._copy_with(
         qdata=qdata,
-        params=dataclasses.replace(module.weight.params, scale=scale),
+        params=dataclasses.replace(qt.params, **fields),
         clone_params=False,
     )
     # The activation scale belongs to the checkpoint's export, not to this layer's

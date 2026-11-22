@@ -73,8 +73,8 @@ model repainting the picture it was given. Ask for it with `ref_method: vision`.
 | **Wan 2.2 TI2V-5B** | ✓ | ✓ | — | [wan22](docs/models/wan22.md#ti2v-5b) |
 | **Wan 2.2 T2V-A14B**, one expert per half of the schedule | ✓ | — | — | [wan22](docs/models/wan22.md#t2v-a14b-two-experts) |
 | **Wan 2.2 I2V-A14B**, the same experts at 36 input channels | — | ✓ | ✓ | [wan22](docs/models/wan22.md#i2v-a14b) |
-| **LTX 2.3 Distilled**, audiovisual generation | ✓ | ✓ | — | [ltx](docs/models/ltx.md) |
-| **LTX 2.5 Distilled**, audiovisual generation | ✓ | ✓ | — | [ltx](docs/models/ltx.md) |
+| **LTX 2.3 Distilled**, audiovisual generation | ✓ | ✓ | ✓ | [ltx](docs/models/ltx.md) |
+| **LTX 2.5 Distilled**, audiovisual generation | ✓ | ✓ | ✓ | [ltx](docs/models/ltx.md) |
 
 
 ## How does it compare to ComfyUI?
