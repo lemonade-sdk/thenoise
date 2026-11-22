@@ -170,10 +170,22 @@ def test_av_transformer_forward_and_checkpoint_variants(ltx25):
     with torch.inference_mode():
         video, audio = model(**args)
         video_isolated, audio_isolated = model(**args, isolate_modalities=True)
+        # The marker is zero-initialised, as the released builder leaves it, so a mask is
+        # only visible once it carries a value.
+        if ltx25:
+            model.keyframes_abs_pos_embedding.data.fill_(0.5)
+        video_marked, _ = model(**args, video_keyframes_mask=torch.tensor([[1., 0, 0, 0]]))
     assert video.shape == video_isolated.shape == (1, 4, 8)
     assert audio.shape == audio_isolated.shape == (1, 3, 8)
     assert all(t.isfinite().all() for t in (video, audio, video_isolated, audio_isolated))
     assert not torch.equal(video, video_isolated) or not torch.equal(audio, audio_isolated)
+
+    assert video_marked.shape == video.shape and video_marked.isfinite().all()
+    if ltx25:
+        assert not torch.equal(video_marked, video)
+    else:
+        # 2.3 builds no marker, so a mask has nothing to act on.
+        assert torch.equal(video_marked, video)
 
     # The LTX 2.5 keyframe and video-FFN bias difference is checkpoint ABI.
     state = model.state_dict()

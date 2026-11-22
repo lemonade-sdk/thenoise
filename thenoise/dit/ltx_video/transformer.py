@@ -450,7 +450,10 @@ class LTX2VideoTransformer3DModel(nn.Module):
         v = self.proj_in(hidden_states)
         a = self.audio_proj_in(audio_hidden_states)
         if self.config.use_keyframes_abs_pos_embedding and video_keyframes_mask is not None:
-            v = v + (video_keyframes_mask > 0).to(v) * self.keyframes_abs_pos_embedding.to(v)
+            # A per-token mask against one row of the trunk: the feature axis has to be
+            # added to the mask, or the broadcast lines tokens up against channels.
+            v = v + ((video_keyframes_mask > 0).to(v)[..., None]
+                     * self.keyframes_abs_pos_embedding.to(v))
         vtime, embedded_v = self._embed(self.time_embed, timestep, b, v.dtype)
         atime, embedded_a = self._embed(self.audio_time_embed, audio_timestep, b, a.dtype)
         if self.prompt_modulation and self.config.use_prompt_adaln_single:
