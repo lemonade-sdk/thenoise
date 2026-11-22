@@ -78,6 +78,27 @@ def test_quantization_metadata_follows_the_weight_it_describes(tmp_path):
                        part_of=_routing(dit="dit."), strict=frozenset({"dit"}))
 
 
+def test_a_packed_weights_scales_follow_it_across_the_partition(tmp_path):
+    """A packed weight is one tensor with four names: the row scale and the codebook
+    belong to it, and one of them with no weight to belong to is refused.
+    """
+    header = _saved(tmp_path, {"dit.layer.weight": torch.ones(2, 1, dtype=torch.int8),
+                               "dit.layer.weight_s_channel": torch.ones(2),
+                               "dit.layer.weight_codebook": torch.ones(16)})
+    picked, rejected = partition_keys(header, {"dit": {"layer.weight": (2, 1)}},
+                                      part_of=_routing(dit="dit."))
+    assert picked["dit"] == {"dit.layer.weight": "layer.weight",
+                             "dit.layer.weight_s_channel": "layer.weight_s_channel",
+                             "dit.layer.weight_codebook": "layer.weight_codebook"}
+    assert not rejected["dit"]
+
+    homeless = _saved(tmp_path, {"dit.other.weight_codebook": torch.ones(16)},
+                      "homeless.safetensors")
+    with pytest.raises(ValueError, match="quantization metadata"):
+        partition_keys(homeless, {"dit": {"layer.weight": (2, 1)}},
+                       part_of=_routing(dit="dit."), strict=frozenset({"dit"}))
+
+
 def test_a_part_is_filled_from_several_files_but_filled_once(tmp_path):
     weights = tmp_path / "weights.safetensors"
     save_file({"a.weight": torch.ones(2, 2)}, str(weights))

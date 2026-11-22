@@ -568,6 +568,19 @@ def _upscaler_file(tmp_path, weight):
     return _save(tmp_path / "upscaler.safetensors", {"upsampler.0.weight": weight})
 
 
+def _load_ltx(m, tmp_path, *, dit, text):
+    """The 2.5 request shape: transformer, both codecs, upscaler and Gemma apart."""
+    weight = torch.ones(2, 2)
+    return m.load_original_components(
+        {"": dit, "vae": _save(tmp_path / "video-vae.safetensors", {"vae.weight": weight}),
+         "audio_vae": _save(tmp_path / "audio-vae.safetensors",
+                            {"audio_vae.weight": weight, "vocoder.weight": weight}),
+         "upscaler": _upscaler_file(tmp_path, weight), "text_encoder": text},
+        version="2.5", gemma_text_config=object(),
+        device_for=lambda paths: "cpu", dtype=torch.float32,
+    )
+
+
 def test_one_file_answers_for_every_part_it_holds(tmp_path, monkeypatch):
     m = _tiny_components(monkeypatch)
     weight = torch.ones(2, 2)
@@ -694,6 +707,54 @@ def test_split_connectors_are_complete_across_dit_and_text_file(tmp_path, monkey
     _save(path_text, {"text_embedding_projection.video_aggregate_embed.weight": weight})
     with pytest.raises(ValueError, match="leave missing="):
         load()
+
+
+def test_a_connector_pair_two_files_both_carry_is_read_from_the_one_it_belongs_to(
+        tmp_path, monkeypatch):
+    """The 2.5 Gemma ships the projections, and a repackaged transformer carries a copy.
+
+    Both files spell the same pair, which is not a collision to refuse; the file the
+    request named for the text encoder decides, or the load stops on a duplicate weight
+    and no LTX 2.5 request with a repacked transformer can start at all.
+    """
+    m = _tiny_components(monkeypatch)
+    weight = torch.ones(2, 2)
+    copy = torch.full((2, 2), 7.0)
+    path_dit = _save(tmp_path / "dit.safetensors", {
+        "model.diffusion_model.patchify_proj.weight": weight,
+        "model.diffusion_model.video_embeddings_connector.learnable_registers": torch.ones(1, 2),
+        "model.diffusion_model.audio_embeddings_connector.learnable_registers": torch.ones(1, 2),
+        "text_embedding_projection.video_aggregate_embed.weight": copy,
+        "text_embedding_projection.audio_aggregate_embed.weight": copy,
+    })
+    path_text = _save(tmp_path / "text.safetensors", {
+        "text_embedding_projection.video_aggregate_embed.weight": weight,
+        "text_embedding_projection.audio_aggregate_embed.weight": weight,
+    })
+    parts, sources = _load_ltx(m, tmp_path, dit=path_dit, text=path_text)
+
+    assert sources["connectors"] == path_text.resolve()
+    torch.testing.assert_close(parts["connectors"].video_text_proj_in.weight, weight)
+
+
+def test_a_connector_pair_split_across_two_files_is_still_completed(tmp_path, monkeypatch):
+    """The other file still supplies what the authoritative one does not hold."""
+    m = _tiny_components(monkeypatch)
+    weight = torch.ones(2, 2)
+    copy = torch.full((2, 2), 7.0)
+    path_dit = _save(tmp_path / "dit.safetensors", {
+        "model.diffusion_model.patchify_proj.weight": weight,
+        "model.diffusion_model.video_embeddings_connector.learnable_registers": torch.ones(1, 2),
+        "model.diffusion_model.audio_embeddings_connector.learnable_registers": torch.ones(1, 2),
+        "text_embedding_projection.audio_aggregate_embed.weight": copy,
+    })
+    path_text = _save(tmp_path / "text.safetensors", {
+        "text_embedding_projection.video_aggregate_embed.weight": weight,
+    })
+    parts, _ = _load_ltx(m, tmp_path, dit=path_dit, text=path_text)
+
+    torch.testing.assert_close(parts["connectors"].video_text_proj_in.weight, weight)
+    torch.testing.assert_close(parts["connectors"].audio_text_proj_in.weight, copy)
 
 
 def test_released_grids_survive_their_own_resampling():

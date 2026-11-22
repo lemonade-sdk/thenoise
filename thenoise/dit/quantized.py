@@ -18,6 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from comfy_kitchen.tensor import QuantizedTensor, TensorWiseINT8Layout
+from comfy_kitchen.tensor.w4a8_int8 import AsymW4A8Int8Layout
 
 from thenoise.utils.loader import restore_quantized_layer
 from thenoise.utils.lora import LoraFactors, LoraMode
@@ -81,15 +82,32 @@ class QuantizedLinear(nn.Module):
         The int8 exporter stores ``scale = absmax / 127`` per row (ConvRot rotates
         within groups and an orthogonal rotation keeps norms), so the stored scale
         *is* the step; a per-tensor scale broadcasts.
+
+        The grouped W4A8 export decodes a stored codebook under a per-group and a
+        per-row scale, so its step is the codebook's mean spacing under the row's mean
+        group scale. That puts the two layouts' steps on one footing: measured on real
+        weights, each grid stops carrying a baked delta at about the same multiple of
+        its own step. A 6-bit export ships no codebook, so there is nothing to measure.
         """
         qt = self.weight
-        if not isinstance(qt, QuantizedTensor) or qt.layout_cls is not TensorWiseINT8Layout:
+        if not isinstance(qt, QuantizedTensor):
             return None
-        scale = getattr(qt.params, "scale", None)
-        if not isinstance(scale, torch.Tensor) or scale.numel() not in (1, self.out_features):
-            return None
-        step = scale.detach().to(torch.float32).reshape(-1)
-        return step.expand(self.out_features) if step.numel() == 1 else step
+        if qt.layout_cls is TensorWiseINT8Layout:
+            scale = getattr(qt.params, "scale", None)
+            if not isinstance(scale, torch.Tensor) or scale.numel() not in (1, self.out_features):
+                return None
+            step = scale.detach().to(torch.float32).reshape(-1)
+            return step.expand(self.out_features) if step.numel() == 1 else step
+        if qt.layout_cls is AsymW4A8Int8Layout:
+            params = qt.params
+            book = params.codebook
+            if (params.s_channel is None or book is None or book.numel() < 2
+                    or params.scale.shape[0] != self.out_features):
+                return None
+            spacing = (book.max() - book.min()) / (book.numel() - 1)
+            step = params.s_channel * params.scale.float().mean(dim=1) * spacing
+            return step.detach().to(torch.float32).reshape(-1)
+        return None
 
     @staticmethod
     def _bake_ratio(factors: LoraFactors, step: torch.Tensor) -> torch.Tensor:

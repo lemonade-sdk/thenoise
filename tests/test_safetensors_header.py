@@ -10,7 +10,15 @@ import json
 import pytest
 import torch
 
-from conftest import write_safetensors, write_wan_dit
+from conftest import (
+    TINY_DIM,
+    W4A8_GROUP,
+    quant_marker,
+    w4a8_checkpoint,
+    w4a8_marker,
+    write_safetensors,
+    write_wan_dit,
+)
 from thenoise.dit.wan_video.model import SIGNATURE as WAN_SIGNATURE, detect_params
 from thenoise.utils.safetensors import (
     Header,
@@ -156,3 +164,45 @@ def test_two_names_resolving_to_one_is_refused(tmp_path):
         "a.scale": torch.zeros(1), "a.weight": torch.zeros(1)}))
     with pytest.raises(RuntimeError, match="resolve to 'a.weight'"):
         header.relabel(lambda key: key.replace(".scale", ".weight"))
+
+
+# ------------------------------------------------- a packed weight's true width
+
+
+def test_a_packed_weight_reports_the_shape_it_fills(tmp_path):
+    """Every geometry read goes through these shapes, so a packed width is resolved
+    once here rather than in each model that would otherwise build a layer half as
+    wide as the checkpoint means it to be.
+    """
+    path, _ = w4a8_checkpoint(tmp_path / "w4a8.safetensors")
+    header = read_header(path)
+
+    assert header.shape("q.weight") == TINY_DIM
+    assert tuple(header.raw_entries["q.weight"]["shape"]) == (TINY_DIM[0], TINY_DIM[1] // 2)
+    assert header.logical_shape("q.weight") == TINY_DIM
+    # The scale siblings state the same tensor and keep the shape they are stored at.
+    assert header.shape("q.weight_s_rel") == (TINY_DIM[0], TINY_DIM[1] // W4A8_GROUP)
+
+
+def test_relabel_keeps_a_packed_weight_wide(tmp_path):
+    """A loader that renames the checkpoint's leaves still reads the logical shape."""
+    path, _ = w4a8_checkpoint(tmp_path / "w4a8.safetensors")
+    renamed = read_header(path, key_map=lambda key: key.replace("q.", "layer."))
+    assert renamed.shape("layer.weight") == TINY_DIM
+
+
+@pytest.mark.parametrize(
+    "marker,fault",
+    [
+        (None, "carries no"),
+        (quant_marker({"format": "asym_w4a8_int8"}), "states no group size"),
+        # A group size that does not divide the stored row into 4 or 6 bits cannot be
+        # recovered, so it is refused rather than guessed at.
+        (w4a8_marker(group_size=32), "neither 4- nor 6-bit"),
+    ],
+    ids=["no-marker", "no-group-size", "impossible-packing"],
+)
+def test_a_packed_weight_that_cannot_state_its_width_is_refused(tmp_path, marker, fault):
+    path, _ = w4a8_checkpoint(tmp_path / "w4a8.safetensors", marker=marker)
+    with pytest.raises(ValueError, match=fault):
+        read_header(path)

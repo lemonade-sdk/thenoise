@@ -4,7 +4,7 @@ import json
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Union, Optional
+from typing import Callable, Dict, Tuple, Union, Optional
 
 from thenoise.utils.setup_logging import setup_logging
 from thenoise.utils.device import synchronize_device
@@ -135,6 +135,71 @@ def strip_wrap_prefixes(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.
     return {unwrap_key(key): value for key, value in state_dict.items()}
 
 
+def parse_comfy_quant(tensor: torch.Tensor) -> dict:
+    """Decode a per-layer ``comfy_quant`` marker tensor into its JSON dict.
+
+    The marker is a small U8 tensor holding the JSON payload, e.g.
+    ``{"format": "int8_tensorwise", "convrot": true, "convrot_groupsize": 256}`` or
+    ``{"format": "asym_w4a8_int8", "group_size": 16, "convrot_groupsize": 256}``.
+    """
+    try:
+        data = json.loads(tensor.detach().cpu().numpy().tobytes().decode("utf-8"))
+    except (TypeError, ValueError, UnicodeDecodeError):
+        logger.warning(
+            "Could not parse a comfy_quant marker; using default quantized profile"
+        )
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+#: The per-layer profile a quantized export writes beside each weight.
+COMFY_QUANT_SUFFIX = ".comfy_quant"
+#: The packed low-bit export (ConvRot W4A8/W6A8) stores a weight's codes at reduced
+#: width, so the header cannot state the shape the module it fills has. Its group-scale
+#: sibling can: one scale per ``group_size`` columns, whose count is stated only by the
+#: layer's ``comfy_quant`` marker. The suffixes are comfy_kitchen's own
+#: ``QuantizedTensor.state_dict`` names.
+PACKED_GROUPS_SUFFIX = ".weight_s_rel"
+_PACKED_CODE_BITS = (4, 6)
+
+
+def _packed_shapes(f: MemoryEfficientSafeOpen, raw_entries: Dict[str, dict]) -> Dict[str, tuple]:
+    """The shape each packed weight in ``f`` really fills, keyed by the file's own name.
+
+    A file with no packed weight — every INT8, FP8 and full-precision one — pays
+    nothing here, since no marker payload is read until a group scale appears.
+    """
+    if not any(name.endswith(PACKED_GROUPS_SUFFIX) for name in raw_entries):
+        return {}
+    shapes: Dict[str, tuple] = {}
+    for raw, entry in raw_entries.items():
+        if not raw.endswith(".weight"):
+            continue
+        stem = raw[: -len(".weight")]
+        groups = raw_entries.get(stem + PACKED_GROUPS_SUFFIX)
+        if groups is None:
+            continue
+        marker_key = stem + COMFY_QUANT_SUFFIX
+        if marker_key not in raw_entries:
+            raise ValueError(
+                f"{f.filename}: {raw!r} is stored packed and carries no "
+                f"{marker_key!r} to state its group size")
+        group_size = parse_comfy_quant(f.get_tensor(marker_key)).get("group_size")
+        if not isinstance(group_size, int) or group_size < 1:
+            raise ValueError(
+                f"{f.filename}: {marker_key!r} states no group size for {raw!r}")
+        n, codes = entry["shape"]
+        rows, grid = groups["shape"]
+        k = grid * group_size
+        bits, remainder = divmod(codes * 8, k) if k else (0, 1)
+        if rows != n or remainder or bits not in _PACKED_CODE_BITS:
+            raise ValueError(
+                f"{f.filename}: {raw!r} stores {codes} columns for a {rows}x{k} weight, "
+                f"which is neither 4- nor 6-bit packing")
+        shapes[raw] = (n, k)
+    return shapes
+
+
 #: A model's identity, in tensor names.
 @dataclass(frozen=True)
 class Signature:
@@ -174,12 +239,16 @@ class Header:
         dtypes: Dict[str, str],
         raw_entries: Dict[str, dict],
         metadata: Dict[str, str],
+        packed: Optional[Dict[str, Tuple[int, ...]]] = None,
     ):
         self.path = path
         self.shapes = shapes
         self.dtypes = dtypes
         self.raw_entries = raw_entries
         self.metadata = metadata
+        # The weights stored at less than their real width, and the shape they fill, by
+        # the file's own name: ``shapes`` cannot hold both spellings of one tensor.
+        self.packed: Dict[str, Tuple[int, ...]] = packed or {}
         # The catalog entry that claimed this file, set by `thenoise.models.resolve`: the
         # parse that identified the checkpoint travels with it instead of being redone.
         self.model_cls: Optional[type] = None
@@ -202,6 +271,15 @@ class Header:
             return self.shapes[name]
         except KeyError:
             raise KeyError(f"{self.path} carries no '{name}'") from None
+
+    def logical_shape(self, raw: str) -> Tuple[int, ...]:
+        """The shape the tensor the file spells ``raw`` fills.
+
+        For everything but a packed low-bit weight this is the stored shape. The
+        partition walks a file in its own spelling, where ``shape`` answers normalized
+        names, so it asks here rather than reading the header entry directly.
+        """
+        return self.packed.get(raw, tuple(self.raw_entries[raw]["shape"]))
 
     def metadata_json(self, section: str) -> dict:
         """One JSON section of the file's ``__metadata__``, empty when absent or broken.
@@ -282,11 +360,15 @@ class Header:
                 raise RuntimeError(f"{self.path}: two checkpoint names resolve to {renamed!r}")
             shapes[renamed] = shape
             dtypes[renamed] = self.dtypes[name]
-        return Header(self.path, shapes, dtypes, self.raw_entries, self.metadata)
+        return Header(self.path, shapes, dtypes, self.raw_entries, self.metadata, self.packed)
 
 
 def read_header(path: str, key_map: Optional[Callable[[str], str]] = None) -> Header:
     """Parse ``path``'s header once. The only place a checkpoint header is opened.
+
+    The shapes are those the *parameters* fill, which for a weight a packed layout
+    stores at reduced width is wider than the file spells it: geometry read from a
+    header is then usable without every reader knowing about packing.
 
     ``key_map`` renames on top of the wrapper stripping, for a loader whose geometry is
     read under the names the model uses instead of the checkpoint's.
@@ -294,13 +376,14 @@ def read_header(path: str, key_map: Optional[Callable[[str], str]] = None) -> He
     with MemoryEfficientSafeOpen(path) as f:
         raw_entries = {k: f.header[k] for k in f.keys()}
         metadata = f.metadata()
-    header = Header(
-        path,
-        {unwrap_key(raw): tuple(entry["shape"]) for raw, entry in raw_entries.items()},
-        {unwrap_key(raw): entry["dtype"] for raw, entry in raw_entries.items()},
-        raw_entries,
-        metadata,
-    )
+        packed = _packed_shapes(f, raw_entries)
+    shapes: Dict[str, Tuple[int, ...]] = {}
+    dtypes: Dict[str, str] = {}
+    for raw, entry in raw_entries.items():
+        name = unwrap_key(raw)
+        shapes[name] = packed.get(raw, tuple(entry["shape"]))
+        dtypes[name] = entry["dtype"]
+    header = Header(path, shapes, dtypes, raw_entries, metadata, packed)
     return header if key_map is None else header.relabel(key_map)
 
 
