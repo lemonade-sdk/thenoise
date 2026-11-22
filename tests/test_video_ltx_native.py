@@ -322,6 +322,52 @@ def test_denoise_holds_its_pinned_frames_and_marks_only_a_standalone_one():
             assert args["video_keyframes_mask"] is None
 
 
+def test_the_real_trunk_takes_the_pins_and_the_marker():
+    """The adapter's masks are per token; only the trunk says whether that shape is right.
+
+    The fakes above record what was passed. This is the one call where the conditioning
+    mask, the keyframe marker and the video/audio split meet the module that has to agree
+    with them -- which is exactly what a shape error used to reach hardware unnoticed.
+    """
+    from thenoise.dit.ltx_video.transformer import LTX2VideoTransformer3DModel
+    from thenoise.models.ltx_video import AVConditioning, Clip, Frame, LTXVideo
+    from thenoise.models.video_base import Segment
+    from thenoise.samplers import Step
+
+    torch.manual_seed(3)
+    dit = LTX2VideoTransformer3DModel(
+        in_channels=128, out_channels=128, num_attention_heads=4, attention_head_dim=16,
+        cross_attention_dim=64, audio_in_channels=128, audio_out_channels=128,
+        audio_num_attention_heads=4, audio_attention_head_dim=16,
+        audio_cross_attention_dim=64, num_layers=1, ff_bias=False, audio_ff_bias=True,
+        gated_attn=True, audio_gated_attn=True, cross_attn_mod=True,
+        audio_cross_attn_mod=True, use_keyframes_abs_pos_embedding=True,
+    ).eval()
+    dit.keyframes_abs_pos_embedding.data.normal_(0, 0.01)
+
+    model = object.__new__(LTXVideo)
+    model.device = "cpu"
+    model.dit = dit
+    model._clip = Clip(start=Frame(low=torch.ones(1, 128, 1, 2, 2)),
+                       end=Frame(low=torch.full((1, 128, 1, 2, 2), -1.0)))
+    model._segment = Segment("dit", None, (Step(t=1.0, delta=0.25),), 1.0,
+                             SimpleNamespace(fps=24))
+    model._geometry = lambda *_: (2, 2, 2)
+    both = torch.cat((torch.ones(1, 4, 128), torch.full((1, 4, 128), -1.0),
+                      torch.randn(1, 3, 128)), dim=1)
+    cond = AVConditioning(torch.randn(1, 4, 64), torch.randn(1, 4, 64),
+                          torch.ones(1, 4))
+
+    with torch.inference_mode():
+        out = model.denoise_step(both, torch.tensor(0.75), cond, 1.0, 0)
+
+    assert out.shape == both.shape and out.isfinite().all()
+    # Both endpoints answer a velocity of zero; the frames between them do not.
+    assert torch.equal(out[:, :4], torch.zeros(1, 4, 128))
+    assert torch.equal(out[:, 4:8], torch.zeros(1, 4, 128))
+    assert out[:, 8:].abs().sum() > 0
+
+
 def test_starting_frame_is_encoded_in_the_codecs_own_dtype():
     """A BF16 codec handed the fp32 frame the resize produced.
 
