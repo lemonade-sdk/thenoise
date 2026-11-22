@@ -179,8 +179,8 @@ class QuantizedLinear(nn.Module):
         """Undo a baked LoRA by reloading this layer's originals from the checkpoint."""
         if not checkpoint or not raw_key:
             raise RuntimeError(
-                "cannot undo a baked quantized LoRA: this layer was not loaded from a"
-                " checkpoint, so it has no originals to reload"
+                "cannot undo a baked quantized LoRA: no checkpoint was recorded behind"
+                " this layer, so it has no originals to reload"
             )
         restore_quantized_layer(self, checkpoint, raw_key)
 

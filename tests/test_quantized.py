@@ -40,6 +40,7 @@ from thenoise.utils.loader import (
     is_quantized_checkpoint,
     load_dit,
     load_quantized_state_dict,
+    load_selected_state,
 )
 
 OUT_F, IN_F = 512, 256
@@ -226,6 +227,37 @@ def test_a_second_component_is_undone_from_the_file_it_came_from(tmp_path):
 
     adapter.switch_loras(None, low_dit, "dit_low")
     assert torch.equal(low_dit.q.weight._qdata, originals)
+
+
+def test_a_component_cut_out_of_a_multi_component_file_undoes_from_that_file(tmp_path):
+    """LTX reads its transformer out of a file that also holds the codecs and projections.
+
+    That route hands over a slice rather than a whole file, and it alone knows the raw
+    names behind the slice, so it is the one that has to record them: without it a baked
+    layer had nowhere to reload from and no LoRA switch on those checkpoints could end.
+    """
+    from thenoise.utils.lora import apply_lora_to_model, undo_lora_on_model
+
+    prefix = "model.diffusion_model."
+    tensors = int8_tensors(prefix=prefix,
+                           extra={"vae.conv.weight": torch.zeros(2, 2, dtype=torch.bfloat16)})
+    path = write_safetensors(tmp_path / "all-in-one.safetensors", tensors)
+    model = TinyDiT()
+    load_selected_state(
+        model,
+        [(path, {raw: raw[len(prefix):] for raw in tensors if raw.startswith(prefix)})],
+        dtype=torch.bfloat16, device="cpu", what="dit")
+
+    assert model.q._quantized
+    assert model._quantized_restore_map == {"q": (path, f"{prefix}q.weight")}
+    original = model.q.weight._qdata.clone()
+
+    result = apply_lora_to_model(model, [int8_lora_state_dict()])
+    assert _modes(result) == {"q": LoraMode.BAKED_QUANTIZED}
+    assert not torch.equal(model.q.weight._qdata, original)
+
+    undo_lora_on_model(model, result)
+    assert torch.equal(model.q.weight._qdata, original)
 
 
 def test_undoing_a_bake_of_a_layer_with_no_checkpoint_raises():

@@ -336,6 +336,7 @@ def load_selected_state(
     """
     device = torch.device(device)
     weights: dict[str, torch.Tensor] = {}
+    origin: dict[str, tuple[str, str]] = {}
     used: list[str] = []
     for path, selected in sources:
         if not selected:
@@ -345,7 +346,10 @@ def load_selected_state(
         if clash:
             raise ValueError(f"{path}: duplicate {what} weight {sorted(clash)[:3]}")
         for raw, tensor in data.items():
-            weights[selected[raw]] = tensor
+            target = selected[raw]
+            weights[target] = tensor
+            if target.endswith(".weight") and tensor.dtype in _QUANT_DTYPES:
+                origin[target[: -len(".weight")]] = (path, raw)
         used.append(path)
 
     expected = model.state_dict()
@@ -354,8 +358,7 @@ def load_selected_state(
         raise ValueError(f"{what} weights in {', '.join(used)} leave missing={missing[:8]}"
                          " (no random/meta weight fallback)")
     if any(_is_quant_metadata(key) for key in weights) or any(
-            t.dtype == torch.int8 or str(t.dtype).startswith("torch.float8")
-            for t in weights.values()):
+            tensor.dtype in _QUANT_DTYPES for tensor in weights.values()):
         load_quantized_state_dict(model, weights, dtype=dtype)
     else:
         load_module_state(model, {k: v.to(dtype=dtype) if v.is_floating_point() else v
@@ -365,6 +368,9 @@ def load_selected_state(
     leftover += [key for key, b in model.named_buffers() if b.is_meta]
     if leftover:
         raise RuntimeError(f"{what} left uninitialized: {leftover[:8]}")
+    # A baked quantized LoRA is undone by reloading this component's originals, and only
+    # this route knows the name each weight arrived under in the file it was sliced from.
+    model._quantized_restore_map = origin
     model.to(device)
 
 
@@ -429,7 +435,6 @@ def _load_into(
             # from: a LoRA undo reads the component's own, since two experts share
             # every key name.
             model._quantized_restore_map = build_quantized_restore_map(header, key_map)
-            model._quantized_restore_path = header.path
         logger.info("Loaded quantized %s from %s", what, header.path)
     else:
         if dtype is not None:
@@ -792,15 +797,15 @@ def _submodule(model: torch.nn.Module, module_path: str, key: str) -> torch.nn.M
 def build_quantized_restore_map(
     checkpoint: Union[str, Header],
     key_map: Optional[Callable[[str], str]] = None,
-) -> dict[str, str]:
-    """Map quantized module paths (post key-map) to their raw checkpoint weight keys.
+) -> dict[str, tuple[str, str]]:
+    """Map quantized module paths (post key-map) to the file and raw key behind them.
 
     So a later LoRA undo can reload the original quantized weights from disk by raw
     key: wrapper-prefix stripping and ``key_map`` are already resolved here, but the
     file is spelled under the raw name, which is why the header's own spelling is kept.
     """
     header = as_header(checkpoint)
-    restore: dict[str, str] = {}
+    restore: dict[str, tuple[str, str]] = {}
     for raw_key, entry in header.raw_entries.items():
         if entry["dtype"] not in _QUANT_HEADER_DTYPES or not raw_key.endswith(".weight"):
             continue
@@ -811,7 +816,7 @@ def build_quantized_restore_map(
         mapped = key_map(unwrap_key(raw_key)) if key_map is not None else unwrap_key(raw_key)
         if not mapped.endswith(".weight"):
             continue
-        restore[mapped[: -len(".weight")]] = raw_key
+        restore[mapped[: -len(".weight")]] = (str(header.path), raw_key)
     return restore
 
 
