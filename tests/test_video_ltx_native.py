@@ -884,4 +884,3 @@ def test_ltx_component_roles_and_lora_contract():
     # 2.3 packs its codecs with the transformer, so only the encoder is a second file.
     assert LTX23Video.REQUIRED_COMPONENTS == ("text_encoder",)
     assert LTX25Video.REQUIRED_COMPONENTS == ("vae", "text_encoder")
-    assert LTXVideo.lora_components(object()) == {}

@@ -155,10 +155,6 @@ class LTXVideo(VideoModel):
     def _create_upscaler(self):
         raise NotImplementedError("LTX uses an internal AV refinement stage")
 
-    def lora_components(self) -> dict[str, nn.Module]:
-        # Not enabled/tested for LTX: let the shared LoRA role checker reject it.
-        return {}
-
     def _clear_weights(self):
         self.dit = self.vae = self.text_encoder = self.tokenizer = None
         self.audio_vae = self.vocoder = self.upscaler = None
