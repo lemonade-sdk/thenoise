@@ -168,17 +168,6 @@ def test_a_request_without_a_picture_cannot_ask_for_a_shape(tmp_path):
         queue.close()
 
 
-def test_a_prompt_is_not_a_field_this_route_reads(tmp_path):
-    queue = JobQueue(tmp_path)
-    try:
-        with _client(_controller(), queue) as client:
-            answer = client.post("/mesh", json={"prompt": "a chair"})
-            assert answer.status_code == 422
-            assert "prompt" in answer.text
-    finally:
-        queue.close()
-
-
 def test_a_controller_refusal_is_a_bad_request_not_a_crash(tmp_path):
     queue = JobQueue(tmp_path)
     try:

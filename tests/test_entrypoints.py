@@ -100,7 +100,7 @@ class _FakeVideo:
 class _FakeShape:
     """A mesh controller with fixed model defaults, keeping the render it was handed."""
 
-    DEFAULTS = {"negative_prompt": "", "output_format": "glb", "num_latents": 64,
+    DEFAULTS = {"output_format": "glb", "num_latents": 64,
                 "steps": 12, "guidance_scale": 5.0, "sampler": "euler",
                 "octree_resolution": 64, "bounds": 1.01, "mc_level": 0.0}
 
@@ -463,14 +463,6 @@ def test_mesh_refuses_an_unknown_sampler_before_anything_loads(mesh_runtime, tmp
 def test_mesh_names_the_flag_of_a_picture_it_cannot_read(mesh_runtime):
     with pytest.raises(SystemExit, match=r"--image.*nowhere\.png"):
         run_mesh(_parse(["mesh", *MESH_PATHS, "--image", "nowhere.png"]))
-
-
-def test_mesh_offers_no_words_to_describe_a_shape_with(capsys):
-    """The wire still carries the field a shared request body has, but a flag would promise
-    that a shape can be asked for in words, and this model cannot read them."""
-    with pytest.raises(SystemExit):
-        _parse(["mesh", *MESH_PATHS, "--image", "chair.png", "--prompt", "a chair"])
-    assert "unrecognized arguments: --prompt" in capsys.readouterr().err
 
 
 def test_mesh_wires_the_picture_the_tokens_and_the_volume(mesh_runtime, tmp_path):

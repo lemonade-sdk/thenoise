@@ -53,4 +53,4 @@ def run_video(args) -> None:
         raise SystemExit("video: " + "; ".join(err["msg"] for err in e.errors())) from e
 
     render_one(spec, args, medium="video", command="video", noun="clip",
-               summary=_summary, silent=("decoding",))
+               summary=_summary)

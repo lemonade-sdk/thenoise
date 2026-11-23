@@ -50,11 +50,10 @@ def load(args, medium: str, command: str):
 
 
 def render_one(spec, args, *, medium: str, command: str, noun: str,
-               summary: Callable[[Any], str], silent: tuple[str, ...] = ()) -> None:
+               summary: Callable[[Any], str]) -> None:
     """Resolve one request before any weight moves, then render it to ``--out``."""
-    from .jobs import Uncancellable
+    from .jobs import idle, Uncancellable
     from .utils.paths import named_output
-    from .utils.progress import StageBars
 
     runtime = load(args, medium, command)
     try:
@@ -64,12 +63,7 @@ def render_one(spec, args, *, medium: str, command: str, noun: str,
     out = named_output(args.out, resolved.output_format, noun, command)
     logger.info("%s %s: %s", runtime.model_name, resolved.mode, summary(resolved))
 
-    progress = StageBars(silent)
-    try:
-        runtime.run(lambda controller: controller.render(
-            resolved, Uncancellable(), progress, out))
-    finally:
-        progress.close()
+   runtime.run(lambda controller: controller.render(resolved, Uncancellable(), idle, out))
     logger.info("saved %s", out)
 
 

@@ -141,7 +141,7 @@ own files.
 Unlike `generate`, no flag of this one has a default: what each release ships is
 the variant's to say, so a flag you leave out stays unset. The run logs the size,
 frame count, frame rate, solver and seed it settled on before the first step, and
-bars the stages as it goes.
+bars the solver's steps and the written frames as it goes.
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
