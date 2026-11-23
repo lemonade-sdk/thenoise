@@ -231,7 +231,7 @@ With a video model:
 With a mesh model:
 
 ```json
-{"status": "ok", "models": ["hunyuan3d-21"], "medium": "mesh",
+{"status": "ok", "models": ["hunyuan3d21"], "medium": "mesh",
   "samplers": ["er_sde", "euler", "unipc"],
   "capabilities": {"kv_cache": false, "mesh": {"i2d": true, "t2d": false}}}
 ```

@@ -100,7 +100,7 @@ BARE = {
     "wan22": {"variant": VARIANTS["ti2v_5b"]},
     "ltx23": {},
     "ltx25": {},
-    "hunyuan3d-21": {"checkpoint_prefs": {}},
+    "hunyuan3d21": {"checkpoint_prefs": {}},
 }
 
 # The adapters whose step schedule shifts with the image token count. Krea 2 is
