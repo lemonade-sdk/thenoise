@@ -175,6 +175,7 @@ def load_flux3_dit(
         dtype=dtype,
         key_map=_flux3_key_map,
         state_map=None if params.fused_qkv else fuse_qkv_state,
+        relay_stores=True,
     )
 
 

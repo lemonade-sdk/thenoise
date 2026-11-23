@@ -119,8 +119,8 @@ import block_bench as bb
 from thenoise.dit.ltx_video import transformer as ltx
 from thenoise.dit.ltx_video.rope import AVRope
 from thenoise.utils import attention as attention_mod
-from thenoise.dit.quantized import (PITCH_MIN_BYTES, PITCH_MIN_ROWS, PITCH_PAD_ELEMENTS,
-                                    TRANSPOSE_MIN_RATIO)
+from thenoise.dit.quantized import PITCH_MIN_BYTES, PITCH_MIN_ROWS, PITCH_PAD_ELEMENTS
+from thenoise.utils.layout import TRANSPOSE_MIN_RATIO
 from thenoise.utils.attention import eager_attention
 from thenoise.utils.dynamo import apply_recompile_limit
 

@@ -28,6 +28,7 @@ from comfy_kitchen.tensor import (
     w4a8_int8_linear,
 )
 
+from thenoise.utils.layout import LAYOUT_PENALTY
 from thenoise.utils.loader import restore_quantized_layer
 from thenoise.utils.lora import LoraFactors, LoraMode
 
@@ -130,54 +131,24 @@ _LINEAR_OPS = (AsymW4A8Int8Layout, TensorCoreFP8Layout)
 
 
 #: Row pitches, in bytes, from which a full-precision GEMM pays for the alignment of its
-#: operand, and the elements added to a row once it does.
-#:
-#: The penalty follows the reduction length, because that is the activation's row pitch.
-#: Measured on gfx1151 across the blocks the engine ships: rows 32768 B apart cost about
-#: half the rate the same block charges elsewhere — LTX's and krea2's 16384-wide FFN
-#: activations, 1.48x and 1.54x in eager and 8-13% of the block — and rows 24576 B apart
-#: about a sixth (flux2_klein9b and qwen_image21: 2.6% and 5.3%). Nothing at or below
-#: 16384 B responded. Neither did rows 27648 B apart, wan22's, so the threshold does buy a
-#: copy there: about 0.6% of that GEMM, against the sixth recovered wherever the pitch is
-#: 24576.
-#:
-#: The gate is the backend rather than a device list because only ROCm is known to have the
-#: penalty; on cuBLAS the copy would be pure cost. The quantized paths are untouched, since
-#: what was measured is the rate of a GEMM reading a full-precision activation. It gates
-#: every layout rule in this module, because every one of them was measured here.
+#: operand, and the elements added to a row once it does. The penalty follows the reduction
+#: length, because that is the activation's row pitch: nothing at or below 16384 B responds,
+#: and rows 27648 B apart — wan22's — pay the copy without recovering anything. Full
+#: precision only, since what is slow is a GEMM reading a full-precision activation.
 PITCH_MIN_BYTES = 24576
 PITCH_PAD_ELEMENTS = 8
-LAYOUT_PENALTY = torch.version.hip is not None
-
 
 #: Fewer rows than this, and the tile effect the widening cures is not what the GEMM's time
-#: is made of. The same ``[M, 12288] x [12288, 4096]`` problem on gfx1151: 1.17x from
-#: widening at M=1024, 1.18x at 2025, 1.16x at 4096 — and 0.89x, a loss, at M=512. Which
-#: puts the bound between 512 and 1024, and the streams on either side of it are the image
-#: and video ones against the text (512) and audio (126) ones.
+#: is made of. The bound sits between 512 and 1024 rows, which is the image and video
+#: streams on one side of it and the text and audio ones on the other.
 PITCH_MIN_ROWS = 1024
-
-
-#: A projection at least this much wider out than in, and its GEMM reads the weight rather
-#: than the activation when the stream is short — and ``F.linear`` reads that weight strided
-#: by the row it is stored in. Storing the same numbers with the reduction axis contiguous
-#: gave it the operand it wanted, on gfx1151 at 512-token streams, measured at block level
-#: in bf16: 1.14x for flux2's double block and 1.13x for its single one, 1.07x for qwen21
-#: and flux3's text block, 1.05x for fibo2's trunk, 1.04x for anima and wan's 5B, and 1.02x
-#: for h3, flux3's image and joint blocks and LTX's i2v one. Blocks with nothing to gain were
-#: flat, not slower. The one exception is ``moss_image``'s joint block, about 1% worse, and no
-#: ratio excludes it: undoing only its 5.33x feed-forward recovers all of that and undoing its
-#: 3x qkv nothing, so its shape is on the wrong side of a kernel choice rather than of this
-#: bound. The rule is on floating-point weights, so an int8 load never sees it.
-TRANSPOSE_MIN_RATIO = 3.0
 
 
 def pitch_too_wide(x: torch.Tensor) -> bool:
     """Whether ``x`` has enough rows, long enough and squarely enough laid out, to want it.
 
-    Contiguity is part of the test: a row already widened by an earlier projection has a
-    stride that says so, and copying behind someone else's copy earns nothing. The row count
-    is the GEMM's own — rows a leading batch dimension hides are still rows.
+    Contiguity is part of the test: rows already widened by an earlier projection say so in
+    their stride, and copying behind someone else's copy earns nothing.
     """
     if x.dim() < 2 or x.numel() // x.shape[-1] < PITCH_MIN_ROWS:
         return False
@@ -188,9 +159,9 @@ def pitch_too_wide(x: torch.Tensor) -> bool:
 def pitch_padded(x: torch.Tensor) -> torch.Tensor:
     """``x`` in rows ``PITCH_PAD_ELEMENTS`` wider, when its rows are wide in the slow way.
 
-    Sixteen bytes per row break whatever bank or set conflict costs the GEMM its rate, for
-    one pointwise write — which Inductor folds into the kernel that produced the activation,
-    so in a compiled block this is usually no extra kernel at all but a wider allocation.
+    Sixteen bytes per row break whatever bank or set conflict costs the GEMM its rate. In a
+    compiled block Inductor folds the write into whatever produced the rows, so this is a
+    wider allocation rather than another kernel.
     """
     if not LAYOUT_PENALTY or x.device.type != "cuda" or not pitch_too_wide(x):
         return x
@@ -198,31 +169,6 @@ def pitch_padded(x: torch.Tensor) -> torch.Tensor:
                        dtype=x.dtype, device=x.device)
     wide[..., :x.shape[-1]] = x
     return wide[..., :x.shape[-1]]
-
-
-def stores_weight_transposed(in_features: int, out_features: int) -> bool:
-    """Whether a full-precision projection of these widths wants its weight the other way.
-
-    ``F.linear`` reads the weight as ``[K, N]``, strided by its stored row: with N much
-    larger than K and few rows to amortise the read, that read is the GEMM's traffic.
-    """
-    return LAYOUT_PENALTY and out_features >= TRANSPOSE_MIN_RATIO * in_features
-
-
-def weight_relayed(weight: torch.Tensor) -> torch.Tensor:
-    """``weight``'s own numbers in the store its module wants, or ``weight`` itself.
-
-    Shape and values are unchanged, so anything reading ``module.weight`` by shape —
-    ``F.linear``, a LoRA delta, a quantizer — sees what it expected, and no checkpoint
-    changes. Only a plain row-major floating-point store is relayed: a quantized weight is
-    a different tensor in front of a different kernel, and a weight already strided was laid
-    out by someone else, so copying behind that earns nothing.
-    """
-    if (weight.dim() != 2 or not weight.is_floating_point()
-            or weight.stride(-1) != 1
-            or not stores_weight_transposed(weight.shape[-1], weight.shape[-2])):
-        return weight
-    return weight.t().contiguous().t()
 
 
 class QuantizedLinear(nn.Module):
@@ -240,8 +186,9 @@ class QuantizedLinear(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        # Cast to the compute dtype by the adapter, or replaced at load time.
-        self.weight = nn.Parameter(weight_relayed(torch.empty(out_features, in_features)))
+        # Cast to the compute dtype by the adapter, or replaced at load time. The store
+        # arrives with the weights: a module built here holds the checkpoint's own order.
+        self.weight = nn.Parameter(torch.empty(out_features, in_features))
         if bias:
             self.bias = nn.Parameter(torch.empty(out_features))
         else:
@@ -255,45 +202,14 @@ class QuantizedLinear(nn.Module):
         self.register_buffer("_lora_down", None, persistent=False)
         self.register_buffer("_lora_up", None, persistent=False)
 
-    def _apply(self, fn, *args, **kwargs):
-        out = super()._apply(fn, *args, **kwargs)
-        # A device move or a dtype cast rebuilds the parameter, and a rebuild that preserves
-        # nothing hands back the row-major store these widths do not want.
-        self._relay_store()
-        return out
-
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
-                              missing_keys, unexpected_keys, error_msgs):
-        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
-                                      missing_keys, unexpected_keys, error_msgs)
-        # Loading with ``assign`` hands the checkpoint's tensor straight to the module and
-        # goes around ``_apply``, so the store has to be restored on this door too. A plain
-        # load copies into the parameter, which keeps the layout it was built with.
-        self._relay_store()
-
     def _save_to_state_dict(self, destination, prefix, keep_vars):
         super()._save_to_state_dict(destination, prefix, keep_vars)
-        # The relayed store is a runtime layout, not a format: safetensors refuses a strided
-        # tensor outright, so a module written back out — a merged export, a fixture, a
-        # checkpoint round trip — hands over the plain one. With ``keep_vars`` the entry is
-        # the parameter itself and other code holds that identity, so it stays as it is.
+        # The relayed store is a runtime layout, not a format, and safetensors refuses a
+        # strided tensor outright. With ``keep_vars`` the entry is the parameter itself and
+        # other code holds that identity, so it stays as it is.
         weight = destination.get(f"{prefix}weight")
         if not keep_vars and isinstance(weight, torch.Tensor) and weight.stride(-1) != 1:
             destination[f"{prefix}weight"] = weight.contiguous()
-
-    def _relay_store(self) -> None:
-        """Put ``weight`` in the store these widths ask for, if it is a parameter.
-
-        A quantized weight is a buffer in front of a different kernel, so it is not this
-        rule's business; a store already relayed is left alone, which keeps the copy to once
-        however many times the module is moved or cast.
-        """
-        weight = getattr(self, "weight", None)
-        if not isinstance(weight, nn.Parameter):
-            return
-        relayed = weight_relayed(weight.data)
-        if relayed is not weight.data:
-            weight.data = relayed
 
     def _reset_parameters(self) -> None:
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
@@ -467,8 +383,7 @@ class QuantizedLinear(nn.Module):
         if not isinstance(weight, QuantizedTensor):
             # Full precision stays an ordinary ``F.linear``: an op boundary here would cut
             # the layer off from the elementwise fusion around it. Widening the operand's
-            # rows is not one — it is pointwise, it fuses into whatever produced them, and
-            # it is this GEMM's own rate that wants it.
+            # rows is pointwise, so it is not one.
             y = F.linear(pitch_padded(x), weight, self.bias)
         elif self.input_scale is not None:
             # Only quantized layers loaded with calibrated FP8 input scaling take

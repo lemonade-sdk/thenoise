@@ -105,6 +105,7 @@ def load_qwen_image21_dit(
         dtype=dtype,
         key_map=_key_map,
         value_map=_value_map,
+        relay_stores=True,
     )
 
 

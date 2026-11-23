@@ -84,6 +84,7 @@ def load_flux2_dit(
         device=device,
         dtype=dtype,
         key_map=_flux2_key_map,
+        relay_stores=True,
     )
 
 

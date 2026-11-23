@@ -21,6 +21,7 @@ from comfy_kitchen.tensor.fp8 import TensorCoreFP8Layout
 from comfy_kitchen.tensor.w4a8_int8 import AsymW4A8Int8Layout
 
 from thenoise.utils.checkpoint import CHECKPOINT_MARKER_KEYS
+from thenoise.utils.layout import weight_relayed
 from thenoise.utils.safetensors import (
     Header,
     Signature,
@@ -216,13 +217,21 @@ def load_module_state(
     *,
     what: str = "checkpoint",
     allow_missing: tuple[str, ...] = (),
+    relay_stores: bool = False,
 ) -> None:
     """Load ``state_dict`` into ``model``, or name the keys that did not line up.
 
     ``allow_missing`` lists substrings of the module paths no checkpoint carries
     (model-internal buffers); everything else has to match in both directions, which
     is what ``strict=True`` does not report.
+
+    ``relay_stores`` asks :func:`~thenoise.utils.layout.weight_relayed` of each tensor as
+    it is assigned, so the file's own store is released as it is transposed instead of held
+    beside it. Which models ask is theirs to know; nothing here weighs a width.
     """
+    if relay_stores:
+        for key, tensor in state_dict.items():
+            state_dict[key] = weight_relayed(tensor)
     info = model.load_state_dict(state_dict, strict=False, assign=True)
     missing = [k for k in info.missing_keys
                if not any(allowed in k for allowed in allow_missing)]
@@ -318,6 +327,7 @@ def partition_keys(
 def load_selected_state(
     model: torch.nn.Module, sources: Sequence[tuple[str, Mapping[str, str]]], *,
     dtype: Optional[torch.dtype], device: Union[str, torch.device], what: str,
+    relay_stores: bool = False,
 ) -> None:
     """Fill one module from ``(file, {raw key: module key})`` pairs, reading only those keys.
 
@@ -350,6 +360,8 @@ def load_selected_state(
             weights[target] = tensor
             if target.endswith(".weight") and tensor.dtype in _QUANT_DTYPES:
                 origin[target[: -len(".weight")]] = (path, raw)
+        # ``weights`` holds them all now, and a relayed store is a copy.
+        data.clear()
         used.append(path)
 
     expected = model.state_dict()
@@ -361,9 +373,11 @@ def load_selected_state(
             tensor.dtype in _QUANT_DTYPES for tensor in weights.values()):
         load_quantized_state_dict(model, weights, dtype=dtype)
     else:
-        load_module_state(model, {k: v.to(dtype=dtype) if v.is_floating_point() else v
-                                  for k, v in weights.items()},
-                          ", ".join(used), what=what)
+        loaded = {k: v.to(dtype=dtype) if v.is_floating_point() else v
+                  for k, v in weights.items()}
+        weights.clear()  # the relay copies; the file's store must not ride along
+        load_module_state(model, loaded, ", ".join(used), what=what,
+                          relay_stores=relay_stores)
     leftover = [key for key, p in model.named_parameters() if p.is_meta]
     leftover += [key for key, b in model.named_buffers() if b.is_meta]
     if leftover:
@@ -388,6 +402,7 @@ def _load_into(
     strip_wrappers: bool = False,
     allow_missing: tuple[str, ...] = (),
     quantized_restore: bool = False,
+    relay_stores: bool = False,
 ) -> torch.nn.Module:
     """Read one safetensors file into a module built on meta.
 
@@ -439,7 +454,8 @@ def _load_into(
     else:
         if dtype is not None:
             sd = {k: v.to(dtype=dtype) for k, v in sd.items()}
-        load_module_state(model, sd, header.path, what=what, allow_missing=allow_missing)
+        load_module_state(model, sd, header.path, what=what, allow_missing=allow_missing,
+                          relay_stores=relay_stores)
         logger.info("Loaded %s from %s", what, header.path)
 
     # Includes buffers (e.g. RoPE) not present in the checkpoint.
@@ -458,6 +474,7 @@ def load_dit(
     key_map: Optional[Callable[[str], str]] = None,
     value_map: Optional[Callable[[str, torch.Tensor], tuple[str, torch.Tensor]]] = None,
     state_map: Optional[Callable[[dict], dict]] = None,
+    relay_stores: bool = False,
 ) -> torch.nn.Module:
     """Load a DiT checkpoint into ``model`` (constructed on meta)."""
     return _load_into(
@@ -473,6 +490,7 @@ def load_dit(
         strip_wrappers=True,
         allow_missing=expected_missing,
         quantized_restore=True,
+        relay_stores=relay_stores,
     )
 
 

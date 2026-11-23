@@ -292,7 +292,7 @@ def load_original_components(
         load_selected_state(
             module, [(str(path), selected) for path, selected in claims[name].items()],
             dtype=dtype, device=device_for(sources[name]),
-            what=f"LTX {name}")
+            what=f"LTX {name}", relay_stores=(name == "dit"))
         module.eval()
     return modules, {name: paths[0] for name, paths in sources.items()}
 

@@ -115,6 +115,7 @@ def load_fibo2_dit(
         device=device,
         dtype=dtype,
         key_map=fibo2_key_map,
+        relay_stores=True,
     )
 
 

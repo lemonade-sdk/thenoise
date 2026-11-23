@@ -68,4 +68,5 @@ def load_anima_model(
         dtype=dit_weight_dtype,
         key_map=qk_norm_key_map,
         expected_missing=("seq", "dim_spatial_range", "dim_temporal_range", "inv_freq"),
+        relay_stores=True,
     )

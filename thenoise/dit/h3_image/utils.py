@@ -107,6 +107,7 @@ def load_h3_image_dit(
         device=device,
         dtype=None,
         key_map=qk_norm_key_map,
+        relay_stores=True,
     )
     model.to(dtype=dtype)
     return model

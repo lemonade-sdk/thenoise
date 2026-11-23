@@ -44,5 +44,6 @@ def load_wan_native_transformer(
         device=device,
         dtype=dtype or (QUANTIZED_COMPUTE_DTYPE if quantized else None),
         key_map=wan_dit_key,
+        relay_stores=True,
     )
     return model.apply_precision().eval()
