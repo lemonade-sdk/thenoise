@@ -2,12 +2,12 @@ import pytest
 import torch
 from PIL import Image, ImageDraw
 from conftest import header_of
-from test_dit_hunyuan3d import TINY
-from thenoise.dit.hunyuan3d import Hunyuan3DShapeParams
+from test_dit_hunyuan3d21 import TINY
+from thenoise.dit.hunyuan3d21 import Hunyuan3D21ShapeParams
 
 from thenoise.models.base import Conditioning
 from thenoise.models.config import EncodePromptArgs, MeshDecodeParams, MeshSamplingParams
-from thenoise.models.hunyuan3d import Hunyuan3DShapeModel
+from thenoise.models.hunyuan3d21 import Hunyuan3D21ShapeModel
 
 
 class RecordingDiT(torch.nn.Module):
@@ -67,13 +67,13 @@ class OneSignCodec(StubCodec):
         return torch.full((1, points.shape[1]), -3.0)
 
 
-def bare(dtype=torch.float32) -> Hunyuan3DShapeModel:
+def bare(dtype=torch.float32) -> Hunyuan3D21ShapeModel:
     """An adapter with stubbed components: the kernels, without a checkpoint."""
-    model = object.__new__(Hunyuan3DShapeModel)
+    model = object.__new__(Hunyuan3D21ShapeModel)
     model.device = "cpu"
     model.dtype = dtype
     model.checkpoint_prefs = {}
-    model.shape_params = Hunyuan3DShapeParams(**TINY)
+    model.shape_params = Hunyuan3D21ShapeParams(**TINY)
     model.dit = RecordingDiT()
     model.conditioner = StubConditioner()
     model.codec = StubCodec()
@@ -87,9 +87,9 @@ def params(steps=4, num_latents=6, seed=3) -> MeshSamplingParams:
 
 
 def test_the_shared_shape_file_is_the_only_component():
-    assert Hunyuan3DShapeModel.REQUIRED_COMPONENTS == ()
-    assert Hunyuan3DShapeModel.MEDIUM == "mesh"
-    assert Hunyuan3DShapeModel.REF_METHODS == ("vision",)
+    assert Hunyuan3D21ShapeModel.REQUIRED_COMPONENTS == ()
+    assert Hunyuan3D21ShapeModel.MEDIUM == "mesh"
+    assert Hunyuan3D21ShapeModel.REF_METHODS == ("vision",)
 
 
 def test_the_dit_is_asked_at_the_inverted_clock_and_answers_inverted():
@@ -219,9 +219,9 @@ def test_a_shape_that_never_surfaces_blames_the_field_it_saw():
 
 
 def test_the_volume_defaults_are_the_shape_pipelines():
-    assert Hunyuan3DShapeModel.DEFAULT_PREFS["octree_resolution"] == 384
-    assert Hunyuan3DShapeModel.DEFAULT_PREFS["bounds"] == 1.01
-    assert Hunyuan3DShapeModel.DEFAULT_PREFS["mc_level"] == 1 / 512
+    assert Hunyuan3D21ShapeModel.DEFAULT_PREFS["octree_resolution"] == 384
+    assert Hunyuan3D21ShapeModel.DEFAULT_PREFS["bounds"] == 1.01
+    assert Hunyuan3D21ShapeModel.DEFAULT_PREFS["mc_level"] == 1 / 512
 
 
 def test_a_reference_arrives_as_the_square_the_tower_was_trained_on():
@@ -249,12 +249,12 @@ def test_a_small_reference_is_enlarged_to_the_towers_canvas():
 
 
 def test_detection_uses_the_dits_own_fingerprint():
-    assert Hunyuan3DShapeModel.detect(header_of([
+    assert Hunyuan3D21ShapeModel.detect(header_of([
         "model.t_embedder.mlp.2.weight", "model.blocks.0.attn1.k_norm.weight"]))
-    assert not Hunyuan3DShapeModel.detect(header_of([
+    assert not Hunyuan3D21ShapeModel.detect(header_of([
         "model.t_embedder.mlp.0.weight", "model.blocks.0.attn1.k_norm.weight"]))
-    assert Hunyuan3DShapeModel.detect(header_of([
+    assert Hunyuan3D21ShapeModel.detect(header_of([
         "model.diffusion_model.model.t_embedder.mlp.2.weight",
         "model.diffusion_model.model.blocks.0.attn1.k_norm.weight"]))
-    assert not Hunyuan3DShapeModel.detect(header_of([
+    assert not Hunyuan3D21ShapeModel.detect(header_of([
         "model.diffusion_model.txt_in.weight", "model.diffusion_model.img_in.weight"]))

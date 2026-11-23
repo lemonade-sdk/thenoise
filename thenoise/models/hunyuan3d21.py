@@ -6,16 +6,16 @@ from typing import Callable
 
 import torch
 
-from thenoise.dit.hunyuan3d import (
+from thenoise.dit.hunyuan3d21 import (
     SHAPE_SIGNATURE,
-    Hunyuan3DCodecParams,
-    Hunyuan3DConditionerParams,
-    Hunyuan3DShapeParams,
+    Hunyuan3D21CodecParams,
+    Hunyuan3D21ConditionerParams,
+    Hunyuan3D21ShapeParams,
     codec_params,
     conditioner_params,
-    load_hunyuan3d_image_encoder,
-    load_hunyuan3d_shape_codec,
-    load_hunyuan3d_shape_dit,
+    load_hunyuan3d21_image_encoder,
+    load_hunyuan3d21_shape_codec,
+    load_hunyuan3d21_shape_dit,
     shape_params,
 )
 from thenoise.mesh.extract import Mesh, extract_surface
@@ -42,8 +42,8 @@ REFERENCE_SIDE = 518
 NEAR_BAND = 0.95
 
 
-class Hunyuan3DShapeModel(DiffusionModel):
-    name = "hunyuan3d-shape"
+class Hunyuan3D21ShapeModel(DiffusionModel):
+    name = "hunyuan3d-21"
 
     MEDIUM = "mesh"
     REQUIRED_COMPONENTS = ()
@@ -77,20 +77,20 @@ class Hunyuan3DShapeModel(DiffusionModel):
         super().__init__(config=config)
         header = config.header()
         shapes = header.shapes
-        self.shape_params: Hunyuan3DShapeParams = shape_params(shapes)
-        self.conditioner_params: Hunyuan3DConditionerParams = conditioner_params(shapes)
-        self.codec_params: Hunyuan3DCodecParams = codec_params(shapes)
+        self.shape_params: Hunyuan3D21ShapeParams = shape_params(shapes)
+        self.conditioner_params: Hunyuan3D21ConditionerParams = conditioner_params(shapes)
+        self.codec_params: Hunyuan3D21CodecParams = codec_params(shapes)
 
         target = self._load_target(config.dit_path)
         logger.info("Loading Hunyuan3D shape DiT from %s", header.path)
-        self.dit = load_hunyuan3d_shape_dit(header, self.shape_params,
+        self.dit = load_hunyuan3d21_shape_dit(header, self.shape_params,
                                             device=target, dtype=config.dtype)
         logger.info("Loading its DINOv2 conditioner (%d positions)",
                     self.conditioner_params.num_tokens)
-        self.conditioner = load_hunyuan3d_image_encoder(
+        self.conditioner = load_hunyuan3d21_image_encoder(
             header, self.conditioner_params, device=target, dtype=config.dtype)
         logger.info("Loading its shape codec (%d latent layers)", self.codec_params.layers)
-        self.codec = load_hunyuan3d_shape_codec(header, self.codec_params,
+        self.codec = load_hunyuan3d21_shape_codec(header, self.codec_params,
                                                 device=target, dtype=config.dtype)
 
         self.memory.register("dit", self.dit)
@@ -172,4 +172,4 @@ class Hunyuan3DShapeModel(DiffusionModel):
         return mesh
 
 
-__all__ = ["Hunyuan3DShapeModel"]
+__all__ = ["Hunyuan3D21ShapeModel"]

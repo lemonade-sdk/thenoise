@@ -11,7 +11,7 @@ from thenoise.utils.image_tensor import pil_to_pixels
 from thenoise.utils.loader import build_dit
 from thenoise.utils.safetensors import Header
 
-from .keys import CONDITIONER_PREFIX, Hunyuan3DConditionerParams, conditioner_key_map, take_prefix
+from .keys import CONDITIONER_PREFIX, Hunyuan3D21ConditionerParams, conditioner_key_map, take_prefix
 
 #: The views a multi-view request's pictures fill, in the order the view embeddings number them.
 VIEW_SLOTS = ("front", "left", "back", "right")
@@ -31,10 +31,10 @@ def dino_normalize(pixels: torch.Tensor) -> torch.Tensor:
     return ((pixels + 1.0) / 2.0 - mean) / std
 
 
-class Hunyuan3DImageEncoder(Dinov2Model):
+class Hunyuan3D21ImageEncoder(Dinov2Model):
     """DINOv2 over a reference picture, using the ``transformers`` tower so the saved names load verbatim."""
 
-    def __init__(self, params: Hunyuan3DConditionerParams):
+    def __init__(self, params: Hunyuan3D21ConditionerParams):
         super().__init__(Dinov2Config(
             hidden_size=params.hidden_size,
             num_hidden_layers=params.layers,
@@ -83,11 +83,11 @@ class Hunyuan3DImageEncoder(Dinov2Model):
         return torch.zeros_like(like)
 
 
-def load_hunyuan3d_image_encoder(checkpoint: Union[str, Header],
-                                 params: Hunyuan3DConditionerParams,
-                                 device, dtype: torch.dtype) -> Hunyuan3DImageEncoder:
+def load_hunyuan3d21_image_encoder(checkpoint: Union[str, Header],
+                                 params: Hunyuan3D21ConditionerParams,
+                                 device, dtype: torch.dtype) -> Hunyuan3D21ImageEncoder:
     """Build on meta from the header's geometry, then load the conditioner."""
-    model = build_dit(lambda: Hunyuan3DImageEncoder(params), checkpoint, device=device,
+    model = build_dit(lambda: Hunyuan3D21ImageEncoder(params), checkpoint, device=device,
                       dtype=None, state_map=take_prefix(CONDITIONER_PREFIX),
                       key_map=conditioner_key_map)
     model.to(dtype=dtype)
@@ -97,5 +97,5 @@ def load_hunyuan3d_image_encoder(checkpoint: Union[str, Header],
     return model
 
 
-__all__ = ["IMAGENET_MEAN", "IMAGENET_STD", "Hunyuan3DImageEncoder", "VIEW_SLOTS",
-           "dino_normalize", "load_hunyuan3d_image_encoder"]
+__all__ = ["IMAGENET_MEAN", "IMAGENET_STD", "Hunyuan3D21ImageEncoder", "VIEW_SLOTS",
+           "dino_normalize", "load_hunyuan3d21_image_encoder"]

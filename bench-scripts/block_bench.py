@@ -1432,17 +1432,17 @@ H3D_MOE_LAYERS = 6
 H3D_PICTURE = 1370
 
 
-def _hunyuan3d_case(ctx: Ctx, tokens: int, moe: bool, skip: bool) -> Case:
+def _hunyuan3d21_case(ctx: Ctx, tokens: int, moe: bool, skip: bool) -> Case:
     """One shape block over latent tokens, led by the timestep token the model prepends."""
-    from thenoise.dit.hunyuan3d import Hunyuan3DShapeParams
-    from thenoise.dit.hunyuan3d.models import ShapeBlock
+    from thenoise.dit.hunyuan3d21 import Hunyuan3D21ShapeParams
+    from thenoise.dit.hunyuan3d21.models import ShapeBlock
     from thenoise.utils.dynamo import mark_token_axis
 
-    params = Hunyuan3DShapeParams(moe_layers=H3D_MOE_LAYERS if moe else 0, **H3D)
+    params = Hunyuan3D21ShapeParams(moe_layers=H3D_MOE_LAYERS if moe else 0, **H3D)
     role = "block_moe" if moe else ("block_skip" if skip else "block")
-    blk = new_block(ctx, f"hunyuan3d/{role}", ShapeBlock, params, moe=moe, skip=skip)
+    blk = new_block(ctx, f"hunyuan3d21/{role}", ShapeBlock, params, moe=moe, skip=skip)
     seq = tokens + 1
-    seed_inputs(f"hunyuan3d/{role}", "plain", seq)
+    seed_inputs(f"hunyuan3d21/{role}", "plain", seq)
 
     x = randn(ctx, 1, seq, params.hidden_size)
     context = randn(ctx, 1, H3D_PICTURE, params.context_dim)
@@ -1463,22 +1463,22 @@ def _hunyuan3d_case(ctx: Ctx, tokens: int, moe: bool, skip: bool) -> Case:
                        f"pic={H3D_PICTURE}" + " +skip" * skip)
 
 
-@fixture("hunyuan3d", "block")
-def hunyuan3d_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
+@fixture("hunyuan3d21", "block")
+def hunyuan3d21_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     """Blocks 0-10: self-attention, the picture, one FFN."""
-    return _hunyuan3d_case(ctx, tokens, moe=False, skip=False)
+    return _hunyuan3d21_case(ctx, tokens, moe=False, skip=False)
 
 
-@fixture("hunyuan3d", "block_skip")
-def hunyuan3d_block_skip(ctx: Ctx, tokens: int, scenario: str) -> Case:
+@fixture("hunyuan3d21", "block_skip")
+def hunyuan3d21_block_skip(ctx: Ctx, tokens: int, scenario: str) -> Case:
     """Blocks 11-14: the same, with a LIFO skip folded in first at twice the width."""
-    return _hunyuan3d_case(ctx, tokens, moe=False, skip=True)
+    return _hunyuan3d21_case(ctx, tokens, moe=False, skip=True)
 
 
-@fixture("hunyuan3d", "block_moe")
-def hunyuan3d_block_moe(ctx: Ctx, tokens: int, scenario: str) -> Case:
+@fixture("hunyuan3d21", "block_moe")
+def hunyuan3d21_block_moe(ctx: Ctx, tokens: int, scenario: str) -> Case:
     """Blocks 15-20: skip plus the mixture of experts, whose routing stays eager."""
-    return _hunyuan3d_case(ctx, tokens, moe=True, skip=True)
+    return _hunyuan3d21_case(ctx, tokens, moe=True, skip=True)
 
 
 # ------------------------------------------------------------------ measurement

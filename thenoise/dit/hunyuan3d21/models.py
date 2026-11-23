@@ -14,7 +14,7 @@ from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.safetensors import Header
 from thenoise.utils.timestep import timestep_embedding
 
-from .keys import DIT_PREFIX, Hunyuan3DShapeParams, shape_key_map, take_prefix
+from .keys import DIT_PREFIX, Hunyuan3D21ShapeParams, shape_key_map, take_prefix
 
 
 class Attention(nn.Module):
@@ -78,7 +78,7 @@ class MoE(nn.Module):
 class ShapeBlock(nn.Module):
     """Self-attention, cross-attention to the picture, then a feed-forward."""
 
-    def __init__(self, params: Hunyuan3DShapeParams, *, moe: bool, skip: bool):
+    def __init__(self, params: Hunyuan3D21ShapeParams, *, moe: bool, skip: bool):
         super().__init__()
         dim = params.hidden_size
         self.norm1 = nn.LayerNorm(dim, eps=params.norm_eps)
@@ -132,10 +132,10 @@ class FinalLayer(nn.Module):
         return self.linear(self.norm_final(x)[:, 1:])
 
 
-class Hunyuan3DShapeDiT(nn.Module):
+class Hunyuan3D21ShapeDiT(nn.Module):
     """Latent tokens, unpositioned, led by a timestep token; ``t`` is 0 at noise, 1 at clean."""
 
-    def __init__(self, params: Hunyuan3DShapeParams):
+    def __init__(self, params: Hunyuan3D21ShapeParams):
         super().__init__()
         self.params = params
         self.x_embedder = QuantizedLinear(params.in_channels, params.hidden_size)
@@ -161,11 +161,11 @@ class Hunyuan3DShapeDiT(nn.Module):
         return self.final_layer(x)
 
 
-def load_hunyuan3d_shape_dit(checkpoint: Union[str, Header],
-                             params: Hunyuan3DShapeParams,
-                             device, dtype: torch.dtype) -> Hunyuan3DShapeDiT:
+def load_hunyuan3d21_shape_dit(checkpoint: Union[str, Header],
+                             params: Hunyuan3D21ShapeParams,
+                             device, dtype: torch.dtype) -> Hunyuan3D21ShapeDiT:
     """Build on meta from the header's geometry, then load the ``model.`` subtree."""
-    model = build_dit(lambda: Hunyuan3DShapeDiT(params), checkpoint, device=device, dtype=None,
+    model = build_dit(lambda: Hunyuan3D21ShapeDiT(params), checkpoint, device=device, dtype=None,
                       state_map=take_prefix(DIT_PREFIX), key_map=shape_key_map)
     return model.to(dtype=dtype)
 
@@ -173,9 +173,9 @@ def load_hunyuan3d_shape_dit(checkpoint: Union[str, Header],
 __all__ = [
     "Attention",
     "FinalLayer",
-    "Hunyuan3DShapeDiT",
+    "Hunyuan3D21ShapeDiT",
     "MoE",
     "ShapeBlock",
     "TimestepEmbedder",
-    "load_hunyuan3d_shape_dit",
+    "load_hunyuan3d21_shape_dit",
 ]

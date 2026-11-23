@@ -11,7 +11,7 @@ from thenoise.mesh.controller import MeshPipelineController
 from thenoise.mesh.http import install_mesh_routes
 from thenoise.mesh.service import mesh_planner
 
-MODEL = "hunyuan3d-shape"
+MODEL = "hunyuan3d-21"
 
 
 def _b64(color="red") -> str:

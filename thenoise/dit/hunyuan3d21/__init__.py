@@ -1,9 +1,9 @@
-from .codec import Hunyuan3DShapeCodec, load_hunyuan3d_shape_codec
+from .codec import Hunyuan3D21ShapeCodec, load_hunyuan3d21_shape_codec
 from .conditioner import (
     VIEW_SLOTS,
-    Hunyuan3DImageEncoder,
+    Hunyuan3D21ImageEncoder,
     dino_normalize,
-    load_hunyuan3d_image_encoder,
+    load_hunyuan3d21_image_encoder,
 )
 from .keys import (
     CODEC_PREFIX,
@@ -13,9 +13,9 @@ from .keys import (
     MOE_TOP_K,
     SHAPE_SCALE_FACTOR,
     SHAPE_SIGNATURE,
-    Hunyuan3DConditionerParams,
-    Hunyuan3DCodecParams,
-    Hunyuan3DShapeParams,
+    Hunyuan3D21ConditionerParams,
+    Hunyuan3D21CodecParams,
+    Hunyuan3D21ShapeParams,
     conditioner_key_map,
     conditioner_params,
     codec_key_map,
@@ -27,18 +27,18 @@ from .keys import (
     shape_params,
     take_prefix,
 )
-from .models import Hunyuan3DShapeDiT, load_hunyuan3d_shape_dit
+from .models import Hunyuan3D21ShapeDiT, load_hunyuan3d21_shape_dit
 
 __all__ = [
     "CODEC_PREFIX",
     "CONDITIONER_PREFIX",
     "DINO_HEAD_DIM",
     "DIT_PREFIX",
-    "Hunyuan3DCodecParams",
-    "Hunyuan3DConditionerParams",
-    "Hunyuan3DImageEncoder",
-    "Hunyuan3DShapeCodec",
-    "Hunyuan3DShapeDiT",
+    "Hunyuan3D21CodecParams",
+    "Hunyuan3D21ConditionerParams",
+    "Hunyuan3D21ImageEncoder",
+    "Hunyuan3D21ShapeCodec",
+    "Hunyuan3D21ShapeDiT",
     "MOE_TOP_K",
     "SHAPE_SCALE_FACTOR",
     "SHAPE_SIGNATURE",
@@ -51,9 +51,9 @@ __all__ = [
     "detect_conditioner_params",
     "detect_params",
     "dino_normalize",
-    "load_hunyuan3d_image_encoder",
-    "load_hunyuan3d_shape_codec",
-    "load_hunyuan3d_shape_dit",
+    "load_hunyuan3d21_image_encoder",
+    "load_hunyuan3d21_shape_codec",
+    "load_hunyuan3d21_shape_dit",
     "shape_key_map",
     "shape_params",
     "take_prefix",

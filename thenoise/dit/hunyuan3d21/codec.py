@@ -15,7 +15,7 @@ from thenoise.utils.safetensors import Header
 
 from .keys import (
     CODEC_PREFIX,
-    Hunyuan3DCodecParams,
+    Hunyuan3D21CodecParams,
     codec_key_map,
     take_prefix,
 )
@@ -69,7 +69,7 @@ class CodecCrossAttention(nn.Module):
 class SelfBlock(nn.Module):
     """A pre-norm self-attention block over latent tokens."""
 
-    def __init__(self, params: Hunyuan3DCodecParams):
+    def __init__(self, params: Hunyuan3D21CodecParams):
         super().__init__()
         self.ln_1 = nn.LayerNorm(params.width, eps=params.norm_eps)
         self.attn = CodecSelfAttention(params.width, params.num_heads, params.qkv_bias,
@@ -102,7 +102,7 @@ class CrossBlock(nn.Module):
 class GeoDecoder(nn.Module):
     """Queried points -> one SDF logit each, by cross-attending to the latent tokens."""
 
-    def __init__(self, params: Hunyuan3DCodecParams):
+    def __init__(self, params: Hunyuan3D21CodecParams):
         super().__init__()
         self.num_freqs = params.num_freqs
         self.query_proj = QuantizedLinear(fourier_dim(COORDS, params.num_freqs), params.width)
@@ -126,7 +126,7 @@ class GeoDecoder(nn.Module):
 class CodecTransformer(nn.Module):
     """The latent tokens, refined by ``layers`` self-attention blocks."""
 
-    def __init__(self, params: Hunyuan3DCodecParams):
+    def __init__(self, params: Hunyuan3D21CodecParams):
         super().__init__()
         self.resblocks = nn.ModuleList(SelfBlock(params) for _ in range(params.layers))
 
@@ -136,10 +136,10 @@ class CodecTransformer(nn.Module):
         return x
 
 
-class Hunyuan3DShapeCodec(nn.Module):
+class Hunyuan3D21ShapeCodec(nn.Module):
     """Latent tokens to an SDF at any point; nothing in generation encodes, so there is no encode half."""
 
-    def __init__(self, params: Hunyuan3DCodecParams):
+    def __init__(self, params: Hunyuan3D21CodecParams):
         super().__init__()
         self.params = params
         self.scale_factor = params.scale_factor
@@ -160,11 +160,11 @@ class Hunyuan3DShapeCodec(nn.Module):
         return self.sdf(self.tokens(latents), points)
 
 
-def load_hunyuan3d_shape_codec(checkpoint: Union[str, Header],
-                               params: Hunyuan3DCodecParams,
-                               device, dtype: torch.dtype) -> Hunyuan3DShapeCodec:
+def load_hunyuan3d21_shape_codec(checkpoint: Union[str, Header],
+                               params: Hunyuan3D21CodecParams,
+                               device, dtype: torch.dtype) -> Hunyuan3D21ShapeCodec:
     """Build on meta from the header's geometry, then load the codec's decode half."""
-    model = build_dit(lambda: Hunyuan3DShapeCodec(params), checkpoint, device=device,
+    model = build_dit(lambda: Hunyuan3D21ShapeCodec(params), checkpoint, device=device,
                       dtype=None, drop_keys=(CODEC_PREFIX + "encoder.", CODEC_PREFIX + "pre_kl."),
                       state_map=take_prefix(CODEC_PREFIX), key_map=codec_key_map)
     return model.to(dtype=dtype)
@@ -176,7 +176,7 @@ __all__ = [
     "CodecTransformer",
     "CrossBlock",
     "GeoDecoder",
-    "Hunyuan3DShapeCodec",
+    "Hunyuan3D21ShapeCodec",
     "SelfBlock",
-    "load_hunyuan3d_shape_codec",
+    "load_hunyuan3d21_shape_codec",
 ]

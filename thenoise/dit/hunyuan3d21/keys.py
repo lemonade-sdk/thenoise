@@ -23,7 +23,7 @@ SHAPE_SIGNATURE = Signature(
 
 
 @dataclass(frozen=True)
-class Hunyuan3DShapeParams:
+class Hunyuan3D21ShapeParams:
     """The DiT's geometry, as read out of the checkpoint header."""
 
     hidden_size: int
@@ -58,7 +58,7 @@ SHAPE_SCALE_FACTOR = 1.0039506158752403
 
 
 @dataclass(frozen=True)
-class Hunyuan3DCodecParams:
+class Hunyuan3D21CodecParams:
     """The shape codec's decode half, as read out of the checkpoint header."""
 
     width: int
@@ -76,7 +76,7 @@ class Hunyuan3DCodecParams:
     scale_factor: float = SHAPE_SCALE_FACTOR
 
 
-def shape_params(shapes: Mapping[str, Tuple[int, ...]]) -> Hunyuan3DShapeParams:
+def shape_params(shapes: Mapping[str, Tuple[int, ...]]) -> Hunyuan3D21ShapeParams:
     """The DiT geometry out of a name -> shape mapping (wrapper prefixes already off)."""
     p = DIT_PREFIX
     hidden = shapes[p + "x_embedder.weight"][0]
@@ -88,7 +88,7 @@ def shape_params(shapes: Mapping[str, Tuple[int, ...]]) -> Hunyuan3DShapeParams:
     moe_layers = sum(1 for i in range(depth) if p + f"blocks.{i}.moe.gate.weight" in shapes)
     if moe_layers and not experts:
         raise ValueError("MoE blocks without a gate wide enough to count their experts")
-    return Hunyuan3DShapeParams(
+    return Hunyuan3D21ShapeParams(
         hidden_size=hidden,
         depth=depth,
         num_heads=hidden // head_dim,
@@ -103,12 +103,12 @@ def shape_params(shapes: Mapping[str, Tuple[int, ...]]) -> Hunyuan3DShapeParams:
     )
 
 
-def detect_params(checkpoint: Union[str, Header]) -> Hunyuan3DShapeParams:
+def detect_params(checkpoint: Union[str, Header]) -> Hunyuan3D21ShapeParams:
     """Read the DiT geometry from a checkpoint's header, without loading tensors."""
     return shape_params(as_header(checkpoint).shapes)
 
 
-def codec_params(shapes: Mapping[str, Tuple[int, ...]]) -> Hunyuan3DCodecParams:
+def codec_params(shapes: Mapping[str, Tuple[int, ...]]) -> Hunyuan3D21CodecParams:
     """The decode-half geometry out of a name -> shape mapping."""
     p = CODEC_PREFIX
     width = shapes[p + "post_kl.weight"][0]
@@ -119,7 +119,7 @@ def codec_params(shapes: Mapping[str, Tuple[int, ...]]) -> Hunyuan3DCodecParams:
     query_in = shapes[p + "geo_decoder.query_proj.weight"][1]
     if (query_in - 3) % 6:
         raise ValueError(f"{query_in} query features are not xyz at any frequency count")
-    return Hunyuan3DCodecParams(
+    return Hunyuan3D21CodecParams(
         width=width,
         embed_dim=shapes[p + "post_kl.weight"][1],
         num_heads=width // head_dim,
@@ -134,7 +134,7 @@ def codec_params(shapes: Mapping[str, Tuple[int, ...]]) -> Hunyuan3DCodecParams:
     )
 
 
-def detect_codec_params(checkpoint: Union[str, Header]) -> Hunyuan3DCodecParams:
+def detect_codec_params(checkpoint: Union[str, Header]) -> Hunyuan3D21CodecParams:
     """Read the codec geometry from a checkpoint's header, without loading tensors."""
     return codec_params(as_header(checkpoint).shapes)
 
@@ -193,7 +193,7 @@ DINO_HEAD_DIM = 64
 
 
 @dataclass(frozen=True)
-class Hunyuan3DConditionerParams:
+class Hunyuan3D21ConditionerParams:
     """The DINOv2 tower, as read out of the checkpoint header."""
 
     hidden_size: int
@@ -213,7 +213,7 @@ class Hunyuan3DConditionerParams:
         return side * side + (1 if self.use_cls_token else 0)
 
 
-def conditioner_params(shapes: Mapping[str, Tuple[int, ...]]) -> Hunyuan3DConditionerParams:
+def conditioner_params(shapes: Mapping[str, Tuple[int, ...]]) -> Hunyuan3D21ConditionerParams:
     """The tower's geometry out of a name -> shape mapping."""
     p = CONDITIONER_PREFIX
     _, _, patch_size, _ = shapes[p + "embeddings.patch_embeddings.projection.weight"]
@@ -222,7 +222,7 @@ def conditioner_params(shapes: Mapping[str, Tuple[int, ...]]) -> Hunyuan3DCondit
     side = math.isqrt(positions - 1)
     if side * side + 1 != positions:
         raise ValueError(f"{positions} positions are not a square grid plus one")
-    return Hunyuan3DConditionerParams(
+    return Hunyuan3D21ConditionerParams(
         hidden_size=hidden,
         layers=_layer_count(shapes, p + "encoder.layer."),
         num_heads=hidden // DINO_HEAD_DIM,
@@ -233,7 +233,7 @@ def conditioner_params(shapes: Mapping[str, Tuple[int, ...]]) -> Hunyuan3DCondit
     )
 
 
-def detect_conditioner_params(checkpoint: Union[str, Header]) -> Hunyuan3DConditionerParams:
+def detect_conditioner_params(checkpoint: Union[str, Header]) -> Hunyuan3D21ConditionerParams:
     """Read the tower geometry from a checkpoint's header, without loading tensors."""
     return conditioner_params(as_header(checkpoint).shapes)
 
@@ -293,9 +293,9 @@ __all__ = [
     "DIT_PREFIX",
     "SHAPE_SCALE_FACTOR",
     "DINO_HEAD_DIM",
-    "Hunyuan3DConditionerParams",
-    "Hunyuan3DCodecParams",
-    "Hunyuan3DShapeParams",
+    "Hunyuan3D21ConditionerParams",
+    "Hunyuan3D21CodecParams",
+    "Hunyuan3D21ShapeParams",
     "conditioner_key_map",
     "conditioner_params",
     "codec_key_map",

@@ -3,25 +3,25 @@ import torch
 from PIL import Image
 from conftest import header_of, write_safetensors
 
-from thenoise.dit.hunyuan3d import (
+from thenoise.dit.hunyuan3d21 import (
     CODEC_PREFIX,
     DIT_PREFIX,
     SHAPE_SIGNATURE,
-    Hunyuan3DCodecParams,
-    Hunyuan3DShapeCodec,
-    Hunyuan3DShapeDiT,
-    Hunyuan3DShapeParams,
+    Hunyuan3D21CodecParams,
+    Hunyuan3D21ShapeCodec,
+    Hunyuan3D21ShapeDiT,
+    Hunyuan3D21ShapeParams,
     codec_key_map,
     codec_params,
     detect_codec_params,
     detect_params,
-    load_hunyuan3d_shape_codec,
-    load_hunyuan3d_shape_dit,
+    load_hunyuan3d21_shape_codec,
+    load_hunyuan3d21_shape_dit,
     shape_key_map,
     shape_params,
     take_prefix,
 )
-from thenoise.dit.hunyuan3d.models import Attention, MoE
+from thenoise.dit.hunyuan3d21.models import Attention, MoE
 from thenoise.utils.attention import interleaved_heads
 from thenoise.utils.fourier import (fourier_dim, fourier_features, fourier_frequencies,
                                     sinusoidal_positions)
@@ -41,12 +41,12 @@ TINY = dict(
 )
 
 
-def tiny_params(**overrides) -> Hunyuan3DShapeParams:
-    return Hunyuan3DShapeParams(**{**TINY, **overrides})
+def tiny_params(**overrides) -> Hunyuan3D21ShapeParams:
+    return Hunyuan3D21ShapeParams(**{**TINY, **overrides})
 
 
-def tiny_dit(**overrides) -> Hunyuan3DShapeDiT:
-    model = Hunyuan3DShapeDiT(tiny_params(**overrides))
+def tiny_dit(**overrides) -> Hunyuan3D21ShapeDiT:
+    model = Hunyuan3D21ShapeDiT(tiny_params(**overrides))
     with torch.no_grad():
         for parameter in model.parameters():
             torch.nn.init.normal_(parameter, std=0.02)
@@ -169,9 +169,9 @@ def test_a_shared_file_loads_its_dit_and_nothing_else(tmp_path):
         tensors[DIT_PREFIX + key] = value
     tensors["vae.post_kl.weight"] = torch.ones(4, 4)
     tensors["conditioner.main_image_encoder.model.layernorm.weight"] = torch.ones(32)
-    path = write_safetensors(tmp_path / "hunyuan3d.safetensors", tensors)
+    path = write_safetensors(tmp_path / "hunyuan3d21.safetensors", tensors)
 
-    loaded = load_hunyuan3d_shape_dit(path, detect_params(path), device="cpu",
+    loaded = load_hunyuan3d21_shape_dit(path, detect_params(path), device="cpu",
                                       dtype=torch.float32)
 
     assert torch.equal(loaded.x_embedder.weight, dit.x_embedder.weight)
@@ -198,9 +198,9 @@ TINY_CODEC = dict(
 )
 
 
-def tiny_codec(**overrides) -> Hunyuan3DShapeCodec:
-    params = Hunyuan3DCodecParams(**{**TINY_CODEC, **overrides})
-    model = Hunyuan3DShapeCodec(params)
+def tiny_codec(**overrides) -> Hunyuan3D21ShapeCodec:
+    params = Hunyuan3D21CodecParams(**{**TINY_CODEC, **overrides})
+    model = Hunyuan3D21ShapeCodec(params)
     with torch.no_grad():
         for parameter in model.parameters():
             torch.nn.init.normal_(parameter, std=0.02)
@@ -377,7 +377,7 @@ def test_the_encode_half_is_left_where_it_is(tmp_path):
     tensors["model.x_embedder.weight"] = torch.ones(4, 4)
     path = write_safetensors(tmp_path / "codec.safetensors", tensors)
 
-    loaded = load_hunyuan3d_shape_codec(path, detect_codec_params(path),
+    loaded = load_hunyuan3d21_shape_codec(path, detect_codec_params(path),
                                         device="cpu", dtype=torch.float32)
 
     assert torch.equal(loaded.post_kl.weight, codec.post_kl.weight)
@@ -388,24 +388,24 @@ def test_the_encode_half_is_left_where_it_is(tmp_path):
 
 # ---------------------------------------------------------------------- conditioner
 
-from thenoise.dit.hunyuan3d import CONDITIONER_PREFIX, Hunyuan3DConditionerParams
-from thenoise.dit.hunyuan3d import (conditioner_key_map, conditioner_params,
+from thenoise.dit.hunyuan3d21 import CONDITIONER_PREFIX, Hunyuan3D21ConditionerParams
+from thenoise.dit.hunyuan3d21 import (conditioner_key_map, conditioner_params,
                                     detect_conditioner_params)
-from thenoise.dit.hunyuan3d.conditioner import (
+from thenoise.dit.hunyuan3d21.conditioner import (
     IMAGENET_MEAN,
     IMAGENET_STD,
-    Hunyuan3DImageEncoder,
+    Hunyuan3D21ImageEncoder,
     dino_normalize,
-    load_hunyuan3d_image_encoder,
+    load_hunyuan3d21_image_encoder,
 )
 
 TINY_DINO = dict(hidden_size=64, layers=2, num_heads=1, mlp_dim=128, patch_size=14,
                  image_size=56)
 
 
-def tiny_dino(**overrides) -> Hunyuan3DImageEncoder:
-    params = Hunyuan3DConditionerParams(**{**TINY_DINO, **overrides})
-    model = Hunyuan3DImageEncoder(params)
+def tiny_dino(**overrides) -> Hunyuan3D21ImageEncoder:
+    params = Hunyuan3D21ConditionerParams(**{**TINY_DINO, **overrides})
+    model = Hunyuan3D21ImageEncoder(params)
     with torch.no_grad():
         for parameter in model.parameters():
             torch.nn.init.normal_(parameter, std=0.02)
@@ -537,7 +537,7 @@ def test_the_conditioner_loads_under_its_own_prefix(tmp_path):
     tensors["model.x_embedder.weight"] = torch.ones(4, 4)
     path = write_safetensors(tmp_path / "cond.safetensors", tensors)
 
-    loaded = load_hunyuan3d_image_encoder(path, detect_conditioner_params(path),
+    loaded = load_hunyuan3d21_image_encoder(path, detect_conditioner_params(path),
                                           device="cpu", dtype=torch.float32)
 
     assert torch.equal(loaded.embeddings.cls_token, encoder.embeddings.cls_token)

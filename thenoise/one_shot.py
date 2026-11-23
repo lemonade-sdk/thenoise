@@ -63,7 +63,7 @@ def render_one(spec, args, *, medium: str, command: str, noun: str,
     out = named_output(args.out, resolved.output_format, noun, command)
     logger.info("%s %s: %s", runtime.model_name, resolved.mode, summary(resolved))
 
-   runtime.run(lambda controller: controller.render(resolved, Uncancellable(), idle, out))
+    runtime.run(lambda controller: controller.render(resolved, Uncancellable(), idle, out))
     logger.info("saved %s", out)
 
 

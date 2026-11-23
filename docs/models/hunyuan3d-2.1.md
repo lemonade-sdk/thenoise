@@ -39,22 +39,22 @@ a reference photo and writes it as `.glb`, `.obj` or `.stl`. A picture is the wh
 ## Download
 
 ```bash
-# Comfy-Org's single-file repackage, into ./models/hunyuan3d/
-.venv/bin/python scripts/download.py --model hunyuan3d
+# Comfy-Org's single-file repackage, into ./models/hunyuan3d-2.1/
+.venv/bin/python scripts/download.py --model hunyuan3d21
 ```
 
 ## Usage
 
 ```bash
 ./thenoise.sh mesh \
-  --dit ./models/hunyuan3d/hunyuan_3d_v2.1.safetensors \
+  --dit ./models/hunyuan3d-2.1/hunyuan_3d_v2.1.safetensors \
   --image chair.png --out chair.glb
 ```
 
 Serve over HTTP with the web UI (open <http://localhost:8000/>):
 
 ```bash
-./thenoise.sh serve --dit ./models/hunyuan3d/hunyuan_3d_v2.1.safetensors
+./thenoise.sh serve --dit ./models/hunyuan3d-2.1/hunyuan_3d_v2.1.safetensors
 ```
 
 In the web UI a shape is the Generate tab: a dropzone for the picture, the density and

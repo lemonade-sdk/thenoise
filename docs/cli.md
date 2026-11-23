@@ -169,13 +169,13 @@ Waiting for a clip is the difference from the job API: queue the same render wit
 ## Generate a single shape
 
 Reconstructs the surface in one picture and writes it to `--out` as `.glb`, `.obj` or
-`.stl`. Needs a mesh model — [hunyuan3d](models/hunyuan3d.md) is the one supported today
+`.stl`. Needs a mesh model — [hunyuan3d-2.1](models/hunyuan3d-2.1.md) is the one supported today
 — whose transformer, conditioner and codec live in one file, so `--dit` is the only path
 flag.
 
 ```bash
 ./thenoise.sh mesh \
-  --dit ./models/hunyuan3d/hunyuan_3d_v2.1.safetensors \
+  --dit ./models/hunyuan3d-2.1/hunyuan_3d_v2.1.safetensors \
   --image ./chair.png --out /tmp/chair.glb
 ```
 

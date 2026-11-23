@@ -37,7 +37,7 @@ from thenoise.models import (  # noqa: E402
     Flux3Model,
     FluxKleinModel,
     H3ImageModel,
-    Hunyuan3DShapeModel,
+    Hunyuan3D21ShapeModel,
     Krea2Model,
     MageFlowModel,
     MingImageModel,
@@ -949,8 +949,8 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
         "model.diffusion_model.audio_patchify_proj.weight",
         "model.diffusion_model.keyframes_abs_pos_embedding",
     ]),
-    "hunyuan3d": (
-        Hunyuan3DShapeModel,
+    "hunyuan3d21": (
+        Hunyuan3D21ShapeModel,
         [
             "model.t_embedder.mlp.2.weight",
             "model.blocks.0.attn1.k_norm.weight",

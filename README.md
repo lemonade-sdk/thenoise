@@ -80,7 +80,7 @@ model repainting the picture it was given. Ask for it with `ref_method: vision`.
 
 | Model | Image-to-shape | Details |
 |---|---|---|
-| **Hunyuan3D 2.1 shape**, transformer, image conditioner and shape codec in one file | ✓ | [hunyuan3d](docs/models/hunyuan3d.md) |
+| **Hunyuan3D 2.1 shape**, transformer, image conditioner and shape codec in one file | ✓ | [hunyuan3d-2.1](docs/models/hunyuan3d-2.1.md) |
 
 
 ## How does it compare to ComfyUI?
