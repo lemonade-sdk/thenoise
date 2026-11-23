@@ -149,13 +149,24 @@ PITCH_PAD_ELEMENTS = 8
 PITCH_PENALTY = torch.version.hip is not None
 
 
+#: Fewer rows than this, and the tile effect the widening cures is not what the GEMM's time
+#: is made of: the same ``[M, 12288] x [12288, 3072]`` problem on gfx1151 gained 1.16x at
+#: M=4096 and lost 0.86x at M=512, and flux2's ``[512, 12288] x [12288, 4096]`` lost too.
+#: The boundary between the two is unmeasured — every block's video or image stream is
+#: thousands of rows and the streams this excludes are its text (512) and audio (126) ones —
+#: so this sits an order below the smallest win rather than at a number that would pretend
+#: to be a measurement.
+PITCH_MIN_ROWS = 2048
+
+
 def pitch_too_wide(x: torch.Tensor) -> bool:
-    """Whether ``x``'s rows are long enough, and laid out squarely enough, to want widening.
+    """Whether ``x`` has enough rows, long enough and squarely enough laid out, to want it.
 
     Contiguity is part of the test: a row already widened by an earlier projection has a
-    stride that says so, and copying behind someone else's copy earns nothing.
+    stride that says so, and copying behind someone else's copy earns nothing. The row count
+    is the GEMM's own — rows a leading batch dimension hides are still rows.
     """
-    if x.dim() < 2:
+    if x.dim() < 2 or x.numel() // x.shape[-1] < PITCH_MIN_ROWS:
         return False
     pitch = x.stride(-2) * x.element_size()
     return pitch >= PITCH_MIN_BYTES and pitch == x.shape[-1] * x.element_size()
