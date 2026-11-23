@@ -1,5 +1,5 @@
-"""CLI subcommands: serve, generate, edit, video, upscale, controlmap — the first four
-take model paths, the last two are model-free. No config file: everything is a flag.
+"""CLI subcommands: serve, generate, edit, video, mesh, upscale, controlmap — all but the
+last two take model paths. No config file: everything is a flag.
 """
 from __future__ import annotations
 
@@ -17,6 +17,15 @@ def _add_model_paths(p: argparse.ArgumentParser, required: bool = True) -> None:
                    help="VAE checkpoint (.safetensors)")
     p.add_argument("--text-encoder", required=required, default="", metavar="PATH",
                    help="text encoder checkpoint (.safetensors)")
+    p.add_argument("--lora-dir", default="", metavar="PATH",
+                   help="directory containing LoRA .safetensors files "
+                        "(subdirectories allowed)")
+
+
+def _add_mesh_paths(p: argparse.ArgumentParser) -> None:
+    """A shape release ships transformer, picture encoder and codec in one file."""
+    p.add_argument("--dit", required=True, default="", metavar="PATH",
+                   help="shape model checkpoint (.safetensors)")
     p.add_argument("--lora-dir", default="", metavar="PATH",
                    help="directory containing LoRA .safetensors files "
                         "(subdirectories allowed)")
@@ -80,6 +89,20 @@ def _add_postprocess_args(p: argparse.ArgumentParser) -> None:
     add_flags(p, PostprocessOptions, bounds=True)
 
 
+def _add_solver_args(p: argparse.ArgumentParser) -> None:
+    """What every diffused medium is asked for in the same words, all of them optional."""
+    p.add_argument("--steps", type=int)
+    p.add_argument("--guidance-scale", type=float)
+    p.add_argument("--sampler", metavar="NAME",
+                   help="denoising solver (default: the model's)")
+    p.add_argument("--seed", type=int)
+
+
+def _add_device_arg(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--device", default="cuda",
+                   help="inference device; ROCm aliases cuda -> hip (default: cuda)")
+
+
 def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png") -> None:
     """Add the generation options shared by ``generate`` and ``edit``."""
     p.add_argument("--pixel-upscaler", default="", metavar="PATH",
@@ -90,9 +113,7 @@ def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png
     p.add_argument("--negative-prompt", default="")
     p.add_argument("--width", type=int)
     p.add_argument("--height", type=int)
-    p.add_argument("--steps", type=int)
-    p.add_argument("--guidance-scale", type=float)
-    p.add_argument("--seed", type=int)
+    _add_solver_args(p)
     p.add_argument("--out", default=out_default)
     p.add_argument("--lora", action="append", default=[],
                    metavar="FILE[:WEIGHT]",
@@ -112,8 +133,6 @@ def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png
                    help="'refined' (default): latent 2x + refiner, plus pixel "
                         "upscaler above factor 2; 'no-refiner': pixel upscaler "
                         "only (no latent 2x)")
-    p.add_argument("--sampler", metavar="NAME",
-                   help="denoising solver (default: auto)")
     p.add_argument("--kv-cache", dest="kv_cache", action="store_true",
                    help="reuse step-invariant K/V during denoising (T2I opt-in; "
                         "automatic for compatible edits)")
@@ -130,8 +149,7 @@ def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png
                         "'vision' has the text encoder read the picture rather than "
                         "the VAE. Which of them a model takes is the model's own")
     _add_postprocess_args(p)
-    p.add_argument("--device", default="cuda",
-                   help="inference device; ROCm aliases cuda -> hip (default: cuda)")
+    _add_device_arg(p)
 
 
 def _add_video_args(p: argparse.ArgumentParser) -> None:
@@ -146,13 +164,9 @@ def _add_video_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--duration", type=float, metavar="SECONDS",
                    help="clip length, an alternative to --frames")
     p.add_argument("--fps", type=int)
-    p.add_argument("--steps", type=int)
-    p.add_argument("--guidance-scale", type=float)
+    _add_solver_args(p)
     p.add_argument("--flow-shift", type=float,
                    help="schedule shift; a distilled LoRA wants the one it ships with")
-    p.add_argument("--sampler", metavar="NAME",
-                   help="denoising solver (default: the model's)")
-    p.add_argument("--seed", type=int)
     p.add_argument("--output-format", choices=["mp4", "webm"],
                    help="container; --out's extension is taken when this is left out")
     p.add_argument("--image", metavar="PATH",
@@ -168,8 +182,38 @@ def _add_video_args(p: argparse.ArgumentParser) -> None:
                         "for the whole clip goes to both")
     p.add_argument("--out", default="out.mp4",
                    help="output clip path (default: out.mp4)")
-    p.add_argument("--device", default="cuda",
-                   help="inference device; ROCm aliases cuda -> hip (default: cuda)")
+    _add_device_arg(p)
+
+
+def _add_mesh_args(p: argparse.ArgumentParser) -> None:
+    """The shape knobs: tokens and the volume its surface is cut from. Nothing defaults
+    but the output path and the device: what a release ships is the model's to answer
+    for."""
+    p.add_argument("--image", required=True, action="append", metavar="PATH",
+                   help="the picture whose shape to reconstruct; repeat once per view of "
+                        "one object, in front, left, back, right order (the only "
+                        "conditioning this medium reads)")
+    p.add_argument("--latents", type=int,
+                   help="latent tokens to denoise (default: the model's)")
+    _add_solver_args(p)
+    p.add_argument("--octree-resolution", type=int, metavar="N",
+                   help="finest voxel grid the surface is cut from (default: the model's)")
+    p.add_argument("--bounds", type=float, metavar="R",
+                   help="half-width of the volume sampled, in latent units")
+    p.add_argument("--mc-level", dest="mc_level", type=float, metavar="LEVEL",
+                   help="the field value the surface is cut at "
+                        "(default: 1/512, the reference pipeline's own cut)")
+    p.add_argument("--scale", type=float,
+                   help="multiply the written coordinates; a container such as stl "
+                        "carries no unit, so a print sizes itself here "
+                        "(default: 1.0, the sampled volume itself)")
+    p.add_argument("--output-format", choices=["glb", "obj", "stl"],
+                   help="container; --out's extension is taken when this is left out")
+    p.add_argument("--lora", action="append", default=[], metavar="FILE[:WEIGHT]",
+                   help="LoRA for the shape transformer (repeatable)")
+    p.add_argument("--out", default="out.glb",
+                   help="output mesh path (default: out.glb)")
+    _add_device_arg(p)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -191,8 +235,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="bind host (default: 127.0.0.1)")
     serve.add_argument("--port", type=int, default=8000,
                        help="bind port (default: 8000)")
-    serve.add_argument("--device", default="cuda",
-                       help="inference device; ROCm aliases cuda -> hip (default: cuda)")
+    _add_device_arg(serve)
     serve.add_argument(
         "--offload-device", default="cpu",
         help="device for idle weights (default: %(default)s; pass the compute device to"
@@ -219,6 +262,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_av_components(video)
     _add_video_args(video)
 
+    # mesh
+    mesh = sub.add_parser("mesh", help="run one shape generation and save a mesh")
+    _add_mesh_paths(mesh)
+    _add_mesh_args(mesh)
+
     # upscale
     up = sub.add_parser("upscale", help="pixel-upscale an image (no model needed)")
     up.add_argument("--pixel-upscaler", required=True, metavar="PATH",
@@ -231,8 +279,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "scale); must be in [1, the model's detected scale]")
     up.add_argument("--out", default="out_upscaled.png",
                     help="output image path (default: out_upscaled.png)")
-    up.add_argument("--device", default="cuda",
-                    help="inference device; ROCm aliases cuda -> hip (default: cuda)")
+    _add_device_arg(up)
 
     # controlmap: extract a control map; needs no diffusion model either
     pre = sub.add_parser("controlmap",
@@ -253,7 +300,6 @@ def build_parser() -> argparse.ArgumentParser:
                      help="output image path; the map is the size of the input, and "
                           "extra --type values add a _<type> suffix "
                           "(default: out_control.png)")
-    pre.add_argument("--device", default="cuda",
-                     help="inference device; ROCm aliases cuda -> hip (default: cuda)")
+    _add_device_arg(pre)
 
     return parser

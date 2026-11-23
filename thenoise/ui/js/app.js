@@ -155,7 +155,7 @@ updateUpscaleMax('edit_');
 /* ---------- Generate is the medium this server renders ---------- */
 // The checkpoint loaded at startup decides it; the other medium's routes are never installed.
 // Upscale and Control Maps need no model, so whoever is on one when /health answers stays.
-const MODEL_VIEWS = ['generate', 'video', 'edit'];
+const MODEL_VIEWS = ['generate', 'video', 'mesh', 'edit'];
 
 let mediumView = 'generate';   // what the loaded model serves
 let shownView = 'generate';
@@ -176,7 +176,7 @@ document.querySelectorAll('.tab[data-tab]').forEach(t =>
 // Solver names are /health's to give, so a menu here holds no list of its own.
 function fillSamplers(names) {
   if (!names || !names.length) return; // unreachable server: only `auto` is offered
-  for (const id of ['sampler', 'edit_sampler', 'video_sampler']) {
+  for (const id of ['sampler', 'edit_sampler', 'video_sampler', 'mesh_sampler']) {
     const sel = $(id);
     const keep = sel.value;
     fillSelect(sel, ['', ...names], name => name || 'auto');
@@ -205,6 +205,7 @@ async function applyModelState() {
   const capable = (name) => models === null || !!caps[name];
   // Nested under the medium's name, and null on a model of the other one.
   const video = caps.video || null;
+  const mesh = caps.mesh || null;
   // One bit now: a model either takes a reference or does not. How it uses one
   // (``caps.ref_methods``) is a request field, not something the tabs split on.
   const takesImage = models === null || !!caps.image?.i2i;
@@ -213,10 +214,10 @@ async function applyModelState() {
   // they would read as black (or as the panel colour) rather than as transparency.
   document.body.classList.toggle('rgba_out', rgba);
 
-  mediumView = hasModel && video ? 'video' : 'generate';
+  mediumView = hasModel ? (video ? 'video' : mesh ? 'mesh' : 'generate') : 'generate';
   if (MODEL_VIEWS.includes(shownView)) showView(mediumView);
   // A video server installs no edit routes at all, so the tab would only open a refusal.
-  $('edit_tab').classList.toggle('hidden', mediumView === 'video');
+  $('edit_tab').classList.toggle('hidden', mediumView !== 'generate');
 
   $('no_model').classList.toggle('hidden', !noModel);
   $('edit_no_model').classList.toggle('hidden', !noModel);
@@ -238,10 +239,11 @@ async function applyModelState() {
   method.disabled = methods.length < 2;
   method.title = method.disabled
     ? 'the loaded model has only one way with a reference' : '';
-  // The I2V initial frame exists only when the loaded variant can condition on one.
   $('video_i2v_field').classList.toggle('hidden', !video?.i2v);
-  // A last frame needs a reference that carries a mask to name it with.
   $('video_flf2v_field').classList.toggle('hidden', !video?.flf2v);
+  const views = (mesh && mesh.mv2d) || 1;
+  $('mesh_file').multiple = views > 1;
+  $('mesh_views_hint').classList.toggle('hidden', views < 2);
   fillSamplers(samplers);
 }
 applyModelState();

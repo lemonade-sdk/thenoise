@@ -26,6 +26,12 @@ def _video_controller(model, pixel_upscalers):
     return VideoPipelineController(model)
 
 
+def _mesh_controller(model, pixel_upscalers):
+    from .mesh.controller import MeshPipelineController
+
+    return MeshPipelineController(model)
+
+
 def _image_routes(app, jobs, runtime):
     from .api import install_image_job_routes
 
@@ -39,10 +45,18 @@ def _video_routes(app, jobs, runtime):
     install_video_routes(app, jobs, video_planner(runtime), runtime.model_name)
 
 
+def _mesh_routes(app, jobs, runtime):
+    from .mesh.http import install_mesh_routes
+    from .mesh.service import mesh_planner
+
+    install_mesh_routes(app, jobs, mesh_planner(runtime), runtime.model_name)
+
+
 #: Imports are inside the factories, so an image model never imports ``thenoise.video``.
 MEDIUMS: dict[str, Medium] = {
     "image": Medium(controller=_image_controller, routes=_image_routes),
     "video": Medium(controller=_video_controller, routes=_video_routes),
+    "mesh": Medium(controller=_mesh_controller, routes=_mesh_routes),
 }
 
 #: What an unloaded runtime answers as, so the queue refuses a submit, not the router.

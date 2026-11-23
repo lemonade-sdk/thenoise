@@ -244,7 +244,8 @@ def test_ui_scripts_only_look_up_ids_the_page_has():
     assert checked > 50, f"barely any lookup checked ({checked}): the patterns drifted"
 
 
-@pytest.mark.parametrize("menu", ["sampler", "edit_sampler", "video_sampler"])
+@pytest.mark.parametrize("menu", ["sampler", "edit_sampler", "video_sampler",
+                                  "mesh_sampler"])
 def test_ui_asks_the_server_which_samplers_exist(menu):
     """A sampler menu holds no solver name of its own beyond `auto`: the list is the
     server's to hand out.
@@ -253,6 +254,45 @@ def test_ui_asks_the_server_which_samplers_exist(menu):
         block = re.search(rf'<select id="{menu}">(.*?)</select>', f.read(), re.S)[1]
     assert block.count("<option") == 1, block
     assert '<option value="">auto</option>' in block
+
+
+def test_ui_offers_every_container_the_mesh_writer_has():
+    """The shape pane's Output menu is the writer's own list, not a copy of it."""
+    from thenoise.mesh.spec import OUTPUT_FORMATS
+
+    with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
+        block = re.search(r'<select id="mesh_output_format">(.*?)</select>', f.read(), re.S)[1]
+    offered = [m.group(1) for m in re.finditer(r'<option value="([^"]*)"', block)]
+    assert offered == ["", *OUTPUT_FORMATS], block
+
+
+def test_ui_offers_the_density_presets_the_spec_keeps():
+    """The pane's density menu is ``DENSITY_PRESETS``, values and all."""
+    from thenoise.mesh.spec import DENSITY_PRESETS
+
+    with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
+        block = re.search(r'<select id="mesh_octree_resolution">(.*?)</select>',
+                          f.read(), re.S)[1]
+    offered = [one.group(1) for one in re.finditer(r'<option value="([^"]*)"', block)]
+    assert offered == ["", *[str(one) for one in DENSITY_PRESETS]], block
+
+
+def test_ui_keeps_the_shape_tuning_behind_one_disclosure():
+    """The release's own configuration is folded away rather than removed."""
+    tuning = {"mesh_latents", "mesh_steps", "mesh_guidance_scale", "mesh_sampler",
+              "mesh_bounds", "mesh_mc_level"}
+    shown = {"mesh_octree_resolution", "mesh_seed", "mesh_output_format",
+             "mesh_lora_specs", "mesh_file"}
+
+    with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
+        page = f.read()
+    mesh = page[page.index('id="view-mesh"'):page.index("/view-mesh")]
+    group = re.search(r"<details[^>]*thenoise-mesh-tuning-open[^>]*>(.*?)</details>",
+                      mesh, re.S)
+    assert group, "the shape pane has no tuning disclosure"
+    inside = set(re.findall(r'id="(mesh_[a-z_]+)"', group[1]))
+    assert inside == tuning, inside
+    assert shown <= set(re.findall(r'id="(mesh_[a-z_]+)"', mesh)) - inside
 
 
 def test_ui_every_named_view_exists():

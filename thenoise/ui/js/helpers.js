@@ -456,6 +456,8 @@ const FIELD_LABELS = {
   sampler: 'Sampler', lora_specs: 'LoRA',
   mode: 'Mode', frame_count: 'Frames', fps: 'FPS', duration: 'Duration',
   flow_shift: 'Flow shift', output_format: 'Output',
+  latents: 'Tokens', octree_resolution: 'Density', bounds: 'Bounds',
+  mc_level: 'Cut level', scale: 'Scale',
 };
 
 function addRow(grid, label, value, cls) {

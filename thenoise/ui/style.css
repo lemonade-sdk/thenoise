@@ -20,6 +20,7 @@
   --backdrop-bg: rgba(11, 14, 20, .6);
   --spinner-track: rgba(255, 255, 255, .15);
   --checker-bg: #0f131b;
+  --viewer-bg: #090c12;
   --modal-shadow: 0 16px 48px rgba(0, 0, 0, .5);
   --lora-shadow: 0 6px 24px rgba(0, 0, 0, .45);
 }
@@ -47,6 +48,7 @@ body.light {
   --backdrop-bg: rgba(60, 70, 90, .45);
   --spinner-track: rgba(0, 0, 0, .14);
   --checker-bg: #ffffff;
+  --viewer-bg: #dfe4ec;
   --modal-shadow: 0 16px 48px rgba(0, 0, 0, .18);
   --lora-shadow: 0 6px 24px rgba(0, 0, 0, .12);
 }
@@ -611,8 +613,57 @@ body.rgba_out .stage img {
   line-height: 1.6;
 }
 
+.stage .stage-file {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: .5rem;
+  text-align: center;
+}
+
+.stage .stage-file .stage-file-name {
+  font-family: monospace;
+  color: var(--text);
+}
+
+.stage .stage-file .stage-file-note {
+  color: var(--dim);
+  font-size: .85rem;
+}
+
 .stage .placeholder .kbd {
   color: var(--dim);
+}
+
+/* ---------- shape viewer ---------- */
+.stage .stage-mesh {
+  flex: 1;
+  min-height: 0;
+  align-self: stretch;
+}
+
+.mesh-view {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border-radius: 8px;
+  background: var(--viewer-bg);
+  cursor: grab;
+  touch-action: none;
+}
+
+.mesh-view:active {
+  cursor: grabbing;
+}
+
+.mesh-view:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.stage .actions .ctrl[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 /* ---------- stage action buttons (download / info) ---------- */
