@@ -8,6 +8,7 @@ import torch.nn as nn
 from thenoise.dit.feed_forward import FeedForward
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import attention, interleaved_heads
+from thenoise.utils.dynamo import mark_token_axis
 from thenoise.utils.loader import build_dit
 from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.safetensors import Header
@@ -58,7 +59,9 @@ class MoE(nn.Module):
         )
         self.shared_experts = FeedForward(dim, mult=mult, approximate="none")
 
+    @torch._dynamo.disable()
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """An eager island: which rows an expert gets is data, not shape."""
         tokens = x.reshape(-1, x.shape[-1])
         weights, chosen = self.gate(tokens).softmax(dim=-1).topk(self.top_k, dim=-1)
         out = self.shared_experts(tokens)
@@ -89,6 +92,7 @@ class ShapeBlock(nn.Module):
         self.skip_linear = QuantizedLinear(2 * dim, dim) if skip else None
         self.skip_norm = nn.LayerNorm(dim, eps=params.norm_eps) if skip else None
 
+    @torch.compile(fullgraph=False)
     def forward(self, x: torch.Tensor, context: torch.Tensor,
                 skip_value: Optional[torch.Tensor] = None) -> torch.Tensor:
         if self.skip_linear is not None:
@@ -145,10 +149,12 @@ class Hunyuan3DShapeDiT(nn.Module):
     def forward(self, x: torch.Tensor, t: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
         """``x`` ``[B, N, in_channels]``, ``t`` ``[B]``, ``context`` ``[B, L, context_dim]``."""
         x = torch.cat([self.t_embedder(t), self.x_embedder(x)], dim=1)
+        mark_token_axis(x, context)
         half = self.params.depth // 2
         skips: List[torch.Tensor] = []
         for layer, block in enumerate(self.blocks):
             skip_value = None if layer <= half else skips.pop()
+            mark_token_axis(skip_value)
             x = block(x, context, skip_value)
             if layer < half:
                 skips.append(x)

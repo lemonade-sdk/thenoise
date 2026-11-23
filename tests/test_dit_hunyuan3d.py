@@ -1,11 +1,12 @@
 import pytest
 import torch
 from PIL import Image
-from conftest import write_safetensors
+from conftest import header_of, write_safetensors
 
 from thenoise.dit.hunyuan3d import (
     CODEC_PREFIX,
     DIT_PREFIX,
+    SHAPE_SIGNATURE,
     Hunyuan3DCodecParams,
     Hunyuan3DShapeCodec,
     Hunyuan3DShapeDiT,
@@ -14,7 +15,6 @@ from thenoise.dit.hunyuan3d import (
     codec_params,
     detect_codec_params,
     detect_params,
-    is_hunyuan3d_shape,
     load_hunyuan3d_shape_codec,
     load_hunyuan3d_shape_dit,
     shape_key_map,
@@ -134,13 +134,13 @@ def test_params_are_read_out_of_the_checkpoint_shapes():
     assert [params.uses_skip(layer) for layer in range(5)] == [False, False, False, True, True]
 
 
-def test_the_fingerprint_needs_the_timestep_mlp_and_qk_norm():
-    assert is_hunyuan3d_shape([
-        "model.t_embedder.mlp.2.weight",
-        "model.blocks.0.attn1.k_norm.weight",
-    ])
-    assert not is_hunyuan3d_shape(["model.t_embedder.mlp.2.weight"])
-    assert not is_hunyuan3d_shape(["latent_in.weight", "guidance_in.in_layer.weight"])
+def test_the_signature_needs_the_timestep_mlp_and_qk_norm():
+    """The 2.0 transformer is Flux-style (`latent_in`) and carries neither key."""
+    assert header_of(["model.t_embedder.mlp.2.weight",
+                      "model.blocks.0.attn1.k_norm.weight"]).identifies(SHAPE_SIGNATURE)
+    assert not header_of(["model.t_embedder.mlp.2.weight"]).identifies(SHAPE_SIGNATURE)
+    assert not header_of(["latent_in.weight",
+                          "guidance_in.in_layer.weight"]).identifies(SHAPE_SIGNATURE)
 
 
 def test_the_plain_mlp_moves_onto_the_shared_feed_forward_slots():

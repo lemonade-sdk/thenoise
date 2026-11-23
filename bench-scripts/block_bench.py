@@ -118,7 +118,7 @@ CONVROT_GROUP = 256            # the ConvRot group the int8 exports are quantize
 # snapshots that disagree can still be told apart from a real change.
 BENCH_VARS = ("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "MIOPEN_FIND_MODE",
               "TORCH_BLAS_PREFER_HIPBLASLT", "HSA_OVERRIDE_GFX_VERSION",
-              "TORCH_COMPILE_DISABLE")
+              "TORCH_COMPILE_DISABLE", "TORCHDYNAMO_DISABLE")
 PLAIN = ("plain",)
 
 
@@ -1423,6 +1423,62 @@ def ltx_av_i2v(ctx: Ctx, tokens: int, scenario: str) -> Case:
     """The same block as an image-conditioned step runs it: a timestep row per video
     token, because the reference frame's tokens are pinned to a different one."""
     return _ltx_case(ctx, tokens, "av_i2v", token_timestep=True)
+
+
+H3D = dict(hidden_size=2048, depth=21, num_heads=16, head_dim=128,
+           in_channels=64, out_channels=64, context_dim=1024, mlp_ratio=4,
+           num_experts=8)
+H3D_MOE_LAYERS = 6
+H3D_PICTURE = 1370
+
+
+def _hunyuan3d_case(ctx: Ctx, tokens: int, moe: bool, skip: bool) -> Case:
+    """One shape block over latent tokens, led by the timestep token the model prepends."""
+    from thenoise.dit.hunyuan3d import Hunyuan3DShapeParams
+    from thenoise.dit.hunyuan3d.models import ShapeBlock
+    from thenoise.utils.dynamo import mark_token_axis
+
+    params = Hunyuan3DShapeParams(moe_layers=H3D_MOE_LAYERS if moe else 0, **H3D)
+    role = "block_moe" if moe else ("block_skip" if skip else "block")
+    blk = new_block(ctx, f"hunyuan3d/{role}", ShapeBlock, params, moe=moe, skip=skip)
+    seq = tokens + 1
+    seed_inputs(f"hunyuan3d/{role}", "plain", seq)
+
+    x = randn(ctx, 1, seq, params.hidden_size)
+    context = randn(ctx, 1, H3D_PICTURE, params.context_dim)
+    skip_value = randn(ctx, 1, seq, params.hidden_size) if skip else None
+
+    def run():
+        mark_token_axis(x, context, skip_value)
+        return blk(x, context, skip_value)
+
+    picture = gemm_params(blk.attn2.to_k) + gemm_params(blk.attn2.to_v)
+    weights = gemm_params(blk) - picture
+    if moe:
+        weights += params.top_k * gemm_params(blk.moe.experts[0]) - gemm_params(blk.moe.experts)
+    flops = gemm_flops((weights, seq), (picture, H3D_PICTURE))
+    flops += attn_flops(params.num_heads, params.head_dim, ((seq, seq), (seq, H3D_PICTURE)))
+    return Case(run, flops, seq,
+                detail=f"{params.hidden_size}w {params.num_heads}x{params.head_dim} "
+                       f"pic={H3D_PICTURE}" + " +skip" * skip)
+
+
+@fixture("hunyuan3d", "block")
+def hunyuan3d_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """Blocks 0-10: self-attention, the picture, one FFN."""
+    return _hunyuan3d_case(ctx, tokens, moe=False, skip=False)
+
+
+@fixture("hunyuan3d", "block_skip")
+def hunyuan3d_block_skip(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """Blocks 11-14: the same, with a LIFO skip folded in first at twice the width."""
+    return _hunyuan3d_case(ctx, tokens, moe=False, skip=True)
+
+
+@fixture("hunyuan3d", "block_moe")
+def hunyuan3d_block_moe(ctx: Ctx, tokens: int, scenario: str) -> Case:
+    """Blocks 15-20: skip plus the mixture of experts, whose routing stays eager."""
+    return _hunyuan3d_case(ctx, tokens, moe=True, skip=True)
 
 
 # ------------------------------------------------------------------ measurement

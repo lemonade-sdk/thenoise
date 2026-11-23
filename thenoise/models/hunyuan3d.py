@@ -7,12 +7,12 @@ from typing import Callable
 import torch
 
 from thenoise.dit.hunyuan3d import (
+    SHAPE_SIGNATURE,
     Hunyuan3DCodecParams,
     Hunyuan3DConditionerParams,
     Hunyuan3DShapeParams,
     codec_params,
     conditioner_params,
-    is_hunyuan3d_shape,
     load_hunyuan3d_image_encoder,
     load_hunyuan3d_shape_codec,
     load_hunyuan3d_shape_dit,
@@ -34,7 +34,6 @@ from thenoise.models.config import (
 )
 from thenoise.samplers import sigma_steps
 from thenoise.utils.image_tensor import cover_crop
-from thenoise.utils.safetensors import Header
 
 logger = logging.getLogger(__name__)
 
@@ -66,16 +65,13 @@ class Hunyuan3DShapeModel(DiffusionModel):
         "mc_level": 1 / 512,
     }
 
+    SIGNATURE = SHAPE_SIGNATURE
+
     def prepare_reference(self, image: Image.Image) -> Image.Image:
         """Short side to :data:`REFERENCE_SIDE`, then centre-crop the overhang: the frame the
         tower builds itself with ``Resize``+``CenterCrop``, so no aspect ratio arrives
         stretched or forces its position grid to interpolate."""
         return cover_crop(image, REFERENCE_SIDE, REFERENCE_SIDE)
-
-    @classmethod
-    def detect(cls, header: Header) -> bool:
-        """True for the one-file 2.1 shape checkpoint."""
-        return is_hunyuan3d_shape(header.names)
 
     def __init__(self, *, config: ModelConfig):
         super().__init__(config=config)

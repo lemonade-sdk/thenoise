@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Callable, Iterable, Mapping, Tuple, Union
+from typing import Callable, Mapping, Tuple, Union
 
 from thenoise.utils.qk_norm import qk_norm_key_map
-from thenoise.utils.safetensors import Header, as_header
+from thenoise.utils.safetensors import Header, Signature, as_header
 
 #: One Hunyuan3D shape file carries the DiT, the image conditioner and the shape codec.
 DIT_PREFIX = "model."
@@ -15,10 +15,10 @@ CODEC_PREFIX = "vae."
 #: Experts the gate picks; the checkpoint does not say.
 MOE_TOP_K = 2
 
-#: The 2.1 fingerprint: a two-layer timestep MLP, and QK-norm inside the first block.
-_FINGERPRINT = (
-    DIT_PREFIX + "t_embedder.mlp.2.weight",
-    DIT_PREFIX + "blocks.0.attn1.k_norm.weight",
+SHAPE_SIGNATURE = Signature(
+    "Hunyuan3D 2.1 shape",
+    keys=(DIT_PREFIX + "t_embedder.mlp.2.weight",
+          DIT_PREFIX + "blocks.0.attn1.k_norm.weight"),
 )
 
 
@@ -74,12 +74,6 @@ class Hunyuan3DCodecParams:
     geo_ln_post: bool = True
     norm_eps: float = 1e-6
     scale_factor: float = SHAPE_SCALE_FACTOR
-
-
-def is_hunyuan3d_shape(keys: Iterable[str]) -> bool:
-    """True for a Hunyuan3D shape checkpoint; the whole file, not just its DiT."""
-    names = set(keys)
-    return all(key in names for key in _FINGERPRINT)
 
 
 def shape_params(shapes: Mapping[str, Tuple[int, ...]]) -> Hunyuan3DShapeParams:
@@ -309,7 +303,7 @@ __all__ = [
     "detect_codec_params",
     "detect_conditioner_params",
     "detect_params",
-    "is_hunyuan3d_shape",
+    "SHAPE_SIGNATURE",
     "shape_key_map",
     "shape_params",
     "take_prefix",
