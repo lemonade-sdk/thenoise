@@ -774,7 +774,7 @@ def _monolith_keys(weight):
 def _load(m, files, version="2.3"):
     return m.load_original_components(files, version=version,
                                       gemma_text_config=object(),
-                                      device_for=lambda paths: "cpu",
+                                      device_for=lambda nbytes: "cpu",
                                       dtype=torch.float32)
 
 
@@ -791,7 +791,7 @@ def _load_ltx(m, tmp_path, *, dit, text):
                             {"audio_vae.weight": weight, "vocoder.weight": weight}),
          "upscaler": _upscaler_file(tmp_path, weight), "text_encoder": text},
         version="2.5", gemma_text_config=object(),
-        device_for=lambda paths: "cpu", dtype=torch.float32,
+        device_for=lambda nbytes: "cpu", dtype=torch.float32,
     )
 
 
@@ -821,30 +821,47 @@ def test_a_named_file_takes_its_part_from_the_all_in_one(tmp_path, monkeypatch):
     torch.testing.assert_close(parts["vae"].weight, weight)
 
 
-def test_a_part_is_asked_where_the_files_that_carry_it_should_live(tmp_path, monkeypatch):
-    """The memory manager decides placement from the files a part arrives from, and the
-    read goes there directly -- a copy afterwards would double a 22 GB transformer."""
+def test_a_part_is_asked_where_the_bytes_it_reads_should_live(tmp_path, monkeypatch):
+    """The memory manager is asked once per part, for the bytes that part will actually be
+    read as, and the read goes where it answers -- a copy afterwards would double a 22 GB
+    transformer.
+
+    The files' sizes are the wrong figure for a part cut out of them: 2.5 keeps its two
+    text projections with the Gemma and its connector blocks with the transformer, so a
+    pair weighed at the files it arrives from is weighed at both checkpoints entire, and
+    lands on the offload device while the module it belongs to does not.
+    """
     m = _tiny_components(monkeypatch)
     weight = torch.ones(2, 2)
-    keys = _monolith_keys(weight)
-    del keys["vae.weight"]
-    monolith = _save(tmp_path / "all-in-one.safetensors", keys)
+    gemma = _save(tmp_path / "gemma.safetensors", {
+        "text_embedding_projection.video_aggregate_embed.weight": weight,
+        "text_embedding_projection.audio_aggregate_embed.weight": weight,
+        "model.layers.0.self_attn.q_proj.weight": torch.ones(64, 64),
+    })
+    transformer = _save(tmp_path / "dit.safetensors", _monolith_keys(weight))
     codec = _save(tmp_path / "video-vae.safetensors", {"vae.weight": weight})
+    audio = _save(tmp_path / "audio-vae.safetensors",
+                  {"audio_vae.weight": weight, "vocoder.weight": weight})
     ups = _upscaler_file(tmp_path, weight)
 
-    asked: list[list[Path]] = []
+    figures: list[int] = []
 
-    def device_for(paths):
-        asked.append(list(paths))
+    def device_for(nbytes):
+        figures.append(nbytes)
         return "cpu"
 
-    m.load_original_components({"": monolith, "vae": codec, "upscaler": ups},
-                               version="2.3", gemma_text_config=object(),
-                               dtype=torch.float32, device_for=device_for)
-    assert asked.count([monolith.resolve()]) == 4, "dit, audio_vae, vocoder, connectors"
-    assert asked.count([codec.resolve()]) == 1
-    assert asked.count([ups.resolve()]) == 1
-    assert len(asked) == 6
+    m.load_original_components(
+        {"": transformer, "vae": codec, "audio_vae": audio, "upscaler": ups,
+         "text_encoder": gemma},
+        version="2.5", gemma_text_config=object(), dtype=torch.float32,
+        device_for=device_for)
+
+    # One decision per part, in the order the parts are built.
+    dit, vae, audio_vae, vocoder, upscaler, connectors = figures
+    assert (dit, vae, audio_vae, vocoder, upscaler) == (16,) * 5
+    assert connectors == 2 * 16 + 2 * 8, ("two projections out of the Gemma file, two "
+                                          "register tables out of the transformer file")
+    assert connectors < gemma.stat().st_size + transformer.stat().st_size
 
 
 def test_a_file_naming_a_part_without_fitting_it_is_not_taken_for_it(tmp_path, monkeypatch):

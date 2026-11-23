@@ -151,7 +151,7 @@ class LTXVideo(VideoModel):
              "text_encoder": self.text_encoder_path},
             version=self.version, gemma_text_config=text_cfg,
             headers=config.all_headers(),
-            device_for=self._load_target_all,
+            device_for=self.memory.device_for,
         )
         self.dit = components["dit"]
         self.vae = components["vae"]
@@ -256,11 +256,13 @@ class LTXVideo(VideoModel):
     def init_latents(self, params: VideoSamplingParams):
         t, h, w = self._geometry(params, False)
         audio_length = max(1, round(params.frames / params.fps * LATENT_TOKENS_PER_SECOND))
-        seed = torch.Generator(device="cpu").manual_seed(params.seed)
+        dev = self.device
+        seed = torch.Generator(device=dev).manual_seed(params.seed)
         video = torch.randn((1, self.vae.latent_channels, t, h, w),
-                            generator=seed, dtype=torch.float32)
-        audio = torch.randn((1, audio_length, 128), generator=seed, dtype=torch.float32)
-        return torch.cat((_pack(video), audio), dim=1).to(self.device)
+                            generator=seed, device=dev, dtype=torch.float32)
+        audio = torch.randn((1, audio_length, 128),
+                            generator=seed, device=dev, dtype=torch.float32)
+        return torch.cat((_pack(video), audio), dim=1)
 
     def prepare_latent(self, latents, cond, params, ref=None, ref_method="index"):
         """Overwrite the clip's endpoints once, and keep both resolutions for the boundary.
@@ -324,9 +326,10 @@ class LTXVideo(VideoModel):
         if upscale.shape != want:
             raise ValueError(f"LTX upscaler returned {tuple(upscale.shape)}, expected {want}")
         sigma = REFINE_GRID[0]
-        gen = torch.Generator(device="cpu").manual_seed(params.seed + 5)
-        vnoise = torch.randn(upscale.shape, generator=gen, dtype=torch.float32).to(self.device)
-        anoise = torch.randn(audio.shape, generator=gen, dtype=torch.float32).to(self.device)
+        dev = self.device
+        gen = torch.Generator(device=dev).manual_seed(params.seed + 5)
+        vnoise = torch.randn(upscale.shape, generator=gen, device=dev, dtype=torch.float32)
+        anoise = torch.randn(audio.shape, generator=gen, device=dev, dtype=torch.float32)
         v = (1 - sigma) * upscale + sigma * vnoise
         a = (1 - sigma) * audio + sigma * anoise
         if self._clip.start.high is not None:

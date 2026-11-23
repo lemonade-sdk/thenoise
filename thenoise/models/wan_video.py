@@ -326,9 +326,9 @@ class Wan22Model(VideoModel):
                  (params.frames - 1) // self.vae.temporal_compression + 1,
                  params.height // self.vae.spatial_compression,
                  params.width // self.vae.spatial_compression)
-        rng = torch.Generator(device="cpu").manual_seed(params.seed)
-        latents = torch.randn(shape, generator=rng, dtype=torch.float32)
-        return latents.to(self.device)
+        dev = self.device
+        rng = torch.Generator(device=dev).manual_seed(params.seed)
+        return torch.randn(shape, generator=rng, device=dev, dtype=torch.float32)
 
     def encode_references(self, images, frames=1):
         """One latent per frame, or the 20 channels a concatenated reference contributes.

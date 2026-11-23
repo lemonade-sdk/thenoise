@@ -187,13 +187,11 @@ class DiffusionModel(LoRASupport, ABC):
 
     # ------------------------------------------------------------ devices
     def _load_target(self, path: str) -> str:
-        """The device to build the weights at ``path`` on, the manager's decision."""
-        return self._load_target_all([path])
+        """The device to build the weights at ``path`` on, the manager's decision.
 
-    def _load_target_all(self, paths) -> str:
-        """``_load_target`` for one component whose weights arrive from several files."""
-        return str(self.memory.device_for(
-            sum(checkpoint_bytes(str(path)) for path in paths)))
+        The file's own bytes are the hint: a component that owns a file reads all of it.
+        """
+        return str(self.memory.device_for(checkpoint_bytes(str(path))))
 
     # ------------------------------------------------------------ teardown
     def unload(self) -> None:

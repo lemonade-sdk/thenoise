@@ -216,7 +216,7 @@ def _flag_for(name: str, version: str) -> str:
 
 def load_original_components(
     files: dict[str, str | Path], *, version: str,
-    device_for: Callable[[list[Path]], object],
+    device_for: Callable[[int], object],
     dtype=torch.bfloat16, gemma_text_config=None, headers: Mapping[str, object] | None = None,
 ) -> tuple[dict, dict[str, Path]]:
     """Build every LTX component from the files a request named by role (``""`` is the
@@ -228,16 +228,21 @@ def load_original_components(
     the runtime's own parsed headers by role, so a checkpoint is opened once however many
     parts ask about it.
 
-    ``device_for`` answers where the part arriving from the given files should live -- the
-    memory manager's decision, made on the bytes of those files -- and the tensors are read
-    there, so a 22 GB transformer does not pass through system RAM on its way to the card.
+    ``device_for`` answers where a part of the given bytes should live -- the memory
+    manager's decision, made on the bytes that part will actually be read as, since one
+    part cut from two checkpoints that each hold most of the other is worth neither file
+    on its own nor both together -- and the tensors are read there, so a 22 GB
+    transformer does not pass through system RAM on its way to the card.
     """
     given = {role: Path(path).expanduser().resolve()
              for role, path in files.items() if path}
     primary = given.get("")
     if primary is None:
         raise ValueError("LTX needs its transformer: pass --dit")
-    params = detect_params(_header("", primary, headers))
+    header_of: dict[Path, object] = {primary: _header("", primary, headers)}
+    for role, path in given.items():
+        header_of.setdefault(path, _header(role, path, headers))
+    params = detect_params(header_of[primary])
     modules = dict(
         dit=make_transformer(params), vae=make_video_vae(),
         audio_vae=make_audio_vae(), vocoder=make_vocoder(),
@@ -255,10 +260,10 @@ def load_original_components(
 
     picks: dict[str, dict[Path, dict[str, str]]] = {name: {} for name in modules}
     misses: dict[str, list[tuple[Path, str]]] = {name: [] for name in modules}
-    for role, path in given.items():
+    for path in given.values():
         named = named_parts[path]
         chosen, rejected = partition_keys(
-            _header(role, path, headers), expected,
+            header_of[path], expected,
             part_of=lambda raw: component_for(raw, transformer=(path == primary), named=named),
             strict=frozenset(named))
         for name in modules:
@@ -291,7 +296,9 @@ def load_original_components(
     for name, module in modules.items():
         load_selected_state(
             module, [(str(path), selected) for path, selected in claims[name].items()],
-            dtype=dtype, device=device_for(sources[name]),
+            dtype=dtype,
+            device=device_for(sum(header_of[path].stored_bytes(selected)
+                                  for path, selected in claims[name].items())),
             what=f"LTX {name}", relay_stores=(name == "dit"))
         module.eval()
     return modules, {name: paths[0] for name, paths in sources.items()}

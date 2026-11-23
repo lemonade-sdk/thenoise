@@ -387,9 +387,10 @@ class H3ImageDiT(nn.Module):
         for ref in refs:
             padded, _ = pad_to_patch(ref.to(torch.float32), self.params.patch_size)
             r = self.patchify(padded)
-            gen = torch.Generator("cpu").manual_seed(seed)
-            noise = torch.randn(r.shape, generator=gen, dtype=torch.float32)
-            rows.append(COND_TIMESTEP * r + (1.0 - COND_TIMESTEP) * noise.to(r.device))
+            gen = torch.Generator(device=r.device).manual_seed(seed)
+            noise = torch.randn(r.shape, generator=gen, device=r.device,
+                                dtype=torch.float32)
+            rows.append(COND_TIMESTEP * r + (1.0 - COND_TIMESTEP) * noise)
         return torch.cat(rows, dim=0)
 
     def forward(

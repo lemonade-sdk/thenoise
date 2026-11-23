@@ -81,20 +81,22 @@ def _tensor_bytes(tensor: torch.Tensor) -> int:
     return tensor.numel() * tensor.element_size()
 
 
-def _weight_bytes(component: Any) -> int:
-    """Bytes of ``component``'s weights and buffers, 0 where it reports none. A plain
-    wrapper is counted through the module it holds, as ``freeze`` does.
+def _owned_tensors(component: Any) -> tuple[torch.Tensor, ...]:
+    """Every weight and buffer ``component`` owns. A plain wrapper is read through the
+    module it holds, as ``freeze`` does.
     """
     if isinstance(component, nn.Module):
-        tensors = (*component.parameters(), *component.buffers())
+        modules: tuple[nn.Module, ...] = (component,)
     else:
-        tensors = tuple(
-            tensor
-            for held in getattr(component, "__dict__", {}).values()
-            if isinstance(held, nn.Module)
-            for tensor in (*held.parameters(), *held.buffers())
-        )
-    return sum(_tensor_bytes(tensor) for tensor in tensors)
+        modules = tuple(held for held in getattr(component, "__dict__", {}).values()
+                        if isinstance(held, nn.Module))
+    return tuple(tensor for held in modules
+                 for tensor in (*held.parameters(), *held.buffers()))
+
+
+def _weight_bytes(component: Any) -> int:
+    """Bytes of ``component``'s weights and buffers, 0 where it reports none."""
+    return sum(_tensor_bytes(tensor) for tensor in _owned_tensors(component))
 
 
 def _attempt(fn, args, kwargs):
@@ -179,7 +181,7 @@ class MemoryManager:
         if module is not None and not self._weights[name]:
             logger.warning(
                 "component %r reports no weights: nothing can be traded for it", name)
-        if module is not None and self._module_device(module) == self._load:
+        if module is not None and self._arrived_resident(name, module):
             self._resident.add(name)
 
     def resident(self) -> Set[str]:
@@ -358,21 +360,24 @@ class MemoryManager:
                 break
 
     # ------------------------------------------------------------- helpers
-    @staticmethod
-    def _module_device(module: nn.Module) -> Optional[torch.device]:
-        """Current device of ``module`` (an ``nn.Module`` or a wrapper).
+    def _arrived_resident(self, name: str, component: Any) -> bool:
+        """Whether ``component`` came up wholly on the load device.
 
-        Wrappers expose a ``device`` attribute/property; plain modules are probed via
-        their first parameter or buffer."""
-        found: Union[str, torch.device, None] = None
-        if hasattr(module, "device"):
-            found = module.device
-        else:
-            for tensor in (*module.parameters(), *module.buffers()):
-                if tensor is not None:
-                    found = tensor.device
-                    break
-        return None if found is None else _with_index(found)
+        A component that reports a ``device`` is taken at its word. One that reports none
+        is read from all of its weights, since the first is not the whole of it: a
+        component can be built in pieces, each placed on the answer given for its own
+        bytes, and the piece that landed elsewhere still has to be uploaded by the stage
+        that names the component.
+        """
+        reported = getattr(component, "device", None)
+        if reported is not None:
+            return _with_index(reported) == self._load
+        where = {_with_index(tensor.device) for tensor in _owned_tensors(component)}
+        if len(where) > 1:
+            logger.warning(
+                "component %r came up across %s: the stage that names it will move it in",
+                name, " and ".join(sorted(str(device) for device in where)))
+        return where == {self._load}
 
 
 __all__ = ["MemoryManager"]

@@ -82,6 +82,30 @@ def test_a_prompt_runs_at_its_own_length_and_is_padded_afterwards():
     assert int(mask.sum()) == 6 and int(mask[0, :PROMPT_CONTEXT - 6].sum()) == 0
 
 
+def test_a_tower_built_in_two_places_is_still_one_residency_role():
+    """A tower built in two places is still one residency role.
+
+    The connector pair is cut from the text encoder's file and the transformer's, each
+    half read onto the device its own bytes bought it, while one stage runs all of it.
+    """
+    from thenoise.memory import MemoryManager
+    from thenoise.models.ltx_video import _PromptTower
+
+    class _Rows(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.rows = nn.Parameter(torch.zeros(2))
+
+    manager = MemoryManager("meta", "cpu")
+    tower = _PromptTower(_Rows().to("meta"), _Rows())
+    manager.register("text_encoder", tower)
+    assert manager.resident() == set(), "the connectors came up on the offload device"
+
+    with manager.stage("text_encoder", pixels=0):
+        assert manager.resident() == {"text_encoder"}
+        assert [p.device.type for p in tower.parameters()] == ["meta", "meta"]
+
+
 def test_a_prompt_arrives_as_bos_first_ids_truncated_to_the_context():
     from thenoise.text_encoders.ltx_video import PROMPT_CONTEXT, GemmaPrompter
 

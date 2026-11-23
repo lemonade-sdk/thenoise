@@ -84,6 +84,24 @@ def test_register_tracks_initial_residency():
     assert "b" not in mm.resident()
 
 
+def test_a_component_built_across_both_devices_is_uploaded_as_one():
+    """Half a component on the load device is not resident, or the stage that names it
+    finds no bytes to upload and runs on half its weights.
+
+    ``meta`` plays the load device, being the one device a real weight travels to and from
+    where there is no GPU.
+    """
+    mm = MemoryManager("meta", "cpu")
+    tower = nn.ModuleList([_Comp().to("meta"), _Comp()])
+    mm.register("tower", tower)
+    assert "tower" not in mm.resident(), "one weight is where the stages run, the other is not"
+
+    with mm.stage("tower", pixels=0):
+        pass
+    assert [p.device.type for p in tower.parameters()] == ["meta", "meta"]
+    assert "tower" in mm.resident()
+
+
 def test_a_stage_moves_in_once_and_offload_moves_out():
     m = _MockComp()
     mm = MemoryManager("cpu", "meta")
