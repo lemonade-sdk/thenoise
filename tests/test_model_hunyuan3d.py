@@ -157,14 +157,11 @@ def test_the_picture_is_the_conditioning_and_the_null_branch_is_zeros_like_it():
     assert model.conditioner.calls == [(1, False)]
 
 
-def test_several_pictures_condition_one_shape_rather_than_several():
-    model = bare()
-    out = model.encode_prompt(EncodePromptArgs(
-        prompt="a chair", guidance_scale=5.0,
-        image=[Image.new("RGB", (32, 32)), Image.new("RGB", (32, 32), (9, 9, 9))]))
-    assert out.cond.shape == (1, 10, 8), "the two views share one context"
-    assert out.null.shape == (1, 10, 8), "the null branch is as blind to every view"
-    assert model.conditioner.calls == [(2, True)]
+def test_views_are_not_this_checkpoint_s_to_offer():
+    """Its conditioner is the release's `DinoImageEncoder`, which concatenates nothing, so
+    the offsets a multi-view tower adds are numbers this one has never met. The refusal of
+    a second picture is the medium's, at the request boundary."""
+    assert bare().capability("mesh").get("mv2d") is None
 
 
 def test_a_prompt_without_a_picture_is_refused():

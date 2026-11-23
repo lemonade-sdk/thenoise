@@ -6,9 +6,9 @@ takes a shape anywhere it would otherwise not go.
 
 | | Hunyuan3D 2.1 shape |
 |---|---|
-| Modes | image-to-shape (`i2d`); views-to-shape (`mv2d`) when several pictures are sent; text-to-shape does not exist |
+| Modes | image-to-shape (`i2d`); text-to-shape does not exist. The medium also has views-to-shape (`mv2d`), which this checkpoint does not advertise |
 | Checkpoint | **one file** (`--dit`): transformer + DINOv2 image conditioner + shape codec |
-| Conditioning | the reference reframed to a 518² square, as its whole DINOv2-L/14 patch grid; one grid per picture, concatenated into one context |
+| Conditioning | the reference reframed to a 518² square, as its whole DINOv2-L/14 patch grid |
 | Latents | 4096 unstructured tokens of 64 channels, no positional embedding |
 | Output | `.glb` (binary glTF), `.obj` or `.stl` — positions and triangles, no material |
 | Defaults | 4096 tokens, 30 steps, CFG 5.0, Euler, 384³ octree, seed random |
@@ -52,14 +52,15 @@ so nothing is stretched and the canvas is always 37×37 patches — the 1370 con
 tokens the checkpoint's config declares. Transparency is composited onto white, the
 surface the cutouts it was trained on sat on.
 
-Several pictures are views of **one** object, not several objects: each 1370-token grid is
-marked with the sincos offset of its slot — front, left, back, right, in the order sent —
-and the marked grids are concatenated into a single conditioning, which is what both the
-release's `DinoImageEncoderMV` and ComfyUI's multi-view node do. Four is the ceiling
-because four is how many slots are numbered. A single picture never takes an offset, so
-the verified single-view path is untouched; and note what that leaves unproven — the
-offsets mean something to a model trained with them, and the 2.1 shape file is configured
-as a single-view model. Views on it run, and what they produce is yours to judge.
+One picture per shape, because that is what this release was trained with: its conditioner
+is `DinoImageEncoder`, which concatenates nothing and marks nothing. The mesh medium
+carries the multi-view idea anyway — a request may name several pictures, which resolves to
+mode `mv2d` — and this model's `/health` capabilities say nothing about views, so a second
+picture is refused at the request boundary rather than quietly dropped, averaged, or fed to
+a tower that cannot tell a left view from a front one. The weights for that tower live with
+the 2.0 family (`-mv`); the marking itself — a sincos of the view index added to every
+token of that view — is implemented in the conditioner, waiting for a model that advertises
+slots.
 
 ## The knobs
 
@@ -129,12 +130,12 @@ Nothing is welded, decimated or smoothed — the raw cut, at the resolution you 
 
 * **Text.** `prompt` is accepted so a request travels between media unchanged, and is
   otherwise ignored. `negative_prompt` too, though CFG still runs against a zeroed context.
-* **Image media other than the reference.** No inpainting a shape and no half-built
-  views: a slot is either a picture or absent, and every picture sent is one view of the
-  one shape being built.
+* **Image media other than the reference.** No inpainting a shape, and no more than one
+  reference: a second picture is refused, not ignored — see the conditioning note above.
 * **Other checkpoints in the family.** The 2.0 releases (`hunyuan3d-dit-v2*`) are a
   different transformer — Flux-style, guidance-distilled — and are not detected. Only the
-  2.1 shape file is.
+  2.1 shape file is, and it is the multi-view weights of that older family that want the
+  medium's several pictures.
 
 Every stage of the port has been diffed against Tencent's own implementation with the real
 checkpoint on CPU: same weights, same inputs, per-block outputs equal to within bf16

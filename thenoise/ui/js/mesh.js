@@ -7,10 +7,21 @@ const meshJob = { id: null };
 const MESH_PROGRESS = { root: 'mesh_progress', label: 'mesh_progress_label', bar: 'mesh_bar' };
 const MESH_MODES = {i2d: 'image-to-shape', mv2d: 'views-to-shape', t2d: 'text-to-shape'};
 const MESH_FORMATS = { glb: 'model/gltf-binary', obj: 'text/plain', stl: 'model/stl' };
-// The server refuses past its own count, which /health calls caps.mesh.mv2d; this only
-// stops the form collecting pictures it cannot send.
+// A view-taking model's ceiling is its own, in caps.mesh.mv2d; this is only the most
+// thumbnails this form will ever collect, and the server refuses past its count anyway.
 const MESH_MAX_VIEWS = 4;
 const meshViews = [];   // {b64, dataUrl, name}, in view order
+
+// Views are the exception, and `multiple` is the fact that they are: app.js sets it from
+// the loaded model's caps, so a tower that cannot tell a left view from a front one takes
+// one picture here too.
+function meshCeiling() {
+  return $('mesh_file').multiple ? MESH_MAX_VIEWS : 1;
+}
+
+function meshViewLabel(index) {
+  return meshCeiling() > 1 ? 'view ' + (index + 1) : 'picture';
+}
 
 function meshFail(message) {
   setTimer('mesh_timer', 'mesh_timer_text', 'error', 'error: ' + message);
@@ -21,8 +32,8 @@ function renderMeshViews() {
   const box = $('mesh_refs');
   box.innerHTML = '';
   meshViews.forEach((view, i) => addThumb(box, {
-    src: view.dataUrl, alt: 'view ' + (i + 1), cls: i === 0 ? 'first' : '',
-    title: 'view ' + (i + 1) + (view.name ? ': ' + view.name : ''),
+    src: view.dataUrl, alt: meshViewLabel(i), cls: i === 0 ? 'first' : '',
+    title: meshViewLabel(i) + (view.name ? ': ' + view.name : ''),
     onRemove: () => {
       meshViews.splice(i, 1);
       renderMeshViews();
@@ -33,14 +44,17 @@ function renderMeshViews() {
   const nameEl = $('mesh_dz_name');
   const names = meshViews.map(view => view.name).filter(Boolean).join(', ');
   nameEl.textContent = names
-    ? meshViews.length + (meshViews.length > 1 ? ' views' : ' view') + ': ' + names
+    ? (meshCeiling() > 1 && meshViews.length > 1
+       ? meshViews.length + ' views: ' + names : names)
     : '';
   nameEl.style.display = nameEl.textContent ? 'block' : 'none';
 }
 
 async function loadMeshPicture(file) {
-  if (meshViews.length >= MESH_MAX_VIEWS) {
-    return meshFail('a shape takes at most ' + MESH_MAX_VIEWS + ' views');
+  const ceiling = meshCeiling();
+  if (meshViews.length >= ceiling) {
+    return meshFail(ceiling > 1 ? 'a shape takes at most ' + ceiling + ' views'
+                                : 'this model conditions on one picture');
   }
   const image = await readImageFile(file);
   if (!image) return;

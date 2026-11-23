@@ -243,6 +243,12 @@ async function applyModelState() {
   $('video_i2v_field').classList.toggle('hidden', !video?.i2v);
   // A last frame needs a reference that carries a mask to name it with.
   $('video_flf2v_field').classList.toggle('hidden', !video?.flf2v);
+  // How many pictures a shape can be conditioned on is a fact about the model's tower,
+  // and most towers tell one picture from nothing; the form stops collecting what the
+  // server would refuse.
+  const views = (mesh && mesh.mv2d) || 1;
+  $('mesh_file').multiple = views > 1;
+  $('mesh_views_hint').classList.toggle('hidden', views < 2);
   fillSamplers(samplers);
 }
 applyModelState();

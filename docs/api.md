@@ -181,12 +181,15 @@ unused.
 When a mesh model is loaded, it is served through the synchronous `POST /mesh` (mesh bytes
 directly) or `POST /jobs/mesh`, which queues the same body — see
 [Asynchronous jobs](#asynchronous-jobs). A shape is conditioned on a picture, so `image` is
-required: there is no text-to-shape to fall back to. Several pictures are views of one
-object, and the resolved mode says so: `i2d` for one, `mv2d` for more.
+required: there is no text-to-shape to fall back to. It may instead be an array, naming the
+views of **one** object; the resolved mode says which happened (`i2d` for one, `mv2d` for
+more), and how many a model can tell apart is its own capability — `caps.mesh.mv2d`, absent
+when it has no multi-view tower and refuses more than one picture. No model served today
+has one.
 
 | Field | Type | Description |
 |---|---|---|
-| `image` | string \| string[] | Required base64-encoded picture, or up to four of one object as an array, in front, left, back, right order |
+| `image` | string \| string[] | Required base64-encoded picture — or, for a model that advertises views, an array of them: pictures of one object in the order its tower numbers them |
 | `model` | string | Optional loaded model name, checked if provided |
 | `prompt`, `negative_prompt` | string | Accepted and not read: a shape model has no text encoder |
 | `latents` | integer | Latent tokens to denoise; the model's release count is its default |
@@ -228,7 +231,7 @@ With a mesh model:
 ```json
 {"status": "ok", "models": ["hunyuan3d-shape"], "medium": "mesh",
   "samplers": ["er_sde", "euler", "unipc"],
-  "capabilities": {"kv_cache": false, "mesh": {"i2d": true, "mv2d": 4, "t2d": false}}}
+  "capabilities": {"kv_cache": false, "mesh": {"i2d": true, "t2d": false}}}
 ```
 
 `models` is empty until a DiT is loaded, `medium` says what the loaded model produces
@@ -240,6 +243,9 @@ The request modes sit under their medium: `t2i` and `i2i` under `image`, `t2v`,
 `i2v` and `flf2v` under `video`. A model answers the other medium with `null`.
 `kv_cache` and `upscale` are not modes, so they stay at the top; either medium
 can use them.
+
+One mesh mode is not a boolean: `mv2d` is how many views of one object the model's tower
+numbers, and its absence is the refusal — which is every mesh model served today.
 
 `i2i` says a model takes a picture with the request, not what it does with one. That is
 `ref_method`: `index` and `index_timestep_zero` encode the picture as a latent the DiT

@@ -10,7 +10,6 @@ from thenoise.dit.hunyuan3d import (
     Hunyuan3DCodecParams,
     Hunyuan3DConditionerParams,
     Hunyuan3DShapeParams,
-    VIEW_SLOTS,
     codec_params,
     conditioner_params,
     is_hunyuan3d_shape,
@@ -57,8 +56,11 @@ class Hunyuan3DShapeModel(DiffusionModel):
     REQUIRED_COMPONENTS = ()
     REF_METHODS = (VISION_REF_METHOD,)
 
+    # No "mv2d": this release's conditioner is `DinoImageEncoder`, which concatenates
+    # nothing, so a view offset is a number the tower has never met. A model that ships a
+    # multi-view tower says so here, and the medium refuses the rest at the boundary.
     CAPABILITIES = {**DiffusionModel.CAPABILITIES,
-                    "mesh": {"i2d": True, "mv2d": len(VIEW_SLOTS), "t2d": False}}
+                    "mesh": {"i2d": True, "t2d": False}}
 
     DEFAULT_PREFS = {
         **DiffusionModel.DEFAULT_PREFS,
@@ -113,15 +115,11 @@ class Hunyuan3DShapeModel(DiffusionModel):
 
     # ------------------------------------------------------------ kernels
     def encode_prompt(self, args: EncodePromptArgs) -> Conditioning:
-        """The reference pictures through the tower; this model reads no text at all.
-
-        Several pictures are views of one object, so they condition one shape together
-        rather than one shape each.
-        """
+        """The reference picture through the tower; this model reads no text at all."""
         images = self.conditioned_images(args)
         if not images:
             raise ValueError(f"{self.name} conditions on a picture: an image is required")
-        cond = self.conditioner(images, self.dtype, views=len(images) > 1)
+        cond = self.conditioner(images, self.dtype)
         null = (self.conditioner.unconditional(cond) if args.guidance_scale > 1.0
                 else None)
         return Conditioning(cond=cond, null=null)

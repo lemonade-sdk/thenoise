@@ -63,16 +63,18 @@ class FakeShapeModel:
     dtype = torch.float32
     device = "cpu"
 
-    def __init__(self, cancel_during=None):
+    def __init__(self, cancel_during=None, caps=None):
         self.memory = FakeMemory()
         self.events: list[str] = []
         self.seen_args = []
         self.decode_params = []
         self.cancel_during = cancel_during
         self.token = None
+        # A tower that numbers views is the exception, so a test says which model it means.
+        self.caps = caps if caps is not None else {"i2d": True, "mv2d": 4, "t2d": False}
 
     def capability(self, medium):
-        return {"i2d": True, "mv2d": 4, "t2d": False}
+        return dict(self.caps)
 
     def lora_components(self):
         return ("dit",)
@@ -159,6 +161,14 @@ def test_more_views_than_the_model_numbers_are_refused():
     with pytest.raises(ValueError, match="at most 4 views"):
         MeshPipelineController(model).resolve(
             MeshSpec(image=[PNG] * 5))
+
+
+def test_a_model_with_no_multi_view_tower_refuses_the_second_picture():
+    """Refused, not ignored: a tower never marked with a view cannot read the marking, and
+    a quietly dropped picture is a shape nobody asked for."""
+    one_picture = FakeShapeModel(caps={"i2d": True, "t2d": False})
+    with pytest.raises(ValueError, match="no multi-view tower"):
+        MeshPipelineController(one_picture).resolve(MeshSpec(image=[PNG, OTHER]))
 
 
 def test_the_file_is_the_container_the_request_asked_for(tmp_path):

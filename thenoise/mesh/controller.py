@@ -34,10 +34,13 @@ class MeshPipelineController:
     def resolve(self, spec: MeshSpec) -> ResolvedMesh:
         """Refuse what this model cannot serve, then apply its defaults."""
         model = self.model
-        capacity = model.capability("mesh")[spec.mode]
+        capacity = model.capability("mesh").get(spec.mode)
         if not capacity:
+            if spec.mode == "mv2d":
+                raise ValueError(f"{model.name} conditions on one picture: it has no "
+                                 f"multi-view tower, and {len(spec.images)} were sent")
             raise ValueError(f"model '{model.name}' does not support {spec.mode}")
-        if len(spec.images) > 1 and len(spec.images) > capacity:
+        if spec.mode == "mv2d" and len(spec.images) > capacity:
             raise ValueError(f"{model.name} takes at most {capacity} views, "
                              f"got {len(spec.images)}")
         resolved = spec.resolve(model.default_prefs)

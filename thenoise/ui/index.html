@@ -464,13 +464,14 @@
   <div class="field">
     <label class="label" for="mesh_file">Picture <span class="hint">required</span></label>
     <div class="dropzone" id="mesh_dropzone">
-      <input type="file" id="mesh_file" accept="image/*" multiple hidden>
+      <input type="file" id="mesh_file" accept="image/*" hidden>
       <div class="dz-hint" id="mesh_dz_hint">Drag &amp; drop an image here or <span class="kbd">click to browse</span></div>
       <div class="dz-name" id="mesh_dz_name" style="display:none"></div>
     </div>
     <div class="ref-thumbs" id="mesh_refs"></div>
-    <div class="hint">A shape is conditioned on the picture alone; no prompt is read.
-      Drop several and they become views of one shape, in front, left, back, right order.</div>
+    <div class="hint">A shape is conditioned on the picture alone; no prompt is read.</div>
+    <div class="hint hidden" id="mesh_views_hint">Several pictures are views of one
+      shape, in front, left, back, right order.</div>
   </div>
 
   <div class="row">
