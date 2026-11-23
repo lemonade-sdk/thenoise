@@ -80,9 +80,13 @@ Usage
         --arms pitch_pad
 
 Any case ``block_bench`` can build can be probed: pass its ``model/block``, and the sections
-run with the GEMM list read off that block's own profile and the generic arms — ``baseline``
-and ``pitch_pad``, which finds the projections whose input rows sit a power-of-two number of
-bytes apart and feeds them from a wider buffer — standing in for an arm set.
+run with the GEMM list read off that block's own profile and three layout arms standing in
+for an arm set — ``pitch_pad``, widening the operand rows whose pitch the sweep found the
+penalty on; ``weight_transposed``, storing a wide-output projection's weight the other way
+round, same numbers, which is what a load-time transpose would hand it; and
+``transposed_problem``, answering a narrow-output projection as ``Cᵀ`` and leaving its
+consumers to cope. All three select on module widths alone, so every block is asked the same
+questions the LTX findings came from.
 
 What a block needs to be asked sharper questions is an arm set of its own, and a FLOPs model
 decomposing its terms for the rate column; neither is needed to time it or to read its
@@ -358,46 +362,82 @@ def camera_fixture(ctx: bb.Ctx, name: str, tokens: int,
                    detail=f"{fx.block} {which}: {case.detail}", terms={}, attentions=0)
 
 
+#: The arm's defaults are the engine's own rule, so a flat gain means the engine already
+#: does this and a nonzero one means it does not; the flags are for asking about the bounds.
+PAD_MIN_PITCH = PITCH_MIN_BYTES
+
+
 PITCH_NOTE = ("every projection whose input rows are {min_pitch} bytes apart or further, "
               "fed from a buffer eight elements wider where the operand has at least "
               "{min_rows} rows: rows 32 KiB apart cost about half the rate the same block "
               "gets elsewhere, and short streams lose to the same change")
-#: The arm's defaults are the engine's rule, so a flat gain means the engine already does
-#: this and a nonzero one means it does not; the flags are for asking about the bounds.
-PAD_MIN_PITCH = PITCH_MIN_BYTES
+WTRANSPOSE_NOTE = ("every projection at least {min_ratio}x wider out than in, its weight "
+                   "stored the other way round and the same numbers in it: on short streams "
+                   "the weight is the traffic, and this is what a load-time transpose would "
+                   "hand it")
+TRANSPOSED_NOTE = ("every projection reducing to {max_ratio}x or less of its width "
+                   "answering for the transposed problem, C transposed, its consumers left "
+                   "to read it: for those shapes the tile problem is better the other way "
+                   "round and the pitch has nothing to do with it")
+
+#: The bounds the layout arms select on. Each is a measurement, not a law: the pitches
+#: taken from the sweep over every block the camera can build, the ratios from the rows
+#: that moved in it. ``LayoutRules`` carries them so an arm set takes one argument and a
+#: flag can move one bound without reaching through the script.
+TRANSPOSE_MIN_RATIO = 3.0     # the winning stores were 3x and 6x wider out than in
+TRANSPOSED_MAX_RATIO = 0.5    # anima's winner reduced 8192 to 2048, LTX's audio rows too
 
 
-def pitch_pad_patches(blk: nn.Module, min_pitch: int, min_rows: int) -> list:
-    """Wrap every projection whose input rows are at least ``min_pitch`` bytes apart.
+@dataclass(frozen=True)
+class LayoutRules:
+    """The bounds the layout arms select on, as one required argument."""
+
+    min_pitch: int = PAD_MIN_PITCH
+    min_rows: int = PITCH_MIN_ROWS
+    transpose_min_ratio: float = TRANSPOSE_MIN_RATIO
+    transposed_max_ratio: float = TRANSPOSED_MAX_RATIO
+
+
+def _projections(blk: nn.Module, ratio: Callable[[int, int], bool]) -> list[nn.Module]:
+    """The full-precision 2-D projections of ``blk`` that ``ratio(in, out)`` selects.
+
+    Floating-point weights only: a quantized weight is a different tensor with a different
+    kernel behind it, and none of these rules were measured on one.
+    """
+    return [mod for mod in blk.modules()
+            if getattr(mod, "weight", None) is not None
+            and mod.weight.dim() == 2 and mod.weight.is_floating_point()
+            and ratio(mod.weight.shape[1], mod.weight.shape[0])]
+
+
+def pitch_pad_patches(blk: nn.Module, rules: LayoutRules) -> list:
+    """Wrap every projection whose input rows are at least ``rules.min_pitch`` bytes apart.
 
     What the engine-wide sweep says the rule is: a GEMM's rate follows its reduction length,
     because that is its activation's row pitch, and rows 32768 bytes apart are charged at
-    about half what the same block charges anywhere else — LTX's 16384-wide FFN at 19 TF/s
-    against its own 39, krea2's at 20.6 against 40.6. Rows 24576 bytes apart lose about a
-    sixth. Nothing at or below 16 KiB moved, and anima's slow 16 KiB row answered a kernel
-    search rather than a pitch, which is a different disease.
+    about half what the same block charges anywhere else — LTX's and krea2's 16384-wide FFN
+    activations at 1.47x and 1.54x, h3_image's and wan22's 14336-wide ones at 1.24x and
+    1.29x, flux2's and qwen's 12288-wide ones at 1.16x. Nothing at or below 19 KiB moved in
+    any block, and anima's slow 16 KiB row answered a kernel search rather than a pitch,
+    which is a different disease. Rows narrower than ``min_rows``, on the other hand, lose:
+    the flux2 text stream was 0.89x on the same problem its image stream won 1.17x with.
 
-    So the threshold is the finding, and it is a parameter rather than a rule about powers
-    of two: at 32768 the arm touches only the half-rate GEMMs, at 24576 it also takes the
-    sixths, for a copy of every operand it pads.
+    So the two bounds are the finding, and the engine applies them in
+    ``thenoise.dit.quantized``, which is why this arm now reads flat. Run it with the bounds
+    moved to price the boundary rather than the fix.
 
-    Projections are picked by their input width alone, so a block needs no fixture, no arm
-    set and no name to be asked. The wrapper copies rather than writing straight into the
-    wider buffer, which is what an arm can do from outside a forward; the buckets section
-    says whether Inductor folds that copy into the kernel that produced the activation, and
-    it did for the LTX FFN.
+    The wrapper copies rather than writing straight into the wider buffer, which is what an
+    arm can do from outside a forward; the buckets section says whether Inductor folds that
+    copy into the kernel that produced the activation, and it did for the LTX FFN.
     """
     out = []
-    for mod in blk.modules():
-        weight = getattr(mod, "weight", None)
-        if weight is None or weight.dim() != 2:
-            continue
-        pitch = weight.shape[-1] * weight.element_size()
-        if pitch < min_pitch:
+    for mod in _projections(blk, lambda i, o: True):
+        if mod.weight.shape[-1] * mod.weight.element_size() < rules.min_pitch:
             continue
 
-        def forward(x, _m=mod, min_rows=min_rows):
-            if x.dim() >= 2 and x.numel() // x.shape[-1] >= min_rows:
+        def forward(x, _m=mod):
+            rows = x.dim() >= 2 and x.numel() // x.shape[-1] >= rules.min_rows
+            if rows and x.stride(-2) * x.element_size() >= rules.min_pitch:
                 wide = torch.empty((*x.shape[:-1], x.shape[-1] + PITCH_PAD_ELEMENTS),
                                    dtype=x.dtype, device=x.device)
                 wide[..., :x.shape[-1]] = x
@@ -408,35 +448,85 @@ def pitch_pad_patches(blk: nn.Module, min_pitch: int, min_rows: int) -> list:
     return out
 
 
-def pitch_arm(blk: Optional[nn.Module], min_pitch: int = PAD_MIN_PITCH,
-              min_rows: int = PITCH_MIN_ROWS) -> Arm:
-    """The pitch arm for one block, saying how many of its projections the rule reaches.
+def weight_transposed_patches(blk: nn.Module, rules: LayoutRules) -> list:
+    """Wide-output projections with their weight stored the other way round, same numbers.
 
-    The count belongs in the note because a gain of 0% means different things depending on
-    whether the rule found the block's FFN or found nothing to touch, and only the built
-    block knows which.
+    Where the row count is small and the output wide, the weight is the traffic and
+    ``F.linear`` reads it strided by its stored row. A transposed store hands the GEMM that
+    operand contiguous: 1.43x and 1.38x on flux2's two text-stream rows, 1.24x on moss's and
+    1.16x on qwen_image's and fibo2's, and nothing anywhere the stream was long.
+
+    The patch swaps the *tensor*, not the forward, which is what a load-time transpose would
+    do: the projection sees a weight of the shape it expects and a layout it never asked for,
+    and its operand padding and LoRA branch stay in the graph untouched.
     """
-    patches = pitch_pad_patches(blk, min_pitch, min_rows) if blk is not None else []
-    return Arm("pitch_pad",
-               PITCH_NOTE.format(min_pitch=min_pitch, min_rows=min_rows)
-               + (f" — {len(patches)} of this block's projections" if blk is not None
-                  else ""),
-               exact=False, patches=patches)
+    return [(mod, "weight",
+             nn.Parameter(mod.weight.t().contiguous().t(), requires_grad=False))
+            for mod in _projections(blk, lambda i, o: o >= rules.transpose_min_ratio * i)]
 
 
-def generic_arms(blk: Optional[nn.Module], min_pitch: int = PAD_MIN_PITCH,
-                 min_rows: int = PITCH_MIN_ROWS) -> dict[str, Arm]:
+def transposed_problem_patches(blk: nn.Module, rules: LayoutRules) -> list:
+    """Narrow-output projections answering for ``Cᵀ``, their consumers left to cope.
+
+    The same reduction with its free dimensions exchanged — ``W @ xᵀ`` for ``x @ Wᵀ`` — was
+    1.45x on anima's ``4096 x 8192 x 2048``, the row the pitch had no effect on, and 1.46x
+    on LTX's small audio projections: where a projection reduces to a fraction of its width
+    the tile problem is better the other way round.
+
+    The answer comes back as a transposed view rather than a copy, because whether the block
+    eats the strided reads that follow is the question this arm asks, and transposing here
+    would answer it wrong. It also asks the question the sweep answered about the operand
+    layout the other way round: a column-major operand cost 2.7x on LTX's down projection.
+    """
+    out = []
+    for mod in _projections(blk, lambda i, o: o <= rules.transposed_max_ratio * i):
+        def forward(x, _m=mod):
+            y = torch.matmul(_m.weight, x.transpose(-1, -2))
+            if _m.bias is not None:
+                y = y + _m.bias[:, None]
+            return y.transpose(-1, -2)
+
+        out.append((mod, "forward", forward))
+    return out
+
+
+def layout_arms(blk: Optional[nn.Module], rules: LayoutRules) -> list[Arm]:
+    """The layout arms, the same three for every block: reach for the operand, the weight,
+    and the problem itself.
+
+    With no block they come back unpatched, which is what ``--list-arms`` wants — the widths
+    are only known once the block exists, and that costs a GPU. Each note counts what its
+    rule reached, since "0% and nothing to do" and "0% and nothing to reach" are different
+    results.
+    """
+    built = ((pitch_pad_patches,
+              PITCH_NOTE.format(min_pitch=rules.min_pitch, min_rows=rules.min_rows),
+              "pitch_pad"),
+             (weight_transposed_patches,
+              WTRANSPOSE_NOTE.format(min_ratio=rules.transpose_min_ratio),
+              "weight_transposed"),
+             (transposed_problem_patches,
+              TRANSPOSED_NOTE.format(max_ratio=rules.transposed_max_ratio),
+              "transposed_problem"))
+    arms = []
+    for build, note, name in built:
+        patches = build(blk, rules) if blk is not None else []
+        arms.append(Arm(name,
+                        note + (f" — {len(patches)} of this block's projections"
+                                if blk is not None else ""),
+                        exact=False, patches=patches))
+    return arms
+
+
+def generic_arms(blk: Optional[nn.Module], rules: LayoutRules) -> dict[str, Arm]:
     """The arms every block has, without anyone writing them down for it.
 
     ``baseline`` so a block can be timed against the changes the script knows how to make
-    without knowing anything about it, and the pitch arm, which reads them off the module
-    widths. A block worth real arms gets its own set and this one stops being used.
-
-    With no block the patches are left empty, which is what ``--list-arms`` wants: the
-    widths are only known once the block has been built, and that costs a GPU.
+    without knowing anything about it, then the layout arms, which read the module widths.
+    A block worth real arms gets its own set and this one stops being used.
     """
     return {"baseline": Arm("baseline", "the block as shipped"),
-            "pitch_pad": pitch_arm(blk, min_pitch, min_rows)}
+            **{arm.name: arm for arm in layout_arms(blk, rules)}}
 
 
 def phases_dtype(dtype: torch.dtype):
@@ -505,6 +595,10 @@ def ltx_arms() -> dict[str, Arm]:
             exact=False),
         Arm("pitch_pad", PITCH_NOTE.format(min_pitch=PAD_MIN_PITCH,
                                            min_rows=PITCH_MIN_ROWS), exact=False),
+        Arm("weight_transposed",
+            WTRANSPOSE_NOTE.format(min_ratio=TRANSPOSE_MIN_RATIO), exact=False),
+        Arm("transposed_problem",
+            TRANSPOSED_NOTE.format(max_ratio=TRANSPOSED_MAX_RATIO), exact=False),
         Arm("sdpa_eager",
             "SDPA outside the compiled region (attention -> eager_attention), which "
             "breaks the graph around every attention call",
@@ -548,8 +642,7 @@ ARMS: dict[str, Callable[[], dict[str, Arm]]] = ({"ltx/av": ltx_arms,
 FIXTURES = {"ltx/av": ltx_fixture, "ltx/av_i2v": ltx_fixture}
 
 
-def arm_modules(arms: dict[str, Arm], blk: nn.Module, min_pitch: int,
-                min_rows: int) -> None:
+def arm_modules(arms: dict[str, Arm], blk: nn.Module, rules: LayoutRules) -> None:
     """Fill in the arms that name sub-modules, now that the block exists.
 
     A sub-module is replaced with a stand-in forward on the *instance*, which Inductor
@@ -583,7 +676,9 @@ def arm_modules(arms: dict[str, Arm], blk: nn.Module, min_pitch: int,
 
     arms["ff_down_contig"].patches = [(ff, "forward", ff_forward)]
     arms["ff_down_padded"].patches = [(ff, "forward", ff_padded)]
-    arms["pitch_pad"] = pitch_arm(blk, min_pitch, min_rows)
+    for arm in layout_arms(blk, rules):
+        if arm.name in arms:
+            arms[arm.name] = arm
     arms["no_gate"].patches = [(mod, "to_gate_logits", None) for mod in sub.values()
                                if getattr(mod, "to_gate_logits", None) is not None]
 
@@ -640,7 +735,9 @@ def child_cmd(arm: str, args, out: Path) -> list[str]:
            "--warmup", str(args.warmup), "--iters", str(args.iters),
            "--repeats", str(args.repeats), "--json", str(out),
            "--pad-min-pitch", str(args.pad_min_pitch),
-           "--pad-min-rows", str(args.pad_min_rows)]
+           "--pad-min-rows", str(args.pad_min_rows),
+           "--weight-transposed-min-ratio", str(args.weight_transposed_min_ratio),
+           "--transposed-problem-max-ratio", str(args.transposed_problem_max_ratio)]
     if args.scenario:
         cmd += ["--scenario", args.scenario]
     if args.tunable:
@@ -1500,12 +1597,20 @@ def main() -> None:
                     help="ask hipBLASLt for this many candidate algorithms per GEMM")
     ap.add_argument("--pad-min-pitch", type=int, default=PAD_MIN_PITCH,
                     help="the input row pitch, in bytes, from which the pitch_pad arm "
-                         "starts padding: 32768 catches the half-rate GEMMs, 24576 also "
-                         "catches the ones losing a sixth")
+                         "starts padding: the engine's bound, 24576, catches every GEMM the "
+                         "sweep found paying for its operand pitch")
     ap.add_argument("--pad-min-rows", type=int, default=PITCH_MIN_ROWS,
                     help="rows an operand must have for the pitch_pad arm to widen it; the "
                          "engine uses the same bound, since short streams were measured "
                          "losing to widening. 1 removes it, which is how to price that")
+    ap.add_argument("--weight-transposed-min-ratio", type=float,
+                    default=TRANSPOSE_MIN_RATIO,
+                    help="how much wider in output than input a projection must be for the "
+                         "weight_transposed arm to restore its weight transposed")
+    ap.add_argument("--transposed-problem-max-ratio", type=float,
+                    default=TRANSPOSED_MAX_RATIO,
+                    help="how narrow a projection's output must be, against its input, for "
+                         "the transposed_problem arm to answer it as C transposed")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="print each arm's raw group times")
     args = ap.parse_args()
@@ -1527,9 +1632,12 @@ def main() -> None:
         from thenoise.utils.device_patches import apply_device_patches
         apply_device_patches(args.device)
 
+    rules = LayoutRules(min_pitch=args.pad_min_pitch, min_rows=args.pad_min_rows,
+                        transpose_min_ratio=args.weight_transposed_min_ratio,
+                        transposed_max_ratio=args.transposed_problem_max_ratio)
     if args.list_arms:
         for name, arm in (ARMS[args.block]() if args.block in ARMS
-                          else generic_arms(None)).items():
+                          else generic_arms(None, rules)).items():
             print(f"{name:{NAME_W}s} {'exact' if arm.exact else 'ablate':6s} {arm.note}")
         return
 
@@ -1547,12 +1655,10 @@ def main() -> None:
                                              for k, v in fixture.terms.items())
               + f"   total={total / 1e12:.2f}")
     wanted = ([a.strip() for a in args.arms.split(",") if a.strip()]
-              or list(ARMS[args.block]() if known
-                      else generic_arms(fixture.blk, args.pad_min_pitch,
-                                        args.pad_min_rows)))
+              or list(ARMS[args.block]() if known else generic_arms(fixture.blk, rules)))
     arms = (ARMS[args.block]() if known
-            else generic_arms(fixture.blk, args.pad_min_pitch, args.pad_min_rows))
-    arm_modules(arms, fixture.blk, args.pad_min_pitch, args.pad_min_rows)
+            else generic_arms(fixture.blk, rules))
+    arm_modules(arms, fixture.blk, rules)
     for name in wanted:
         if name not in arms:
             ap.error(f"unknown arm {name!r}; see --list-arms")

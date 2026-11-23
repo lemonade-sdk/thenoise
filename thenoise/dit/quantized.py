@@ -150,13 +150,11 @@ PITCH_PENALTY = torch.version.hip is not None
 
 
 #: Fewer rows than this, and the tile effect the widening cures is not what the GEMM's time
-#: is made of: the same ``[M, 12288] x [12288, 3072]`` problem on gfx1151 gained 1.16x at
-#: M=4096 and lost 0.86x at M=512, and flux2's ``[512, 12288] x [12288, 4096]`` lost too.
-#: The boundary between the two is unmeasured — every block's video or image stream is
-#: thousands of rows and the streams this excludes are its text (512) and audio (126) ones —
-#: so this sits an order below the smallest win rather than at a number that would pretend
-#: to be a measurement.
-PITCH_MIN_ROWS = 2048
+#: is made of. The same ``[M, 12288] x [12288, 4096]`` problem on gfx1151: 1.17x from
+#: widening at M=1024, 1.18x at 2025, 1.16x at 4096 — and 0.89x, a loss, at M=512. Which
+#: puts the bound between 512 and 1024, and the streams on either side of it are the image
+#: and video ones against the text (512) and audio (126) ones.
+PITCH_MIN_ROWS = 1024
 
 
 def pitch_too_wide(x: torch.Tensor) -> bool:
