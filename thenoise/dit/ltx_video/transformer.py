@@ -93,6 +93,22 @@ class _FeedForward(nn.Module):
         return x
 
 
+def _prompt_params(mask: torch.Tensor | None) -> AttentionParams:
+    """Params for a prompt mask, decided where the mask can still be read.
+
+    A prompt mask constrains keys and never queries, so the block needs no operand: a crop
+    of the keys every query shares, or nothing at all when the prompt carries no padding.
+    Both answers depend on the mask's values, and the block is compiled, so the question is
+    asked once per step here.
+
+    Only a two-dimensional mask is key padding. Anything else was built upstream with
+    per-query structure no crop expresses and keeps the additive operand it arrived with.
+    """
+    if mask is not None and mask.ndim == 2:
+        return AttentionParams.create_attention_params_from_mask(0, mask)
+    return AttentionParams(attention_mask=mask)
+
+
 class _LTXAttention(nn.Module):
     """LTX attention projection ABI, using TheNoise's SDPA and split-half RoPE."""
 
@@ -111,6 +127,7 @@ class _LTXAttention(nn.Module):
 
     def forward(self, x: torch.Tensor, *, context: torch.Tensor | None = None,
                 mask: torch.Tensor | None = None,
+                attn_params: AttentionParams | None = None,
                 q_rope: tuple[torch.Tensor, torch.Tensor] | None = None,
                 k_rope: tuple[torch.Tensor, torch.Tensor] | None = None) -> torch.Tensor:
         if context is None:
@@ -126,12 +143,16 @@ class _LTXAttention(nn.Module):
         if q_rope is not None:
             q = apply_rope_split_half(q, *q_rope)
             k = apply_rope_split_half(k, *(k_rope if k_rope is not None else q_rope))
-        if mask is not None:
-            if mask.ndim == 2:
-                mask = mask[:, None, None, :]
-            elif mask.ndim == 3:
-                mask = mask[:, None, :, :]
-        x = attention(q, k, v, attn_params=AttentionParams(attention_mask=mask))
+        if attn_params is None:
+            # Params arrive decided where a caller can read the mask; ``mask`` stays for the
+            # per-query self-attention mask, which no crop expresses.
+            if mask is not None:
+                if mask.ndim == 2:
+                    mask = mask[:, None, None, :]
+                elif mask.ndim == 3:
+                    mask = mask[:, None, :, :]
+            attn_params = AttentionParams(attention_mask=mask)
+        x = attention(q, k, v, attn_params=attn_params)
         if logits is not None:
             # Per-head sigmoid gates. Zero logits mean a unit gate, as in LTX.
             x = x.unflatten(-1, (self.heads, self.head_dim))
@@ -191,8 +212,8 @@ class _AVBlock(nn.Module):
                 a_rope: tuple[torch.Tensor, torch.Tensor],
                 v_ca_rope: tuple[torch.Tensor, torch.Tensor],
                 a_ca_rope: tuple[torch.Tensor, torch.Tensor],
-                vtext_mask: torch.Tensor | None,
-                atext_mask: torch.Tensor | None,
+                vtext_params: AttentionParams,
+                atext_params: AttentionParams,
                 v_self_mask: torch.Tensor | None,
                 *, isolate_modalities: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
         s_v, c_v, g_v, s_vf, c_vf, g_vf, *text_v = self._ada(self.scale_shift_table, vtime)
@@ -219,7 +240,7 @@ class _AVBlock(nn.Module):
             vn = vn * (1 + scale_vq) + shift_vq
         if self.cross_attn_adaln:
             vtext = vtext * (1 + scale_vk) + shift_vk
-        vc = self.attn2(vn, context=vtext, mask=vtext_mask)
+        vc = self.attn2(vn, context=vtext, attn_params=vtext_params)
         if self.video_cross_attn_adaln:
             vc = vc * gate_vq
         v = v + vc
@@ -230,7 +251,7 @@ class _AVBlock(nn.Module):
             an = an * (1 + scale_aq) + shift_aq
         if self.cross_attn_adaln:
             atext = atext * (1 + scale_ak) + shift_ak
-        ac = self.audio_attn2(an, context=atext, mask=atext_mask)
+        ac = self.audio_attn2(an, context=atext, attn_params=atext_params)
         if self.audio_cross_attn_adaln:
             ac = ac * gate_aq
         a = a + ac
@@ -431,12 +452,8 @@ class LTX2VideoTransformer3DModel(nn.Module):
         b = hidden_states.shape[0]
         audio_timestep = timestep if audio_timestep is None else audio_timestep
         audio_sigma = sigma if audio_sigma is None else audio_sigma
-        if encoder_attention_mask is not None and encoder_attention_mask.ndim == 2:
-            encoder_attention_mask = ((1 - encoder_attention_mask.to(hidden_states.dtype))
-                                      * -10000.0).unsqueeze(1)
-        if audio_encoder_attention_mask is not None and audio_encoder_attention_mask.ndim == 2:
-            audio_encoder_attention_mask = ((1 - audio_encoder_attention_mask.to(audio_hidden_states.dtype))
-                                            * -10000.0).unsqueeze(1)
+        vtext_params = _prompt_params(encoder_attention_mask)
+        atext_params = _prompt_params(audio_encoder_attention_mask)
         if video_self_attention_mask is not None:
             video_self_attention_mask = (1 - video_self_attention_mask.to(hidden_states.dtype)) * -10000.0
         v_rope = self.rope.video(b, num_frames, height, width, fps, hidden_states.device)
@@ -479,15 +496,14 @@ class LTX2VideoTransformer3DModel(nn.Module):
         # and leaves batch, heads and trunk static.
         mark_token_axis(v, a, encoder_hidden_states, audio_encoder_hidden_states,
                         vtime, atime, v_cross, a_cross, v_gate, a_gate,
-                        vprompt, aprompt, encoder_attention_mask,
-                        audio_encoder_attention_mask, video_self_attention_mask)
+                        vprompt, aprompt, video_self_attention_mask)
         # A phase table's token axis is the one before last: [B, H, tokens, angles].
         mark_token_axis(*v_rope, *a_rope, *v_ca_rope, *a_ca_rope, dim=-2)
         for block in self.transformer_blocks:
             v, a = block(v, a, encoder_hidden_states, audio_encoder_hidden_states,
                          vtime, atime, v_cross, a_cross, v_gate, a_gate,
                          vprompt, aprompt, v_rope, a_rope, v_ca_rope, a_ca_rope,
-                         encoder_attention_mask, audio_encoder_attention_mask,
+                         vtext_params, atext_params,
                          video_self_attention_mask, isolate_modalities=isolate_modalities)
         vv = self.scale_shift_table[None, None].to(embedded_v) + embedded_v[:, :, None]
         ash = self.audio_scale_shift_table[None, None].to(embedded_a) + embedded_a[:, :, None]

@@ -69,7 +69,7 @@ Usage
     .venv/bin/python bench-scripts/block_probe.py --tokens 16384 --section sdpa
     .venv/bin/python bench-scripts/block_probe.py --tokens 16384 --section gemm \
         --lt-algos 16
-    .venv/bin/python bench-scripts/block_probe.py --tokens 9216 --arms no_prompt_mask,sdpa_eager
+    .venv/bin/python bench-scripts/block_probe.py --tokens 9216 --arms prompt_mask_operand,sdpa_eager
     .venv/bin/python bench-scripts/block_probe.py --tokens 16384 --section buckets \
         --arms open_graph,sdpa_eager,rope_bf16
     .venv/bin/python bench-scripts/block_probe.py --tokens 16384 --section profile
@@ -564,19 +564,43 @@ class Arm:
     result: Optional["Result"] = None
 
 
+def prompt_mask_patches(*attns: nn.Module) -> list:
+    """Give each attention back the additive all-valid operand LTX used to build for it.
+
+    The transformer now reads the prompt mask once per step, outside the compiled block, and
+    hands the block a crop or no operand at all. This undoes that decision at the attention,
+    which is where the key count is known, so the block pays for a mask again and the arm
+    says what the decision is worth on a block that already has it.
+    """
+    out = []
+    for att in attns:
+        def forward(x, *, context=None, mask=None, attn_params=None, q_rope=None,
+                    k_rope=None, _m=att):
+            empty = (attn_params is not None and attn_params.attention_mask is None
+                     and attn_params.key_prefix is None)
+            if context is not None and empty:
+                mask = torch.zeros(x.shape[0], context.shape[1],
+                                   dtype=x.dtype, device=x.device)
+                attn_params = None
+            return type(_m).forward(_m, x, context=context, mask=mask,
+                                    attn_params=attn_params, q_rope=q_rope, k_rope=k_rope)
+
+        out.append((att, "forward", forward))
+    return out
+
+
 def ltx_arms() -> dict[str, Arm]:
     """Every arm that needs no block instance; the sub-module ones are filled in later."""
     forward = ltx._AVBlock.forward
     open_graph = torch.compile(fullgraph=False)(forward._torchdynamo_orig_callable)
-    unmask = (ltx, "AttentionParams", lambda **_kw: None)
 
     return {a.name: a for a in (
         Arm("baseline", "the block as shipped"),
-        Arm("no_prompt_mask",
-            "both prompt attentions unmasked. The mask is the connectors' own, which "
-            "they return all-valid: the same function and the same FLOPs answered by a "
-            "different SDPA kernel, so there is no rate here, only the time",
-            patches=[unmask]),
+        Arm("prompt_mask_operand",
+            "an additive all-valid operand put back on both prompt attentions, the way LTX "
+            "built one for every block before the transformer started reading the mask once "
+            "per step: the same function and the same FLOPs answered by a different SDPA "
+            "kernel, so there is no rate here, only the time an operand costs", exact=False),
         Arm("open_graph", "the block compiled without fullgraph, semantics untouched",
             patches=[(ltx._AVBlock, "forward", open_graph)]),
         Arm("open_graph_rope",
@@ -604,9 +628,12 @@ def ltx_arms() -> dict[str, Arm]:
             "breaks the graph around every attention call",
             patches=[(ltx._AVBlock, "forward", open_graph),
                      (ltx, "attention", eager_attention)]),
-        Arm("sdpa_eager_nomask", "the two above together",
+        Arm("sdpa_eager_masked",
+            "SDPA eager with the additive operand restored on the prompt attentions, which "
+            "is what an operand looks like once the region around it is unfused",
+            exact=False,
             patches=[(ltx._AVBlock, "forward", open_graph),
-                     (ltx, "attention", eager_attention), unmask]),
+                     (ltx, "attention", eager_attention)]),
         Arm("rope_bf16",
             "the rotary phase tables carried in bf16 instead of fp32: half the table "
             "traffic, and the doubled band assembled in bf16",
@@ -662,6 +689,9 @@ def arm_modules(arms: dict[str, Arm], blk: nn.Module, rules: LayoutRules) -> Non
     arms["no_v2a"].patches = mods("video_to_audio_attn")
     arms["no_cross_modal"].patches = mods("audio_to_video_attn", "video_to_audio_attn")
     arms["no_audio_stream"].patches = mods("audio_attn1", "audio_attn2", "audio_ff")
+    operand = prompt_mask_patches(sub["attn2"], sub["audio_attn2"])
+    arms["prompt_mask_operand"].patches = operand
+    arms["sdpa_eager_masked"].patches += operand
     ff = sub["ff"]
 
     def ff_forward(x, _ff=ff):

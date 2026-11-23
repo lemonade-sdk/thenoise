@@ -1347,6 +1347,7 @@ def _ltx_case(ctx: Ctx, tokens: int, role: str, token_timestep: bool) -> Case:
     from thenoise.dit.ltx_video.rope import AVRope
     from thenoise.dit.ltx_video.transformer import (AUDIO_HEAD_DIM, VIDEO_HEAD_DIM,
                                                     _AVBlock)
+    from thenoise.utils.attention import AttentionParams
     from thenoise.utils.dynamo import mark_token_axis
 
     vdim, adim = LTX_VDIM, LTX_ADIM
@@ -1370,7 +1371,10 @@ def _ltx_case(ctx: Ctx, tokens: int, role: str, token_timestep: bool) -> Case:
     v = randn(ctx, 1, n, vdim)
     a = randn(ctx, 1, audio_tokens, adim)
     vtext, atext = randn(ctx, 1, txt, vctx), randn(ctx, 1, txt, actx)
-    key_mask = torch.zeros(1, txt, device=ctx.tdev, dtype=ctx.dtype)
+    # What the transformer decides once per step, outside the compiled block: an unpadded
+    # prompt reaches the attentions as no operand at all.
+    vtext_params = atext_params = AttentionParams.create_attention_params_from_mask(
+        0, torch.ones(1, txt, dtype=torch.bool, device=ctx.tdev))
     # 9 AdaLN slots per stream once prompt modulation is wired in: 6 for the block's own
     # norms and gates, 3 more for the prompt attention's.
     vtime = randn(ctx, 1, n if token_timestep else 1, 9 * vdim)
@@ -1392,11 +1396,11 @@ def _ltx_case(ctx: Ctx, tokens: int, role: str, token_timestep: bool) -> Case:
 
     def run():
         mark_token_axis(v, a, vtext, atext, vtime, atime, v_cross, a_cross,
-                        v_gate, a_gate, v_prompt, a_prompt, key_mask)
+                        v_gate, a_gate, v_prompt, a_prompt)
         mark_token_axis(*v_rope, *a_rope, *v_ca_rope, *a_ca_rope, dim=-2)
         return blk(v, a, vtext, atext, vtime, atime, v_cross, a_cross, v_gate, a_gate,
                    v_prompt, a_prompt, v_rope, a_rope, v_ca_rope, a_ca_rope,
-                   key_mask, key_mask, None)
+                   vtext_params, atext_params, None)
 
     video, audio = (vheads, VIDEO_HEAD_DIM), (aheads, AUDIO_HEAD_DIM)
     flops = 0.0
