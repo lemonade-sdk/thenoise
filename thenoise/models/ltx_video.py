@@ -439,7 +439,7 @@ class LTXVideo(VideoModel):
 
 
 class LTX23Video(LTXVideo):
-    name = "LTX-2.3-Distilled"
+    name = "ltx23"
     version = VERSION_23
     SIGNATURE = SIGNATURE_23
     #: Its codecs, vocoder and projections ship inside the transformer file -- in BF16
@@ -448,7 +448,7 @@ class LTX23Video(LTXVideo):
 
 
 class LTX25Video(LTXVideo):
-    name = "LTX-2.5-Distilled"
+    name = "ltx25"
     version = VERSION_25
     SIGNATURE = SIGNATURE_25
     #: No all-in-one 2.5 release: its codecs and upscaler ship apart.
