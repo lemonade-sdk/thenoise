@@ -181,4 +181,4 @@ class MeshDecodeParams:
 
 
 __all__ = ["ModelConfig", "EncodePromptArgs", "GenerateRequest", "SamplingParams",
-           "VideoSamplingParams"]
+           "VideoSamplingParams", "MeshSamplingParams", "MeshDecodeParams"]
