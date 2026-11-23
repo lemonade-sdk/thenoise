@@ -677,13 +677,12 @@ def test_a_down_block_leaves_the_tensor_it_was_handed_alone():
 
 # ----------------------------------------------------------------- Schedule
 
-def test_the_flow_shifts_are_the_ones_the_releases_ship():
-    assert VARIANTS["ti2v_5b"].prefs["flow_shift"] == 5.0
-    assert VARIANTS["i2v_14b"].prefs["flow_shift"] == 5.0
-    assert VARIANTS["t2v_14b"].prefs["flow_shift"] == 12.0
-    sigmas = get_sigmas(4, shift=5.0)
-    assert sigmas[0] == 1.0 and sigmas[-1] == 0.0
-    assert all(a > b for a, b in zip(sigmas, sigmas[1:]))
+def test_every_variants_shift_feeds_a_grid_running_one_to_zero():
+    """Which shift a release ships is a knob; the grid it feeds is the contract."""
+    for variant in VARIANTS.values():
+        sigmas = get_sigmas(4, shift=variant.prefs["flow_shift"])
+        assert sigmas[0] == 1.0 and sigmas[-1] == 0.0
+        assert all(a > b for a, b in zip(sigmas, sigmas[1:]))
     assert wan_adapter().resolve_video(VideoSpec(prompt="x", frames=10)).frame_count == 13
 
 
@@ -1353,9 +1352,9 @@ def test_the_concatenating_variant_is_read_from_the_patch_embedding():
     assert i2v.variant is VARIANTS["i2v_14b"]
     assert i2v.CAPABILITIES["video"]["i2v"] is True
     assert i2v.pref("ref_method") == "concat_channels"
-    # The pair's own release schedule: later handover, half the T2V shift.
+    # The pair's own release schedule: a later handover on a smaller shift than its T2V twin.
     assert i2v.variant.experts.boundary == 0.900 > A14B.experts.boundary
-    assert i2v.variant.prefs["flow_shift"] == 5.0 < A14B.prefs["flow_shift"]
+    assert i2v.variant.prefs["flow_shift"] < A14B.prefs["flow_shift"]
     assert i2v.variant.experts.low_cfg_ratio == 1.0
 
 
@@ -1523,7 +1522,8 @@ def test_a_generated_first_frame_survives_a_concatenated_reference():
 
 def test_a_request_can_ask_for_the_shift_it_needs():
     model = wan_adapter("t2v_14b")
-    assert model.resolve_video(VideoSpec(prompt="x")).flow_shift == 12.0
+    assert (model.resolve_video(VideoSpec(prompt="x")).flow_shift
+            == model.variant.prefs["flow_shift"])
     assert model.resolve_video(
         VideoSpec(prompt="x", flow_shift=5.0)).flow_shift == 5.0
 

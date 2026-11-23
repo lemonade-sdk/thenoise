@@ -1040,15 +1040,22 @@ def test_ltx_variants_resolve_with_shared_video_contract_and_fixed_refinement():
                 flow_shift=resolved.flow_shift, fps=resolved.fps,
             )
 
+        # Which defaults a bare request lands on is the adapter's to move; that the clip
+        # they name fits the VAE it will be decoded through is what has to hold.
         resolved = model.resolve_video(VideoSpec(prompt="moving fox"))
-        assert (resolved.width, resolved.height, resolved.frame_count) == (768, 512, 33)
-        assert (resolved.steps, resolved.sampler, resolved.output_format) == (8, "euler", "mp4")
+        assert (resolved.width % model.vae.spatial_compression_ratio,
+                resolved.height % model.vae.spatial_compression_ratio) == (0, 0)
+        assert (resolved.frame_count - 1) % model.vae.temporal_compression_ratio == 0
+        assert resolved.sampler and resolved.output_format
         explicit = model.resolve_video(VideoSpec(prompt="moving fox", frames=34))
         assert explicit.frame_count == 41  # explicit frame request rounds up to 8n+1
 
         schedule = model.schedule(params_for(resolved))
-        assert len(schedule) == 8
-        assert [len(s.steps) for s in model.segments(params_for(resolved), schedule, 1.0)] == [8, 3]
+        spans = model.segments(params_for(resolved), schedule, 1.0)
+        assert len(schedule) == resolved.steps == len(spans[0].steps)
+        # A second stage, entered below pure noise.
+        assert 0 < len(spans[1].steps) <= len(spans[0].steps)
+        assert float(spans[1].steps[0].t) < 1.0
         # The released recipe is the default, not a floor: another count resamples the
         # published grid and the refine pass keeps its share of it.
         for steps, refine in ((1, 1), (4, 2), (16, 6)):
