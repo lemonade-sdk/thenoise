@@ -116,6 +116,8 @@ def written(mesh: Mesh, directory: Path) -> dict[str, tuple[Path, str]]:
         "f 1/1/1 2/1/1 3/1/1 4/1/1\nf -4 -3 -2 -1\nf 5 6 7 9 10 11 12\n")
     (directory / "junk.glb").write_bytes(b"not a glb at all, not even close")
     (directory / "oob.obj").write_text("v 0 0 0\nv 1 0 0\nv 1 1 0\nf 1 2 9\n")
+    # A writer refuses to make this file, so it has to arrive from elsewhere.
+    (directory / "nan.obj").write_text("v 0 0 0\nv nan 0 0\nv 0 1 0\nf 1 2 3\n")
     return {"glb": (directory / "shape.glb", "glb"),
             "obj": (directory / "shape.obj", "obj"),
             "stl": (directory / "shape.stl", "stl"),
@@ -123,6 +125,7 @@ def written(mesh: Mesh, directory: Path) -> dict[str, tuple[Path, str]]:
             "quad": (directory / "quad.obj", "obj"),
             "junk": (directory / "junk.glb", "glb"),     # refused: not the bytes
             "oob": (directory / "oob.obj", "obj"),      # refused: points past the vertices
+            "nan": (directory / "nan.obj", "obj"),     # refused: a vertex that is not a number
             "unknown": (directory / "shape.obj", "ply")}  # refused: not a format we view
 
 def parsed(tmp_path: Path) -> dict:
@@ -181,6 +184,7 @@ def test_viewer_says_no_in_words_the_stage_can_show(tmp_path):
     assert "nothing here views" in got["unknown"]["error"]
     # A face past the end of the vertex list draws nothing and would say nothing at all.
     assert "not there" in got["oob"]["error"]
+    assert "not a number" in got["nan"]["error"]
 
 
 def test_viewer_frames_the_shape_it_was_given(tmp_path):

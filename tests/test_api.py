@@ -266,6 +266,35 @@ def test_ui_offers_every_container_the_mesh_writer_has():
     assert offered == ["", *OUTPUT_FORMATS], block
 
 
+def test_ui_offers_the_density_presets_the_spec_keeps():
+    """The pane's density menu is ``DENSITY_PRESETS``, values and all."""
+    from thenoise.mesh.spec import DENSITY_PRESETS
+
+    with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
+        block = re.search(r'<select id="mesh_octree_resolution">(.*?)</select>',
+                          f.read(), re.S)[1]
+    offered = [one.group(1) for one in re.finditer(r'<option value="([^"]*)"', block)]
+    assert offered == ["", *[str(one) for one in DENSITY_PRESETS]], block
+
+
+def test_ui_keeps_the_shape_tuning_behind_one_disclosure():
+    """The release's own configuration is folded away rather than removed."""
+    tuning = {"mesh_latents", "mesh_steps", "mesh_guidance_scale", "mesh_sampler",
+              "mesh_bounds", "mesh_mc_level"}
+    shown = {"mesh_octree_resolution", "mesh_seed", "mesh_output_format",
+             "mesh_lora_specs", "mesh_file"}
+
+    with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
+        page = f.read()
+    mesh = page[page.index('id="view-mesh"'):page.index("/view-mesh")]
+    group = re.search(r"<details[^>]*thenoise-mesh-tuning-open[^>]*>(.*?)</details>",
+                      mesh, re.S)
+    assert group, "the shape pane has no tuning disclosure"
+    inside = set(re.findall(r'id="(mesh_[a-z_]+)"', group[1]))
+    assert inside == tuning, inside
+    assert shown <= set(re.findall(r'id="(mesh_[a-z_]+)"', mesh)) - inside
+
+
 def test_ui_every_named_view_exists():
     """A view that a tab or the medium logic names but nobody serves is a blank screen."""
     with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:

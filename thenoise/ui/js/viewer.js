@@ -198,6 +198,7 @@ function meshShape(positions, indices) {
   for (let i = 0; i + 2 < positions.length; i += 3) {
     for (let axis = 0; axis < 3; axis += 1) {
       const value = positions[i + axis];
+      if (!Number.isFinite(value)) throw new Error('a vertex that is not a number');
       if (value < floor[axis]) floor[axis] = value;
       if (value > ceiling[axis]) ceiling[axis] = value;
     }

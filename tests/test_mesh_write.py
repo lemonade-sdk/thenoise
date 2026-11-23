@@ -136,3 +136,23 @@ def test_the_writers_move_the_faces_with_the_vertices(monkeypatch, tmp_path):
         moved.clear()
         write(mesh, tmp_path / f"mesh.{suffix}")
         assert moved == {(3, 3), (1, 3)}, suffix
+
+
+def a_corner_that_is_not_a_number() -> Mesh:
+    return Mesh(vertices=torch.tensor([[0.0, 0.0, 0.0], [float("nan"), 0.0, 0.0],
+                                       [0.0, 1.0, 0.0]]),
+                faces=torch.tensor([[0, 1, 2]], dtype=torch.int64))
+
+
+@pytest.mark.parametrize("writer", [write_glb, write_obj, write_stl])
+def test_a_file_is_not_written_from_a_field_that_overflowed(tmp_path, writer):
+    """A glTF header cannot carry the ``NaN`` this mesh would put in it."""
+    with pytest.raises(ValueError, match="not a number"):
+        writer(a_corner_that_is_not_a_number(), tmp_path / "shape")
+    assert not (tmp_path / "shape").exists()
+
+
+def test_the_dispatch_refuses_it_before_a_container_is_chosen(tmp_path):
+    with pytest.raises(ValueError, match="not a number"):
+        write_mesh(a_corner_that_is_not_a_number(), tmp_path / "shape.glb")
+    assert not (tmp_path / "shape.glb").exists()

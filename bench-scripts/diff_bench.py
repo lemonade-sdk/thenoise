@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Say what actually moved between two bench snapshots.
 
-``block_bench.py`` and ``vae_bench.py`` photograph; this develops a pair of photographs
+``block_bench.py``, ``vae_bench.py`` and ``shape_sweep.py`` photograph; this develops a
+pair of photographs
 and hands back the rows that changed. Nothing is measured here, so it runs anywhere, in
 seconds, on two JSON files, and it takes either tool's snapshots — they record the same
 fields per case, so one diff reads DiT blocks and one reads VAE codecs. What it will not
@@ -39,7 +40,7 @@ import sys
 
 SIGMA_FLOOR = 0.005          # a groups set with zero scatter would flag a 1 ns change
 MIN_COV_FLOOR = 0.1          # ditto for a snapshot that recorded cov_pct == 0.0
-TOOLS = ("block_bench", "vae_bench")     # the snapshot layouts this can read
+TOOLS = ("block_bench", "vae_bench", "shape_sweep")  # snapshots this can read
 
 
 def load(path: str) -> dict:

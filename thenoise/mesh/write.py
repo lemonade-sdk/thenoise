@@ -15,11 +15,18 @@ _GLTF_POSITION_TARGET = 34962
 _GLTF_INDEX_TARGET = 34963
 
 
+def _host(mesh: Mesh) -> Mesh:
+    """Every writer starts here, and a glTF header cannot carry a ``NaN`` position."""
+    if not bool(torch.isfinite(mesh.vertices).all()):
+        raise ValueError("the sampled field left a position that is not a number")
+    return mesh.cpu()
+
+
 def write_obj(mesh: Mesh, path: str | Path) -> None:
     """``v`` lines then ``f`` lines, 1-based as OBJ counts."""
     if mesh.is_empty:
         raise ValueError("there is no mesh to write")
-    local = mesh.cpu()
+    local = _host(mesh)
     vertices = local.vertices.tolist()
     faces = local.faces.tolist()
     lines = [f"v {x:.6f} {y:.6f} {z:.6f}" for x, y, z in vertices]
@@ -29,7 +36,7 @@ def write_obj(mesh: Mesh, path: str | Path) -> None:
 
 def _glb(mesh: Mesh) -> bytes:
     """One mesh, one primitive, no materials; glTF demands a POSITION min and max."""
-    local = mesh.cpu()
+    local = _host(mesh)
     positions = local.vertices.to(torch.float32).contiguous()
     indices = local.faces.to(torch.int32).contiguous().reshape(-1)
     blob = positions.numpy().tobytes() + indices.numpy().tobytes()
@@ -78,7 +85,7 @@ def write_stl(mesh: Mesh, path: str | Path) -> None:
     Units are whatever the model's space means to whoever opens it."""
     if mesh.is_empty:
         raise ValueError("there is no mesh to write")
-    local = mesh.cpu()
+    local = _host(mesh)
     corners = local.vertices.to(torch.float32)[local.faces]
     span = corners[:, 1] - corners[:, 0]
     reach = corners[:, 2] - corners[:, 0]

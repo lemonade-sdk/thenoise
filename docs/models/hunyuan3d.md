@@ -75,6 +75,7 @@ slots.
 | `--bounds` | `bounds` | 1.01 | half-width of the sampled volume in latent units |
 | `--mc-level` | `mc_level` | 1/512 | the field value the surface is cut at; the reference pipeline's cut, in this field's sign |
 | `--output-format` | `output_format` | `glb` | `glb`, `obj` or `stl`; `--out`'s extension decides if unset |
+| `--scale` | `scale` | 1.0 | multiply the coordinates on the way out, because no container says what a unit is |
 
 STL is the one format that stores no shared vertices: every triangle carries its own three
 corners and its own normal, which is exactly what comes out of the cut — a slicer welds
@@ -88,6 +89,22 @@ built by halving down from the resolution you asked for until 63, so 384 walks
 
 `--bounds` slightly above 1 matters: an object that touches the edge of the sampled volume
 gets its surface clipped there, and nothing downstream can tell you it happened.
+
+`--scale` exists because no container says what a unit is: a shape spanning 1.01 latent
+units is neither millimetres nor inches until someone multiplies it, and it scales about
+the origin, which is the centre of the sampled volume.
+
+What the cut does promise is that it is closed and wound outward: `Mesh.signed_volume()`
+comes out positive on every shape and every edge is shared by exactly two triangles. A
+handful of triangles are numerically flat — areas near 1e-13, a few dozen in a quarter
+million at 192 — and they are kept, because dropping them turns their neighbours' edges
+into boundary edges, which is a hole. A slicer that minds them can be told; a mesh with
+holes cannot be.
+
+The browser's density menu is that same ladder — 96, 192, 384, 768, from `DENSITY_PRESETS`
+— and its finest step is `MAX_OCTREE_RESOLUTION`, so the pane cannot ask for what the
+engine would refuse. Above it a request is refused before a weight moves, since the field
+being sampled is `(R + 1)³` values whatever the band narrows afterwards.
 
 ## What it is
 

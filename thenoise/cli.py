@@ -23,8 +23,7 @@ def _add_model_paths(p: argparse.ArgumentParser, required: bool = True) -> None:
 
 
 def _add_mesh_paths(p: argparse.ArgumentParser) -> None:
-    """A shape release ships its transformer, its picture encoder and its codec together,
-    so ``--dit`` is the whole of it."""
+    """A shape release ships transformer, picture encoder and codec in one file."""
     p.add_argument("--dit", required=True, default="", metavar="PATH",
                    help="shape model checkpoint (.safetensors)")
     p.add_argument("--lora-dir", default="", metavar="PATH",
@@ -91,8 +90,7 @@ def _add_postprocess_args(p: argparse.ArgumentParser) -> None:
 
 
 def _add_solver_args(p: argparse.ArgumentParser) -> None:
-    """The knobs every diffused medium is asked for in the same words, all of them
-    optional so the model answers for what a release ships."""
+    """What every diffused medium is asked for in the same words, all of them optional."""
     p.add_argument("--steps", type=int)
     p.add_argument("--guidance-scale", type=float)
     p.add_argument("--sampler", metavar="NAME",
@@ -209,6 +207,10 @@ def _add_mesh_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--mc-level", dest="mc_level", type=float, metavar="LEVEL",
                    help="the field value the surface is cut at "
                         "(default: 1/512, the reference pipeline's own cut)")
+    p.add_argument("--scale", type=float,
+                   help="multiply the written coordinates; a container such as stl "
+                        "carries no unit, so a print sizes itself here "
+                        "(default: 1.0, the sampled volume itself)")
     p.add_argument("--output-format", choices=["glb", "obj", "stl"],
                    help="container; --out's extension is taken when this is left out")
     p.add_argument("--lora", action="append", default=[], metavar="FILE[:WEIGHT]",

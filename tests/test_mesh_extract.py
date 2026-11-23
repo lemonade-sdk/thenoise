@@ -1,5 +1,6 @@
 import math
 
+import pytest
 import torch
 
 from thenoise.mesh.extract import ORIENTATION, TETRAHEDRA, Mesh, empty_mesh, extract_surface
@@ -120,3 +121,12 @@ def test_every_pattern_of_every_tetrahedron_faces_out_of_the_solid():
                                    for a, b in edges.tolist()])
                 normal = torch.linalg.cross(cut[1] - cut[0], cut[2] - cut[0])
                 assert (normal * outward).sum() > 0, (tet, code, slot)
+
+
+def test_scaling_a_shape_is_the_same_shape_about_the_origin():
+    shape = volume_of(sphere(0.4))
+    assert shape.scaled(1.0) is shape
+    twice = shape.scaled(2.0)
+    assert twice.vertices == pytest.approx(shape.vertices * 2)
+    assert torch.equal(twice.faces, shape.faces)
+    assert twice.signed_volume() == pytest.approx(shape.signed_volume() * 8)

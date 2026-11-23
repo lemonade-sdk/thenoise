@@ -13,7 +13,7 @@ DiT checkpoint.
 | `generate` | Generate one image from a text prompt | yes |
 | `edit` | Edit an image from an instruction (image + prompt → edited image) | model that takes a reference |
 | `video` | Generate one clip (text, or an image to start from) | video model |
-| `mesh` | Reconstruct the shape in a picture (`.glb` / `.obj`) | mesh model |
+| `mesh` | Reconstruct the shape in a picture (`.glb` / `.obj` / `.stl`) | mesh model |
 | `upscale` | Pixel-upscale an existing image | no (upscaler only) |
 | `controlmap` | Extract a control map (canny / depth / pose) from an image | no |
 | `serve` | Serve a model over HTTP: JSON API + web UI at <http://localhost:8000/> | yes (lazily) |
@@ -185,9 +185,10 @@ that model's three parts live in one checkpoint, so `--dit` is the only path fla
 | `--prompt` | no | `""` | Text a shape model does not read, accepted so a request travels between media |
 | `--latents` | no | model default | Latent tokens to denoise |
 | `--steps`, `--guidance-scale`, `--sampler`, `--seed` | no | model default | Sampling parameters, as for `generate` |
-| `--octree-resolution` | no | model default | Finest voxel grid the surface is cut from; the costliest knob |
+| `--octree-resolution` | no | model default | Finest voxel grid the surface is cut from; the costliest knob. The browser offers it as a ladder of 96 / 192 / 384 / 768, the last being the most this will sample |
 | `--bounds` | no | model default | Half-width of the sampled volume, in latent units |
 | `--mc-level` | no | `1/512` | The field value the surface is cut at |
+| `--scale` | no | `1.0` | Multiply the written coordinates. STL in particular carries no unit, so a print sizes itself here |
 | `--lora` | no | — | LoRA for the shape transformer; repeatable, `file:weight` |
 | `--output-format` | no | model default | `glb`, `obj` or `stl`; `--out`'s extension answers when this is left out |
 | `--out` | no | `out.glb` | Output mesh path; with no extension, the container the mesh was written in |

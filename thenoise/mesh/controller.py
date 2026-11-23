@@ -87,7 +87,7 @@ class MeshPipelineController:
                                  bounds=spec.bounds, mc_level=spec.mc_level),
                 resident=("codec",), pixels=work,
             )
-            write_mesh(mesh, output, spec.output_format)
+            write_mesh(mesh.scaled(spec.scale), output, spec.output_format)
             logger.info("Mesh: %d vertices, %d triangles, resolution %d",
                         mesh.vertices.shape[0], mesh.faces.shape[0], spec.octree_resolution)
 

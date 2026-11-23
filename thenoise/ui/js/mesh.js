@@ -89,8 +89,8 @@ function validateMeshInputs() {
   };
   const whole = (n) => Number.isInteger(n) && n >= 1;
   const real = (n) => Number.isFinite(n);
-  return check(['latents', 'steps', 'octree_resolution'], whole,
-               'tokens, steps and octree must be positive whole numbers')
+  return check(['latents', 'steps'], whole,
+               'tokens and steps must be positive whole numbers')
     && check(['seed'], (n) => Number.isInteger(n) && n >= 0,
              'seed must be a nonnegative whole number (leave empty for random)')
     && check(['guidance_scale'], (n) => real(n) && n >= 0,
@@ -177,7 +177,7 @@ function renderMeshInfo() {
   if (m.model) rows.push(['Model', m.model, '']);
   if (m.mode) rows.push([FIELD_LABELS.mode, MESH_MODES[m.mode] || m.mode, '']);
   for (const key of ['latents', 'steps', 'guidance_scale', 'sampler', 'octree_resolution',
-                     'bounds', 'mc_level', 'seed', 'output_format']) {
+                     'bounds', 'mc_level', 'scale', 'seed', 'output_format']) {
     if (m[key] != null && m[key] !== '') rows.push([FIELD_LABELS[key], m[key], '']);
   }
   if (m.picture) rows.push(['Picture', m.picture, '']);

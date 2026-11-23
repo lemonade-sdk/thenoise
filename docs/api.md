@@ -198,6 +198,7 @@ has one.
 | `octree_resolution` | integer | Finest voxel grid the surface is cut from |
 | `bounds` | number | Half-width of the sampled volume, in latent units |
 | `mc_level` | number | The field value the surface is cut at |
+| `scale` | number | Multiply the written coordinates; the sampled volume itself when omitted, since no container carries a unit |
 | `lora_specs` | string[] \| object | Optional LoRAs, as `name:weight`, looked up in `--lora-dir`; a shape model's components are `dit`, `conditioner` and `codec` |
 | `output_format` | string | `glb`, `obj` or `stl` (model default when omitted) |
 

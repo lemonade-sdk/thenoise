@@ -2,7 +2,10 @@ import math
 
 import pytest
 
-from thenoise.mesh.spec import OUTPUT_FORMATS, MeshSpec, mode_of
+from thenoise.mesh.spec import (
+    DEFAULT_MESH_SCALE, DENSITY_PRESETS, MAX_OCTREE_RESOLUTION, OUTPUT_FORMATS,
+    MeshSpec, mode_of,
+)
 
 DEFAULTS = {
     "negative_prompt": "",
@@ -103,7 +106,7 @@ def test_the_echo_leaves_the_picture_out():
     assert public["mode"] == "i2d"
     assert set(public) <= {"mode", "latents", "steps", "guidance_scale", "sampler",
                            "seed", "output_format", "octree_resolution", "bounds",
-                           "mc_level", "lora_specs"}
+                           "mc_level", "scale", "lora_specs"}
 
 
 def test_a_request_names_no_loras_unless_asked():
@@ -123,3 +126,30 @@ def test_every_promised_container_resolves_and_is_written():
         assert resolve(output_format=fmt).output_format == fmt
     with pytest.raises(ValueError, match="no mesh writer for"):
         write_mesh(triangle(), "/tmp/nope.ply", "ply")
+
+
+def test_the_density_presets_double_and_stop_where_the_grid_stops_fitting():
+    steps = list(DENSITY_PRESETS)
+    assert all(fine == 2 * coarse for coarse, fine in zip(steps, steps[1:])), steps
+    assert min(steps) >= 8, steps
+    assert max(steps) == MAX_OCTREE_RESOLUTION, "the pane would offer what the engine refuses"
+
+
+def test_a_density_past_the_sampled_grid_is_refused_before_a_weight_moves():
+    with pytest.raises(ValueError, match="at most"):
+        resolve(octree_resolution=MAX_OCTREE_RESOLUTION + 1)
+
+
+def test_an_unscaled_shape_spans_the_volume_it_was_sampled_from():
+    assert resolve().scale == DEFAULT_MESH_SCALE
+
+
+def test_units_are_nobody_s_business_until_someone_asks():
+    assert resolve(scale=100.0).scale == 100.0
+    assert MeshSpec().resolve({**DEFAULTS, "scale": 0.001}).scale == 0.001
+
+
+def test_a_scale_that_is_not_a_positive_number_refuses_the_request():
+    for bad in (0.0, -1.0):
+        with pytest.raises(ValueError):
+            MeshSpec(scale=bad)

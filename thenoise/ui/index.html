@@ -476,61 +476,72 @@
 
   <div class="row">
     <div class="field">
-      <label class="label" for="mesh_latents">Tokens</label>
-      <input type="number" id="mesh_latents" placeholder="auto" min="1">
-    </div>
-    <div class="field">
-      <label class="label" for="mesh_steps">Steps</label>
-      <input type="number" id="mesh_steps" placeholder="auto" min="1">
-    </div>
-  </div>
-
-  <div class="row">
-    <div class="field">
-      <label class="label" for="mesh_guidance_scale">Guidance</label>
-      <input type="number" id="mesh_guidance_scale" step="0.1" placeholder="auto" min="0">
-    </div>
-    <div class="field">
-      <label class="label" for="mesh_sampler">Sampler</label>
-      <select id="mesh_sampler">
+      <label class="label" for="mesh_octree_resolution">Mesh density</label>
+      <select id="mesh_octree_resolution">
         <option value="">auto</option>
+        <option value="96">small (96)</option>
+        <option value="192">medium (192)</option>
+        <option value="384">high (384)</option>
+        <option value="768">ultra high (768)</option>
       </select>
+      <div class="hint">How finely the surface is cut; each step up costs about eight
+        times the memory of the one below it. Left on auto, the model answers for it.</div>
     </div>
-  </div>
-
-  <div class="divider"></div>
-
-  <div class="field">
-    <label class="label" for="mesh_octree_resolution">Octree <span class="hint">voxel grid the surface is cut from</span></label>
-    <input type="number" id="mesh_octree_resolution" placeholder="auto" min="8">
-  </div>
-
-  <div class="row">
-    <div class="field">
-      <label class="label" for="mesh_bounds">Bounds</label>
-      <input type="number" id="mesh_bounds" placeholder="auto" min="0" step="any">
-    </div>
-    <div class="field">
-      <label class="label" for="mesh_mc_level">Cut level <span class="hint">field value the surface is cut at</span></label>
-      <input type="number" id="mesh_mc_level" placeholder="auto" step="any">
-    </div>
-  </div>
-
-  <div class="row">
     <div class="field">
       <label class="label" for="mesh_seed">Seed</label>
       <input type="number" id="mesh_seed" placeholder="random" min="0">
     </div>
-    <div class="field">
-      <label class="label" for="mesh_output_format">Output</label>
-      <select id="mesh_output_format">
-        <option value="">auto</option>
-        <option value="glb">glb</option>
-        <option value="obj">obj</option>
-        <option value="stl">stl</option>
-      </select>
-    </div>
   </div>
+
+  <div class="field">
+    <label class="label" for="mesh_output_format">Output</label>
+    <select id="mesh_output_format">
+      <option value="">auto</option>
+      <option value="glb">glb</option>
+      <option value="obj">obj</option>
+      <option value="stl">stl</option>
+    </select>
+  </div>
+
+  <details class="collapse" data-pref="thenoise-mesh-tuning-open">
+    <summary class="label">Shape tuning</summary>
+    <div class="group">
+      <div class="row">
+        <div class="field">
+          <label class="label" for="mesh_latents">Tokens</label>
+          <input type="number" id="mesh_latents" placeholder="auto" min="1">
+        </div>
+        <div class="field">
+          <label class="label" for="mesh_steps">Steps</label>
+          <input type="number" id="mesh_steps" placeholder="auto" min="1">
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label class="label" for="mesh_guidance_scale">Guidance</label>
+          <input type="number" id="mesh_guidance_scale" step="0.1" placeholder="auto" min="0">
+        </div>
+        <div class="field">
+          <label class="label" for="mesh_sampler">Sampler</label>
+          <select id="mesh_sampler">
+            <option value="">auto</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label class="label" for="mesh_bounds">Bounds</label>
+          <input type="number" id="mesh_bounds" placeholder="auto" min="0" step="any">
+        </div>
+        <div class="field">
+          <label class="label" for="mesh_mc_level">Cut level</label>
+          <input type="number" id="mesh_mc_level" placeholder="auto" step="any">
+        </div>
+      </div>
+    </div>
+  </details>
 
   <div class="divider"></div>
 

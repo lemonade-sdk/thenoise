@@ -73,6 +73,12 @@ class Mesh:
         """The mesh detached and on the host, which is where every writer starts."""
         return Mesh(self.vertices.detach().cpu(), self.faces.detach().cpu())
 
+    def scaled(self, factor: float) -> "Mesh":
+        """Positions about the origin; unscaled is the same mesh, not a copy."""
+        if factor == 1.0:
+            return self
+        return Mesh(self.vertices * factor, self.faces)
+
     def signed_volume(self) -> Tensor:
         """The volume the faces enclose, positive when they face outward."""
         triangles = self.vertices[self.faces]
