@@ -150,7 +150,7 @@ def test_no_second_branch_without_guidance():
 
 def test_the_picture_is_the_conditioning_and_the_null_branch_is_zeros_like_it():
     model = bare()
-    out = model.encode_prompt(EncodePromptArgs(prompt="a chair", guidance_scale=5.0,
+    out = model.encode_prompt(EncodePromptArgs(prompt="", guidance_scale=5.0,
                                                   image=[Image.new("RGB", (32, 32))]))
     assert out.cond.shape == (1, 5, 8)
     assert torch.equal(out.null, torch.full(out.cond.shape, 7.0))
@@ -164,9 +164,9 @@ def test_views_are_not_this_checkpoint_s_to_offer():
     assert bare().capability("mesh").get("mv2d") is None
 
 
-def test_a_prompt_without_a_picture_is_refused():
+def test_a_picture_is_required_and_no_words_stand_in_for_one():
     with pytest.raises(ValueError, match="image is required"):
-        bare().encode_prompt(EncodePromptArgs(prompt="a chair", guidance_scale=5.0))
+        bare().encode_prompt(EncodePromptArgs(prompt="", guidance_scale=5.0))
 
 
 def test_the_scale_factor_comes_off_before_the_codec_is_queried():

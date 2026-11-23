@@ -67,8 +67,8 @@ class MeshPipelineController:
 
             cond = stages.run(
                 model.encode_prompt,
-                EncodePromptArgs(prompt=spec.prompt, negative_prompt=spec.negative_prompt,
-                                 guidance_scale=spec.guidance_scale, image=images or None),
+                EncodePromptArgs(prompt="", guidance_scale=spec.guidance_scale,
+                                 image=images or None),
                 resident=("conditioner",),
                 pixels=sum(image.width * image.height for image in images) or work,
                 cache="prompt", key=self._cache_key(spec),
@@ -93,9 +93,9 @@ class MeshPipelineController:
 
     @staticmethod
     def _cache_key(spec: ResolvedMesh) -> tuple:
-        """The conditioning is the pictures' and their count's, so both and the guidance are
-        the key: a second view changes the shape, not just the prompt."""
-        return ("prompt", spec.prompt, spec.negative_prompt, spec.guidance_scale,
+        """The pictures decide the conditioning, and the guidance decides whether the
+        unguided branch is built at all, so both belong in the key."""
+        return ("prompt", spec.guidance_scale,
                 content_digest(load_image(io.BytesIO(one)) for one in spec.images))
 
     def _denoise(self, latents, cond, params, spec: ResolvedMesh, token: Cancellation,

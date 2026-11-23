@@ -193,10 +193,6 @@ def _add_mesh_args(p: argparse.ArgumentParser) -> None:
                    help="the picture whose shape to reconstruct; repeat once per view of "
                         "one object, in front, left, back, right order (the only "
                         "conditioning this medium reads)")
-    p.add_argument("--prompt", default="",
-                   help="text a shape model does not read, kept so a request travels "
-                        "between media unchanged")
-    p.add_argument("--negative-prompt")
     p.add_argument("--latents", type=int,
                    help="latent tokens to denoise (default: the model's)")
     _add_solver_args(p)

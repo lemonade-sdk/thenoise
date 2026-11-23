@@ -157,13 +157,24 @@ def test_a_picture_that_is_not_a_picture_is_refused_before_the_minutes_are_spent
         queue.close()
 
 
-def test_a_prompt_alone_cannot_ask_for_a_shape(tmp_path):
+def test_a_request_without_a_picture_cannot_ask_for_a_shape(tmp_path):
+    queue = JobQueue(tmp_path)
+    try:
+        with _client(_controller(), queue) as client:
+            answer = client.post("/mesh", json={})
+            assert answer.status_code == 400
+            assert "t2d" in answer.text
+    finally:
+        queue.close()
+
+
+def test_a_prompt_is_not_a_field_this_route_reads(tmp_path):
     queue = JobQueue(tmp_path)
     try:
         with _client(_controller(), queue) as client:
             answer = client.post("/mesh", json={"prompt": "a chair"})
-            assert answer.status_code == 400
-            assert "t2d" in answer.text
+            assert answer.status_code == 422
+            assert "prompt" in answer.text
     finally:
         queue.close()
 

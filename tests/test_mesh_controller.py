@@ -21,7 +21,6 @@ Image.new("RGB", (24, 16), (9, 9, 9)).save(OTHER, format="PNG")
 OTHER = OTHER.getvalue()
 
 DEFAULTS = {
-    "negative_prompt": "",
     "output_format": "glb",
     "num_latents": 6,
     "steps": 3,
@@ -205,10 +204,10 @@ def test_a_different_picture_is_not_the_previous_ones_conditioning():
     assert model.events.count("encode") == 2
 
 
-def test_a_shape_has_no_text_to_condition_on_so_a_prompt_alone_is_refused():
+def test_a_shape_needs_a_picture_because_there_is_nothing_else_to_condition_on():
     controller = MeshPipelineController(FakeShapeModel())
     with pytest.raises(ValueError, match="does not support t2d"):
-        controller.resolve(MeshSpec(prompt="a chair"))
+        controller.resolve(MeshSpec())
 
 
 def test_the_requests_own_checks_run_before_anything_is_loaded():

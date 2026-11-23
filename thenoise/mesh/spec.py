@@ -30,8 +30,6 @@ def mode_of(images: tuple[bytes, ...]) -> str:
 
 @dataclass(frozen=True)
 class ResolvedMesh:
-    prompt: str
-    negative_prompt: str
     images: tuple[bytes, ...]
     latents: int
     steps: int
@@ -65,8 +63,6 @@ class MeshSpec(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    prompt: str = ""
-    negative_prompt: str | None = None
     image: _Picture | list[_Picture] | None = None
     latents: _Positive | None = None
     steps: _Positive | None = None
@@ -132,7 +128,6 @@ class MeshSpec(BaseModel):
         if not math.isfinite(scale) or scale <= 0:
             raise ValueError("scale must be finite and positive")
         return ResolvedMesh(
-            prompt=self.prompt, negative_prompt=pref("negative_prompt"),
             images=self.images, latents=latents, steps=steps,
             guidance_scale=guidance_scale, sampler=sampler,
             seed=secrets.randbits(32) if self.seed is None or self.seed == -1 else self.seed,

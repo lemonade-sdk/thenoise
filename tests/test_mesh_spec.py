@@ -1,6 +1,7 @@
 import math
 
 import pytest
+from pydantic import ValidationError
 
 from thenoise.mesh.spec import (
     DEFAULT_MESH_SCALE, DENSITY_PRESETS, MAX_OCTREE_RESOLUTION, OUTPUT_FORMATS,
@@ -8,7 +9,6 @@ from thenoise.mesh.spec import (
 )
 
 DEFAULTS = {
-    "negative_prompt": "",
     "output_format": "glb",
     "num_latents": 4096,
     "steps": 30,
@@ -37,8 +37,11 @@ def test_several_pictures_are_views_of_the_one_shape_asked_for():
     assert (resolved.mode, resolved.images) == ("mv2d", (b"front", b"left", b"back"))
 
 
-def test_an_unset_prompt_is_allowed_because_the_shape_is_not_described_in_words():
-    assert resolve().prompt == ""
+def test_a_shape_cannot_be_asked_for_in_words():
+    """The release has no text tower, so the contract refuses the field outright rather
+    than accepting a request whose one conditioning argument was ignored."""
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        MeshSpec(prompt="a chair")
 
 
 def test_the_models_defaults_fill_what_the_request_left_out():
@@ -101,7 +104,7 @@ def test_the_seed_is_inside_torchs_range():
 
 
 def test_the_echo_leaves_the_picture_out():
-    public = resolve(image=b"png", prompt="a chair").public()
+    public = resolve(image=b"png").public()
     assert "image" not in public
     assert public["mode"] == "i2d"
     assert set(public) <= {"mode", "latents", "steps", "guidance_scale", "sampler",
