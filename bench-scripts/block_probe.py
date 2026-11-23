@@ -357,18 +357,32 @@ def camera_fixture(ctx: bb.Ctx, name: str, tokens: int,
                    detail=f"{fx.block} {which}: {case.detail}", terms={}, attentions=0)
 
 
-def pitch_pad_patches(blk: nn.Module) -> list:
-    """Wrap every projection whose input rows sit a power-of-two number of bytes apart.
+PITCH_NOTE = ("every projection whose input rows are {min_pitch} bytes apart or further, "
+              "fed from a buffer eight elements wider: rows 32 KiB apart cost about half "
+              "the rate the same block gets elsewhere")
+#: The pitch the half-rate GEMMs were found at, which is what makes the arm worth running.
+PAD_MIN_PITCH = 32768
 
-    This is the one finding worth asking of every block in the engine: on gfx1151 a GEMM
-    whose operands both stride at exactly 32768 bytes ran at 19 TF/s while the same FLOPs
-    cost 40 elsewhere, and widening the row by eight elements — sixteen bytes — recovered
-    most of it. Projections are picked by their input width alone, so a block needs no
-    fixture, no arm set and no name to be asked.
 
-    The wrapper copies rather than writing straight into the wider buffer, which is what an
-    arm can do from outside a forward; the buckets section says whether Inductor folds that
-    copy into the kernel that produced the activation, and it did for the LTX FFN.
+def pitch_pad_patches(blk: nn.Module, min_pitch: int) -> list:
+    """Wrap every projection whose input rows are at least ``min_pitch`` bytes apart.
+
+    What the engine-wide sweep says the rule is: a GEMM's rate follows its reduction length,
+    because that is its activation's row pitch, and rows 32768 bytes apart are charged at
+    about half what the same block charges anywhere else — LTX's 16384-wide FFN at 19 TF/s
+    against its own 39, krea2's at 20.6 against 40.6. Rows 24576 bytes apart lose about a
+    sixth. Nothing at or below 16 KiB moved, and anima's slow 16 KiB row answered a kernel
+    search rather than a pitch, which is a different disease.
+
+    So the threshold is the finding, and it is a parameter rather than a rule about powers
+    of two: at 32768 the arm touches only the half-rate GEMMs, at 24576 it also takes the
+    sixths, for a copy of every operand it pads.
+
+    Projections are picked by their input width alone, so a block needs no fixture, no arm
+    set and no name to be asked. The wrapper copies rather than writing straight into the
+    wider buffer, which is what an arm can do from outside a forward; the buckets section
+    says whether Inductor folds that copy into the kernel that produced the activation, and
+    it did for the LTX FFN.
     """
     out = []
     for mod in blk.modules():
@@ -376,7 +390,7 @@ def pitch_pad_patches(blk: nn.Module) -> list:
         if weight is None or weight.dim() != 2:
             continue
         pitch = weight.shape[-1] * weight.element_size()
-        if pitch < 16384 or pitch & (pitch - 1):
+        if pitch < min_pitch:
             continue
 
         def forward(x, _m=mod, pad=8):
@@ -389,7 +403,22 @@ def pitch_pad_patches(blk: nn.Module) -> list:
     return out
 
 
-def generic_arms(blk: Optional[nn.Module]) -> dict[str, Arm]:
+def pitch_arm(blk: Optional[nn.Module], min_pitch: int = PAD_MIN_PITCH) -> Arm:
+    """The pitch arm for one block, saying how many of its projections the rule reaches.
+
+    The count belongs in the note because a gain of 0% means different things depending on
+    whether the rule found the block's FFN or found nothing to touch, and only the built
+    block knows which.
+    """
+    patches = pitch_pad_patches(blk, min_pitch) if blk is not None else []
+    return Arm("pitch_pad",
+               PITCH_NOTE.format(min_pitch=min_pitch)
+               + (f" — {len(patches)} of this block's projections" if blk is not None
+                  else ""),
+               exact=False, patches=patches)
+
+
+def generic_arms(blk: Optional[nn.Module], min_pitch: int = PAD_MIN_PITCH) -> dict[str, Arm]:
     """The arms every block has, without anyone writing them down for it.
 
     ``baseline`` so a block can be timed against the changes the script knows how to make
@@ -399,14 +428,8 @@ def generic_arms(blk: Optional[nn.Module]) -> dict[str, Arm]:
     With no block the patches are left empty, which is what ``--list-arms`` wants: the
     widths are only known once the block has been built, and that costs a GPU.
     """
-    return {
-        "baseline": Arm("baseline", "the block as shipped"),
-        "pitch_pad": Arm("pitch_pad",
-                         "every projection whose input rows sit a power-of-two number of "
-                         "bytes apart fed from a buffer eight elements wider, which is "
-                         "what the video FFN's down projection wanted",
-                         exact=False, patches=pitch_pad_patches(blk) if blk else []),
-    }
+    return {"baseline": Arm("baseline", "the block as shipped"),
+            "pitch_pad": pitch_arm(blk, min_pitch)}
 
 
 def phases_dtype(dtype: torch.dtype):
@@ -473,6 +496,7 @@ def ltx_arms() -> dict[str, Arm]:
             "says that costs this GEMM half its rate, and a tuned kernel gets the same "
             "answer without the pitch",
             exact=False),
+        Arm("pitch_pad", PITCH_NOTE.format(min_pitch=PAD_MIN_PITCH), exact=False),
         Arm("sdpa_eager",
             "SDPA outside the compiled region (attention -> eager_attention), which "
             "breaks the graph around every attention call",
@@ -516,7 +540,7 @@ ARMS: dict[str, Callable[[], dict[str, Arm]]] = ({"ltx/av": ltx_arms,
 FIXTURES = {"ltx/av": ltx_fixture, "ltx/av_i2v": ltx_fixture}
 
 
-def arm_modules(arms: dict[str, Arm], blk: nn.Module) -> None:
+def arm_modules(arms: dict[str, Arm], blk: nn.Module, min_pitch: int) -> None:
     """Fill in the arms that name sub-modules, now that the block exists.
 
     A sub-module is replaced with a stand-in forward on the *instance*, which Inductor
@@ -550,6 +574,7 @@ def arm_modules(arms: dict[str, Arm], blk: nn.Module) -> None:
 
     arms["ff_down_contig"].patches = [(ff, "forward", ff_forward)]
     arms["ff_down_padded"].patches = [(ff, "forward", ff_padded)]
+    arms["pitch_pad"] = pitch_arm(blk, min_pitch)
     arms["no_gate"].patches = [(mod, "to_gate_logits", None) for mod in sub.values()
                                if getattr(mod, "to_gate_logits", None) is not None]
 
@@ -604,7 +629,8 @@ def child_cmd(arm: str, args, out: Path) -> list[str]:
            "--tokens", str(args.tokens), "--txt", str(args.txt),
            "--weights", args.weights, "--device", args.device,
            "--warmup", str(args.warmup), "--iters", str(args.iters),
-           "--repeats", str(args.repeats), "--json", str(out)]
+           "--repeats", str(args.repeats), "--json", str(out),
+           "--pad-min-pitch", str(args.pad_min_pitch)]
     if args.scenario:
         cmd += ["--scenario", args.scenario]
     if args.tunable:
@@ -1406,6 +1432,10 @@ def main() -> None:
                          "(default a file named after the device in the temp dir)")
     ap.add_argument("--lt-algos", type=int, default=0,
                     help="ask hipBLASLt for this many candidate algorithms per GEMM")
+    ap.add_argument("--pad-min-pitch", type=int, default=PAD_MIN_PITCH,
+                    help="the input row pitch, in bytes, from which the pitch_pad arm "
+                         "starts padding: 32768 catches the half-rate GEMMs, 24576 also "
+                         "catches the ones losing a sixth")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="print each arm's raw group times")
     args = ap.parse_args()
@@ -1447,9 +1477,11 @@ def main() -> None:
                                              for k, v in fixture.terms.items())
               + f"   total={total / 1e12:.2f}")
     wanted = ([a.strip() for a in args.arms.split(",") if a.strip()]
-              or list(ARMS[args.block]() if known else generic_arms(fixture.blk)))
-    arms = ARMS[args.block]() if known else generic_arms(fixture.blk)
-    arm_modules(arms, fixture.blk)
+              or list(ARMS[args.block]() if known
+                      else generic_arms(fixture.blk, args.pad_min_pitch)))
+    arms = (ARMS[args.block]() if known
+            else generic_arms(fixture.blk, args.pad_min_pitch))
+    arm_modules(arms, fixture.blk, args.pad_min_pitch)
     for name in wanted:
         if name not in arms:
             ap.error(f"unknown arm {name!r}; see --list-arms")
