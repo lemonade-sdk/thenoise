@@ -178,33 +178,34 @@ unused.
 
 ## Mesh generation
 
-When a mesh model is loaded, it is served through the synchronous `POST /mesh` (mesh bytes
-directly) or `POST /jobs/mesh`, which queues the same body — see
-[Asynchronous jobs](#asynchronous-jobs). A shape is conditioned on a picture, so `image` is
-required: there is no text-to-shape to fall back to. It may instead be an array, naming the
-views of **one** object; the resolved mode says which happened (`i2d` for one, `mv2d` for
-more), and how many a model can tell apart is its own capability — `caps.mesh.mv2d`, absent
-when it has no multi-view tower and refuses more than one picture. No model served today
-has one.
+When a mesh model is loaded, TheNoise serves it through either the synchronous
+`POST /mesh` endpoint (mesh bytes directly), or `POST /jobs/mesh`, which queues the
+same body — see [Asynchronous jobs](#asynchronous-jobs). Both use the loaded model's
+defaults when optional fields are omitted.
+
+A shape is conditioned on a picture, so `image` is required. An array of pictures names the
+views of one object, which only a model with a multi-view tower accepts; a model without
+one refuses the second picture.
 
 | Field | Type | Description |
 |---|---|---|
-| `image` | string \| string[] | Required base64-encoded picture — or, for a model that advertises views, an array of them: pictures of one object in the order its tower numbers them |
+| `image` | string \| string[] | Required base64-encoded picture, or an array of views of one object |
 | `model` | string | Optional loaded model name, checked if provided |
-| `prompt`, `negative_prompt` | string | Accepted and not read: a shape model has no text encoder |
-| `latents` | integer | Latent tokens to denoise; the model's release count is its default |
+| `latents` | integer | Latent tokens to denoise |
 | `steps`, `guidance_scale`, `seed` | number | Sampling parameters |
 | `sampler` | string | Denoising solver — one of `GET /health`'s `samplers` |
-| `octree_resolution` | integer | Finest voxel grid the surface is cut from |
+| `octree_resolution` | integer | Finest voxel grid the surface is cut from; the field that costs the most |
 | `bounds` | number | Half-width of the sampled volume, in latent units |
 | `mc_level` | number | The field value the surface is cut at |
-| `scale` | number | Multiply the written coordinates; the sampled volume itself when omitted, since no container carries a unit |
-| `lora_specs` | string[] \| object | Optional LoRAs, as `name:weight`, looked up in `--lora-dir`; a shape model's components are `dit`, `conditioner` and `codec` |
+| `scale` | number | Multiply the written coordinates; no mesh format carries a unit |
+| `lora_specs` | string[] \| object | Optional LoRAs, as `name:weight`, looked up in `--lora-dir` |
 | `output_format` | string | `glb`, `obj` or `stl` (model default when omitted) |
+
+For a synchronous glb response:
 
 ```bash
 curl -fS http://127.0.0.1:8000/mesh -H 'content-type: application/json' \
-  -d "{\"image\": \"$(base64 -w0 chair.png)\", \"octree_resolution\": 256}" \
+  -d "{\"image\": \"$(base64 -w0 chair.png)\", \"octree_resolution\": 192}" \
   -o chair.glb
 ```
 

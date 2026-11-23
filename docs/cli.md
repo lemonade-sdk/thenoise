@@ -169,9 +169,9 @@ Waiting for a clip is the difference from the job API: queue the same render wit
 ## Generate a single shape
 
 Reconstructs the surface in one picture and writes it to `--out` as `.glb`, `.obj` or
-`.stl`.
-Needs a mesh model — [hunyuan3d](models/hunyuan3d.md) is the one supported today — and
-that model's three parts live in one checkpoint, so `--dit` is the only path flag.
+`.stl`. Needs a mesh model — [hunyuan3d](models/hunyuan3d.md) is the one supported today
+— whose transformer, conditioner and codec live in one file, so `--dit` is the only path
+flag.
 
 ```bash
 ./thenoise.sh mesh \
@@ -181,14 +181,13 @@ that model's three parts live in one checkpoint, so `--dit` is the only path fla
 
 | Flag | Required | Default | Description |
 |------|----------|---------|-------------|
-| `--image` | yes | — | The picture whose shape to reconstruct. Repeating it names the views of one object, which only a model with a multi-view tower accepts; a model without one refuses the second picture |
-| `--prompt` | no | `""` | Text a shape model does not read, accepted so a request travels between media |
+| `--image` | yes | — | The picture whose shape to reconstruct. Repeat it for the views of one object, which only a model with a multi-view tower accepts |
 | `--latents` | no | model default | Latent tokens to denoise |
 | `--steps`, `--guidance-scale`, `--sampler`, `--seed` | no | model default | Sampling parameters, as for `generate` |
-| `--octree-resolution` | no | model default | Finest voxel grid the surface is cut from; the costliest knob. The browser offers it as a ladder of 96 / 192 / 384 / 768, the last being the most this will sample |
+| `--octree-resolution` | no | model default | Finest voxel grid the surface is cut from; the knob that costs time and memory, and 768 is the ceiling |
 | `--bounds` | no | model default | Half-width of the sampled volume, in latent units |
-| `--mc-level` | no | `1/512` | The field value the surface is cut at |
-| `--scale` | no | `1.0` | Multiply the written coordinates. STL in particular carries no unit, so a print sizes itself here |
+| `--mc-level` | no | model default (`1/512`) | The field value the surface is cut at |
+| `--scale` | no | `1.0` | Multiply the written coordinates: a mesh carries no unit, so a print sizes itself here |
 | `--lora` | no | — | LoRA for the shape transformer; repeatable, `file:weight` |
 | `--output-format` | no | model default | `glb`, `obj` or `stl`; `--out`'s extension answers when this is left out |
 | `--out` | no | `out.glb` | Output mesh path; with no extension, the container the mesh was written in |
