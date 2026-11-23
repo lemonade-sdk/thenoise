@@ -949,7 +949,6 @@ MODEL_KEYSETS: dict[str, tuple[Optional[type[DiffusionModel]], list[str]]] = {
         "model.diffusion_model.audio_patchify_proj.weight",
         "model.diffusion_model.keyframes_abs_pos_embedding",
     ]),
-    
     "hunyuan3d": (
         Hunyuan3DShapeModel,
         [
