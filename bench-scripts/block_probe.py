@@ -80,11 +80,12 @@ Usage
         --arms pitch_pad
 
 Any case ``block_bench`` can build can be probed: pass its ``model/block``, and the sections
-run with the GEMM list read off that block's own profile and three layout arms standing in
-for an arm set — ``pitch_pad``, widening the operand rows whose pitch the sweep found the
-penalty on; ``weight_transposed``, storing a wide-output projection's weight the other way
-round, same numbers, which is what a load-time transpose would hand it; and
-``transposed_problem``, answering a narrow-output projection as ``Cᵀ`` and leaving its
+run with the GEMM list read off that block's own profile and four layout arms standing in for
+an arm set — ``pitch_pad``, widening the operand rows whose pitch the sweep found the penalty
+on; ``weight_transposed`` and ``weight_plain_store``, a pair: the first stores a wide-output
+projection's weight the other way round, same numbers, which is what the engine now does as
+the weights land, so it reads flat and the second puts the checkpoint's store back to price
+it; and ``transposed_problem``, answering a narrow-output projection as ``Cᵀ`` and leaving its
 consumers to cope. All three select on module widths alone, so every block is asked the same
 questions the LTX findings came from.
 
@@ -117,7 +118,8 @@ from torch import nn
 import block_bench as bb
 from thenoise.dit.ltx_video import transformer as ltx
 from thenoise.dit.ltx_video.rope import AVRope
-from thenoise.dit.quantized import PITCH_MIN_BYTES, PITCH_MIN_ROWS, PITCH_PAD_ELEMENTS
+from thenoise.dit.quantized import (PITCH_MIN_BYTES, PITCH_MIN_ROWS, PITCH_PAD_ELEMENTS,
+                                    TRANSPOSE_MIN_RATIO)
 from thenoise.utils.attention import eager_attention
 from thenoise.utils.dynamo import apply_recompile_limit
 
@@ -372,9 +374,12 @@ PITCH_NOTE = ("every projection whose input rows are {min_pitch} bytes apart or 
               "{min_rows} rows: rows 32 KiB apart cost about half the rate the same block "
               "gets elsewhere, and short streams lose to the same change")
 WTRANSPOSE_NOTE = ("every projection at least {min_ratio}x wider out than in, its weight "
-                   "stored the other way round and the same numbers in it: on short streams "
-                   "the weight is the traffic, and this is what a load-time transpose would "
-                   "hand it")
+                   "stored the other way round, same numbers: the engine relays these as the "
+                   "weights land, so a flat row at maxabs 0 is the expected reading and "
+                   "weight_plain_store is the arm that prices the relay")
+WEIGHT_PLAIN_NOTE = ("every projection the engine relays, its weight put back the way a "
+                     "checkpoint stores it: the same numbers read strided again, so what "
+                     "this arm loses is what the load-time relay earns")
 TRANSPOSED_NOTE = ("every projection reducing to {max_ratio}x or less of its width "
                    "answering for the transposed problem, C transposed, its consumers left "
                    "to read it: for those shapes the tile problem is better the other way "
@@ -384,7 +389,6 @@ TRANSPOSED_NOTE = ("every projection reducing to {max_ratio}x or less of its wid
 #: taken from the sweep over every block the camera can build, the ratios from the rows
 #: that moved in it. ``LayoutRules`` carries them so an arm set takes one argument and a
 #: flag can move one bound without reaching through the script.
-TRANSPOSE_MIN_RATIO = 3.0     # the winning stores were 3x and 6x wider out than in
 TRANSPOSED_MAX_RATIO = 0.5    # anima's winner reduced 8192 to 2048, LTX's audio rows too
 
 
@@ -456,12 +460,27 @@ def weight_transposed_patches(blk: nn.Module, rules: LayoutRules) -> list:
     operand contiguous: 1.43x and 1.38x on flux2's two text-stream rows, 1.24x on moss's and
     1.16x on qwen_image's and fibo2's, and nothing anywhere the stream was long.
 
-    The patch swaps the *tensor*, not the forward, which is what a load-time transpose would
-    do: the projection sees a weight of the shape it expects and a layout it never asked for,
-    and its operand padding and LoRA branch stay in the graph untouched.
+    The patch swaps the *tensor*, not the forward, which is what a load-time transpose does:
+    the projection sees a weight of the shape it expects and a layout it never asked for, and
+    its operand padding and LoRA branch stay in the graph untouched. Which is why this arm is
+    now expected to be flat — the engine relays the same weights itself, and the swap of an
+    already relayed weight is a no-op that Inductor cannot even see.
     """
     return [(mod, "weight",
              nn.Parameter(mod.weight.t().contiguous().t(), requires_grad=False))
+            for mod in _projections(blk, lambda i, o: o >= rules.transpose_min_ratio * i)]
+
+
+def weight_plain_store_patches(blk: nn.Module, rules: LayoutRules) -> list:
+    """Wide-output projections with the checkpoint's own store put back under them.
+
+    The undo of what ``thenoise.dit.quantized`` does as weights land, and therefore the arm
+    that says what the relay is worth on a block that has had it. It copies rather than
+    patching the GEMM, because the relay is a copy too: the difference between the two rows
+    is the layout, not the arithmetic.
+    """
+    return [(mod, "weight",
+             nn.Parameter(mod.weight.data.contiguous(), requires_grad=False))
             for mod in _projections(blk, lambda i, o: o >= rules.transpose_min_ratio * i)]
 
 
@@ -505,6 +524,7 @@ def layout_arms(blk: Optional[nn.Module], rules: LayoutRules) -> list[Arm]:
              (weight_transposed_patches,
               WTRANSPOSE_NOTE.format(min_ratio=rules.transpose_min_ratio),
               "weight_transposed"),
+             (weight_plain_store_patches, WEIGHT_PLAIN_NOTE, "weight_plain_store"),
              (transposed_problem_patches,
               TRANSPOSED_NOTE.format(max_ratio=rules.transposed_max_ratio),
               "transposed_problem"))
@@ -621,6 +641,7 @@ def ltx_arms() -> dict[str, Arm]:
                                            min_rows=PITCH_MIN_ROWS), exact=False),
         Arm("weight_transposed",
             WTRANSPOSE_NOTE.format(min_ratio=TRANSPOSE_MIN_RATIO), exact=False),
+        Arm("weight_plain_store", WEIGHT_PLAIN_NOTE, exact=False),
         Arm("transposed_problem",
             TRANSPOSED_NOTE.format(max_ratio=TRANSPOSED_MAX_RATIO), exact=False),
         Arm("sdpa_eager",

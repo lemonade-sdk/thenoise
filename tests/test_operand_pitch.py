@@ -78,7 +78,7 @@ def test_a_short_stream_keeps_its_operand_on_device_too():
 
 @cuda_only
 def test_the_gate_hands_the_operand_back_to_a_backend_without_the_penalty(monkeypatch):
-    monkeypatch.setattr(quantized, "PITCH_PENALTY", False)
+    monkeypatch.setattr(quantized, "LAYOUT_PENALTY", False)
     x = torch.randn(PITCH_MIN_ROWS, WIDTH, device="cuda", dtype=torch.bfloat16)
     assert pitch_padded(x) is x
 
