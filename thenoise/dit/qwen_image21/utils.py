@@ -91,6 +91,9 @@ def _value_map(key: str, tensor: torch.Tensor) -> tuple[str, torch.Tensor]:
     return key, tensor
 
 
+RELAY_STORES = True
+
+
 def load_qwen_image21_dit(
     checkpoint: Union[str, Header],
     params: QwenImage21Params,
@@ -105,6 +108,7 @@ def load_qwen_image21_dit(
         dtype=dtype,
         key_map=_key_map,
         value_map=_value_map,
+        relay_stores=RELAY_STORES,
     )
 
 
@@ -112,4 +116,5 @@ __all__ = [
     "QWEN_IMAGE21_SIGNATURE",
     "detect_params",
     "load_qwen_image21_dit",
+    "RELAY_STORES",
 ]

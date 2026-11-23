@@ -103,9 +103,8 @@ VARIANTS: dict[str, Variant] = {variant.name: variant for variant in (
         prefs=dict(width=832, height=480, frames=33, fps=16, steps=40,
                    guidance_scale=3.5, sampler="euler", flow_shift=5.0),
         i2v=True,
-        # The pair's own release defaults, which differ from the T2V pair in all
-        # three numbers: a handover later in the schedule, at half its shift, with
-        # no CFG reduction on the low-noise half.
+        # The pair's own release defaults, which the T2V pair does not share: one is not
+        # the other, so a change to either is its own decision.
         experts=Experts(boundary=0.900, low_cfg_ratio=1.0),
         ref_method="concat_channels"),
 )}
@@ -326,9 +325,9 @@ class Wan22Model(VideoModel):
                  (params.frames - 1) // self.vae.temporal_compression + 1,
                  params.height // self.vae.spatial_compression,
                  params.width // self.vae.spatial_compression)
-        rng = torch.Generator(device="cpu").manual_seed(params.seed)
-        latents = torch.randn(shape, generator=rng, dtype=torch.float32)
-        return latents.to(self.device)
+        dev = self.device
+        rng = torch.Generator(device=dev).manual_seed(params.seed)
+        return torch.randn(shape, generator=rng, device=dev, dtype=torch.float32)
 
     def encode_references(self, images, frames=1):
         """One latent per frame, or the 20 channels a concatenated reference contributes.

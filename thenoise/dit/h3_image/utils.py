@@ -88,6 +88,9 @@ def detect_params(checkpoint: Union[str, Header]) -> H3ImageParams:
     return params
 
 
+RELAY_STORES = True
+
+
 def load_h3_image_dit(
     checkpoint: Union[str, Header],
     params: H3ImageParams,
@@ -107,9 +110,10 @@ def load_h3_image_dit(
         device=device,
         dtype=None,
         key_map=qk_norm_key_map,
+        relay_stores=RELAY_STORES,
     )
     model.to(dtype=dtype)
     return model
 
 
-__all__ = ["H3_IMAGE_SIGNATURE", "detect_params", "load_h3_image_dit"]
+__all__ = ["H3_IMAGE_SIGNATURE", "detect_params", "load_h3_image_dit", "RELAY_STORES"]

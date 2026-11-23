@@ -28,6 +28,7 @@ from comfy_kitchen.tensor import (
     w4a8_int8_linear,
 )
 
+from thenoise.utils.layout import LAYOUT_PENALTY
 from thenoise.utils.loader import restore_quantized_layer
 from thenoise.utils.lora import LoraFactors, LoraMode
 
@@ -129,6 +130,48 @@ def _(
 _LINEAR_OPS = (AsymW4A8Int8Layout, TensorCoreFP8Layout)
 
 
+#: The row pitch, in bytes, from which a full-precision GEMM pays for how its operand is
+#: laid out, and the elements added to a row once it does. The pitch is the reduction length
+#: — the operand is the activation — so the penalty arrives by width rather than by model,
+#: and only where a full-precision activation is read. Where the bound sits, and what each
+#: width gave back, belongs to the ``pitch_pad`` arm of ``bench-scripts/block_probe.py``:
+#: that is where the sweep was run and where moving this bound gets priced.
+PITCH_MIN_BYTES = 24576
+PITCH_PAD_ELEMENTS = 8
+
+#: Fewer rows than this, and the tile effect the widening cures is not what the GEMM's time
+#: is made of. The bound sits between 512 and 1024 rows, which is the image and video
+#: streams on one side of it and the text and audio ones on the other.
+PITCH_MIN_ROWS = 1024
+
+
+def pitch_too_wide(x: torch.Tensor) -> bool:
+    """Whether ``x`` has enough rows, long enough and squarely enough laid out, to want it.
+
+    Contiguity is part of the test: rows already widened by an earlier projection say so in
+    their stride, and copying behind someone else's copy earns nothing.
+    """
+    if x.dim() < 2 or x.numel() // x.shape[-1] < PITCH_MIN_ROWS:
+        return False
+    pitch = x.stride(-2) * x.element_size()
+    return pitch >= PITCH_MIN_BYTES and pitch == x.shape[-1] * x.element_size()
+
+
+def pitch_padded(x: torch.Tensor) -> torch.Tensor:
+    """``x`` in rows ``PITCH_PAD_ELEMENTS`` wider, when its rows are wide in the slow way.
+
+    Sixteen bytes per row break whatever bank or set conflict costs the GEMM its rate. In a
+    compiled block Inductor folds the write into whatever produced the rows, so this is a
+    wider allocation rather than another kernel.
+    """
+    if not LAYOUT_PENALTY or x.device.type != "cuda" or not pitch_too_wide(x):
+        return x
+    wide = torch.empty((*x.shape[:-1], x.shape[-1] + PITCH_PAD_ELEMENTS),
+                       dtype=x.dtype, device=x.device)
+    wide[..., :x.shape[-1]] = x
+    return wide[..., :x.shape[-1]]
+
+
 class QuantizedLinear(nn.Module):
     """Linear projection that runs BF16 (default) or a quantized scheme.
 
@@ -144,7 +187,8 @@ class QuantizedLinear(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        # Cast to the compute dtype by the adapter, or replaced at load time.
+        # Cast to the compute dtype by the adapter, or replaced at load time. The store
+        # arrives with the weights: a module built here holds the checkpoint's own order.
         self.weight = nn.Parameter(torch.empty(out_features, in_features))
         if bias:
             self.bias = nn.Parameter(torch.empty(out_features))
@@ -158,6 +202,15 @@ class QuantizedLinear(nn.Module):
         # across devices and dtype casts but never reach a state_dict.
         self.register_buffer("_lora_down", None, persistent=False)
         self.register_buffer("_lora_up", None, persistent=False)
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        # The relayed store is a runtime layout, not a format, and safetensors refuses a
+        # strided tensor outright. With ``keep_vars`` the entry is the parameter itself and
+        # other code holds that identity, so it stays as it is.
+        weight = destination.get(f"{prefix}weight")
+        if not keep_vars and isinstance(weight, torch.Tensor) and weight.stride(-1) != 1:
+            destination[f"{prefix}weight"] = weight.contiguous()
 
     def _reset_parameters(self) -> None:
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
@@ -330,8 +383,9 @@ class QuantizedLinear(nn.Module):
         weight = self.weight
         if not isinstance(weight, QuantizedTensor):
             # Full precision stays an ordinary ``F.linear``: an op boundary here would cut
-            # the layer off from the elementwise fusion around it.
-            y = F.linear(x, weight, self.bias)
+            # the layer off from the elementwise fusion around it. Widening the operand's
+            # rows is pointwise, so it is not one.
+            y = F.linear(pitch_padded(x), weight, self.bias)
         elif self.input_scale is not None:
             # Only quantized layers loaded with calibrated FP8 input scaling take
             # this path; all others use the standard linear dispatch.

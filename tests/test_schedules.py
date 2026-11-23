@@ -98,9 +98,9 @@ BARE = {
     # A clip's schedule reads its variant's flow shift and nothing else: no VAE, no
     # DiT, no frame count.
     "wan22": {"variant": VARIANTS["ti2v_5b"]},
-    "LTX-2.3-Distilled": {},
-    "LTX-2.5-Distilled": {},
-    "hunyuan3d-21": {"checkpoint_prefs": {}},
+    "ltx23": {},
+    "ltx25": {},
+    "hunyuan3d21": {"checkpoint_prefs": {}},
 }
 
 # The adapters whose step schedule shifts with the image token count. Krea 2 is

@@ -523,9 +523,9 @@ class AutoencoderKLH3Image(nn.Module):
 
         moments = self._tiled_moments(x).float()
         mean, logvar = moments.chunk(2, dim=1)
-        noise = torch.randn(
-            mean.shape, generator=torch.Generator().manual_seed(ENCODE_SEED)
-        ).to(mean)
+        noise = torch.randn(mean.shape, device=mean.device, dtype=mean.dtype,
+                            generator=torch.Generator(device=mean.device)
+                            .manual_seed(ENCODE_SEED))
         latents = torch.addcmul(mean, torch.exp(0.5 * logvar.clamp(-30.0, 20.0)), noise)
 
         z = latents.squeeze(2)

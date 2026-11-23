@@ -4,6 +4,7 @@ from PIL import Image, ImageDraw
 from conftest import header_of
 from test_dit_hunyuan3d21 import TINY
 from thenoise.dit.hunyuan3d21 import Hunyuan3D21ShapeParams
+from thenoise.mesh.spec import OUTPUT_FORMATS, MeshSpec
 
 from thenoise.models.base import Conditioning
 from thenoise.models.config import EncodePromptArgs, MeshDecodeParams, MeshSamplingParams
@@ -218,10 +219,15 @@ def test_a_shape_that_never_surfaces_blames_the_field_it_saw():
     assert "latents mean 0.000 std 0.000" in str(caught.value)
 
 
-def test_the_volume_defaults_are_the_shape_pipelines():
-    assert Hunyuan3D21ShapeModel.DEFAULT_PREFS["octree_resolution"] == 384
-    assert Hunyuan3D21ShapeModel.DEFAULT_PREFS["bounds"] == 1.01
-    assert Hunyuan3D21ShapeModel.DEFAULT_PREFS["mc_level"] == 1 / 512
+def test_the_volume_defaults_are_a_request_the_mesh_layer_takes():
+    """The numbers are the model's to choose; that they survive the request contract,
+    which is where a defaults change would surface, is what holds here."""
+    prefs = Hunyuan3D21ShapeModel.DEFAULT_PREFS
+    resolved = MeshSpec().resolve(prefs)
+    assert resolved.latents == prefs["num_latents"]
+    assert (resolved.octree_resolution, resolved.bounds, resolved.mc_level) == (
+        prefs["octree_resolution"], prefs["bounds"], prefs["mc_level"])
+    assert resolved.output_format in OUTPUT_FORMATS
 
 
 def test_a_reference_arrives_as_the_square_the_tower_was_trained_on():

@@ -281,6 +281,17 @@ class Header:
         """
         return self.packed.get(raw, tuple(self.raw_entries[raw]["shape"]))
 
+    def stored_bytes(self, names) -> int:
+        """Bytes this file holds for ``names``, in the file's own spelling.
+
+        What a read of those keys and no others costs, which is the figure a placement
+        decision wants when only part of a file becomes a component. The offset span,
+        so a packed low-bit weight counts the codes it stores rather than the tensor it
+        stands for.
+        """
+        return sum(self.raw_entries[name]["data_offsets"][1]
+                   - self.raw_entries[name]["data_offsets"][0] for name in names)
+
     def metadata_json(self, section: str) -> dict:
         """One JSON section of the file's ``__metadata__``, empty when absent or broken.
 

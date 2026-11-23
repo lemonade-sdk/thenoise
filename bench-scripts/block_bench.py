@@ -35,8 +35,10 @@ One case per ``(block, scenario, weights, token count)``:
 
 Inputs are built the way the owning model builds them — the same RoPE builders,
 position ids, key-padding masks, modulation rows, 256-token padding and KV
-buffers — so each block sees the shapes, layouts and strides it sees in the
-server. Text/context length is ``--txt``; editing cases get ``--refs`` reference
+buffers — and each block's weights land in the store its own loader leaves them
+in (``RELAY_STORES``, ``thenoise.utils.layout``), so each block sees the shapes,
+layouts and strides it sees in the server, on the backend it is photographed
+on. Text/context length is ``--txt``; editing cases get ``--refs`` reference
 images at the target's resolution (``--refs 0`` drops those scenarios). Blocks whose
 sequence does not depend on the image ladder (text-only ones) run once, at the first
 rung, rather than once per rung under a different key.
@@ -76,9 +78,14 @@ same protocol *and* environment, which the JSON records next to them.
   quantized GEMM that could not find its kernel looks like — it dequantizes and
   carries on in bf16, and nothing else in the run complains.
 
-A cold ``TORCHINDUCTOR_CACHE_DIR`` costs compile time, never measured time. The first
-int8 case also prints one AOT-autograd warning about ``QuantizedTensor`` not
-implementing ``_stable_hash_for_caching`` — comfy_kitchen's, not a compile failure.
+A cold ``TORCHINDUCTOR_CACHE_DIR`` costs compile time, never measured time — with one
+exception worth knowing: a graph is cached under the graph, not under the SDPA backends
+that were available while it was written, so a block first compiled without
+``TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1`` comes back with its attention on the
+math path long after the variable is set. Clear the cache when a block looks slow for no
+structural reason. The first int8 case also prints one AOT-autograd warning about
+``QuantizedTensor`` not implementing ``_stable_hash_for_caching`` — comfy_kitchen's, not a
+compile failure.
 
 Usage
 -----
@@ -169,6 +176,7 @@ class Ctx:
     dtype: torch.dtype = torch.bfloat16
     weights: str = "bf16"
     quant_note: str = ""       # what ``new_block`` did to the current case's weights
+    relay_note: str = ""       # and to their stores
 
     @property
     def tdev(self) -> torch.device:
@@ -180,12 +188,40 @@ def seed_of(key: str) -> int:
     return zlib.crc32(key.encode()) & 0x7FFF_FFFF
 
 
-def new_block(ctx: Ctx, name: str, cls, *args, **kwargs):
+def relay_loaded_stores(blk: nn.Module) -> str:
+    """Put ``blk``'s projections in the store a load would leave them in, and say how many.
+
+    ``weight_relayed`` is the loader's own predicate and its own copy, so the width bound,
+    the backend the penalty was measured on, and the rule that a quantized weight is
+    someone else's tensor are not restated here.
+    """
+    from thenoise.utils.layout import weight_relayed
+
+    moved = total = 0
+    for mod in blk.modules():
+        weight = getattr(mod, "weight", None)
+        if not isinstance(weight, nn.Parameter) or weight.dim() != 2:
+            continue
+        total += 1
+        detached = weight.detach()
+        stored = weight_relayed(detached)
+        if stored is not detached:
+            weight.data = stored
+            moved += 1
+    return f"relayed {moved}/{total}" if moved else ""
+
+
+def new_block(ctx: Ctx, name: str, cls, *args, relay_stores: bool, **kwargs):
     """Seeded random weights, on device, compute dtype, eval — as a loaded block is.
+
+    ``relay_stores`` is the model's own answer, its adapter module's ``RELAY_STORES``, so a
+    block is measured in the store its checkpoint lands in rather than the one a
+    constructor gives it.
 
     ``--weights int8`` swaps those weights for INT8 + ConvRot ones on the way out, so
     no fixture has to know a format exists: each one captures ``blk`` in its ``run``
-    closure, and the swap happens inside ``blk``.
+    closure, and the swap happens inside ``blk``. A quantized load is never relayed, so
+    that format leaves the store alone.
     """
     torch.manual_seed(seed_of(name))
     with torch.device(ctx.device):
@@ -193,6 +229,8 @@ def new_block(ctx: Ctx, name: str, cls, *args, **kwargs):
     blk.requires_grad_(False)
     if ctx.weights != "bf16":
         ctx.quant_note = to_int8_convrot(blk)
+    elif relay_stores:
+        ctx.relay_note = relay_loaded_stores(blk)
     return blk
 
 
@@ -350,6 +388,7 @@ def qwen_image21_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
         QwenImage21TransformerBlock,
         modulation_rows,
     )
+    from thenoise.dit.qwen_image21.utils import RELAY_STORES
     from thenoise.utils.positions import broadcast_positions, grid_from_axes
 
     name = "qwen_image21/block"
@@ -361,7 +400,8 @@ def qwen_image21_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     refs = n_refs(ctx, scenario)
     read = scenario == "read"
 
-    blk = new_block(ctx, name, QwenImage21TransformerBlock, dim, heads, head_dim, mlp_ratio=3)
+    blk = new_block(ctx, name, QwenImage21TransformerBlock, dim, heads, head_dim,
+                    mlp_ratio=3, relay_stores=RELAY_STORES)
     seed_inputs(name, scenario, tokens)
 
     # Positions as build_sequence lays them out: text first, then one centred grid
@@ -441,7 +481,7 @@ def qwen_image_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     read = scenario == "read"
 
     blk = new_block(ctx, name, QwenImageTransformerBlock, dim=dim, heads=heads,
-                    attention_head_dim=head_dim, eps=1e-5)
+                    attention_head_dim=head_dim, eps=1e-5, relay_stores=False)
     seed_inputs(name, scenario, tokens)
 
     # Target and reference positions are stored apart, which is what lets ``read``
@@ -534,6 +574,7 @@ def _flux2_mod(groups: int, dim: int, ctx: Ctx, tokens: int = 0, refs: int = 0,
 
 def _flux2_double(ctx: Ctx, tokens: int, scenario: str, params, model: str) -> Case:
     from thenoise.dit.flux2.models import DoubleStreamBlock
+    from thenoise.dit.flux2.utils import RELAY_STORES
     from thenoise.utils.dynamo import mark_token_axis
 
     name = f"{model}/double"
@@ -546,7 +587,8 @@ def _flux2_double(ctx: Ctx, tokens: int, scenario: str, params, model: str) -> C
     refs = nref * tokens
     read = scenario == "read"
 
-    blk = new_block(ctx, name, DoubleStreamBlock, dim, heads, mlp_ratio=params.mlp_ratio)
+    blk = new_block(ctx, name, DoubleStreamBlock, dim, heads,
+                    mlp_ratio=params.mlp_ratio, relay_stores=RELAY_STORES)
     seed_inputs(name, scenario, tokens)
     pe_x, pe_ctx = _flux2_pe(ctx, params, side, nref, read)
 
@@ -581,6 +623,7 @@ def _flux2_double(ctx: Ctx, tokens: int, scenario: str, params, model: str) -> C
 
 def _flux2_single(ctx: Ctx, tokens: int, scenario: str, params, model: str) -> Case:
     from thenoise.dit.flux2.models import SingleStreamBlock
+    from thenoise.dit.flux2.utils import RELAY_STORES
     from thenoise.utils.dynamo import mark_token_axis
 
     name = f"{model}/single"
@@ -593,7 +636,8 @@ def _flux2_single(ctx: Ctx, tokens: int, scenario: str, params, model: str) -> C
     refs = nref * tokens
     read = scenario == "read"
 
-    blk = new_block(ctx, name, SingleStreamBlock, dim, heads, mlp_ratio=params.mlp_ratio)
+    blk = new_block(ctx, name, SingleStreamBlock, dim, heads,
+                    mlp_ratio=params.mlp_ratio, relay_stores=RELAY_STORES)
     seed_inputs(name, scenario, tokens)
     pe_x, pe_ctx = _flux2_pe(ctx, params, side, nref, read)
     pe = torch.cat([pe_ctx, pe_x], dim=1)          # the single stream runs on [txt, img]
@@ -639,7 +683,7 @@ def krea2_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     txt = ctx.txt
 
     blk = new_block(ctx, name, SingleStreamBlock, features, heads, cfg.multiplier,
-                    cfg.bias, cfg.kvheads)
+                    cfg.bias, cfg.kvheads, relay_stores=False)
     seed_inputs(name, scenario, tokens)
 
     # Positions and key-padding mask from ``prepare`` (image tokens first), then the
@@ -682,7 +726,7 @@ def krea2_text_fusion(ctx: Ctx, tokens: int, scenario: str) -> Case:
     heads, features = cfg.txtheads, cfg.txtdim
     head_dim = features // heads
     blk = new_block(ctx, name, TextFusionBlock, features, heads, cfg.multiplier,
-                    cfg.bias, cfg.txtkvheads)
+                    cfg.bias, cfg.txtkvheads, relay_stores=False)
     seed_inputs(name, scenario, tokens)
     x = randn(ctx, 1, ctx.txt, features)
     if scenario == "nomask":
@@ -705,6 +749,7 @@ def krea2_text_fusion(ctx: Ctx, tokens: int, scenario: str) -> Case:
 def anima_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     """Anima (Cosmos-Predict2) block: self-attn + cross-attn + MLP, AdaLN-LoRA, 3D rope."""
     from thenoise.dit.anima.models import Block
+    from thenoise.dit.anima.utils import RELAY_STORES
     from thenoise.utils.attention import AttentionParams
     from thenoise.utils.rope import split_half_rope_3d
 
@@ -715,7 +760,8 @@ def anima_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     tokens = side * side
 
     blk = new_block(ctx, name, Block, x_dim=x_dim, context_dim=context_dim,
-                    num_heads=heads, mlp_ratio=4.0, use_adaln_lora=True, adaln_lora_dim=256)
+                    num_heads=heads, mlp_ratio=4.0, use_adaln_lora=True,
+                    adaln_lora_dim=256, relay_stores=RELAY_STORES)
     seed_inputs(name, scenario, tokens)
 
     x = randn(ctx, 1, 1, side, side, x_dim)        # B, T, H, W, D with T = 1 for images
@@ -766,7 +812,7 @@ def _zimage_case(ctx: Ctx, tokens: int, block: str, modulation: bool) -> Case:
     tokens = side * side
 
     blk = new_block(ctx, name, ZImageTransformerBlock, 0, dim, heads, heads, 1e-5,
-                    modulation=modulation)
+                    modulation=modulation, relay_stores=False)
     seed_inputs(name, block, tokens)
 
     # Each stream pads to a multiple of 32; a batch of one needs no key-padding mask
@@ -855,6 +901,7 @@ def _flux3_case(ctx: Ctx, mode: str, tokens: int, scenario: str) -> Case:
         ladder.
     """
     from thenoise.dit.flux3.models import Block, Flux3Params, ModOut, Span
+    from thenoise.dit.flux3.utils import RELAY_STORES
     from thenoise.utils.dynamo import mark_token_axis
 
     params = Flux3Params()
@@ -872,7 +919,8 @@ def _flux3_case(ctx: Ctx, mode: str, tokens: int, scenario: str) -> Case:
         segments = [("txt", ctx.txt)]
     seq = sum(length for _, length in segments)
 
-    blk = new_block(ctx, name, Block, dim, heads, mlp_ratio=params.mlp_ratio)
+    blk = new_block(ctx, name, Block, dim, heads,
+                    mlp_ratio=params.mlp_ratio, relay_stores=RELAY_STORES)
     seed_inputs(name, scenario, tokens)
     x = randn(ctx, 1, seq, dim)
     pe = _flux3_pe(ctx, params, mode, side, nref)
@@ -937,7 +985,7 @@ def moss_image_joint(ctx: Ctx, tokens: int, scenario: str) -> Case:
     tokens = side * side
     seq = tokens + ctx.txt
 
-    blk = new_block(ctx, name, Block, dim, params.ffn_dim, heads)
+    blk = new_block(ctx, name, Block, dim, params.ffn_dim, heads, relay_stores=False)
     seed_inputs(name, scenario, tokens)
     x = randn(ctx, 1, seq, dim)
     # The rows are computed once per step from the timestep and shared by all blocks.
@@ -961,7 +1009,7 @@ def moss_image_text_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     name = "moss_image/text_block"
     heads, dim = params.num_heads, params.dim
 
-    blk = new_block(ctx, name, TextBlock, dim, params.ffn_dim, heads)
+    blk = new_block(ctx, name, TextBlock, dim, params.ffn_dim, heads, relay_stores=False)
     seed_inputs(name, scenario, ctx.txt)
     x = randn(ctx, 1, ctx.txt, dim)
     _, pe = _moss_pe(ctx, 1, ctx.txt)              # its own positions, no image tokens
@@ -1001,6 +1049,7 @@ def _fibo2_case(ctx: Ctx, tokens: int, scenario: str, role: str) -> Case:
     makes them cacheable.
     """
     from thenoise.dit.fibo2.models import Block, Fibo2Params, gist_count
+    from thenoise.dit.fibo2.utils import RELAY_STORES
     from thenoise.utils.dynamo import mark_token_axis
 
     params = Fibo2Params()
@@ -1013,7 +1062,8 @@ def _fibo2_case(ctx: Ctx, tokens: int, scenario: str, role: str) -> Case:
     refs = nref * tokens
     read = scenario == "read"
 
-    blk = new_block(ctx, name, Block, params, params.cap_dim if injection else None)
+    blk = new_block(ctx, name, Block, params,
+                    params.cap_dim if injection else None, relay_stores=RELAY_STORES)
     seed_inputs(name, scenario, tokens)
 
     num_gist = gist_count(ctx.txt, params.max_gist_tokens)
@@ -1104,12 +1154,13 @@ def fibo2_noise_refiner(ctx: Ctx, tokens: int, scenario: str) -> Case:
 def fibo2_perceiver(ctx: Ctx, tokens: int, scenario: str) -> Case:
     """One Perceiver layer, twice per CFG branch: the gist queries reading the prompt."""
     from thenoise.dit.fibo2.models import Fibo2Params, PerceiverLayer, gist_count
+    from thenoise.dit.fibo2.utils import RELAY_STORES
 
     params = Fibo2Params()
     name = "fibo2/perceiver"
     heads, dim, head_dim = params.num_heads, params.dim, params.head_dim
 
-    blk = new_block(ctx, name, PerceiverLayer, params)
+    blk = new_block(ctx, name, PerceiverLayer, params, relay_stores=RELAY_STORES)
     seed_inputs(name, scenario, ctx.txt)
     num_gist = gist_count(ctx.txt, params.max_gist_tokens)
     x = randn(ctx, 1, num_gist, dim)
@@ -1146,6 +1197,7 @@ def h3_image_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     """
     from thenoise.dit.h3_image.layout import Layout
     from thenoise.dit.h3_image.models import DiTBlock, _spans
+    from thenoise.dit.h3_image.utils import RELAY_STORES
     from thenoise.utils.rope import split_half_rope_axes
 
     params = h3_params()
@@ -1156,7 +1208,7 @@ def h3_image_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     layout = Layout(ctx.txt, cells, cells, ((cells, cells),) * refs)
     n = layout.target_span[1] if read else layout.seq_len
 
-    blk = new_block(ctx, name, DiTBlock, params, ctx.dtype)
+    blk = new_block(ctx, name, DiTBlock, params, ctx.dtype, relay_stores=RELAY_STORES)
     seed_inputs(name, scenario, tokens)
     x = randn(ctx, 1, n, params.hidden_size)
     t_emb = randn(ctx, 2, params.adaln_dim)     # the step's t, and the refs' pinned one
@@ -1189,10 +1241,11 @@ def h3_image_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
 def h3_image_refiner(ctx: Ctx, tokens: int, scenario: str) -> Case:
     """H3-Image's prompt stream: two unmodulated, unrotated blocks over the text."""
     from thenoise.dit.h3_image.models import RefinerBlock
+    from thenoise.dit.h3_image.utils import RELAY_STORES
 
     params = h3_params()
     name = "h3_image/refiner"
-    blk = new_block(ctx, name, RefinerBlock, params)
+    blk = new_block(ctx, name, RefinerBlock, params, relay_stores=RELAY_STORES)
     seed_inputs(name, scenario, ctx.txt)
     x = randn(ctx, 1, ctx.txt, params.hidden_size)
 
@@ -1220,6 +1273,7 @@ WAN_FRAMES = 21             # a 5-second Wan clip: 81 frames at 16 fps over the 
 
 def _wan_case(ctx: Ctx, tokens: int, role: str, geometry: dict, token_temb: bool) -> Case:
     """One Wan 2.2 block over a video token stream, self-attention plus cross-attention."""
+    from thenoise.dit.wan_video.checkpoint import RELAY_STORES
     from thenoise.dit.wan_video.model import Wan22Params, WanNativeBlock
     from thenoise.utils.dynamo import mark_token_axis
     from thenoise.utils.positions import grid_positions
@@ -1235,7 +1289,7 @@ def _wan_case(ctx: Ctx, tokens: int, role: str, geometry: dict, token_temb: bool
     n = frames * side * side
     txt = ctx.txt
 
-    blk = new_block(ctx, name, WanNativeBlock, params)
+    blk = new_block(ctx, name, WanNativeBlock, params, relay_stores=RELAY_STORES)
     # The table a checkpoint fills, which the class leaves empty.
     nn.init.normal_(blk.scale_shift_table, std=0.02)
     # ``WanNativeDiT.apply_precision`` keeps the norms and the modulation table in fp32
@@ -1339,9 +1393,11 @@ def _ltx_case(ctx: Ctx, tokens: int, role: str, token_timestep: bool) -> Case:
     ``dim`` per AdaLN slot, one row for the batch except where noted. Phases come from
     ``AVRope``, which is where the model gets them, in fp32 beside bf16 activations.
     """
+    from thenoise.dit.ltx_video.checkpoint import RELAY_STORES
     from thenoise.dit.ltx_video.rope import AVRope
     from thenoise.dit.ltx_video.transformer import (AUDIO_HEAD_DIM, VIDEO_HEAD_DIM,
                                                     _AVBlock)
+    from thenoise.utils.attention import AttentionParams
     from thenoise.utils.dynamo import mark_token_axis
 
     vdim, adim = LTX_VDIM, LTX_ADIM
@@ -1359,13 +1415,17 @@ def _ltx_case(ctx: Ctx, tokens: int, role: str, token_timestep: bool) -> Case:
     name = f"ltx/{role}"
 
     blk = new_block(ctx, name, _AVBlock, vdim, adim, vheads, aheads, VIDEO_HEAD_DIM,
-                    AUDIO_HEAD_DIM, vctx, actx, True, True, True, True, True, True)
+                    AUDIO_HEAD_DIM, vctx, actx, True, True, True, True, True, True,
+                    relay_stores=("dit" in RELAY_STORES))
     seed_inputs(name, "plain", n)
 
     v = randn(ctx, 1, n, vdim)
     a = randn(ctx, 1, audio_tokens, adim)
     vtext, atext = randn(ctx, 1, txt, vctx), randn(ctx, 1, txt, actx)
-    key_mask = torch.ones(1, txt, device=ctx.tdev, dtype=ctx.dtype)
+    # What the transformer decides once per step, outside the compiled block: an unpadded
+    # prompt reaches the attentions as no operand at all.
+    vtext_params = atext_params = AttentionParams.create_attention_params_from_mask(
+        0, torch.ones(1, txt, dtype=torch.bool, device=ctx.tdev))
     # 9 AdaLN slots per stream once prompt modulation is wired in: 6 for the block's own
     # norms and gates, 3 more for the prompt attention's.
     vtime = randn(ctx, 1, n if token_timestep else 1, 9 * vdim)
@@ -1387,11 +1447,11 @@ def _ltx_case(ctx: Ctx, tokens: int, role: str, token_timestep: bool) -> Case:
 
     def run():
         mark_token_axis(v, a, vtext, atext, vtime, atime, v_cross, a_cross,
-                        v_gate, a_gate, v_prompt, a_prompt, key_mask)
+                        v_gate, a_gate, v_prompt, a_prompt)
         mark_token_axis(*v_rope, *a_rope, *v_ca_rope, *a_ca_rope, dim=-2)
         return blk(v, a, vtext, atext, vtime, atime, v_cross, a_cross, v_gate, a_gate,
                    v_prompt, a_prompt, v_rope, a_rope, v_ca_rope, a_ca_rope,
-                   key_mask, key_mask, None)
+                   vtext_params, atext_params, None)
 
     video, audio = (vheads, VIDEO_HEAD_DIM), (aheads, AUDIO_HEAD_DIM)
     flops = 0.0
@@ -1440,7 +1500,8 @@ def _hunyuan3d21_case(ctx: Ctx, tokens: int, moe: bool, skip: bool) -> Case:
 
     params = Hunyuan3D21ShapeParams(moe_layers=H3D_MOE_LAYERS if moe else 0, **H3D)
     role = "block_moe" if moe else ("block_skip" if skip else "block")
-    blk = new_block(ctx, f"hunyuan3d21/{role}", ShapeBlock, params, moe=moe, skip=skip)
+    blk = new_block(ctx, f"hunyuan3d21/{role}", ShapeBlock, params,
+                    moe=moe, skip=skip, relay_stores=False)
     seq = tokens + 1
     seed_inputs(f"hunyuan3d21/{role}", "plain", seq)
 
@@ -1704,6 +1765,7 @@ def main() -> None:
 
     apply_device_patches(args.device)
     results, failed, last_tokens, case = [], 0, None, None
+    stored: set[str] = set()             # fixtures whose bf16 rows carry a relayed store
     started = time.perf_counter()
     for f, t, scenario, weights in cases:
         if t != last_tokens:
@@ -1719,7 +1781,7 @@ def main() -> None:
         # label first so a long compile is visibly progress rather than a hang.
         print(f"  {label + ' ' + weights:34s}", end="", flush=True)
         try:
-            ctx.weights, ctx.quant_note = weights, ""   # new_block reads the format
+            ctx.weights, ctx.quant_note, ctx.relay_note = weights, "", ""  # new_block reads these
             case = f.build(ctx, t, scenario)
             tim = measure(case.run, ctx)
             tflops = case.flops / (tim.ms / 1000) / 1e12
@@ -1730,8 +1792,10 @@ def main() -> None:
                           "compile_s": round(tim.compile_s, 2),
                           "tflop": round(case.flops / 1e12, 4),
                           "tflops": round(tflops, 2), "peak_gib": round(tim.peak_gib, 3),
-                          "detail": " ".join(s for s in (case.detail, ctx.quant_note)
-                                             if s)})
+                          "detail": " ".join(s for s in (case.detail, ctx.quant_note,
+                                                         ctx.relay_note) if s)})
+            if ctx.relay_note:
+                stored.add(f.model)
         except Exception as exc:                                # noqa: BLE001
             print(f" {'FAILED':>7s}  {type(exc).__name__}: {str(exc)[:110]}", flush=True)
             entry.update({"status": "error", "error": f"{type(exc).__name__}: {exc}"})
@@ -1749,6 +1813,7 @@ def main() -> None:
 
     out = args.out or os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots",
                                    f"{device_slug(env)}-{time.strftime('%Y%m%d-%H%M')}.json")
+    from thenoise.utils.layout import LAYOUT_PENALTY
     snapshot = {
         "tool": "block_bench",
         "schema": SCHEMA,
@@ -1762,7 +1827,10 @@ def main() -> None:
                      "txt_tokens": ctx.txt, "refs": ctx.refs, "warmup": ctx.warmup,
                      "iters": ctx.iters, "repeats": ctx.repeats,
                      "order": "token count ascending, fixtures in registry order, "
-                             "bf16 then int8 for each case"},
+                             "bf16 then int8 for each case",
+                     # Which rows were built in the store their model's loader leaves, and
+                     # whether this backend is one where that store exists at all.
+                     "store": {"penalty": LAYOUT_PENALTY, "relayed": sorted(stored)}},
         "cases": results,
     }
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)

@@ -161,6 +161,9 @@ def _stack_scales(tensors: list[torch.Tensor]) -> torch.Tensor:
     return torch.cat(tensors, dim=0)
 
 
+RELAY_STORES = True
+
+
 def load_flux3_dit(
     checkpoint: Union[str, Header],
     params: Flux3Params,
@@ -175,6 +178,7 @@ def load_flux3_dit(
         dtype=dtype,
         key_map=_flux3_key_map,
         state_map=None if params.fused_qkv else fuse_qkv_state,
+        relay_stores=RELAY_STORES,
     )
 
 
@@ -183,4 +187,5 @@ __all__ = [
     "detect_params",
     "fuse_qkv_state",
     "load_flux3_dit",
+    "RELAY_STORES",
 ]

@@ -43,7 +43,7 @@ NEAR_BAND = 0.95
 
 
 class Hunyuan3D21ShapeModel(DiffusionModel):
-    name = "hunyuan3d-21"
+    name = "hunyuan3d21"
 
     MEDIUM = "mesh"
     REQUIRED_COMPONENTS = ()

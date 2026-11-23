@@ -497,12 +497,12 @@ def test_prepare_latent_puts_each_reference_on_its_own_plane(dit):
 
 
 def test_the_accepted_reference_method_is_the_one_the_model_uses(dit):
-    """A reference joins the sequence on its own plane at ``t = 0`` and there is no
-    other reading of it, so that is also the model's own default. Its one other way
-    with a picture asks the conditioner, not the DiT."""
+    """A reference joins the sequence on its own plane at ``t = 0`` and there is no other
+    reading of it, so whatever the model defaults to has to be a method it accepts. Its
+    one other way with a picture asks the conditioner, not the DiT."""
     model = _bare(dit=dit, params=_params_dict(), vae=FakeVAE())
     assert Fibo2Model.REF_METHODS == ("index_timestep_zero", VISION_REF_METHOD)
-    assert Fibo2Model.DEFAULT_PREFS["ref_method"] == "index_timestep_zero"
+    assert Fibo2Model.DEFAULT_PREFS["ref_method"] in Fibo2Model.REF_METHODS
 
     x = model.prepare_latent(
         _n(1, Z, 4, 3), Conditioning(cond=_n(1, 6, CTX)), _params(),

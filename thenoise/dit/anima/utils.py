@@ -21,6 +21,9 @@ ANIMA_SIGNATURE = Signature("Anima DiT",
                             prefixes=("llm_adapter.", "blocks.0.adaln_modulation"))
 
 
+RELAY_STORES = True
+
+
 def load_anima_model(
     device: Union[str, torch.device],
     checkpoint: Union[str, Header],
@@ -68,4 +71,5 @@ def load_anima_model(
         dtype=dit_weight_dtype,
         key_map=qk_norm_key_map,
         expected_missing=("seq", "dim_spatial_range", "dim_temporal_range", "inv_freq"),
+        relay_stores=RELAY_STORES,
     )

@@ -774,7 +774,7 @@ def _monolith_keys(weight):
 def _load(m, files, version="2.3"):
     return m.load_original_components(files, version=version,
                                       gemma_text_config=object(),
-                                      device_for=lambda paths: "cpu",
+                                      device_for=lambda nbytes: "cpu",
                                       dtype=torch.float32)
 
 
@@ -791,7 +791,7 @@ def _load_ltx(m, tmp_path, *, dit, text):
                             {"audio_vae.weight": weight, "vocoder.weight": weight}),
          "upscaler": _upscaler_file(tmp_path, weight), "text_encoder": text},
         version="2.5", gemma_text_config=object(),
-        device_for=lambda paths: "cpu", dtype=torch.float32,
+        device_for=lambda nbytes: "cpu", dtype=torch.float32,
     )
 
 
@@ -821,30 +821,47 @@ def test_a_named_file_takes_its_part_from_the_all_in_one(tmp_path, monkeypatch):
     torch.testing.assert_close(parts["vae"].weight, weight)
 
 
-def test_a_part_is_asked_where_the_files_that_carry_it_should_live(tmp_path, monkeypatch):
-    """The memory manager decides placement from the files a part arrives from, and the
-    read goes there directly -- a copy afterwards would double a 22 GB transformer."""
+def test_a_part_is_asked_where_the_bytes_it_reads_should_live(tmp_path, monkeypatch):
+    """The memory manager is asked once per part, for the bytes that part will actually be
+    read as, and the read goes where it answers -- a copy afterwards would double a 22 GB
+    transformer.
+
+    The files' sizes are the wrong figure for a part cut out of them: 2.5 keeps its two
+    text projections with the Gemma and its connector blocks with the transformer, so a
+    pair weighed at the files it arrives from is weighed at both checkpoints entire, and
+    lands on the offload device while the module it belongs to does not.
+    """
     m = _tiny_components(monkeypatch)
     weight = torch.ones(2, 2)
-    keys = _monolith_keys(weight)
-    del keys["vae.weight"]
-    monolith = _save(tmp_path / "all-in-one.safetensors", keys)
+    gemma = _save(tmp_path / "gemma.safetensors", {
+        "text_embedding_projection.video_aggregate_embed.weight": weight,
+        "text_embedding_projection.audio_aggregate_embed.weight": weight,
+        "model.layers.0.self_attn.q_proj.weight": torch.ones(64, 64),
+    })
+    transformer = _save(tmp_path / "dit.safetensors", _monolith_keys(weight))
     codec = _save(tmp_path / "video-vae.safetensors", {"vae.weight": weight})
+    audio = _save(tmp_path / "audio-vae.safetensors",
+                  {"audio_vae.weight": weight, "vocoder.weight": weight})
     ups = _upscaler_file(tmp_path, weight)
 
-    asked: list[list[Path]] = []
+    figures: list[int] = []
 
-    def device_for(paths):
-        asked.append(list(paths))
+    def device_for(nbytes):
+        figures.append(nbytes)
         return "cpu"
 
-    m.load_original_components({"": monolith, "vae": codec, "upscaler": ups},
-                               version="2.3", gemma_text_config=object(),
-                               dtype=torch.float32, device_for=device_for)
-    assert asked.count([monolith.resolve()]) == 4, "dit, audio_vae, vocoder, connectors"
-    assert asked.count([codec.resolve()]) == 1
-    assert asked.count([ups.resolve()]) == 1
-    assert len(asked) == 6
+    m.load_original_components(
+        {"": transformer, "vae": codec, "audio_vae": audio, "upscaler": ups,
+         "text_encoder": gemma},
+        version="2.5", gemma_text_config=object(), dtype=torch.float32,
+        device_for=device_for)
+
+    # One decision per part, in the order the parts are built.
+    dit, vae, audio_vae, vocoder, upscaler, connectors = figures
+    assert (dit, vae, audio_vae, vocoder, upscaler) == (16,) * 5
+    assert connectors == 2 * 16 + 2 * 8, ("two projections out of the Gemma file, two "
+                                          "register tables out of the transformer file")
+    assert connectors < gemma.stat().st_size + transformer.stat().st_size
 
 
 def test_a_file_naming_a_part_without_fitting_it_is_not_taken_for_it(tmp_path, monkeypatch):
@@ -1023,15 +1040,22 @@ def test_ltx_variants_resolve_with_shared_video_contract_and_fixed_refinement():
                 flow_shift=resolved.flow_shift, fps=resolved.fps,
             )
 
+        # Which defaults a bare request lands on is the adapter's to move; that the clip
+        # they name fits the VAE it will be decoded through is what has to hold.
         resolved = model.resolve_video(VideoSpec(prompt="moving fox"))
-        assert (resolved.width, resolved.height, resolved.frame_count) == (768, 512, 33)
-        assert (resolved.steps, resolved.sampler, resolved.output_format) == (8, "euler", "mp4")
+        assert (resolved.width % model.vae.spatial_compression_ratio,
+                resolved.height % model.vae.spatial_compression_ratio) == (0, 0)
+        assert (resolved.frame_count - 1) % model.vae.temporal_compression_ratio == 0
+        assert resolved.sampler and resolved.output_format
         explicit = model.resolve_video(VideoSpec(prompt="moving fox", frames=34))
         assert explicit.frame_count == 41  # explicit frame request rounds up to 8n+1
 
         schedule = model.schedule(params_for(resolved))
-        assert len(schedule) == 8
-        assert [len(s.steps) for s in model.segments(params_for(resolved), schedule, 1.0)] == [8, 3]
+        spans = model.segments(params_for(resolved), schedule, 1.0)
+        assert len(schedule) == resolved.steps == len(spans[0].steps)
+        # A second stage, entered below pure noise.
+        assert 0 < len(spans[1].steps) <= len(spans[0].steps)
+        assert float(spans[1].steps[0].t) < 1.0
         # The released recipe is the default, not a floor: another count resamples the
         # published grid and the refine pass keeps its share of it.
         for steps, refine in ((1, 1), (4, 2), (16, 6)):
