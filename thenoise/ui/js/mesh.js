@@ -1,7 +1,7 @@
-/* mesh.js — pictures in, POST /jobs/mesh, a mesh file out. Loaded after helpers.js. */
 
 let meshOutUrl = null;
 let meshOutMeta = null;
+let meshShown = 0;   // a shape still being read when the next one arrives is stale
 
 const meshJob = { id: null };
 const MESH_PROGRESS = { root: 'mesh_progress', label: 'mesh_progress_label', bar: 'mesh_bar' };
@@ -105,17 +105,37 @@ function meshName(meta) {
 
 function resetMeshResult() {
   meshOutMeta = null;
+  meshShown += 1;
+  clearMesh();
+  $('mesh_wire').disabled = true;
   setStageActions($('mesh_download'), $('mesh_info_btn'), false);
   $('mesh_out').style.display = 'none';
   $('meshplaceholder').style.display = '';
 }
 
-function showMeshResult() {
+function showMeshResult(blob) {
   $('meshplaceholder').style.display = 'none';
   $('mesh_out').style.display = 'flex';
   $('mesh_out_name').textContent = meshName(meshOutMeta);
-  $('mesh_out_note').textContent = 'no viewer here — download it to look at the shape';
   setStageActions($('mesh_download'), $('mesh_info_btn'), true);
+  const note = $('mesh_out_note');
+  if (!meshViewerReady()) {
+    note.textContent = 'no webgl2 in this browser — download it to look at the shape';
+    return;
+  }
+  note.textContent = 'reading the shape\u2026';
+  const shown = meshShown;
+  showMeshBlob(blob, meshOutMeta.output_format).then(
+    (shape) => {
+      if (shown !== meshShown) return;
+      $('mesh_wire').disabled = false;
+      note.textContent = shape.triangles.toLocaleString() + ' triangles, '
+        + shape.vertices.toLocaleString() + ' vertices \u2014 drag to turn, wheel to zoom';
+    },
+    (error) => {
+      if (shown === meshShown) note.textContent = 'this viewer cannot read it: ' + error.message;
+    },
+  );
 }
 
 $('mesh_generate').addEventListener('click', () => {
@@ -140,7 +160,7 @@ $('mesh_generate').addEventListener('click', () => {
       meshOutUrl = URL.createObjectURL(new Blob([blob], {
         type: MESH_FORMATS[meshOutMeta.output_format] || 'application/octet-stream',
       }));
-      showMeshResult();
+      showMeshResult(blob);
     },
   });
 });

@@ -546,11 +546,14 @@
 <main class="main">
   <div class="stage" id="mesh_stage">
     <div class="placeholder" id="meshplaceholder">Drop a picture and click <span class="kbd">Generate shape</span></div>
-    <div class="stage-file" id="mesh_out">
+    <div class="stage-file stage-mesh" id="mesh_out">
+      <canvas id="mesh_view" class="mesh-view" tabindex="0"
+              aria-label="The shape. Drag or use the arrow keys to turn it, plus and minus to zoom, zero to frame it again."></canvas>
       <div class="stage-file-name" id="mesh_out_name"></div>
       <div class="stage-file-note" id="mesh_out_note"></div>
     </div>
     <div class="actions">
+      <button class="ctrl" id="mesh_wire" disabled title="Overlay the triangles" aria-pressed="false">&#9651; Wireframe</button>
       <button class="dl ctrl" id="mesh_download" disabled title="Download the mesh">&#8595; Download</button>
       <button class="dl ctrl" id="mesh_cancel" disabled title="Cancel the running job">&#10005; Cancel</button>
       <button class="info ctrl" id="mesh_info_btn" disabled title="Shape info" aria-label="Shape info">&#9432;</button>
@@ -687,6 +690,7 @@
 <script src="static/js/app.js"></script>
 <script src="static/js/controlmap.js"></script>
 <script src="static/js/video.js"></script>
+<script src="static/js/viewer.js"></script>
 <script src="static/js/mesh.js"></script>
 </body>
 </html>
