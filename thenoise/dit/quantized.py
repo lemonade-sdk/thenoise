@@ -129,6 +129,53 @@ def _(
 _LINEAR_OPS = (AsymW4A8Int8Layout, TensorCoreFP8Layout)
 
 
+#: Row pitches, in bytes, from which a full-precision GEMM pays for the alignment of its
+#: operand, and the elements added to a row once it does.
+#:
+#: The penalty follows the reduction length, because that is the activation's row pitch.
+#: Measured on gfx1151 across the blocks the engine ships: rows 32768 B apart cost about
+#: half the rate the same block charges elsewhere — LTX's and krea2's 16384-wide FFN
+#: activations, 1.48x and 1.54x in eager and 8-13% of the block — and rows 24576 B apart
+#: about a sixth (flux2_klein9b and qwen_image21: 2.6% and 5.3%). Nothing at or below
+#: 16384 B responded. Neither did rows 27648 B apart, wan22's, so the threshold does buy a
+#: copy there: about 0.6% of that GEMM, against the sixth recovered wherever the pitch is
+#: 24576.
+#:
+#: The gate is the backend rather than a device list because only ROCm is known to have the
+#: penalty; on cuBLAS the copy would be pure cost. The quantized paths are untouched, since
+#: what was measured is the rate of a GEMM reading a full-precision activation.
+PITCH_MIN_BYTES = 24576
+PITCH_PAD_ELEMENTS = 8
+PITCH_PENALTY = torch.version.hip is not None
+
+
+def pitch_too_wide(x: torch.Tensor) -> bool:
+    """Whether ``x``'s rows are long enough, and laid out squarely enough, to want widening.
+
+    Contiguity is part of the test: a row already widened by an earlier projection has a
+    stride that says so, and copying behind someone else's copy earns nothing.
+    """
+    if x.dim() < 2:
+        return False
+    pitch = x.stride(-2) * x.element_size()
+    return pitch >= PITCH_MIN_BYTES and pitch == x.shape[-1] * x.element_size()
+
+
+def pitch_padded(x: torch.Tensor) -> torch.Tensor:
+    """``x`` in rows ``PITCH_PAD_ELEMENTS`` wider, when its rows are wide in the slow way.
+
+    Sixteen bytes per row break whatever bank or set conflict costs the GEMM its rate, for
+    one pointwise write — which Inductor folds into the kernel that produced the activation,
+    so in a compiled block this is usually no extra kernel at all but a wider allocation.
+    """
+    if not PITCH_PENALTY or x.device.type != "cuda" or not pitch_too_wide(x):
+        return x
+    wide = torch.empty((*x.shape[:-1], x.shape[-1] + PITCH_PAD_ELEMENTS),
+                       dtype=x.dtype, device=x.device)
+    wide[..., :x.shape[-1]] = x
+    return wide[..., :x.shape[-1]]
+
+
 class QuantizedLinear(nn.Module):
     """Linear projection that runs BF16 (default) or a quantized scheme.
 
@@ -330,8 +377,10 @@ class QuantizedLinear(nn.Module):
         weight = self.weight
         if not isinstance(weight, QuantizedTensor):
             # Full precision stays an ordinary ``F.linear``: an op boundary here would cut
-            # the layer off from the elementwise fusion around it.
-            y = F.linear(x, weight, self.bias)
+            # the layer off from the elementwise fusion around it. Widening the operand's
+            # rows is not one — it is pointwise, it fuses into whatever produced them, and
+            # it is this GEMM's own rate that wants it.
+            y = F.linear(pitch_padded(x), weight, self.bias)
         elif self.input_scale is not None:
             # Only quantized layers loaded with calibrated FP8 input scaling take
             # this path; all others use the standard linear dispatch.

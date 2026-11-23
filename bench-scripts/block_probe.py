@@ -1000,9 +1000,9 @@ def _gemm_shapes(run: Callable[[], object], iters: int) -> tuple[list[tuple[int,
     hands over its projections without anyone listing them. A half-rate GEMM is only found
     by asking every block the same question.
 
-    The second value counts the records left out because a batched ``bmm`` has no single
-    ``(M, K, N)`` to name, and it is printed: a table of the block's GEMMs that quietly
-    omitted its batched ones would be read as complete.
+    The second value counts the records whose op is a known GEMM but whose operands the
+    record cannot name — a batched ``bmm`` has no single ``(M, K, N)`` — and it is printed:
+    a table of a block's GEMMs that quietly omitted some of them would be read as complete.
     """
     from torch.profiler import ProfilerActivity, profile
 
@@ -1017,14 +1017,16 @@ def _gemm_shapes(run: Callable[[], object], iters: int) -> tuple[list[tuple[int,
     seen: dict[tuple[int, int, int], list[float]] = {}
     skipped = 0
     for e in prof.key_averages(group_by_input_shape=True):
-        if e.key not in _GEMM_OPS or e.count == 0:
+        if e.count == 0 or e.self_device_time_total <= 0:
             continue
-        mats = [list(s) for s in (getattr(e, "fused_cpu_input_shapes", None)
-                                  or e.input_shapes or []) if len(s) == 2]
-        if len(mats) < 2 or mats[0][1] != mats[1][0]:
-            skipped += 1                     # batched, or a pair the record cannot name
+        dims = [list(s) for s in (getattr(e, "fused_cpu_input_shapes", None)
+                                  or e.input_shapes or [])]
+        got = _projection(e.key, dims)
+        if got is None:
+            if e.key in _GEMM_OPS:
+                skipped += 1             # batched, or a pair the record cannot name
             continue
-        slot = seen.setdefault((mats[0][0], mats[0][1], mats[1][1]), [0.0, 0.0])
+        slot = seen.setdefault(got, [0.0, 0.0])
         slot[0] += e.self_device_time_total / 1000
         slot[1] += e.count
     return (sorted(((m, k, n, ms / calls) for (m, k, n), (ms, calls) in seen.items()
@@ -1067,6 +1069,11 @@ def gemm_section(ctx: bb.Ctx, run: Callable[[], object], iters: int, repeats: in
     ``shipped`` disagrees with it is measuring something the graph does not do.
     """
     shapes, skipped = _gemm_shapes(run, max(2, iters))
+    if ctx.weights != "bf16":
+        print(f"\ngemm: declined — these are full-precision forms and the block was built "
+              f"with {ctx.weights} weights, whose kernels are not these calls. What the "
+              "block's own GEMMs cost, whatever op they are, is in --section shapes.")
+        return
     shapes = shapes[:top]
     if not shapes:
         print("\ngemm: the block recorded no mm/addmm calls to bench")
@@ -1155,18 +1162,26 @@ def shape_section(run: Callable[[], object], name: str, iters: int, weight_bytes
             torch.cuda.synchronize()
 
     print(f"\nshapes: {name}, device time per call over {iters} calls\n")
-    for label, wanted in (("GEMM", _GEMM_OPS), ("attention", _ATTN_OPS)):
+    for label in ("GEMM", "attention"):
         rows = []
         for e in prof.key_averages(group_by_input_shape=True):
-            if e.key not in wanted or e.count == 0:
+            if e.count == 0:
                 continue
             dims = [list(s) for s in (getattr(e, "fused_cpu_input_shapes", None)
                                       or e.input_shapes or [])]
+            # A projection is recognised by its operands, not by a name: a quantized
+            # backend calls its own op, and the block's GEMMs are not fewer for that.
+            if label == "GEMM":
+                if _projection(e.key, dims) is None:
+                    continue
+            elif e.key not in _ATTN_OPS:
+                continue
             rows.append((e.self_device_time_total / iters, e.count / iters, e.key, dims))
         rows.sort(key=lambda r: -r[0])
         print(f"  {label}")
         if not rows:
-            print("    (none — if the block calls attention, the graph decomposed it)")
+            print("    (none — either this block projects nothing, or its projection "
+                  "arrives in a shape no record here can be read as one)")
             continue
         for us, calls, key, dims in rows:
             flops = _shape_flops(key, dims)
@@ -1190,6 +1205,35 @@ def shape_section(run: Callable[[], object], name: str, iters: int, weight_bytes
             print(f"    {us / 1000:8.2f} ms  {key}")
 
 
+def _projection(op: str, dims: list[list[int]]) -> Optional[tuple[int, int, int]]:
+    """``(M, K, N)`` of a recorded GEMM, or None when the record is not one.
+
+    Both operand orientations are read, because both are in use. ``addmm`` is handed the
+    weight as a transposed view, so its pair is ``[M, K] x [K, N]``; a projection that hands
+    over its stored ``[N, K]`` — ``aten::linear``, and ``comfy_kitchen::int8_linear``, which
+    is on no list this script keeps — presents ``[M, K] x [N, K]``. Reading only the first
+    called every weight-transposed projection in the engine a non-GEMM, which is how an INT8
+    block came back with no GEMMs at all.
+
+    Detection is by shape rather than by name for that reason: a quantized backend names
+    its own ops, and a probe that has to be told each one is a probe that has to be told.
+    Only dispatched ops qualify — a record whose name carries no namespace is a kernel, and
+    an Inductor fusion named after the ``int8_linear`` it swallowed has two matching 2-D
+    operands and is not a GEMM.
+    """
+    if "::" not in op or op in _ATTN_OPS:
+        return None
+    mats = [d for d in dims if len(d) == 2]
+    if len(mats) < 2:
+        return None
+    a, b = mats[0], mats[1]
+    if a[1] == b[0]:
+        return a[0], a[1], b[1]
+    if a[1] == b[1]:
+        return a[0], a[1], b[0]
+    return None
+
+
 def _shape_flops(op: str, dims: list[list[int]]) -> float:
     """FLOPs of one recorded call, from the shapes the op was given.
 
@@ -1198,12 +1242,10 @@ def _shape_flops(op: str, dims: list[list[int]]) -> float:
     packed physical layout, where the heads and the sequence can be either middle
     dimension — the rate needs their product, which is the same either way.
     """
-    if op in _GEMM_OPS:
-        mats = [d for d in dims if len(d) == 2]
-        if len(mats) >= 2:
-            a, b = mats[0], mats[1]
-            return 2 * a[0] * a[1] * b[1] if a[1] == b[0] else 0.0
-        return 0.0
+    got = _projection(op, dims)
+    if got is not None:
+        m, k, n = got
+        return 2 * m * k * n
     four = [d for d in dims if len(d) == 4]
     if len(four) >= 2:
         q, k = four[0], four[1]
