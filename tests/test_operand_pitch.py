@@ -61,7 +61,10 @@ def test_a_cpu_operand_is_left_alone_however_wide_its_rows():
 
 
 @cuda_only
-def test_widening_adds_to_the_row_stride_and_not_to_the_shape():
+def test_widening_adds_to_the_row_stride_and_not_to_the_shape(monkeypatch):
+    # The gate is open wherever this runs today; a CUDA runner would hand the operand back
+    # unwidened and this would fail for a reason that has nothing to do with widening.
+    monkeypatch.setattr(quantized, "LAYOUT_PENALTY", True)
     x = torch.randn(2, PITCH_MIN_ROWS, WIDTH, device="cuda", dtype=torch.bfloat16)
     y = pitch_padded(x)
     assert y.shape == x.shape

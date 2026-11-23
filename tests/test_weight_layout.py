@@ -29,6 +29,19 @@ IN = 64
 OUT = IN * int(TRANSPOSE_MIN_RATIO)
 
 
+@pytest.fixture(autouse=True)
+def rocm_gate(monkeypatch):
+    """Hold the backend gate open, because CI has no ROCm.
+
+    The rule is gated on the one backend it was measured on, but everything below is
+    backend-independent plumbing — the relay, the doors a weight comes through, the plain
+    store handed to a file — and skipping all of it wherever ``torch.version.hip`` is None
+    would leave that plumbing untested on the only machine that runs it continuously. The
+    gate itself gets the test it needs.
+    """
+    monkeypatch.setattr(quantized, "LAYOUT_PENALTY", True)
+
+
 def checkpoint_of(lin: QuantizedLinear) -> dict:
     """What a safetensors file would hold for ``lin``: plain row-major tensors."""
     return {k: v.detach().contiguous().clone() for k, v in lin.state_dict().items()}
@@ -47,7 +60,7 @@ def test_a_projection_that_is_not_wider_out_than_in_wants_nothing():
 
 
 def test_the_gate_is_the_backend_because_only_rocm_was_measured(monkeypatch):
-    monkeypatch.setattr(quantized, "LAYOUT_PENALTY", False)
+    monkeypatch.setattr(quantized, "LAYOUT_PENALTY", False)   # over the autouse fixture
     assert not stores_weight_transposed(IN, 4 * IN)
     assert weight_relayed(torch.empty(4 * IN, IN)).stride(-1) == 1
 

@@ -165,8 +165,10 @@ PITCH_MIN_ROWS = 1024
 #: in bf16: 1.14x for flux2's double block and 1.13x for its single one, 1.07x for qwen21
 #: and flux3's text block, 1.05x for fibo2's trunk, 1.04x for anima and wan's 5B, and 1.02x
 #: for h3, flux3's image and joint blocks and LTX's i2v one. Blocks with nothing to gain were
-#: flat, not slower; ``moss_image``'s joint block is the one that wanted it left alone at
-#: 0.985x, and the rule is on floating-point weights, so an int8 load never sees it.
+#: flat, not slower. The one exception is ``moss_image``'s joint block, about 1% worse, and no
+#: ratio excludes it: undoing only its 5.33x feed-forward recovers all of that and undoing its
+#: 3x qkv nothing, so its shape is on the wrong side of a kernel choice rather than of this
+#: bound. The rule is on floating-point weights, so an int8 load never sees it.
 TRANSPOSE_MIN_RATIO = 3.0
 
 
