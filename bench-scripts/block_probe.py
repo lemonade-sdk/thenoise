@@ -1064,6 +1064,10 @@ def gemm_section(ctx: bb.Ctx, run: Callable[[], object], iters: int, repeats: in
     * ``tuned`` — TunableOp's pick for the shipped call, out of what rocBLAS and
       ``--lt-algos`` hipBLASLt algorithms will offer for that exact problem. Where it wins,
       the file it writes is a per-machine configuration a build could carry.
+    * ``pad tuned`` — TunableOp's pick for the *padded* call, which is a different problem
+      and gets its own search: what the fix the engine now applies is worth once a kernel
+      has been chosen for it. ``--no-tune`` skips both tuned columns, which is what a sweep
+      over many blocks wants: the eager levers are free and a search is not.
 
     ``in blk`` is the same GEMM's cost as the block itself recorded it, so a row whose
     ``shipped`` disagrees with it is measuring something the graph does not do.
@@ -1086,7 +1090,7 @@ def gemm_section(ctx: bb.Ctx, run: Callable[[], object], iters: int, repeats: in
              else "") + "\n")
     print(f"{'projection':20s}{'M x K x N':>21s}{'in blk':>8s}{'shipped':>9s}"
           f"{'no bias':>9s}{'B copied':>10s}{'A strided':>10s}{'A flipped':>10s}"
-          f"{'W A\u1d40':>9s}{'tuned':>9s}  {'TF/s':>5s}")
+          f"{'W A\u1d40':>9s}{'tuned':>9s}{'pad tuned':>10s}  {'TF/s':>5s}")
     for m, k, n, in_blk in shapes:
         a = torch.randn(m, k, device=ctx.tdev, dtype=ctx.dtype)
         w = torch.randn(n, k, device=ctx.tdev, dtype=ctx.dtype)
@@ -1101,17 +1105,24 @@ def gemm_section(ctx: bb.Ctx, run: Callable[[], object], iters: int, repeats: in
             lambda: torch.addmm(bias, a_flip.t(), wt), lambda: torch.mm(w, a.t()))]
         shipped = cells[0]
         if tuning is None:
-            tuned, lib = float("nan"), ""
+            tuned, lib, pad_tuned = float("nan"), "", float("nan")
         else:
             tuned, lib = _tuned_ms(lambda: torch.addmm(bias, a, wt), iters, repeats,
                                    tuning, lt_algos)
+            # The padded operand is a different problem for the library, so it gets its own
+            # search: where it beats the padded form's own timing, a shipped kernel file is
+            # worth more than the layout fix alone.
+            pad_tuned, _ = _tuned_ms(lambda: torch.addmm(bias, wide[:, :k], wt),
+                                     iters, repeats, tuning, lt_algos)
         print(f"{names.get((k, n), ''):20s}{f'{m} x {k} x {n}':>21s}{in_blk:8.2f}"
               + "".join(f"{c:10.2f}" for c in cells)
-              + f"{tuned:9.2f}  {2 * m * k * n / shipped * 1e-9:5.1f}")
+              + f"{tuned:9.2f}{pad_tuned:10.2f}"
+              + f"  {2 * m * k * n / shipped * 1e-9:5.1f}")
         pitch = k * itemsize
         won = [f"{label} {shipped / ms:.2f}x" for label, ms in
                (("wider pitch", cells[3]), ("copied weight", cells[2]),
-                ("hipBLASLt", tuned), ("swapped shape", cells[5]))
+                ("hipBLASLt", tuned), ("padded and tuned", pad_tuned),
+                ("swapped shape", cells[5]))
                if ms == ms and ms < shipped * 0.87]
         detail = (f"{pitch // 1024} KiB pitch"
                   + (" (power of two)" if not pitch & (pitch - 1) else ""))
@@ -1472,6 +1483,9 @@ def main() -> None:
     ap.add_argument("--tune-out", type=Path, default=None,
                     help="where --section gemm records the kernels it tunes "
                          "(default a file named after the device in the temp dir)")
+    ap.add_argument("--no-tune", action="store_true",
+                    help="skip --section gemm's two tuned columns: the eager levers cost "
+                         "nothing, a TunableOp search costs a minute per GEMM")
     ap.add_argument("--lt-algos", type=int, default=0,
                     help="ask hipBLASLt for this many candidate algorithms per GEMM")
     ap.add_argument("--pad-min-pitch", type=int, default=PAD_MIN_PITCH,
@@ -1606,7 +1620,7 @@ def main() -> None:
         tuning = args.tune_out or Path(tempfile.gettempdir()) / (
             f"tunableop-{torch.cuda.get_device_name(0).lower().replace(' ', '_')}.csv")
         gemm_section(ctx, fixture.run, args.iters, args.repeats,
-                     tuning if not args.child else None, args.lt_algos,
+                     None if (args.child or args.no_tune) else tuning, args.lt_algos,
                      LTX_GEMMS if known else {})
 
     if args.section in ("shapes", "all"):
