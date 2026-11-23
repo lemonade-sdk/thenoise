@@ -76,9 +76,14 @@ same protocol *and* environment, which the JSON records next to them.
   quantized GEMM that could not find its kernel looks like — it dequantizes and
   carries on in bf16, and nothing else in the run complains.
 
-A cold ``TORCHINDUCTOR_CACHE_DIR`` costs compile time, never measured time. The first
-int8 case also prints one AOT-autograd warning about ``QuantizedTensor`` not
-implementing ``_stable_hash_for_caching`` — comfy_kitchen's, not a compile failure.
+A cold ``TORCHINDUCTOR_CACHE_DIR`` costs compile time, never measured time — with one
+exception worth knowing: a graph is cached under the graph, not under the SDPA backends
+that were available while it was written, so a block first compiled without
+``TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1`` comes back with its attention on the
+math path long after the variable is set. Clear the cache when a block looks slow for no
+structural reason. The first int8 case also prints one AOT-autograd warning about
+``QuantizedTensor`` not implementing ``_stable_hash_for_caching`` — comfy_kitchen's, not a
+compile failure.
 
 Usage
 -----
@@ -1365,7 +1370,7 @@ def _ltx_case(ctx: Ctx, tokens: int, role: str, token_timestep: bool) -> Case:
     v = randn(ctx, 1, n, vdim)
     a = randn(ctx, 1, audio_tokens, adim)
     vtext, atext = randn(ctx, 1, txt, vctx), randn(ctx, 1, txt, actx)
-    key_mask = torch.ones(1, txt, device=ctx.tdev, dtype=ctx.dtype)
+    key_mask = torch.zeros(1, txt, device=ctx.tdev, dtype=ctx.dtype)
     # 9 AdaLN slots per stream once prompt modulation is wired in: 6 for the block's own
     # norms and gates, 3 more for the prompt attention's.
     vtime = randn(ctx, 1, n if token_timestep else 1, 9 * vdim)
