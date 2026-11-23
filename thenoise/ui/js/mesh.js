@@ -7,14 +7,9 @@ const meshJob = { id: null };
 const MESH_PROGRESS = { root: 'mesh_progress', label: 'mesh_progress_label', bar: 'mesh_bar' };
 const MESH_MODES = {i2d: 'image-to-shape', mv2d: 'views-to-shape', t2d: 'text-to-shape'};
 const MESH_FORMATS = { glb: 'model/gltf-binary', obj: 'text/plain', stl: 'model/stl' };
-// A view-taking model's ceiling is its own, in caps.mesh.mv2d; this is only the most
-// thumbnails this form will ever collect, and the server refuses past its count anyway.
 const MESH_MAX_VIEWS = 4;
 const meshViews = [];   // {b64, dataUrl, name}, in view order
 
-// Views are the exception, and `multiple` is the fact that they are: app.js sets it from
-// the loaded model's caps, so a tower that cannot tell a left view from a front one takes
-// one picture here too.
 function meshCeiling() {
   return $('mesh_file').multiple ? MESH_MAX_VIEWS : 1;
 }

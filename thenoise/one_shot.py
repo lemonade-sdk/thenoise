@@ -35,8 +35,7 @@ def load(args, medium: str, command: str):
     from .runtime import ModelPaths, Runtime, Settings
 
     runtime = Runtime(Settings(device=args.device))
-    # A command declares only the checkpoint flags its medium can read; a medium without
-    # the component flags simply passes no extra paths.
+    # A command declares only the checkpoint flags its medium can read.
     runtime.load(ModelPaths(
         dit_path=args.dit, vae_path=getattr(args, "vae", ""),
         text_encoder_path=getattr(args, "text_encoder", ""),

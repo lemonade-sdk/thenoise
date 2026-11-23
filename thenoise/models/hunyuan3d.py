@@ -38,14 +38,8 @@ from thenoise.utils.safetensors import Header
 
 logger = logging.getLogger(__name__)
 
-#: The square the tower takes: 518/14 patches a side, whose count plus the cls token is
-#: the ``text_len: 1370`` in the model config. Any other frame size re-interpolates its
-#: position grid, which it was never trained on.
 REFERENCE_SIDE = 518
 
-#: How close to the cut a corner may sit and still have its cell refined. The codec's
-#: field saturates at about ±1, and the reference decoder keeps this much margin so a
-#: surface a coarse grid steps over is still chased at the next level.
 NEAR_BAND = 0.95
 
 
@@ -56,9 +50,6 @@ class Hunyuan3DShapeModel(DiffusionModel):
     REQUIRED_COMPONENTS = ()
     REF_METHODS = (VISION_REF_METHOD,)
 
-    # No "mv2d": this release's conditioner is `DinoImageEncoder`, which concatenates
-    # nothing, so a view offset is a number the tower has never met. A model that ships a
-    # multi-view tower says so here, and the medium refuses the rest at the boundary.
     CAPABILITIES = {**DiffusionModel.CAPABILITIES,
                     "mesh": {"i2d": True, "t2d": False}}
 
@@ -72,8 +63,6 @@ class Hunyuan3DShapeModel(DiffusionModel):
         "num_latents": 4096,
         "octree_resolution": 384,
         "bounds": 1.01,
-        # The shape pipeline's cut, -1/512 on the inside-positive logit it answers with;
-        # this field counts the other way, so the sign goes with it.
         "mc_level": 1 / 512,
     }
 
