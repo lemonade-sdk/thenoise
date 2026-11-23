@@ -2,8 +2,14 @@
 
 A projection much wider out than in reads its weight rather than its activation when the
 stream is short, and ``F.linear`` reads that weight strided by the row it is stored in.
-Storing the same numbers with the reduction axis contiguous hands the GEMM the operand it
-wants. The loader applies it as the weights land, for the models that ask.
+Storing the same numbers the other way round — ``W`` kept as ``Wᵀ``, with ``W``'s shape —
+hands the GEMM the operand it wants. The loader applies it as the weights land, for the
+models that ask.
+
+Which ask is written down once each, as ``RELAY_STORES`` in the ``thenoise.dit`` module that
+loads that transformer, and ``bench-scripts/block_bench.py`` reads those: a photographed
+block has to carry the store a load would leave it in, on the backend the photograph is
+taken on.
 
 Not in ``thenoise.dit.quantized``, where the projections live: that module imports the
 loader, and the loader is what needs this.

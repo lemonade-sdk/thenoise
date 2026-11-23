@@ -28,6 +28,10 @@ VERSION_25 = "2.5"
 #: Prompt modulation adds three rows to an AdaLN table; six is a table without it.
 _MOD_WITH_PROMPT = 9
 
+#: The components whose weights land in the relayed store: the transformer runs every step,
+#: the codecs and vocoder run once per clip.
+RELAY_STORES = ("dit",)
+
 
 def detect_params(checkpoint) -> LTXParams:
     """Read a transformer's geometry out of the checkpoint header.
@@ -299,7 +303,7 @@ def load_original_components(
             dtype=dtype,
             device=device_for(sum(header_of[path].stored_bytes(selected)
                                   for path, selected in claims[name].items())),
-            what=f"LTX {name}", relay_stores=(name == "dit"))
+            what=f"LTX {name}", relay_stores=(name in RELAY_STORES))
         module.eval()
     return modules, {name: paths[0] for name, paths in sources.items()}
 

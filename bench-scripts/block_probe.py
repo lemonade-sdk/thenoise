@@ -463,9 +463,10 @@ def weight_transposed_patches(blk: nn.Module, rules: LayoutRules) -> list:
 
     The patch swaps the *tensor*, not the forward, which is what a load-time transpose does:
     the projection sees a weight of the shape it expects and a layout it never asked for, and
-    its operand padding and LoRA branch stay in the graph untouched. Which is why this arm is
-    now expected to be flat — the engine relays the same weights itself, and the swap of an
-    already relayed weight is a no-op that Inductor cannot even see.
+    its operand padding and LoRA branch stay in the graph untouched. Which is why this arm
+    reads flat on the models that ask for the store, and reads its gain on the ones that
+    declined: the camera builds a block the way its loader leaves it, so the arm is only a
+    no-op where the engine already did it.
     """
     return [(mod, "weight",
              nn.Parameter(mod.weight.t().contiguous().t(), requires_grad=False))
@@ -475,10 +476,10 @@ def weight_transposed_patches(blk: nn.Module, rules: LayoutRules) -> list:
 def weight_plain_store_patches(blk: nn.Module, rules: LayoutRules) -> list:
     """Wide-output projections with the checkpoint's own store put back under them.
 
-    The undo of what ``thenoise.dit.quantized`` does as weights land, and therefore the arm
-    that says what the relay is worth on a block that has had it. It copies rather than
-    patching the GEMM, because the relay is a copy too: the difference between the two rows
-    is the layout, not the arithmetic.
+    The undo of what the loader does as the weights land (``thenoise.utils.layout``), and
+    therefore the arm that says what the relay is worth on a block that has had it. It
+    copies rather than patching the GEMM, because the relay is a copy too: the difference
+    between the two rows is the layout, not the arithmetic.
     """
     return [(mod, "weight",
              nn.Parameter(mod.weight.data.contiguous(), requires_grad=False))

@@ -17,6 +17,8 @@ from thenoise.utils.wan_weights import wan_dit_key
 
 logger = logging.getLogger(__name__)
 
+RELAY_STORES = True
+
 
 def load_wan_native_transformer(
     checkpoint: Union[str, Header],
@@ -44,6 +46,6 @@ def load_wan_native_transformer(
         device=device,
         dtype=dtype or (QUANTIZED_COMPUTE_DTYPE if quantized else None),
         key_map=wan_dit_key,
-        relay_stores=True,
+        relay_stores=RELAY_STORES,
     )
     return model.apply_precision().eval()

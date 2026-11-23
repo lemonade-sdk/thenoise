@@ -130,11 +130,12 @@ def _(
 _LINEAR_OPS = (AsymW4A8Int8Layout, TensorCoreFP8Layout)
 
 
-#: Row pitches, in bytes, from which a full-precision GEMM pays for the alignment of its
-#: operand, and the elements added to a row once it does. The penalty follows the reduction
-#: length, because that is the activation's row pitch: nothing at or below 16384 B responds,
-#: and rows 27648 B apart — wan22's — pay the copy without recovering anything. Full
-#: precision only, since what is slow is a GEMM reading a full-precision activation.
+#: The row pitch, in bytes, from which a full-precision GEMM pays for how its operand is
+#: laid out, and the elements added to a row once it does. The pitch is the reduction length
+#: — the operand is the activation — so the penalty arrives by width rather than by model,
+#: and only where a full-precision activation is read. Where the bound sits, and what each
+#: width gave back, belongs to the ``pitch_pad`` arm of ``bench-scripts/block_probe.py``:
+#: that is where the sweep was run and where moving this bound gets priced.
 PITCH_MIN_BYTES = 24576
 PITCH_PAD_ELEMENTS = 8
 

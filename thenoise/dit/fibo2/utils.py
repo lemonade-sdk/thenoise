@@ -102,6 +102,9 @@ def detect_params(checkpoint: Union[str, Header]) -> Fibo2Params:
     return params
 
 
+RELAY_STORES = True
+
+
 def load_fibo2_dit(
     checkpoint: Union[str, Header],
     params: Fibo2Params,
@@ -115,8 +118,9 @@ def load_fibo2_dit(
         device=device,
         dtype=dtype,
         key_map=fibo2_key_map,
-        relay_stores=True,
+        relay_stores=RELAY_STORES,
     )
 
 
-__all__ = ["FIBO2_SIGNATURE", "detect_params", "fibo2_key_map", "load_fibo2_dit"]
+__all__ = ["FIBO2_SIGNATURE", "detect_params", "fibo2_key_map", "load_fibo2_dit",
+          "RELAY_STORES"]

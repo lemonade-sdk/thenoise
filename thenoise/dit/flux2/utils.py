@@ -71,6 +71,9 @@ def detect_klein_params(checkpoint: Union[str, Header]) -> Flux2Params:
     return cls()
 
 
+RELAY_STORES = True
+
+
 def load_flux2_dit(
     checkpoint: Union[str, Header],
     params: Flux2Params,
@@ -84,7 +87,7 @@ def load_flux2_dit(
         device=device,
         dtype=dtype,
         key_map=_flux2_key_map,
-        relay_stores=True,
+        relay_stores=RELAY_STORES,
     )
 
 
@@ -174,4 +177,5 @@ __all__ = [
     "load_qwen3_embedder",
     "OUTPUT_LAYERS_QWEN3",
     "MAX_LENGTH",
+    "RELAY_STORES",
 ]
