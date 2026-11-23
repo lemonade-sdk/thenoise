@@ -123,8 +123,7 @@ class LTXVideo(VideoModel):
         **VideoModel.DEFAULT_PREFS,
         "width": 768, "height": 512, "frames": 33, "fps": 24,
         "steps": 8, "guidance_scale": 1.0, "flow_shift": 1.0,
-        "sampler": "euler", "output_format": "mp4",
-        "ref_method": "index_timestep_zero",
+        "sampler": "euler", "ref_method": "index_timestep_zero",
     }
 
     @classmethod
