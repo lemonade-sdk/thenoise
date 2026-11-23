@@ -118,6 +118,7 @@ from torch import nn
 import block_bench as bb
 from thenoise.dit.ltx_video import transformer as ltx
 from thenoise.dit.ltx_video.rope import AVRope
+from thenoise.utils import attention as attention_mod
 from thenoise.dit.quantized import (PITCH_MIN_BYTES, PITCH_MIN_ROWS, PITCH_PAD_ELEMENTS,
                                     TRANSPOSE_MIN_RATIO)
 from thenoise.utils.attention import eager_attention
@@ -659,6 +660,14 @@ def ltx_arms() -> dict[str, Arm]:
             "the rotary phase tables carried in bf16 instead of fp32: half the table "
             "traffic, and the doubled band assembled in bf16",
             inputs=[(AVRope, "_phases", phases_dtype(torch.bfloat16))], exact=False),
+        Arm("no_layout_fixup",
+            "q, k and v handed to SDPA in whatever layout the projections left them, which "
+            "is what ``uniform_layout`` exists to prevent: it copies each one into the "
+            "L-major order the fast kernels want, and the RMSNorm and the rope ride along "
+            "inside that copy for free, which is why removing either of them changes the "
+            "codegen around it rather than the work. The same math either way — the question "
+            "is whether the copy is what the strided operands really cost, or whether they "
+            "cost less than it does", exact=False),
         Arm("no_qk_norm",
             "the query and key RMSNorms out of every attention. LTX norms over the whole "
             "head vector rather than per head, so this is not a norm that can be moved "
@@ -722,6 +731,9 @@ def arm_modules(arms: dict[str, Arm], blk: nn.Module, rules: LayoutRules) -> Non
             for name in ("attn1", "attn2", "audio_attn1", "audio_attn2",
                          "audio_to_video_attn", "video_to_audio_attn")
             if f"{name}.qk_norm" in sub]
+    if "no_layout_fixup" in arms:
+        arms["no_layout_fixup"].patches = [
+            (attention_mod, "uniform_layout", lambda q, k, v: (q, k, v))]
     operand = prompt_mask_patches(sub["attn2"], sub["audio_attn2"])
     arms["prompt_mask_operand"].patches = operand
     arms["sdpa_eager_masked"].patches += operand
