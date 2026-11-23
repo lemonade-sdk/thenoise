@@ -659,6 +659,12 @@ def ltx_arms() -> dict[str, Arm]:
             "the rotary phase tables carried in bf16 instead of fp32: half the table "
             "traffic, and the doubled band assembled in bf16",
             inputs=[(AVRope, "_phases", phases_dtype(torch.bfloat16))], exact=False),
+        Arm("no_qk_norm",
+            "the query and key RMSNorms out of every attention. LTX norms over the whole "
+            "head vector rather than per head, so this is not a norm that can be moved "
+            "after the split into heads and fused with the rope there: it is removed, which "
+            "is what separates its cost from the rope and the layout fix-up riding along in "
+            "the same kernels", exact=False),
         Arm("no_rope", "no rotary rotation at all",
             patches=[(ltx, "apply_rope_split_half", lambda x, *_phases: x)], exact=False),
         Arm("no_gate", "the per-head 2*sigmoid gate off every attention",
@@ -710,6 +716,12 @@ def arm_modules(arms: dict[str, Arm], blk: nn.Module, rules: LayoutRules) -> Non
     arms["no_v2a"].patches = mods("video_to_audio_attn")
     arms["no_cross_modal"].patches = mods("audio_to_video_attn", "video_to_audio_attn")
     arms["no_audio_stream"].patches = mods("audio_attn1", "audio_attn2", "audio_ff")
+    if "no_qk_norm" in arms:
+        arms["no_qk_norm"].patches = [
+            (sub[f"{name}.qk_norm"], "forward", lambda q, k, *_kw: (q, k))
+            for name in ("attn1", "attn2", "audio_attn1", "audio_attn2",
+                         "audio_to_video_attn", "video_to_audio_attn")
+            if f"{name}.qk_norm" in sub]
     operand = prompt_mask_patches(sub["attn2"], sub["audio_attn2"])
     arms["prompt_mask_operand"].patches = operand
     arms["sdpa_eager_masked"].patches += operand
