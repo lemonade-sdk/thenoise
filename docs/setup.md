@@ -75,8 +75,15 @@ All models and options (variants, `--int8-convrot`, ...):
 | MOSS-Image | `--model moss-image` | 14–19 GB | [model page](models/moss-image.md) |
 | Fibo 2.0 edit-turbo / dev | `--model fibo2 --int8-convrot` | 14–26 GB | [model page](models/fibo2.md) |
 | H3-Image | `--model h3-image --int8-convrot` | 49–69 GB | [model page](models/h3-image.md) |
+| Wan 2.2 TI2V-5B | `--model wan22` | 18–23 GB | [model page](models/wan22.md#ti2v-5b) |
+| Wan 2.2 T2V-A14B (two experts) | `--model wan22-14b` | 64–69 GB | [model page](models/wan22.md#t2v-a14b-two-experts) |
+| Wan 2.2 I2V-A14B (two experts) | `--model wan22-14b-i2v` | 64–69 GB | [model page](models/wan22.md#i2v-a14b) |
+| LTX 2.3 Distilled | `--model ltx23 --int8-convrot` | 43–72 GB | [model page](models/ltx.md) |
+| LTX 2.5 Distilled | `--model ltx25 --int8-convrot` | 40–71 GB | [model page](models/ltx.md) |
+| MiniMax-H3 Video | `--model h3-video --int8-convrot` | 54–73 GB | [model page](models/h3-video.md) |
+| Hunyuan3D 2.1 shape *(image-to-shape)* | `--model hunyuan3d21` | ~7.4 GB | [model page](models/hunyuan3d-2.1.md) |
 | Real-ESRGAN x4 *(optional, upscaling)* | `--model esrgan` | ~0.7 GB | [CLI: upscaling](cli.md#upscaling) |
-| Control-map checkpoints *(optional, control-map extraction)* | `--model controlmap` | 99 MB – 425 MB | [CLI: control maps](cli.md#control-map-a-control-map) |
+| Control-map checkpoints *(optional, control-map extraction)* | `--model controlmaps` | 99 MB – 425 MB | [CLI: control maps](cli.md#control-map-a-control-map) |
 
 **Flux.3** is the one model the script cannot fetch: the checkpoint sits behind a
 login on Hugging Face, with no mirror to fall back on. Its
