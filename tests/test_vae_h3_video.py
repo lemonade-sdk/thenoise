@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from comfy_kitchen.tensor import QuantizedTensor
 from conftest import write_safetensors
 from torch.testing import assert_close
 from thenoise.vae import AutoencoderKLH3Video, load_h3_video_vae
@@ -336,3 +337,66 @@ def test_loader_refuses_a_sol_decoder(tmp_path):
     path = write_safetensors(tmp_path / "sol-vae.safetensors", tensors)
     with pytest.raises(ValueError, match="signature"):
         load_h3_video_vae(path, device="cpu")
+
+
+#: The decoder leaves a ComfyUI int8 export quantizes. Every conv stays full precision,
+#: which is why ``CausalConv3d`` needs no quantized twin.
+QUANTIZED_LEAVES = ("attn.to_qkv", "attn.to_out", "ff.w1", "ff.w2")
+
+
+def _int8_codec_state(vae) -> dict:
+    """The codec's own weights on a per-row int8 grid, markers included.
+
+    Exported without ConvRot, so the codes stand for the weight they came from and a
+    test can bound the error instead of only asking whether the file loaded.
+    """
+    from conftest import comfy_quant
+
+    tensors = {}
+    for key, value in vae.state_dict().items():
+        owner = key.rsplit(".", 1)[0]
+        if key.endswith(".weight") and owner.endswith(QUANTIZED_LEAVES):
+            scale = value.float().abs().amax(dim=1, keepdim=True) / 127
+            tensors[key] = torch.round(value.float() / scale).to(torch.int8)
+            tensors[f"{owner}.weight_scale"] = scale
+            tensors[f"{owner}.comfy_quant"] = comfy_quant(convrot=False)
+        else:
+            tensors[key] = value
+    return tensors
+
+
+def test_a_quantized_codec_file_loads(tmp_path, tiny_vae):
+    """The released int8 codec file: quantized ViT Linears, full-precision convs."""
+    path = write_safetensors(tmp_path / "h3-video-vae-int8.safetensors",
+                             _int8_codec_state(tiny_vae))
+
+    loaded = load_h3_video_vae(path, device="cpu")
+
+    block = loaded.decoder.transformer_blocks[0]
+    assert isinstance(block.attn.to_qkv.weight, QuantizedTensor)
+    assert isinstance(block.ff.w2.weight, QuantizedTensor)
+    assert not isinstance(loaded.encoder.conv_in.weight, QuantizedTensor)
+    assert not isinstance(loaded.decoder.proj_out.weight, QuantizedTensor)
+    assert loaded.dtype == AutoencoderKLH3Video.compute_dtype
+
+    # A scale read as something else, or codes taken for another layout, is O(1) here;
+    # the int8 grid's own error is two orders below that.
+    original = tiny_vae.state_dict()["decoder.transformer_blocks.0.attn.to_qkv.weight"]
+    got = block.attn.to_qkv.weight.dequantize().float()
+    assert ((got - original.float()).norm() / original.float().norm()).item() < 0.01
+
+
+def test_a_quantized_codec_still_decodes(tmp_path, tiny_vae):
+    latent = torch.randn(1, 24, 2, 2, 3)
+    path = write_safetensors(tmp_path / "h3-video-vae-int8.safetensors",
+                             _int8_codec_state(tiny_vae))
+    loaded = load_h3_video_vae(path, device="cpu")
+
+    with torch.no_grad():
+        expected = tiny_vae.decode_to_pixels(latent)
+        got = loaded.decode_to_pixels(latent)
+
+    assert got.shape == expected.shape
+    assert torch.isfinite(got).all()
+    assert ((got.float() - expected.float()).norm()
+            / expected.float().norm()).item() < 0.02

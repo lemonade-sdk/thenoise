@@ -558,7 +558,11 @@ def load_codec(
     ``state_map`` then rewrites the dict — dropping a half the model does not build,
     restoring weights the export left out — and needs the module for its shapes.
 
-    The module keeps its own :attr:`compute_dtype` unless ``dtype`` overrides it.
+    A quantized codec file — quant metadata among its keys answers
+    :func:`is_quantized_checkpoint` — takes the same route a quantized DiT does, through
+    :func:`load_quantized_state_dict`; without that branch its int8 weights would be
+    refused as a shape mismatch. Either way the module ends on ``device`` in its own
+    :attr:`compute_dtype` unless ``dtype`` overrides it.
     Anything after the load — FP32 islands, fused attention, freezing — is the
     caller's, on the returned module.
     """
@@ -572,12 +576,21 @@ def load_codec(
 
     model = construct(header)
     state_dict = strip_wrap_prefixes(load_safetensors(header.path, device=device, dtype=None))
+    state_dict = drop_runtime_state(state_dict)
     if key_map is not None:
         state_dict = _map_keys(state_dict, key_map, header.path)
     if state_map is not None:
         state_dict = state_map(state_dict, model)
-    load_module_state(model, state_dict, header.path, what=what)
-    model.to(device, dtype if dtype is not None else model.compute_dtype)
+    compute = dtype if dtype is not None else model.compute_dtype
+    if is_quantized_checkpoint(header):
+        # The compute dtype goes *into* the loader here: quantized weights stay quantized,
+        # so a `.to(compute)` afterwards would round the codes and their scales. No
+        # restore map either — a codec takes no LoRA for an undo to read back from.
+        load_quantized_state_dict(model, state_dict, dtype=compute)
+        model.to(device)
+    else:
+        load_module_state(model, state_dict, header.path, what=what)
+        model.to(device, compute)
     logger.info("Loaded %s from %s", what, header.path)
     return model
 
