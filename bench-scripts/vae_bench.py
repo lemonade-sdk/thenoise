@@ -57,9 +57,12 @@ protocol *and* environment, which the JSON records next to them.
 * ``GiB`` is the allocator's peak *allocated* for that case alone (stats reset after each
   case's warmup) and ``resv`` the peak it had *reserved*: at 2048x2048 a decoder's
   activations are gigabytes wide and the gap between those two columns is fragmentation,
-  which is what actually bites on unified memory. ``Mpx/s`` is the throughput a user
-  feels; ``GiB/Mpx`` is the scale-free one. No FLOP column: PyTorch's flop counter cannot
-  see ``comfy_kitchen::*``, so it would quote a conv codec at a fraction of its work.
+  which is what actually bites on unified memory. ``act`` is ``GiB`` minus the codec's own
+  resident bytes, which is the part the op actually moved: a big codec on a small rung
+  otherwise looks dear per megapixel because its weights are in the numerator. ``Mpx/s`` is
+  the throughput a user feels; ``GiB/Mpx`` is the scale-free one. No FLOP column: PyTorch's
+  flop counter cannot see ``comfy_kitchen::*``, so it would quote a conv codec at a fraction
+  of its work.
 * ``1st`` is the untimed first call: MIOpen picks a conv algorithm per shape there, so
   it is the cold-shape tax a server pays and never a measured number.
 * a case that raises — a 16 GB card will lose the top rung of the ladder — is reported
@@ -133,6 +136,7 @@ class Case:
     dtype: torch.dtype     # what the codec turned out to be built in, under ``auto``
     latent: str = ""       # the canonical latent it produces or consumes
     detail: str = ""       # free-form: who loads this codec, what the op stops at
+    weights_gib: float = 0.0   # the module's own bytes: the floor under the peak
 
 
 @dataclass(frozen=True)
@@ -246,6 +250,19 @@ def rand_pixels(ctx: Ctx, dtype: torch.dtype, res: Res, channels: int,
     return (x * 2.0 - 1.0).to(dtype)
 
 
+def weight_gib(vae) -> float:
+    """What the module tree occupies on the device: the floor under every peak column.
+
+    The scale-free ``GiB/Mpx`` divides that floor by the pixels too, so a big codec at a
+    small rung looks expensive per megapixel for no reason; the ``act`` column subtracts
+    this back out. Parameters and buffers alike, in a plain tree — quantized storage is
+    counted at its logical width, and no fixture here is quantized.
+    """
+    total = sum(p.numel() * p.element_size() for p in vae.parameters())
+    total += sum(b.numel() * b.element_size() for b in vae.buffers())
+    return total / 2**30
+
+
 def vae_case(ctx: Ctx, vae, name: str, res: Res, op: str, note: str = "") -> Case:
     """Wire one op of ``vae`` up at ``res``, exactly as a model calls it.
 
@@ -278,7 +295,7 @@ def vae_case(ctx: Ctx, vae, name: str, res: Res, op: str, note: str = "") -> Cas
     detail = f"{vae.pixel_channels}ch px {res}; {note}"
     if op == FEATURES:
         detail += f", stops after upsample 1/{len(vae.decoder.upsamples)}"
-    return Case(run, res.mpx, vae.dtype, latent, detail)
+    return Case(run, res.mpx, vae.dtype, latent, detail, weight_gib(vae))
 
 
 def vae_video_case(ctx: Ctx, vae, name: str, res: Res, frames: int, op: str,
@@ -328,7 +345,11 @@ def vae_video_case(ctx: Ctx, vae, name: str, res: Res, frames: int, op: str,
         raise ValueError(f"unknown op {op!r} for a temporal codec")
 
     detail = f"{vae.pixel_channels}ch px {res}x{frames}f; {note}"
-    return Case(run, res.mpx * frames, vae.dtype, latent, detail)
+    if op == DECODE and plan.latent_t == 1:
+        # Not a still: the codec decodes a lone latent as a clip of copies and keeps the
+        # frame it stands for, so this row costs a clip's worth of decode.
+        detail += ", lone latent decoded as a clip of copies"
+    return Case(run, res.mpx * frames, vae.dtype, latent, detail, weight_gib(vae))
 
 
 # --------------------------------------------------------------------- fixtures
@@ -671,7 +692,7 @@ def main() -> None:
             print(f"\n=== {res}" + (f" · {n}f" if n > 1 else "")
                   + f" ({res.mpx * n:.1f} Mpx) ===")
             print(f"  {'codec/op':26s} {'dt':>4s} {'latent':>13s} {'ms':>9s} {'±%':>5s} "
-                  f"{'Mpx/s':>7s} {'GiB/Mpx':>7s} {'GiB':>6s} {'resv':>6s} {'1st':>6s}")
+                  f"{'Mpx/s':>7s} {'GiB/Mpx':>7s} {'GiB':>6s} {'act':>6s} {'resv':>6s} {'1st':>6s}")
             last_res = (res, n)
         label = f"{f.model}/{op}"
         entry = {"key": f"{label}@{res}" + (f"@{n}f" if n > 1 else ""),
@@ -690,7 +711,8 @@ def main() -> None:
             gib_mpx = tim.peak_gib / case.mpx
             print(f" {DTYPE_SLUG[case.dtype]:>4s} {case.latent:>13s} {tim.ms:9.1f} "
                   f"{tim.cov_pct:5.1f} {mpx:7.2f} {gib_mpx:7.2f} "
-                  f"{tim.peak_gib:6.2f} {tim.peak_res_gib:6.2f} {tim.first_s:6.1f}",
+                  f"{tim.peak_gib:6.2f} {max(tim.peak_gib - case.weights_gib, 0.0):6.2f} "
+                  f"{tim.peak_res_gib:6.2f} {tim.first_s:6.1f}",
                   flush=True)
             entry.update({"status": "ok", "latent": case.latent,
                           "dtype": DTYPE_SLUG[case.dtype],
@@ -699,6 +721,8 @@ def main() -> None:
                           "mpx_per_s": round(mpx, 4),
                           "gib_per_mpx": round(gib_mpx, 4),
                           "peak_gib": round(tim.peak_gib, 3),
+                          "weights_gib": round(case.weights_gib, 3),
+                          "act_gib": round(max(tim.peak_gib - case.weights_gib, 0.0), 3),
                           "peak_reserved_gib": round(tim.peak_res_gib, 3),
                           "detail": case.detail})
         except Exception as exc:                                # noqa: BLE001
