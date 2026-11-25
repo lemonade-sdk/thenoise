@@ -1,5 +1,11 @@
 """What the chunked producer and a fused norm+rope would each buy, before changing a trunk.
 
+The peaks here are isolated and eager, so they include temporaries that Inductor fuses away in a
+real block: read this as an implementation comparison (which kernel is better at the same job and
+how closely they agree), and use bench-scripts/block_path_probe.py for any adoption decision.
+Section 15 of docs/research/sparse-attention.md has both sets of numbers and the correction that
+followed from the second one.
+
 Two candidate changes to the attention path, measured on the same operands rather than argued
 about:
 
