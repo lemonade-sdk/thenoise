@@ -141,11 +141,13 @@ def test_a_shape_model_menus_words_over_its_own_numbers():
                                      ("roomy", 1.212), ("wide", 1.515)]
     assert named(menu, "mc_level") == [("sharp", 1 / 1024), ("standard", 1 / 512),
                                        ("fatten", 1 / 256), ("extra fatten", 1 / 128)]
+    assert named(menu, "scale") == [("\u00d70.5", 0.5), ("\u00d71", 1),
+                                   ("\u00d72", 2), ("\u00d74", 4)]
 
 
 def test_another_model_of_the_medium_answers_with_its_own_numbers():
     menu = knob_menu({"num_latents": 3072, "octree_resolution": 256, "bounds": 1.0,
-                      "mc_level": 1 / 256})
+                      "mc_level": 1 / 256, "scale": 400})
     assert named(menu, "latents") == [("lean", 1536), ("standard", 3072),
                                       ("detailed", 6144)]
     assert named(menu, "octree_resolution") == [("draft", 64), ("fine", 128),
@@ -154,6 +156,8 @@ def test_another_model_of_the_medium_answers_with_its_own_numbers():
                                      ("roomy", 1.2), ("wide", 1.5)]
     assert named(menu, "mc_level") == [("sharp", 1 / 512), ("standard", 1 / 256),
                                        ("fatten", 1 / 128), ("extra fatten", 1 / 64)]
+    assert named(menu, "scale") == [("\u00d70.5", 200), ("\u00d71", 400),
+                                   ("\u00d72", 800)]
 
 
 def test_a_menu_stops_where_a_request_would_be_refused():
@@ -185,13 +189,14 @@ def test_the_numbers_no_shape_can_use_are_refused_by_name():
     look worse. These two are the ones a real request reached the octree with."""
     for knob, bad in [("bounds", 700.0), ("bounds", 0.001), ("mc_level", 3.0),
                       ("mc_level", -40.0), ("latents", 20_000),
-                      ("octree_resolution", 900), ("octree_resolution", 4)]:
+                      ("octree_resolution", 900), ("octree_resolution", 4),
+                      ("scale", 1e6), ("scale", 1e-6)]:
         with pytest.raises(ValueError, match=knob):
             resolve(**{knob: bad})
 
 
 def test_a_refusal_names_the_edges_it_was_checked_against():
-    for knob in ("latents", "bounds", "mc_level", "octree_resolution"):
+    for knob in ("latents", "bounds", "mc_level", "octree_resolution", "scale"):
         low, high, why = limits(knob)
         with pytest.raises(ValueError, match=f"{knob} must be between {low} and {high}"):
             resolve(**{knob: high * 1000 if low >= 0 else -high * 1000})

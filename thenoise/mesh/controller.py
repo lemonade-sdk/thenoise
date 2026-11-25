@@ -76,10 +76,16 @@ class MeshPipelineController:
             )
             token.check()
 
-            model.switch_loras(spec.lora_specs.get("sampling"), "dit", "sampling")
             latents = model.init_latents(params)
+
+            def wear_loras():
+                # Empty specs included: a LoRA the last shape wore must come off this one.
+                for role, component in model.lora_components().items():
+                    model.switch_loras(spec.lora_specs.get(role), component, role)
+
             x = stages.run(self._denoise, latents, model.fuse_text(cond), params, spec,
-                           token, progress, resident=("dit",), pixels=work)
+                           token, progress, resident=("dit",), pixels=work,
+                           prepare=wear_loras)
             token.check()
 
             mesh = stages.run(

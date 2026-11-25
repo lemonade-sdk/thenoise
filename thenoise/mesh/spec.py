@@ -21,6 +21,8 @@ _LIMITS = {
     "octree_resolution": (8, 768, "each step is eight times the memory of the one below"),
     "bounds": (0.05, 8.0, "a shape fills about ±1 of the volume"),
     "mc_level": (-0.5, 0.5, "the codec's field crosses near zero"),
+    "scale": (0.001, 1000.0, "a mesh is read at about ±1, so past this someone is "
+                             "reading a unit, not sizing a shape"),
 }
 
 KNOB_STEPS = {
@@ -28,6 +30,7 @@ KNOB_STEPS = {
     "latents": (("lean", 0.5), ("standard", 1), ("detailed", 2)),
     "bounds": (("tight", 0.9), ("standard", 1), ("roomy", 1.2), ("wide", 1.5)),
     "mc_level": (("sharp", 0.5), ("standard", 1), ("fatten", 2), ("extra fatten", 4)),
+    "scale": (("×0.5", 0.5), ("×1", 1), ("×2", 2), ("×4", 4)),
 }
 
 KNOB_PREFS = {"latents": "num_latents"}
@@ -149,7 +152,7 @@ class MeshSpec(BaseModel):
         if steps < 1:
             raise ValueError("steps must be positive")
         for knob, value in (("latents", latents), ("bounds", bounds),
-                            ("mc_level", mc_level),
+                            ("mc_level", mc_level), ("scale", scale),
                             ("octree_resolution", octree_resolution)):
             low, high, why = limits(knob)
             if not low <= value <= high:
@@ -161,8 +164,6 @@ class MeshSpec(BaseModel):
             raise ValueError("sampler must not be empty")
         if output_format not in OUTPUT_FORMATS:
             raise ValueError(f"output_format must be one of {', '.join(OUTPUT_FORMATS)}")
-        if not math.isfinite(scale) or scale <= 0:
-            raise ValueError("scale must be finite and positive")
         return ResolvedMesh(
             images=self.images, latents=latents, steps=steps,
             guidance_scale=guidance_scale, sampler=sampler, attention=attention,

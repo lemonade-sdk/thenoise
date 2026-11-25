@@ -157,7 +157,7 @@ def test_health_publishes_the_shape_knobs_of_the_loaded_model():
     from thenoise.mesh.spec import knob_menu
 
     hunyuan = {"num_latents": 4096, "octree_resolution": 384, "bounds": 1.01,
-               "mc_level": 1 / 512}
+               "mc_level": 1 / 512, "scale": 1.0}
     runtime = _runtime()
     runtime._model = type("M", (), {"MEDIUM": "mesh", "default_prefs": hunyuan,
                                     "CAPABILITIES": {"mesh": {"i2d": True}},
@@ -168,6 +168,7 @@ def test_health_publishes_the_shape_knobs_of_the_loaded_model():
     assert [one["value"] for one in knobs["octree_resolution"]] == [96, 192, 384, 768]
     assert [one["name"] for one in knobs["latents"]] == ["lean", "standard", "detailed"]
     assert [one["value"] for one in knobs["mc_level"]] == [1/1024, 1/512, 1/256, 1/128]
+    assert [one["name"] for one in knobs["scale"]] == ["×0.5", "×1", "×2", "×4"]
 
     # Another model, another set of numbers: same code path, different trained values.
     runtime._model = type("M", (), {"MEDIUM": "mesh", "default_prefs": {
@@ -180,6 +181,7 @@ def test_health_publishes_the_shape_knobs_of_the_loaded_model():
                                {"value": 6144, "name": "detailed"}]
     assert [one["value"] for one in knobs["octree_resolution"]] == [64, 128, 256, 512]
     assert [one["value"] for one in knobs["mc_level"]] == [1/512, 1/256, 1/128, 1/64]
+    assert "scale" not in knobs
 
 
 def test_health_with_nothing_loaded():
@@ -284,7 +286,7 @@ def test_ui_scripts_only_look_up_ids_the_page_has():
 
 @pytest.mark.parametrize("menu", ["sampler", "edit_sampler", "video_sampler",
                                   "mesh_sampler", "mesh_latents", "mesh_octree_resolution",
-                                  "mesh_bounds", "mesh_mc_level"])
+                                  "mesh_bounds", "mesh_mc_level", "mesh_scale"])
 def test_ui_menus_hold_no_list_of_their_own(menu):
     """A menu like this is the server's to fill — solver names, or a shape knob's realistic
     range, which is the loaded model's own values scaled. The markup keeps ``auto`` and
@@ -313,7 +315,7 @@ def test_ui_divides_the_shape_pane_by_what_a_knob_changes():
     shape = {"mesh_latents", "mesh_steps", "mesh_guidance_scale", "mesh_sampler",
              "mesh_seed"}
     surface = {"mesh_octree_resolution", "mesh_bounds", "mesh_mc_level"}
-    file_out = {"mesh_output_format"}
+    file_out = {"mesh_scale", "mesh_output_format"}
 
     with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
         page = f.read()
@@ -333,13 +335,12 @@ def test_ui_divides_the_shape_pane_by_what_a_knob_changes():
 
 
 def test_ui_keeps_the_picture_the_only_mandatory_shape_input():
-    """A shape needs a picture and nothing else: no prompt, no size, no reference method."""
+    """No prompt, no pixel size: a shape needs a picture alone. `mesh_scale` sizes a file."""
     with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
         page = f.read()
     mesh = page[page.index('id="view-mesh"'):page.index("/view-mesh")]
     assert 'id="mesh_file"' in mesh
-    for absent in ("mesh_prompt", "mesh_negative_prompt", "mesh_width", "mesh_height",
-                   "mesh_scale"):
+    for absent in ("mesh_prompt", "mesh_negative_prompt", "mesh_width", "mesh_height"):
         assert absent not in mesh, absent
 
 

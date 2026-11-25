@@ -45,16 +45,21 @@ def triangle_mesh() -> Mesh:
 
 
 class FakeMemory:
-    """The one thing a controller asks of residency: which weights a stage held."""
+    """Which weights a stage held, and when: a step outside its stage is on evicted memory."""
 
-    def __init__(self):
+    def __init__(self, events=None):
         self.held: list[tuple[str, ...]] = []
+        self.events = events if events is not None else []
 
     @contextmanager
     def stage(self, *names, pixels):
         assert pixels > 0
         self.held.append(names)
-        yield type("S", (), {"run": staticmethod(lambda work, *a, **k: work(*a, **k))})
+        self.events.append("hold:" + "+".join(names))
+        try:
+            yield type("S", (), {"run": staticmethod(lambda work, *a, **k: work(*a, **k))})
+        finally:
+            self.events.append("release:" + "+".join(names))
 
 
 class FakeShapeModel:
@@ -69,8 +74,10 @@ class FakeShapeModel:
     device = "cpu"
 
     def __init__(self, cancel_during=None, caps=None):
-        self.memory = FakeMemory()
         self.events: list[str] = []
+        self.memory = FakeMemory(self.events)
+        self.dit = object()
+        self.lora_calls: list[tuple] = []
         self.seen_args = []
         self.decode_params = []
         self.cancel_during = cancel_during
@@ -82,13 +89,14 @@ class FakeShapeModel:
         return dict(self.caps)
 
     def lora_components(self):
-        return ("dit",)
+        return {"dit": self.dit}
 
     def list_loras(self):
         return []
 
-    def switch_loras(self, specs, component, stage):
-        self.events.append(f"loras:{stage}")
+    def switch_loras(self, specs, component, role):
+        self.events.append(f"loras:{role}")
+        self.lora_calls.append((role, component, tuple(specs or ())))
 
     def encode_prompt(self, args):
         self.events.append("encode")
@@ -136,7 +144,9 @@ def test_the_three_components_are_brought_in_the_order_the_pipeline_needs_them()
     model = FakeShapeModel()
     render(model)
     assert model.memory.held == [("conditioner",), ("dit",), ("codec",)]
-    assert model.events == ["encode", "loras:sampling", "init", "step", "decode"]
+    assert model.events == ["hold:conditioner", "encode", "release:conditioner",
+                            "init", "hold:dit", "loras:dit", "step", "release:dit",
+                            "hold:codec", "decode", "release:codec"]
 
 
 def test_a_resolved_request_reaches_the_volume_knobs():
@@ -223,6 +233,28 @@ def test_the_requests_own_checks_run_before_anything_is_loaded():
     with pytest.raises(ValueError, match="text_encoder"):
         controller.resolve(MeshSpec(lora_specs={"text_encoder": ["x.safetensors"]},
                                     **picture()))
+
+
+def test_a_named_shape_lora_reaches_the_transformer_that_can_wear_it():
+    """`lora_specs` are keyed by role, so a lookup by another name loads nothing."""
+    model = FakeShapeModel()
+    render(model, lora_specs=["x.safetensors"])
+    assert model.lora_calls == [("dit", model.dit, ("x.safetensors",))]
+
+
+def test_a_lora_is_switched_while_the_transformer_is_held():
+    """Switching bakes weights in and may requantize, so the stage must be holding them."""
+    model = FakeShapeModel()
+    render(model, lora_specs=["x.safetensors"])
+    events = model.events
+    assert events.index("hold:dit") < events.index("loras:dit") < events.index("step")
+
+
+def test_a_shape_with_no_lora_clears_the_previous_shapes():
+    """A model instance is reused between jobs, so empty roles are offered none."""
+    model = FakeShapeModel()
+    render(model)
+    assert model.lora_calls == [("dit", model.dit, ())]
 
 
 def test_loras_without_a_directory_to_read_them_from_are_refused():

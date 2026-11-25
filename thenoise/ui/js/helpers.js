@@ -458,7 +458,7 @@ const FIELD_LABELS = {
   references: 'References', attention: 'Attention',
   flow_shift: 'Flow shift', output_format: 'Output',
   latents: 'Detail level', octree_resolution: 'Voxel resolution',
-  bounds: 'Bounding volume', mc_level: 'Surface offset', scale: 'Scale',
+  bounds: 'Bounding volume', mc_level: 'Surface offset', scale: 'Export scale',
   picture: 'Reference image',
 };
 

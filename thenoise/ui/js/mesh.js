@@ -66,7 +66,7 @@ initLora('mesh_');
 function collectMeshSettings() {
   const body = {};
   addNumbers(body, 'mesh_', ['latents', 'steps', 'seed', 'octree_resolution'],
-                              ['guidance_scale', 'bounds', 'mc_level']);
+                              ['guidance_scale', 'bounds', 'mc_level', 'scale']);
   for (const [id, key] of [['mesh_sampler', 'sampler'],
                            ['mesh_output_format', 'output_format']]) {
     if ($(id).value) body[key] = $(id).value;
