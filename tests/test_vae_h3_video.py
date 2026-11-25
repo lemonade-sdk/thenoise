@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from conftest import write_safetensors
+from torch.testing import assert_close
 from thenoise.vae import AutoencoderKLH3Video, load_h3_video_vae
 from thenoise.dit.h3.layout import FRAME_PER_TOKEN, FRAME_RESCALE, time_spans
 from thenoise.vae.h3 import (
@@ -129,12 +130,17 @@ def test_the_conv_is_causal_over_a_clip():
 
 def test_a_single_frame_sees_what_the_first_of_a_clip_sees():
     """The still shortcut truncates the temporal taps; a clip's first frame reads the
-    same taps off the zeros padded in front, so the two answers are one answer."""
+    same taps off the zeros padded in front, so the two answers are one answer.
+
+    One answer, not one bit pattern: these are different conv problems — one tap over one
+    frame against three taps over a clip padded with four zeros — and how a given kernel
+    sums them is not ours to fix. A wrong tap set misses by units, not by rounding.
+    """
     conv = CausalConv3d(2, 3, kernel_size=3, padding=1).eval()
     x = torch.randn(1, 2, 1, 5, 5)
     clip = torch.cat([x, torch.randn_like(x), torch.randn_like(x)], dim=2)
     with torch.no_grad():
-        assert torch.equal(conv(x), conv(clip)[:, :, :1])
+        assert_close(conv(x), conv(clip)[:, :, :1], atol=1e-6, rtol=1e-5)
 
 
 def test_temporal_stride_halves_a_clip():
