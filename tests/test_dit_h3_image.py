@@ -18,11 +18,10 @@ from thenoise.dit.h3.encoder import (
     layer_count,
     vision_token_tags,
 )
-from thenoise.dit.h3.checkpoint import detect_params, load_h3_image_dit
+from thenoise.dit.h3.checkpoint import H3_IMAGE_SIGNATURE, detect_params, load_h3_image_dit
 from thenoise.dit.h3.image import H3ImageDiT
-from thenoise.dit.h3.layout import Layout, frame_grid, pad_to_patch
-from thenoise.dit.h3.checkpoint import H3_IMAGE_SIGNATURE
-from thenoise.dit.h3.trunk import COND_TIMESTEP, H3Params, _spans
+from thenoise.dit.h3.layout import COND_TIMESTEP, Layout, frame_grid, pad_to_patch
+from thenoise.dit.h3.trunk import H3Params, _spans
 from thenoise.dit.kvcache import KVCache
 from thenoise.samplers import sigma_ladder
 
@@ -72,7 +71,7 @@ def test_patchify_round_trips_through_the_head():
     latent = torch.randn(1, 4, 6, 8)
     rows = dit.patchify(latent)
     assert rows.shape == (3 * 4, 4 * 4)  # (h/2 * w/2) rows of C*2*2
-    assert torch.allclose(dit.unpatchify(rows, 6, 8), latent)
+    assert torch.allclose(dit.unpatchify(rows, (6, 8)), latent)
 
 
 def test_patch_rows_are_area_normalised():
@@ -94,55 +93,64 @@ def test_pad_to_patch_repeats_the_edge_and_reports_the_original():
 
 
 def test_layout_segments_cover_the_sequence_in_order():
-    layout = Layout(text_len=4, latent_h=4, latent_w=6, refs=[(2, 4), (4, 4)])
+    layout = Layout.image(text_len=4, latent_h=4, latent_w=6, refs=[(2, 4), (4, 4)])
     kinds = [kind for _, _, kind in layout.segments]
-    assert kinds == ["text", "target", "ref", "ref"]
+    assert kinds == ["text", "video", "ref_img", "ref_img"]
 
     assert layout.segments[0][0] == 0
     for (_, end, _), (start, _, _) in zip(layout.segments, layout.segments[1:]):
         assert end == start
     assert layout.segments[-1][1] == layout.seq_len
-    assert layout.target_span == layout.segments[1][:2]
+    assert layout.video_span == layout.segments[1][:2]
 
     # (2,4) is one row of patches x two; (4,4) is 2x2; the target (4,6) is 2x3.
     assert [end - start for start, end, _ in layout.segments] == [4, 6, 2, 4]
-    assert layout.codec_rows == 12
+    assert layout.video_rows == 12
 
 
 def test_layout_puts_references_one_time_unit_apart():
     """Reference rows sit on the target's grid one time unit earlier."""
-    layout = Layout(text_len=3, latent_h=2, latent_w=2, refs=[(2, 2), (2, 2)])
+    layout = Layout.image(text_len=3, latent_h=2, latent_w=2, refs=[(2, 2), (2, 2)])
     rows = {kind: layout.position_ids[start:stop]
             for start, stop, kind in layout.segments}
     ref_rows = [layout.position_ids[start:stop]
-                for start, stop, kind in layout.segments if kind == "ref"]
+                for start, stop, kind in layout.segments if kind == "ref_img"]
     assert rows["text"][:, 0].tolist() == [0.0, 1.0, 2.0]
     assert torch.equal(rows["text"][:, 1:], torch.zeros(3, 2))
     assert [float(r[:, 0][0]) for r in ref_rows] == [3.0, 4.0]
-    assert rows["target"][:, 0].unique().tolist() == [5.0]
+    assert rows["video"][:, 0].unique().tolist() == [5.0]
 
 
 def test_layout_without_references_is_text_then_target():
-    layout = Layout(text_len=2, latent_h=4, latent_w=4)
-    assert [kind for _, _, kind in layout.segments] == ["text", "target"]
-    assert layout.refs == ()
+    layout = Layout.image(text_len=2, latent_h=4, latent_w=4)
+    assert [kind for _, _, kind in layout.segments] == ["text", "video"]
+    assert layout.audio_span is None
 
 
 def test_modulation_rows_follow_the_step_and_the_tags():
-    layout = Layout(text_len=4, latent_h=2, latent_w=2)
-    assert layout.modulation_rows() == [(0, 4, 1), (4, 5, 0)]  # text tag 1, visual tag 0
+    layout = Layout.image(text_len=4, latent_h=2, latent_w=2)
+    timesteps = layout.timesteps(0.5)
+    assert layout.modulation_rows(timesteps) == [(0, 4, 1), (4, 5, 0)]  # text tag 1, visual 0
 
     tags = torch.tensor([1, 0, 0, 1])
-    assert layout.modulation_rows(tags=tags) == [
+    assert layout.modulation_rows(timesteps, tags) == [
         (0, 1, 1), (1, 3, 0), (3, 4, 1), (4, 5, 0)]
 
 
 def test_a_reference_is_modulated_at_its_own_timestep():
-    """Row 0 is the step's ``t`` (prompt and target) and row 1 ``COND_TIMESTEP``: reading
-    row 0 for both conditions a reference as picture-to-be-cleaned.
+    """The step's ``t`` modulates the prompt and the target; a reference is read at
+    ``COND_TIMESTEP``, which is its own row of the table: reading it at the step's own
+    conditions it as picture-to-be-cleaned.
     """
-    layout = Layout(text_len=3, latent_h=2, latent_w=2, refs=[(2, 2)])
-    assert layout.modulation_rows() == [(0, 3, 1), (3, 4, 0), (4, 5, 3)]
+    layout = Layout.image(text_len=3, latent_h=2, latent_w=2, refs=[(2, 2)])
+    timesteps = layout.timesteps(0.5)
+    assert timesteps.values == (0.5, COND_TIMESTEP)
+    assert timesteps.rows == {"text": 0, "video": 0, "ref_img": 1}
+    assert layout.modulation_rows(timesteps) == [(0, 3, 1), (3, 4, 0), (4, 5, 3)]
+    # At the last step the two coincide, and the table collapses to the one row.
+    timesteps = layout.timesteps(COND_TIMESTEP)
+    assert timesteps.values == (COND_TIMESTEP,)
+    assert set(timesteps.rows.values()) == {0}
 
 
 # ---------------------------------------------------------------- head bank
@@ -154,11 +162,11 @@ def test_pdd_head_bank_uses_one_head_per_interval_of_its_own_schedule():
     weight = final.video_out.weight.reshape(2, -1, final.video_out.weight.shape[1])
     bias = final.video_out.bias.reshape(2, -1)
 
-    head_first = final._bank(1.0, torch.tensor(TINY_SIGMAS))
+    head_first = final._bank(final.video_out, 1.0, torch.tensor(TINY_SIGMAS))
     assert torch.equal(head_first[0], weight[0])
     assert torch.equal(head_first[1], bias[0])
 
-    head_second = final._bank(0.5, torch.tensor(TINY_SIGMAS))
+    head_second = final._bank(final.video_out, 0.5, torch.tensor(TINY_SIGMAS))
     assert torch.allclose(head_second[0], weight[0] + weight[1])
     assert torch.allclose(head_second[1], bias[0] + bias[1])
 
@@ -170,21 +178,21 @@ def test_pdd_head_bank_averages_the_intervals_a_wider_step_spans():
     dit = _tiny_dit()
     final = dit.final_layer
     weight = final.video_out.weight.reshape(2, -1, final.video_out.weight.shape[1])
-    folded = final._bank(1.0, torch.tensor([1.0, 0.0]))
+    folded = final._bank(final.video_out, 1.0, torch.tensor([1.0, 0.0]))
     assert torch.allclose(folded[0], weight[0] + 0.5 * weight[1])
 
 
 def test_head_bank_demands_the_schedule_it_is_stepping_through():
     dit = _tiny_dit()
     with pytest.raises(ValueError, match="needs the sigma schedule"):
-        dit.final_layer._bank(1.0, None)
+        dit.final_layer._bank(dit.final_layer.video_out, 1.0, None)
 
 
 def test_forward_needs_no_schedule_for_a_single_head():
     params = _tiny_params(pdd_steps=1, pdd_sigmas=(1.0, 0.0))
     dit = _tiny_dit(params)
     out = _forward(dit, torch.randn(1, 4, 4, 4), 1.0, torch.randn(1, 3, params.hidden_size),
-                   Layout(3, 4, 4))
+                   Layout.image(3, 4, 4))
     assert out.shape == (1, 4, 4, 4)
 
 
@@ -196,7 +204,7 @@ def test_forward_returns_the_targets_velocity():
     params = dit.params
     latent = torch.randn(1, params.latents_dim, 6, 6)
     context = torch.randn(1, 5, params.hidden_size)
-    out = _forward(dit, latent, 0.75, context, Layout(5, 6, 6),
+    out = _forward(dit, latent, 0.75, context, Layout.image(5, 6, 6),
                    sample_sigmas=torch.tensor(TINY_SIGMAS))
 
     assert out.shape == latent.shape
@@ -208,7 +216,7 @@ def test_forward_cuts_the_padding_back_off_an_odd_latent():
     dit = _tiny_dit()
     params = dit.params
     latent = torch.randn(1, params.latents_dim, 5, 7)
-    layout = Layout(2, 6, 8)  # the padded shape
+    layout = Layout.image(2, 6, 8)  # the padded shape
     out = _forward(dit, latent, 1.0, torch.randn(1, 2, params.hidden_size), layout,
                    sample_sigmas=torch.tensor(TINY_SIGMAS))
     assert out.shape == (1, params.latents_dim, 5, 7)
@@ -217,14 +225,14 @@ def test_forward_cuts_the_padding_back_off_an_odd_latent():
 def test_forward_rejects_a_layout_built_for_another_shape():
     dit = _tiny_dit()
     with pytest.raises(ValueError, match="layout was built for"):
-        dit(torch.randn(1, 4, 6, 6), 1.0, torch.randn(1, 2, 48), Layout(2, 4, 4),
+        dit(torch.randn(1, 4, 6, 6), 1.0, torch.randn(1, 2, 48), Layout.image(2, 4, 4),
             sample_sigmas=torch.tensor(TINY_SIGMAS))
 
 
 def test_forward_demands_the_rope_table_of_its_branch():
     dit = _tiny_dit()
     with pytest.raises(KeyError, match="no entry for"):
-        dit(torch.randn(1, 4, 4, 4), 1.0, torch.randn(1, 3, 48), Layout(3, 4, 4),
+        dit(torch.randn(1, 4, 4, 4), 1.0, torch.randn(1, 3, 48), Layout.image(3, 4, 4),
             sample_sigmas=torch.tensor(TINY_SIGMAS))
 
 
@@ -235,9 +243,9 @@ def test_references_join_the_sequence_without_reaching_the_output():
     context = torch.randn(1, 3, params.hidden_size)
     ref = torch.randn(1, params.latents_dim, 2, 2)
 
-    plain = _forward(dit, latent, 1.0, context, Layout(3, 4, 4),
+    plain = _forward(dit, latent, 1.0, context, Layout.image(3, 4, 4),
                      sample_sigmas=torch.tensor(TINY_SIGMAS))
-    with_ref = _forward(dit, latent, 1.0, context, Layout(3, 4, 4, [(2, 2)]), refs=[ref],
+    with_ref = _forward(dit, latent, 1.0, context, Layout.image(3, 4, 4, [(2, 2)]), refs=[ref],
                         sample_sigmas=torch.tensor(TINY_SIGMAS))
     assert with_ref.shape == plain.shape
     assert not torch.allclose(with_ref, plain)
@@ -253,7 +261,7 @@ def test_kv_cache_freezes_the_references_and_reproduces_the_full_sequence():
     latent = torch.randn(1, params.latents_dim, 4, 4)
     context = torch.randn(1, 3, params.hidden_size)
     ref = torch.randn(1, params.latents_dim, 2, 2)
-    layout = Layout(3, 4, 4, [(2, 2)])
+    layout = Layout.image(3, 4, 4, [(2, 2)])
     dit.prepare_rope(layout, torch.float32)
     sigmas = torch.tensor(TINY_SIGMAS)
 
@@ -277,7 +285,7 @@ def test_kv_cache_holds_every_reference_of_the_run():
     latent = torch.randn(1, params.latents_dim, 4, 4)
     context = torch.randn(1, 3, params.hidden_size)
     refs = [torch.randn(1, params.latents_dim, 2, 2), torch.randn(1, params.latents_dim, 2, 4)]
-    layout = Layout(3, 4, 4, [(2, 2), (2, 4)])
+    layout = Layout.image(3, 4, 4, [(2, 2), (2, 4)])
     dit.prepare_rope(layout, torch.float32)
     sigmas = torch.tensor(TINY_SIGMAS)
 
@@ -435,7 +443,7 @@ def test_a_bf16_edit_run_with_a_cache_stays_at_bf16(tmp_path):
     path = _write_dit(tmp_path, dit, dit.params)
     loaded = load_h3_image_dit(path, detect_params(path, H3_IMAGE_SIGNATURE), device="cpu", dtype=torch.bfloat16)
     p = loaded.params
-    layout = Layout(3, 4, 4, [(2, 2)])
+    layout = Layout.image(3, 4, 4, [(2, 2)])
     loaded.prepare_rope(layout, torch.bfloat16)
     latent = torch.randn(1, p.latents_dim, 4, 4, dtype=torch.bfloat16)
     context = torch.randn(1, 3, p.hidden_size, dtype=torch.bfloat16)

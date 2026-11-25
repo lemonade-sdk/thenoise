@@ -172,10 +172,10 @@ class H3ImageModel(PixelModel):
         shapes = [(r.shape[-2], r.shape[-1]) for r in refs]
         self._refs = refs
         self._seed = params.seed
-        self._layout = Layout(cond.cond.shape[1], lat_h, lat_w, shapes)
+        self._layout = Layout.image(cond.cond.shape[1], lat_h, lat_w, shapes)
         self._null_layout = (
             None if cond.null is None
-            else Layout(cond.null.shape[1], lat_h, lat_w, shapes)
+            else Layout.image(cond.null.shape[1], lat_h, lat_w, shapes)
         )
 
         self.dit.pe_embedder.clear()

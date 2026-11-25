@@ -1,9 +1,8 @@
-"""The H3 trunk: a packed single-stream transformer, shared by the image and the
-audiovisual model.
+"""The H3 trunk: a packed transformer, shared by the image and the audiovisual model.
 
 The time embedding is a curve stored in the checkpoint and read between its rows, so it
-stays FP32. What a variant adds on top of this trunk is its output head and the packing
-its forward runs over: see :mod:`.image`.
+stays FP32. What a variant adds on top of this trunk is the streams it wires and the
+packing its forward runs over: see :mod:`.image` and :mod:`.av`.
 """
 from __future__ import annotations
 
@@ -25,9 +24,8 @@ from thenoise.utils.rope import RopeCache, apply_rope_split_half, split_half_rop
 #: Whether this model's blocks want the relay store path (``thenoise.utils.layout``).
 RELAY_STORES = True
 
-#: A conditioned row's timestep label: a reference's noise is mixed to match it, and its
-#: own rows are read at it instead of the step's.
-COND_TIMESTEP = 0.999
+#: Stereo, and the row order the checkpoint's audio stream packs it in.
+AUDIO_CHANNELS = 2
 
 
 @dataclass(frozen=True)
@@ -219,6 +217,7 @@ class RefinerBlock(nn.Module):
 
 
 class TokenRefiner(nn.Module):
+
     """The prompt's encoder: unmodulated blocks over the projected text states, which
     do not depend on the timestep.
     """
@@ -233,6 +232,89 @@ class TokenRefiner(nn.Module):
         for block in self.blocks:
             x = block(x)
         return self.final_norm(x)
+
+
+class FinalLayer(nn.Module):
+    """The output heads, one per stream: ``video_out`` for the lattice, ``audio_out`` for
+    the stream the checkpoint has one of.
+
+    Both heads are the checkpoint's FP32 island, and a step-distilled checkpoint stores
+    one head per interval of ``pdd_sigmas`` — row 0 complete, every later row an offset
+    from it — which is what makes H3-Image a four-step model.
+    """
+
+    def __init__(self, params: H3Params, compute_dtype: Optional[torch.dtype] = None):
+        super().__init__()
+        if params.audio_dim and params.pdd_steps != 1:
+            raise ValueError(
+                f"a {params.pdd_steps}-row audio head bank would need its own distilled "
+                f"sigma grid; no release ships one"
+            )
+        self.pdd_steps = params.pdd_steps
+        self.pdd_sigmas = tuple(params.pdd_sigmas)
+        self.norm = RMSNorm(params.hidden_size, eps=params.final_norm_eps)
+        self.adaln_proj = AdalnProj(params.adaln_dim, params.hidden_size, 2, 1,
+                                    out_dtype=compute_dtype)
+        self.video_out = Fp32Linear(params.hidden_size, params.video_dim * params.pdd_steps,
+                                    bias=True)
+        self.audio_out = (None if not params.audio_dim else
+                          Fp32Linear(params.hidden_size, params.audio_dim, bias=True))
+
+    def forward(self, x: torch.Tensor, t_emb: torch.Tensor,
+                video: Tuple[int, int, int], sigma: float,
+                sample_sigmas: Optional[torch.Tensor],
+                audio: Optional[Tuple[int, int, int]] = None):
+        """The target's velocity, or ``(video, audio)`` when the checkpoint has a second
+        stream; each segment is its ``(start, stop, table row)``.
+
+        The row is not always 0: the table is the sorted set of the run's timesteps, and
+        the audio's is a different one, so the video stream can sit behind it.
+        """
+        shift, scale = self.adaln_proj(t_emb)
+        out = self._head(self.video_out, x, shift, scale, video, sigma, sample_sigmas)
+        if audio is None:
+            return out
+        return out, self._head(self.audio_out, x, shift, scale, audio, sigma, sample_sigmas)
+
+    def _head(self, head: Fp32Linear, x: torch.Tensor,
+              shift: torch.Tensor, scale: torch.Tensor, segment: Tuple[int, int, int],
+              sigma: float, sample_sigmas: Optional[torch.Tensor]) -> torch.Tensor:
+        """One stream's velocity, from its own rows and its own row of the table."""
+        start, stop, row = segment
+        h = (self.norm(x[:, start:stop]) * (1.0 + scale[row]) + shift[row]).to(torch.float32)
+        if self.pdd_steps == 1:
+            return head(h)
+        # A bank beside an audio head is refused at construction, so the grid here is always
+        # the video stream's.
+        weight, bias = self._bank(head, sigma, sample_sigmas)
+        return F.linear(h, weight, bias)
+
+    def _bank(self, head: Fp32Linear, sigma: float,
+              sample_sigmas: Optional[torch.Tensor]):
+        """One head for a step: the intervals between its endpoints on the distilled
+        grid, averaged with weights proportional to the sigma distance each covers.
+        """
+        if sample_sigmas is None:
+            raise ValueError(
+                "the PDD head bank needs the sigma schedule this run is stepping "
+                "through; pass it as ``sample_sigmas``"
+            )
+        n, grid = self.pdd_steps, self.pdd_sigmas
+        i = int((sample_sigmas - sigma).abs().argmin())
+        sigma_next = float(sample_sigmas[min(i + 1, sample_sigmas.shape[0] - 1)])
+        start = min(min(range(n + 1), key=lambda k: abs(grid[k] - sigma)), n - 1)
+        stop = max(min(range(n + 1), key=lambda k: abs(grid[k] - sigma_next)), start + 1)
+
+        dt = [grid[k] - grid[k + 1] for k in range(start, stop)]
+        weight_of = head.weight
+        w = torch.tensor(dt, dtype=weight_of.dtype, device=weight_of.device) / sum(dt)
+        rows = weight_of.reshape(len(grid) - 1, -1, weight_of.shape[1])
+        bias_rows = head.bias.reshape(len(grid) - 1, -1)
+        first = max(start, 1)
+        return (
+            rows[0] + torch.einsum("n,noi->oi", w[first - start:], rows[first:stop]),
+            bias_rows[0] + torch.einsum("n,no->o", w[first - start:], bias_rows[first:stop]),
+        )
 
 
 def _spans(rows: Sequence[Tuple[int, int, int]],
@@ -254,7 +336,8 @@ def _spans(rows: Sequence[Tuple[int, int, int]],
 class H3DiT(nn.Module):
     """What a variant has before it has an output head.
 
-    ``video_patch_proj`` turns latent rows into stream rows, ``condition_proj`` and
+    ``video_patch_proj`` turns lattice rows into stream rows, ``audio_patch_proj`` the
+    audio stream's rows when the checkpoint has one, ``condition_proj`` and
     ``token_refiner`` turn the text encoder's states into prompt rows, and
     ``adaln_t_table`` is the modulation curve every block reads.
     """
@@ -265,6 +348,9 @@ class H3DiT(nn.Module):
         self.params = params
         self.video_patch_proj = Fp32Linear(params.video_dim, params.hidden_size,
                                            bias=True, out_dtype=None)
+        self.audio_patch_proj = (
+            None if not params.audio_dim else
+            Fp32Linear(params.audio_dim, params.hidden_size, bias=True, out_dtype=None))
         self.condition_proj = QuantizedLinear(params.text_dim, params.hidden_size, bias=True)
         self.register_buffer("adaln_t_table",
                              torch.empty(params.adaln_grid, params.adaln_dim, dtype=torch.float32))
@@ -320,27 +406,51 @@ class H3DiT(nn.Module):
         return torch.lerp(table[i0], table[i0 + 1], (pos - i0).unsqueeze(1))
 
     def patchify(self, latent: torch.Tensor) -> torch.Tensor:
-        """``[B, C, H, W]`` -> one row per 2x2 patch, channels-major within a row."""
-        _, c, h_full, w_full = latent.shape
-        _, ph, pw = self.params.patch_size
-        h, w = h_full // ph, w_full // pw
-        rows = latent.reshape(-1, c, h, ph, w, pw)
-        return rows.permute(0, 2, 4, 1, 3, 5).reshape(-1, c * ph * pw)
+        """``[B, C, (T,) H, W]`` -> one row per patch, channels-major within a row.
 
-    def unpatchify(self, rows: torch.Tensor, latent_h: int, latent_w: int) -> torch.Tensor:
-        """The inverse of :meth:`patchify`, batch size 1."""
-        _, ph, pw = self.params.patch_size
-        h, w = latent_h // ph, latent_w // pw
-        x = rows.reshape(1, h, w, self.params.latents_dim, ph, pw)
-        return x.permute(0, 3, 1, 4, 2, 5).reshape(1, self.params.latents_dim, latent_h, latent_w)
+        A still is a clip of one frame, which is what makes one implementation serve both:
+        the temporal patch is 1, so a frame's rows are a frame's rows.
+        """
+        if latent.dim() == 4:
+            latent = latent.unsqueeze(2)
+        _, c, t_full, h_full, w_full = latent.shape
+        pt, ph, pw = self.params.patch_size
+        t, h, w = t_full // pt, h_full // ph, w_full // pw
+        rows = latent.reshape(-1, c, t, pt, h, ph, w, pw)
+        return rows.permute(0, 2, 4, 6, 1, 3, 5, 7).reshape(-1, c * pt * ph * pw)
+
+    def unpatchify(self, rows: torch.Tensor, latents: Tuple[int, ...]) -> torch.Tensor:
+        """The inverse of :meth:`patchify`, batch size 1, over the padded trailing
+        dimensions it was given: two for a still, three for a clip.
+        """
+        pt, ph, pw = self.params.patch_size
+        t, h, w = (1, *latents) if len(latents) == 2 else latents
+        x = rows.reshape(1, t, h // ph, w // pw, self.params.latents_dim, pt, ph, pw)
+        x = x.permute(0, 4, 1, 5, 2, 6, 3, 7).reshape(
+            1, self.params.latents_dim, t * pt, h, w)
+        return x[:, :, 0] if len(latents) == 2 else x
+
+
+def pack_audio(latent: torch.Tensor) -> torch.Tensor:
+    """``[B, C, 2, T]`` -> ``[2*T, C]``, channel-major: all of one channel, then the other."""
+    _, c, channels, t = latent.shape
+    return latent[0].permute(1, 2, 0).reshape(channels * t, c)
+
+
+def unpack_audio(rows: torch.Tensor) -> torch.Tensor:
+    """The inverse of :func:`pack_audio`: ``[2*T, C]`` -> ``[B, C, 2, T]``."""
+    frames = rows.shape[0] // AUDIO_CHANNELS
+    return rows.reshape(AUDIO_CHANNELS, frames, rows.shape[-1]) \
+        .permute(2, 0, 1).unsqueeze(0)
 
 
 __all__ = [
-    "COND_TIMESTEP",
+    "AUDIO_CHANNELS",
     "RELAY_STORES",
     "AdalnProj",
     "Attention",
     "DiTBlock",
+    "FinalLayer",
     "H3DiT",
     "H3Params",
     "MLP",
@@ -348,5 +458,7 @@ __all__ = [
     "RefinerBlock",
     "Span",
     "TokenRefiner",
+    "pack_audio",
+    "unpack_audio",
     "_spans",
 ]

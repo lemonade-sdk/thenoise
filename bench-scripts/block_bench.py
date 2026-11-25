@@ -1205,8 +1205,8 @@ def h3_image_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     cells = 2 * grid_side(tokens)          # one DiT row is a 2x2 latent patch
     refs = n_refs(ctx, scenario)
     read = scenario == "read"
-    layout = Layout(ctx.txt, cells, cells, ((cells, cells),) * refs)
-    n = layout.target_span[1] if read else layout.seq_len
+    layout = Layout.image(ctx.txt, cells, cells, ((cells, cells),) * refs)
+    n = layout.video_span[1] if read else layout.seq_len
 
     blk = new_block(ctx, name, DiTBlock, params, ctx.dtype, relay_stores=RELAY_STORES)
     seed_inputs(name, scenario, tokens)

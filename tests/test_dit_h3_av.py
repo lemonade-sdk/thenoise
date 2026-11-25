@@ -15,6 +15,7 @@ from thenoise.dit.h3.checkpoint import (
     H3_IMAGE_SIGNATURE,
     detect_params,
 )
+from thenoise.dit.h3.trunk import H3Params
 
 HIDDEN, HEADS, HEAD_DIM, FFN, TEXT = 48, 2, 16, 32, 16
 #: A video latent row is 24 channels over a 2x2 patch; an audio row is the stream's own
@@ -174,3 +175,197 @@ def test_a_head_bank_wider_than_one_row_still_needs_its_distilled_grid(tmp_path)
     """
     with pytest.raises(ValueError, match="head bank is 2 rows"):
         _detect(tmp_path, av_state(video_out_rows=VIDEO_DIM * 2))
+
+
+# --------------------------------------------------------------------- the second stream
+#
+# Packing and forwards at a reduced width. The expected coordinates below were written
+# out of the reference implementation's packed layout once, then derived from the
+# constants here.
+
+from thenoise.dit.h3.av import H3AVDiT
+from thenoise.dit.h3.layout import (
+    COND_TIMESTEP,
+    FRAME_PER_TOKEN,
+    FRAME_RESCALE,
+    Layout,
+    frame_grid,
+    time_spans,
+)
+from thenoise.dit.h3.trunk import pack_audio, unpack_audio
+
+AUDIO_STREAM = 6
+PROMPT = 5
+LATENTS = (2, 4, 6)  # padded already: latent_t, h, w
+AUDIO_T = 3
+
+
+def _av_params(**over) -> H3Params:
+    base = dict(
+        hidden_size=HIDDEN,
+        num_layers=2,
+        token_refiner_layers=1,
+        num_heads=HEADS,
+        head_dim=HEAD_DIM,
+        ffn_hidden_size=FFN,
+        latents_dim=4,
+        text_dim=TEXT,
+        rope_inv_freq=ROPE_FREQS,
+        adaln_grid=CURVE_ROWS,
+        adaln_dim=CURVE_DIM,
+        pdd_steps=1,
+        pdd_sigmas=(1.0, 0.0),
+        audio_dim=AUDIO_STREAM,
+    )
+    return H3Params(**{**base, **over})
+
+
+def _av_dit(params: H3Params | None = None) -> H3AVDiT:
+    torch.manual_seed(0)
+    dit = H3AVDiT(params or _av_params()).eval().requires_grad_(False)
+    dit.adaln_t_table.normal_()
+    dit.rope.inv_freq.copy_(torch.tensor([1.0, 0.25]))
+    return dit
+
+
+def _av_layout(keyframes=(), **over) -> Layout:
+    opts = dict(text_len=PROMPT, latent_t=LATENTS[0], latent_h=LATENTS[1],
+                latent_w=LATENTS[2], audio_t=AUDIO_T, keyframes=keyframes)
+    return Layout.av(**{**opts, **over})
+
+
+def _run(dit, layout, latent=None, audio=None, **over):
+    torch.manual_seed(11)
+    latent = (torch.randn(1, dit.params.latents_dim, *layout.latents)
+              if latent is None else latent)
+    audio = torch.randn(1, AUDIO_STREAM, 2, AUDIO_T) if audio is None else audio
+    context = torch.randn(1, layout.text_len, dit.params.hidden_size)
+    dit.prepare_rope(layout, context.dtype)
+    levels = dict(sigma=0.8, audio_sigma=0.5)
+    return dit(latent, audio, context=context, layout=layout, **{**levels, **over})
+
+
+def test_av_packing_is_the_released_order():
+    lay = Layout.av(text_len=5, latent_t=4, latent_h=6, latent_w=8, audio_t=3,
+                    keyframes=[0, 12])
+    assert lay.segments == [(0, 5, "text"), (5, 17, "cond"), (17, 29, "cond"),
+                            (29, 35, "audio"), (35, 83, "video")]
+    assert lay.seq_len == 83
+    assert lay.video_span == (35, 83)
+    assert lay.audio_span == (29, 35)
+    assert lay.video_rows == 12 * 2 + 4 * 12  # both keyframes and the target
+    assert lay.audio_rows == 2 * 3
+
+
+def test_a_keyframe_is_pinned_to_the_pixel_frame_it_represents():
+    lay = Layout.av(text_len=5, latent_t=2, latent_h=4, latent_w=4, audio_t=2,
+                    keyframes=[0, 5])
+    t = lay.position_ids[:, 0]
+    assert t[5:9].unique().tolist() == [5.0]
+    assert t[9:13].unique().tolist() == [5.0 + FRAME_RESCALE * 5]
+
+
+def test_the_video_time_axis_advances_by_each_frames_own_span():
+    lay = Layout.av(text_len=3, latent_t=6, latent_h=2, latent_w=2, audio_t=2)
+    t = lay.position_ids[lay.video_span[0]:].view(6, 1, 3)[:, 0, 0]
+    expected = [3.0]
+    for span in time_spans(6)[:-1]:
+        expected.append(expected[-1] + span)
+    assert torch.equal(t, torch.tensor(expected, dtype=t.dtype))
+    assert time_spans(6) == [FRAME_RESCALE * FRAME_PER_TOKEN[k % 5] for k in range(6)]
+
+
+def test_audio_rows_are_pinned_to_the_targets_width_extremes():
+    """The stream has no spatial extent of its own; its two channels sit at either end of
+    the picture's width axis so rope still separates them.
+    """
+    _, w_axis = frame_grid(6, 8)
+    lay = Layout.av(text_len=5, latent_t=2, latent_h=6, latent_w=8, audio_t=3)
+    rows = lay.position_ids[lay.audio_span[0]:lay.audio_span[1]]
+    assert rows[:, 1].tolist() == [0.0] * 6
+    assert rows[:3, 2].tolist() == [float(w_axis[0])] * 3
+    assert rows[3:, 2].tolist() == [float(w_axis[-1])] * 3
+    assert rows[:, 0].tolist() == [5.0, 6.0, 7.0, 5.0, 6.0, 7.0]
+
+
+def test_the_two_streams_are_modulated_at_their_own_levels():
+    lay = _av_layout(keyframes=[0])
+    timesteps = lay.timesteps(0.2, 0.7)
+    assert timesteps.values == (0.2, 0.7, COND_TIMESTEP)
+    assert timesteps.rows == {"text": 0, "cond": 2, "audio": 1, "video": 0}
+    # Without a keyframe the pinned row is not in the table at all.
+    assert lay.timesteps(0.2, 0.7).rows["cond"] == 2
+    assert _av_layout().timesteps(0.2, 0.7).values == (0.2, 0.7)
+
+
+def test_a_packing_with_audio_demands_both_timesteps():
+    with pytest.raises(ValueError, match="audio stream"):
+        _av_layout().timesteps(0.5)
+
+
+def test_audio_rows_are_channel_major():
+    latent = torch.tensor([[[[0.0, 1.0, 2.0], [10.0, 11.0, 12.0]]]])
+    assert pack_audio(latent).view(-1).tolist() == [0, 1, 2, 10, 11, 12]
+    assert torch.equal(unpack_audio(pack_audio(latent)), latent)
+
+
+def test_a_forward_returns_both_streams_at_their_latent_shapes():
+    dit, lay = _av_dit(), _av_layout()
+    video, audio = _run(dit, lay)
+    assert video.shape == (1, dit.params.latents_dim, *LATENTS)
+    assert audio.shape == (1, AUDIO_STREAM, 2, AUDIO_T)
+    assert torch.isfinite(video).all() and torch.isfinite(audio).all()
+
+
+def test_the_streams_reach_each_other():
+    """One joint model, not two: the audio is attended to while the picture is denoised."""
+    dit, lay = _av_dit(), _av_layout()
+    video, _ = _run(dit, lay)
+    other_audio = torch.randn(1, AUDIO_STREAM, 2, AUDIO_T)
+    video2, _ = _run(dit, lay, audio=other_audio)
+    assert not torch.allclose(video, video2)
+
+
+def test_muting_the_audio_head_leaves_the_picture_alone():
+    dit, lay = _av_dit(), _av_layout()
+    video, _ = _run(dit, lay)
+    dit.final_layer.audio_out.weight.data.zero_()
+    dit.final_layer.audio_out.bias.data.zero_()
+    video_muted, audio_muted = _run(dit, lay)
+    assert torch.equal(video, video_muted)
+    assert torch.equal(audio_muted, torch.zeros_like(audio_muted))
+
+
+def test_a_keyframe_conditions_the_run():
+    dit = _av_dit()
+    keyframe = torch.randn(1, dit.params.latents_dim, 1, LATENTS[1], LATENTS[2])
+    plain, _ = _run(dit, _av_layout())
+    with_key, _ = _run(dit, _av_layout(keyframes=[0]), keyframes=[keyframe])
+    assert not torch.allclose(plain, with_key)
+
+    rows = dit._keyframe_rows(keyframe, seed=7)
+    bare = dit.patchify(keyframe)
+    noise = torch.randn(bare.shape, generator=torch.Generator().manual_seed(7),
+                        dtype=torch.float32)
+    assert torch.equal(rows, COND_TIMESTEP * bare + (1.0 - COND_TIMESTEP) * noise)
+    # The stream restarts for every keyframe, so a second one takes the same draw. The
+    # reconstruction above is exact; recovering the draw from two mixes is not.
+    other = torch.randn_like(keyframe)
+    assert torch.allclose(dit._keyframe_rows(other, seed=7) - COND_TIMESTEP * dit.patchify(other),
+                          rows - COND_TIMESTEP * bare, atol=1e-5)
+
+
+def test_the_forward_refuses_a_pack_the_layout_does_not_describe():
+    dit = _av_dit()
+    lay = _av_layout()
+    with pytest.raises(ValueError, match="layout was built for"):
+        dit(torch.randn(1, 4, 2, 6, 6), torch.randn(1, AUDIO_STREAM, 2, AUDIO_T),
+            0.8, 0.5, torch.randn(1, PROMPT, dit.params.hidden_size), lay)
+    with pytest.raises(ValueError, match="audio rows"):
+        dit(torch.randn(1, 4, 2, 4, 6), torch.randn(1, AUDIO_STREAM, 2, AUDIO_T + 1),
+            0.8, 0.5, torch.randn(1, PROMPT, dit.params.hidden_size), lay)
+
+
+def test_a_model_without_the_stream_is_not_an_audiovisual_one():
+    with pytest.raises(ValueError, match="no audio stream"):
+        H3AVDiT(_av_params(audio_dim=None))
