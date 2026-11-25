@@ -14,6 +14,12 @@ block under test is the real one and each variation compiles as its own artifact
               ck.rms_rope_split_half call, which needs both tensors at the call site and so has
               no drop-in seam in the trunk. The mirror is guarded below against the real forward
               so it cannot drift silently.
+``att=producer``  a second mirror over ``ck.sol_attn_chunked``, which takes a generator of fused
+              projection chunks and does QK-norm, RoPE and the attention per chunk. It is the one
+              candidate whose claim is not about temporaries: the trunk would never hold q, k and v
+              for the whole sequence. The price is visible in the call -- the kernel's ``kmean`` and
+              ``vscale`` are per-run state the caller must carry, and the projection is issued one
+              chunk at a time.
 
     .venv/bin/python bench-scripts/block_path_probe.py --tokens 8192
     .venv/bin/python bench-scripts/block_path_probe.py --tokens 40114 --iters 2
@@ -74,22 +80,66 @@ def fused_attention_forward(self, x, rope=None, bufs=None, sol=None):
     return self.out_proj(trunk.sol_attention(q, k, v, sol).reshape(batch, rows, inner))
 
 
-def guards(attn, x, cos, sin, plan):
+@torch._dynamo.disable()      # the producer takes a generator, which Inductor cannot trace
+def producer_attention(self, x, rope, sol, chunk):
+    """QK-norm, RoPE and the attention per projection chunk, as ``[B, T, inner]``.
+
+    The island treatment the trunk already gives sol_attention, and here it is load-bearing: the
+    generator yielding the projection chunks has no fake tensor, so dynamo refuses to trace
+    through it at all. The projections inside it run eagerly, which is what an adopted trunk would
+    do as well.
+    """
+    norm = self.qk_norm
+
+    def chunks():
+        for start in range(0, x.shape[1], chunk):
+            yield self.qkv_proj(x[:, start:start + chunk])
+
+    out, *_carried = ck.sol_attn_chunked(
+        chunks, x.shape[1], self.heads, rope_table(*rope),
+        (norm.query_norm.weight, norm.key_norm.weight), kmean=None, vscale=None,
+        tau=sol.tau, sink_blocks=sol.sink_blocks, sink_q=sol.sink_q,
+        token_aug=sol.token_aug, rope_eps=norm.query_norm.eps, rope_split_half=True)
+    return out.flatten(2)
+
+
+def make_producer_forward(chunk):
+    """Mirror of ``Attention.forward`` whose attention runs through the chunked producer."""
+
+    def forward(self, x, rope=None, bufs=None, sol=None):
+        return self.out_proj(producer_attention(self, x, rope, sol, chunk))
+
+    return forward
+
+
+def guards(attn, x, cos, sin, plan, chunk):
     """Refuse to measure a mirror that does not compute what the trunk computes."""
+    mirrors = (("fused rope", fused_attention_forward, 5e-3),
+               # The producer bootstraps its kmean/vscale per call, so it legitimately disagrees
+               # with a monolithic routed call by the routing error, about 2e-2 on random content.
+               # A wrong table dialect shows up near 1.0, which is what this guard discriminates.
+               ("producer", make_producer_forward(chunk), 6e-2))
     with torch.no_grad():
         ref = {}
         Attention.forward = ENGINE_ATTN_FORWARD
         for label, sol in (("dense", None), ("routed", plan)):
             ref[label] = attn(x, (cos, sin), None, sol).float()
-        Attention.forward = fused_attention_forward
-        for label, sol in (("dense", None), ("routed", plan)):
-            got = attn(x, (cos, sin), None, sol).float()
-            err = float((got - ref[label]).norm() / ref[label].norm())
-            print(f"  mirror vs trunk, {label:<6} rel err {err:.3e}")
-            if err > 5e-3:
-                raise SystemExit(f"mirror drifted from the trunk on the {label} path "
-                                 f"({err:.3e}); the fused kernel and the chain disagree, or the "
-                                 f"mirror is out of date")
+        for name, impl, tol in mirrors:
+            Attention.forward = impl
+            # The producer routes; only the fused-rope mirror also has a dense path to check.
+            paths = (("dense", None), ("routed", plan)) if name == "fused rope" else (("routed", plan),)
+            for label, sol in paths:
+                try:
+                    got = attn(x, (cos, sin), None, sol).float()
+                except Exception as exc:
+                    raise SystemExit(f"{name} mirror cannot run the {label} path: "
+                                     f"{type(exc).__name__}: {exc}")
+                err = float((got - ref[label]).norm() / ref[label].norm())
+                print(f"  {name:>12} vs trunk, {label:<6} rel err {err:.3e}")
+                if err > tol:
+                    raise SystemExit(f"{name} mirror drifted from the trunk on the {label} path "
+                                     f"({err:.3e} over a {tol:.0e} tolerance: a table dialect, "
+                                     f"or an out of date mirror)")
     Attention.forward = ENGINE_ATTN_FORWARD
 
 
@@ -98,8 +148,8 @@ def main():
     ap.add_argument("--tokens", type=int, default=8192)
     ap.add_argument("--iters", type=int, default=3)
     ap.add_argument("--rounds", type=int, default=2)
-    ap.add_argument("--adaln", action="store_true",
-                    help="also vary the input-side norm, which is already rejected")
+    ap.add_argument("--chunk", type=int, default=4096)
+    ap.add_argument("--adaln", action="store_true",                    help="also vary the input-side norm, which is already rejected")
     args = ap.parse_args()
 
     dev, dt = "cuda", torch.bfloat16
@@ -122,8 +172,8 @@ def main():
     plan = SolAttention(TAU, sink_blocks=(0, 4), sink_q=(4, 8))
 
     print(f"block path probe: compiled DiTBlock {HID} hidden, {HEADS}x{HDIM}, T={T}, "
-          f"{'compiled' if not torch._dynamo.config.disable else 'EAGER'}")
-    guards(block.attn, x, cos, sin, plan)
+          f"chunk {args.chunk}, {'compiled' if not torch._dynamo.config.disable else 'EAGER'}")
+    guards(block.attn, x, cos, sin, plan, args.chunk)
 
     def timed(fn):
         with torch.no_grad():
@@ -143,11 +193,12 @@ def main():
 
     adaln_arms = (("engine", ENGINE_MODULATE),) + (("ck", ck_modulate),) if args.adaln else ()
     for qk, attn_impl in (("engine", ENGINE_ATTN_FORWARD),
-                          ("ck", fused_attention_forward)):
+                          ("ck", fused_attention_forward),
+                          ("prod", make_producer_forward(args.chunk))):
         Attention.forward = attn_impl
         for adaln, mod_impl in (("engine", ENGINE_MODULATE),) + adaln_arms:
             trunk._modulate = mod_impl
-            for att in ("dense", "routed"):
+            for att in (("routed",) if qk == "prod" else ("dense", "routed")):
                 extra = (plan,) if att == "routed" else ()
                 try:
                     rounds = [timed(lambda: block(x, spans, (cos, sin), None, *extra))
