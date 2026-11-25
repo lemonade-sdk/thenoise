@@ -210,7 +210,7 @@ class Wan22Model(VideoModel):
         self.CAPABILITIES = {**self.CAPABILITIES,
                              "video": {**self.CAPABILITIES["video"],
                                        "i2v": self.variant.i2v,
-                                       "flf2v": self.variant.flf2v}}
+                                       "flf2v": self.variant.flf2v, "ref2v": False}}
         # Both headers are read before either module is built: the clip's latent is the
         # only thing that crosses between them and the normalization table is keyed by
         # its width, so a mismatched `--vae` is refused here rather than mid-run.

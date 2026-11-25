@@ -127,7 +127,8 @@ class H3VideoModel(VideoModel):
     }
 
     CAPABILITIES = {**VideoModel.CAPABILITIES, "upscale": False,
-                    "video": {"t2v": True, "i2v": True, "flf2v": True}}
+                    "video": {"t2v": True, "i2v": True, "flf2v": True,
+                                  "ref2v": True}}
 
     #: A keyframe enters at a fixed timestep and is never denoised, which is what
     #: ``index_timestep_zero`` means here; that it arrives as extra rows rather than as an

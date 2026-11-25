@@ -55,7 +55,15 @@ class VideoModel(PixelModel):
     MEDIUM = "video"
 
     CAPABILITIES = {**PixelModel.CAPABILITIES, "image": None,
-                    "video": {"t2v": False, "i2v": False, "flf2v": False}}
+                    "video": {"t2v": False, "i2v": False, "flf2v": False,
+                                  "ref2v": False}}
+
+    #: Whether the architecture takes reference *conditions* at all -- pictures, clips
+    #: or audio anchored at a frame index, which is a different thing from a keyframe:
+    #: a keyframe is the clip's first or last frame, a reference is something the clip
+    #: is asked to look like. A request carrying references is refused when this is
+    #: False, because the packing has nowhere to put them. Nothing in a checkpoint says
+    #: which release it is, so the architecture answers, not the filename.
 
     #: Shared video prefs; ``test_video_shared.py`` checks each variant covers them all.
     DEFAULT_PREFS = {**PixelModel.DEFAULT_PREFS,

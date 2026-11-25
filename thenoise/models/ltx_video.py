@@ -118,7 +118,8 @@ class LTXVideo(VideoModel):
     COMPONENT_ROLES: ClassVar[tuple[str, ...]] = ("audio_vae", "upscaler",
                                                   "text_projection")
     CAPABILITIES = {**VideoModel.CAPABILITIES, "upscale": False,
-                    "video": {"t2v": True, "i2v": True, "flf2v": True}}
+                    "video": {"t2v": True, "i2v": True, "flf2v": True,
+                                  "ref2v": False}}
     DEFAULT_PREFS = {
         **VideoModel.DEFAULT_PREFS,
         "width": 768, "height": 512, "frames": 33, "fps": 24,
