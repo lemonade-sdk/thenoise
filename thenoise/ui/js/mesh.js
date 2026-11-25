@@ -64,7 +64,7 @@ async function loadMeshPicture(file) {
   const image = await readImageFile(file);
   if (!image) return;
   meshSource = meshGone = null;   // an image is a shape being made, not one being cut again
-  meshViews.push({ dataUrl: image.dataUrl, b64: image.b64, name: file.name });
+  meshViews.push({ dataUrl: image.dataUrl, b64: image.b64, name: file.name, file });
   renderMeshViews();
   resetMeshResult();
 }
@@ -87,7 +87,7 @@ async function showMeshShape(item) {
   const kept = meshKept.has(item.meta.job);
   meshSource = kept ? item.meta.job : null;
   meshGone = kept || !item.meta.job ? null : item.meta.job;
-  if (!kept) adoptMeshImages(item.meta);
+  if (!kept) await adoptMeshImages(item.meta);
   describeMeshSource();
   applyMeshSettings(item.meta);
   try {
@@ -100,11 +100,13 @@ async function showMeshShape(item) {
 }
 
 // A shape whose latents are gone can still be sampled again from the images it was cut from.
-function adoptMeshImages(meta) {
-  if (!meta.images || !meta.images.length) return;
+// The File handles are kept rather than their bytes: ten entries of up to four multi-megabyte
+// pictures each is a hundred megabytes held for a shape that has already been downloaded.
+async function adoptMeshImages(meta) {
   meshViews.length = 0;
-  for (const dataUrl of meta.images) {
-    meshViews.push({dataUrl, b64: dataUrl.slice(dataUrl.indexOf(',') + 1), name: 'from history'});
+  for (const file of meta.files || []) {
+    const image = await readImageFile(file);
+    if (image) meshViews.push({ dataUrl: image.dataUrl, b64: image.b64, name: file.name, file });
   }
   renderMeshViews();
 }
@@ -129,13 +131,14 @@ function describeMeshSource() {
       : 'shape #' + meshGone.slice(4, 10) + ' is not on the server: only the newest 10 are '
         + 'kept, and nothing survives a restart';
   note.classList.toggle('hidden', !meshGone);
-  $('mesh_file').disabled = !!meshSource;
-  $('mesh_dropzone').inert = !!meshSource;
+  $('mesh_dropzone').inert = !!meshSource;   // inert covers the hidden input inside it
 }
 
 async function loadMeshShapes() {
   const listing = await fetchJSON('/shapes');
-  meshKept = new Set((listing && listing.shapes) || []);
+  // A failed fetch is not an answer: the verdict stays whatever it was, rather than every
+  // shape in the strip being declared lost by a hiccup.
+  if (listing && Array.isArray(listing.shapes)) meshKept = new Set(listing.shapes);
 }
 
 registerKnobs('finish', '/finish');
@@ -187,6 +190,8 @@ function meshName(meta) {
 
 function resetMeshResult() {
   meshOutMeta = null;
+  meshGone = null;      // once a request is running, what an old entry lost is no longer the story
+  describeMeshSource();
   meshShown += 1;
   clearMesh();
   $('mesh_wire').disabled = true;
@@ -195,7 +200,9 @@ function resetMeshResult() {
   $('meshplaceholder').style.display = '';
 }
 
-function showMeshResult(blob, remember) {
+// Resolves to a still of the drawn shape, or to nothing when there was nothing to draw: the
+// strip wants one, whoever is merely looking does not.
+function showMeshResult(blob) {
   $('meshplaceholder').style.display = 'none';
   $('mesh_out').style.display = 'flex';
   $('mesh_out_name').textContent = meshName(meshOutMeta);
@@ -203,24 +210,23 @@ function showMeshResult(blob, remember) {
   const note = $('mesh_out_note');
   if (!meshViewerReady()) {
     note.textContent = 'this browser cannot show 3D — download it to look at the shape';
-    if (remember) remember(null);
-    return;
+    return Promise.resolve(null);
   }
   note.textContent = 'putting it on screen\u2026';
   const shown = meshShown;
-  showMeshBlob(blob, meshOutMeta.output_format).then(
+  return showMeshBlob(blob, meshOutMeta.output_format).then(
     (shape) => {
-      if (remember) remember(shown === meshShown ? meshSnapshot() : null);
-      if (shown !== meshShown) return;
+      if (shown !== meshShown) return null;
       $('mesh_wire').disabled = false;
       note.textContent = shape.triangles.toLocaleString() + ' triangles, '
         + shape.vertices.toLocaleString() + ' vertices'
         + (meshOutMeta.summary ? ' \u00b7 ' + meshOutMeta.summary : '')
         + ' \u2014 drag to turn, wheel to zoom';
+      return meshSnapshot();
     },
     (error) => {
-      if (remember) remember(null);
       if (shown === meshShown) note.textContent = 'could not open it: ' + error.message;
+      return null;
     },
   );
 }
@@ -240,18 +246,16 @@ $('mesh_generate').addEventListener('click', () => {
     timerTextEl: 'mesh_timer_text',
     progress: MESH_PROGRESS,
     onArtifact: async (blob, status) => {
-      const { image, ...sent } = body;   // history holds the shape, not its pixels
-      meshOutMeta = { ...sent, ...status.resolved, model: status.model, job: status.id,
+      meshOutMeta = { ...status.resolved, model: status.model, job: status.id,
                       summary: status.summary || '',
-                      images: meshViews.map(view => view.dataUrl),
-                      picture: body.from_shape ? 'shape #' + body.from_shape.slice(4, 10)
-                                               : meshViews.map(view => view.name).join(', ') };
+                      files: meshViews.map(view => view.file),
+                      picture: meshViews.map(view => view.name).join(', ') };
       const url = URL.createObjectURL(new Blob([blob], {
         type: MESH_FORMATS[meshOutMeta.output_format] || 'application/octet-stream',
       }));
       meshOutUrl = url;
       const meta = meshOutMeta;   // a newer shape may take the stage before this one is drawn
-      showMeshResult(blob, (still) => {
+      showMeshResult(blob).then((still) => {
         meshHist.add(url, meta, still || MESH_GLYPH);
         loadMeshShapes();
       });

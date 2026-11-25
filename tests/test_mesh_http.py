@@ -111,7 +111,8 @@ def _client(pipeline, queue, shapes=None):
     from thenoise.jobs_http import install_job_routes
 
     install_job_routes(app, queue)
-    install_mesh_routes(app, queue, mesh_planner(_Runtime(pipeline), shapes), MODEL, shapes)
+    store = shapes if shapes is not None else ShapeStore(queue.root)
+    install_mesh_routes(app, queue, mesh_planner(_Runtime(pipeline), store), MODEL, store)
     return TestClient(app)
 
 
@@ -268,19 +269,10 @@ def test_the_shapes_a_request_can_name_are_listed_newest_first(tmp_path):
     try:
         with _client(_controller(), queue, shapes) as client:
             assert client.get("/shapes").json() == {"shapes": []}
-            shapes.save("job_alpha", torch.zeros(1, 2, 2))
-            shapes.save("job_beta", torch.zeros(1, 2, 2))
+            shapes.save("job_alpha", torch.zeros(1, 2, 2), MODEL)
+            shapes.save("job_beta", torch.zeros(1, 2, 2), MODEL)
             os.utime(shapes.path("job_beta"), (1, 1))
             assert client.get("/shapes").json() == {"shapes": ["job_alpha", "job_beta"]}
-    finally:
-        queue.close()
-
-
-def test_an_engine_without_a_jobs_directory_answers_no_shapes(tmp_path):
-    queue = JobQueue(tmp_path)
-    try:
-        with _client(_controller(), queue) as client:
-            assert client.get("/shapes").status_code == 404
     finally:
         queue.close()
 

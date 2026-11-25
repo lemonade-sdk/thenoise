@@ -1,14 +1,14 @@
 """Turn a mesh request into a job the queue can run against the loaded model."""
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Callable
 
 from ..jobs import JobPlan
 from .shapes import ShapeStore
 from .spec import MeshSpec
 
 
-def mesh_planner(runtime, shapes: Optional[ShapeStore] = None) -> Callable[[MeshSpec], JobPlan]:
+def mesh_planner(runtime, shapes: ShapeStore) -> Callable[[MeshSpec], JobPlan]:
     """Nothing of the runtime is held: a reload can swap it under a running planner."""
     def render(spec, token, progress, output):
         runtime.run(lambda controller: controller.render(spec, token, progress, output,

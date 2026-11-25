@@ -19,31 +19,30 @@ class ShapeStore:
         self._root = Path(root)
         self._limit = limit
 
-    @property
-    def root(self) -> Path:
-        """The directory the store owns, which is a queue's artifact directory."""
-        return self._root
-
     def path(self, ident: str) -> Path:
         if not ident.startswith(JOB_ID_PREFIX) or not ident.isidentifier():
             raise ValueError(f"a shape is addressed by its job id, not {ident!r}")
         return self._root / f"{ident}.pt"
 
-    def save(self, ident: str, latents: torch.Tensor) -> Path:
+    def save(self, ident: str, latents: torch.Tensor, made_by: str) -> Path:
         target = self.path(ident)
         target.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"latents": latents.detach().to("cpu")}, target)
-        logger.info("shape %s kept: %s of latents", ident, _bytes(target.stat().st_size))
+        torch.save({"latents": latents.detach().to("cpu"), "model": made_by}, target)
+        logger.info("shape %s kept: %d latent tokens", ident, latents.shape[-2])
         self.prune()
         return target
 
-    def load(self, ident: str) -> torch.Tensor:
+    def load(self, ident: str, made_by: str) -> torch.Tensor:
         try:
             record = torch.load(self.path(ident), map_location="cpu", weights_only=True)
         except FileNotFoundError:
             raise ValueError(
                 f"shape {ident!r} has no saved latents: only the newest {self._limit} "
                 f"are kept, and none of them survive a restart") from None
+        sampled_by = record.get("model")
+        if sampled_by != made_by:
+            raise ValueError(f"shape {ident!r} was sampled by {sampled_by or 'an older server'}: "
+                             f"{made_by} would read its own latents out of another model's shape")
         latents = record["latents"]
         logger.info("shape %s reused: %d latent tokens, no sampling",
                     ident, latents.shape[-2])
@@ -63,10 +62,6 @@ class ShapeStore:
     def prune(self) -> None:
         for stale, _ in self.shapes()[self._limit:]:
             self.path(stale).unlink(missing_ok=True)
-
-
-def _bytes(nbytes: int) -> str:
-    return f"{nbytes / (1 << 20):.1f} MiB" if nbytes >= 1 << 20 else f"{nbytes} B"
 
 
 __all__ = ["SHAPES_LIMIT", "ShapeStore"]

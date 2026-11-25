@@ -114,7 +114,7 @@ class MeshPipelineController:
                        f"{time.perf_counter() - began:.1f} s")
             if shapes is not None:
                 # Even a re-cut keeps what it cut: an entry the pane offers must stay cuttable.
-                shapes.save(output.stem, x)
+                shapes.save(output.stem, x, model.name)
             token.check()
 
             progress("cutting")
@@ -139,7 +139,7 @@ class MeshPipelineController:
             return None
         if shapes is None:
             raise ValueError("re-cutting a saved shape needs a server with a jobs directory")
-        return shapes.load(spec.from_shape).to(model.device)
+        return shapes.load(spec.from_shape, model.name).to(model.device)
 
     @staticmethod
     def _cache_key(spec: ResolvedMesh) -> tuple:

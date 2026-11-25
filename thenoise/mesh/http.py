@@ -24,16 +24,14 @@ class MeshRequest(MediaRequest, MeshSpec):
 
 def install_mesh_routes(app: FastAPI, queue: JobQueue,
                         planner: Callable[[MeshSpec], JobPlan],
-                        model_name: str,
-                        shapes: Optional[ShapeStore] = None) -> None:
+                        model_name: str, shapes: ShapeStore) -> None:
     install_media_routes(app, queue, planner, model_name, "mesh", MeshRequest)
     install_knobs_route(app, "/finish", MeshFinishOptions)
 
-    if shapes is not None:
-        @app.get("/shapes")
-        def kept() -> dict:
-            """Newest first: offering more than this offers shapes the server has let go."""
-            return {"shapes": shapes.kept()}
+    @app.get("/shapes")
+    def kept() -> dict:
+        """Newest first: offering more than this offers shapes the server has let go."""
+        return {"shapes": shapes.kept()}
 
 
 __all__ = ["MeshRequest", "install_mesh_routes"]
