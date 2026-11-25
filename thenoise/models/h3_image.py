@@ -19,7 +19,7 @@ import torch
 
 from thenoise.dit.h3 import sampling as h3_sampling
 from thenoise.dit.h3.encoder import load_h3_image_text_encoder
-from thenoise.dit.h3.image import (
+from thenoise.dit.h3.checkpoint import (
     H3_IMAGE_SIGNATURE,
     detect_params,
     load_h3_image_dit,
@@ -88,7 +88,7 @@ class H3ImageModel(PixelModel):
     def __init__(self, *, config: ModelConfig):
         super().__init__(config=config)
 
-        self.params: H3Params = detect_params(self.header)
+        self.params: H3Params = detect_params(self.header, self.SIGNATURE)
         self.dit = load_h3_image_dit(
             self.header, self.params,
             device=self._load_target(self.dit_path), dtype=config.dtype,

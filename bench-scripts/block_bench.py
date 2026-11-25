@@ -1197,7 +1197,7 @@ def h3_image_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     """
     from thenoise.dit.h3.layout import Layout
     from thenoise.dit.h3.trunk import DiTBlock, _spans
-    from thenoise.dit.h3.trunk import RELAY_STORES
+    from thenoise.dit.h3.checkpoint import RELAY_STORES
     from thenoise.utils.rope import split_half_rope_axes
 
     params = h3_params()
@@ -1241,7 +1241,7 @@ def h3_image_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
 def h3_image_refiner(ctx: Ctx, tokens: int, scenario: str) -> Case:
     """H3-Image's prompt stream: two unmodulated, unrotated blocks over the text."""
     from thenoise.dit.h3.trunk import RefinerBlock
-    from thenoise.dit.h3.trunk import RELAY_STORES
+    from thenoise.dit.h3.checkpoint import RELAY_STORES
 
     params = h3_params()
     name = "h3_image/refiner"

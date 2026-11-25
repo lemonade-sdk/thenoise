@@ -18,8 +18,10 @@ from thenoise.dit.h3.encoder import (
     layer_count,
     vision_token_tags,
 )
-from thenoise.dit.h3.image import H3ImageDiT, detect_params, load_h3_image_dit
+from thenoise.dit.h3.checkpoint import detect_params, load_h3_image_dit
+from thenoise.dit.h3.image import H3ImageDiT
 from thenoise.dit.h3.layout import Layout, frame_grid, pad_to_patch
+from thenoise.dit.h3.checkpoint import H3_IMAGE_SIGNATURE
 from thenoise.dit.h3.trunk import COND_TIMESTEP, H3Params, _spans
 from thenoise.dit.kvcache import KVCache
 from thenoise.samplers import sigma_ladder
@@ -377,14 +379,14 @@ def _write_dit(tmp_path, dit, params, sigmas=TINY_SIGMAS) -> str:
 
 def test_detect_params_reads_the_head_bank_and_its_grid(tmp_path):
     dit = _tiny_dit()
-    detected = detect_params(_write_dit(tmp_path, dit, dit.params))
+    detected = detect_params(_write_dit(tmp_path, dit, dit.params), H3_IMAGE_SIGNATURE)
     assert detected == dit.params
 
 
 def test_loader_restores_every_weight(tmp_path):
     dit = _tiny_dit()
     path = _write_dit(tmp_path, dit, dit.params)
-    loaded = load_h3_image_dit(path, detect_params(path), device="cpu", dtype=torch.float32)
+    loaded = load_h3_image_dit(path, detect_params(path, H3_IMAGE_SIGNATURE), device="cpu", dtype=torch.float32)
 
     loaded_state = loaded.state_dict()
     assert loaded_state.keys() == dit.state_dict().keys()
@@ -396,7 +398,7 @@ def test_load_keeps_the_fp32_islands_at_fp32(tmp_path):
     """A BF16 run moves the trunk and leaves the modulation curve and the head bank FP32."""
     dit = _tiny_dit()
     path = _write_dit(tmp_path, dit, dit.params)
-    loaded = load_h3_image_dit(path, detect_params(path), device="cpu", dtype=torch.bfloat16)
+    loaded = load_h3_image_dit(path, detect_params(path, H3_IMAGE_SIGNATURE), device="cpu", dtype=torch.bfloat16)
 
     assert loaded.final_layer.video_out.weight.dtype == torch.float32
     assert loaded.video_patch_proj.weight.dtype == torch.float32
@@ -412,7 +414,7 @@ def test_a_bf16_run_keeps_the_stream_at_bf16(tmp_path):
     """
     dit = _tiny_dit()
     path = _write_dit(tmp_path, dit, dit.params)
-    loaded = load_h3_image_dit(path, detect_params(path), device="cpu", dtype=torch.bfloat16)
+    loaded = load_h3_image_dit(path, detect_params(path, H3_IMAGE_SIGNATURE), device="cpu", dtype=torch.bfloat16)
 
     block = loaded.blocks[0]
     modulation = block.adaln_proj(loaded.time_embedding((0.5, COND_TIMESTEP), torch.device("cpu")))
@@ -431,7 +433,7 @@ def test_a_bf16_edit_run_with_a_cache_stays_at_bf16(tmp_path):
     """
     dit = _tiny_dit()
     path = _write_dit(tmp_path, dit, dit.params)
-    loaded = load_h3_image_dit(path, detect_params(path), device="cpu", dtype=torch.bfloat16)
+    loaded = load_h3_image_dit(path, detect_params(path, H3_IMAGE_SIGNATURE), device="cpu", dtype=torch.bfloat16)
     p = loaded.params
     layout = Layout(3, 4, 4, [(2, 2)])
     loaded.prepare_rope(layout, torch.bfloat16)
@@ -453,7 +455,7 @@ def test_detect_refuses_a_head_bank_that_disagrees_with_its_grid(tmp_path):
     dit.video_patch_proj = torch.nn.Linear(8, 48)  # an 8-wide patch -> a 4-row bank
     path = _write_dit(tmp_path, dit, dit.params, sigmas=(1.0, 0.0))  # ... with 2 points
     with pytest.raises(ValueError, match="head bank is 4 rows"):
-        detect_params(path)
+        detect_params(path, H3_IMAGE_SIGNATURE)
 
 
 def test_detect_defaults_to_one_head_without_the_metadata(tmp_path):
@@ -462,7 +464,7 @@ def test_detect_defaults_to_one_head_without_the_metadata(tmp_path):
     write_safetensors(path, {k.replace("qk_norm.query_norm", "q_norm")
                              .replace("qk_norm.key_norm", "k_norm"): v.contiguous()
                              for k, v in dit.state_dict().items()})
-    assert detect_params(str(path)).pdd_steps == 1
+    assert detect_params(str(path), H3_IMAGE_SIGNATURE).pdd_steps == 1
 
 
 # ------------------------------------------------------------------ schedule

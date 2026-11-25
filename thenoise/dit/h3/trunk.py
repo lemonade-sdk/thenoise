@@ -52,6 +52,10 @@ class H3Params:
     adaln_dim: int
     pdd_steps: int
     pdd_sigmas: Tuple[float, ...]
+    #: Rows of the second stream's width, or ``None`` for a file with no audio stream:
+    #: an audio row is a whole latent frame of it, so this is both the projection's
+    #: input and the head's output width.
+    audio_dim: Optional[int] = None
     patch_size: Tuple[int, int, int] = PATCH_SIZE
     norm_eps: float = 1e-5
     qk_norm_eps: float = 1e-5
