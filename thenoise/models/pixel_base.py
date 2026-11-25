@@ -73,6 +73,15 @@ class PixelModel(DiffusionModel):
         """
         return [self.prepare_reference(img) for img in images]
 
+    def fit_guides(self, images: List[Image.Image],
+                   target: Tuple[int, int]) -> List[Image.Image]:
+        """Reference conditions, fitted for :meth:`encode_references`.
+
+        Separate from :meth:`fit_references` because a model can be strict about the
+        frames of its own clip and generous about the ones it is only asked to resemble.
+        """
+        return self.fit_references(images, target)
+
     def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
         """Encode input pixels (``[C,H,W]`` in [-1, 1]) into the canonical latent."""
         raise NotImplementedError(f"{self.name} does not support reference editing")

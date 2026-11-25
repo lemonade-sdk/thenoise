@@ -80,18 +80,18 @@ class VideoPipelineController:
 
     @staticmethod
     def _reference_images(spec: ResolvedVideo) -> list[Image.Image]:
-        """The clip's reference frames, [] for text-to-video."""
+        """The clip's own frames, [] for text-to-video."""
         return [load_image(io.BytesIO(data))
                 for data in (spec.image, spec.end_image) if data is not None]
+
+    @staticmethod
+    def _guides(spec: ResolvedVideo) -> list[tuple[Image.Image, int]]:
+        """The reference conditions, each with the frame of the clip it belongs to."""
+        return [(load_image(io.BytesIO(g.pixels)), g.frame) for g in spec.references]
 
     # ------------------------------------------------------------ render
     def render(self, spec: ResolvedVideo, token: Cancellation,
                progress: Callable[[str, int, int], None], output: Path) -> None:
-        # ``resolve`` already refused a model with no place for references; this is the
-        # adapter that has the place and not yet the stage that fills it.
-        if spec.references:
-            raise NotImplementedError(
-                f"{self.model.name} declares ref2v but anchors no reference stage yet")
         try:
             self._render(spec, token, progress, output)
         finally:
@@ -119,14 +119,19 @@ class VideoPipelineController:
                 fps=spec.fps,
             )
             images = self._reference_images(spec)
-            ref_key = (self._cache_key_reference(images, spec) if images else None)
+            guides = self._guides(spec)
+            ref_key = None
+            if images or guides:
+                ref_key = (self._cache_key_reference(
+                    [*images, *[image for image, _ in guides]], spec),
+                    tuple(frame for _, frame in guides))
             prompt_key = self._cache_key_prompt(spec, ref_key)
             stages = Stages(model, self._cache)
 
-            # Stage 0: reference latent(s).
-            ref = None
-            if images:
-                ref = stages.run(self._encode_references, images, spec,
+            # Stage 0: the conditions the run steps alongside — keyframes, then references.
+            ref: tuple[list, list] = ([], [])
+            if images or guides:
+                ref = stages.run(self._encode_references, images, guides, spec,
                                  resident=("vae",), pixels=pixels,
                                  cache="reference", key=ref_key)
                 token.check()
@@ -175,9 +180,13 @@ class VideoPipelineController:
 
                     # Preparation must happen while the stage is resident.
                     if x is None:
+                        # Only an adapter that takes reference conditions is asked
+                        # for them, so the ones without them keep their own signature.
+                        pinned = ({"guides": [(latent, frame) for latent, (_, frame)
+                                              in zip(ref[1], guides)]} if ref[1] else {})
                         x = model.prepare_latent(
-                            latents, cond, params, ref=ref,
-                            ref_method=model.pref("ref_method"),
+                            latents, cond, params, ref=ref[0] or None,
+                            ref_method=model.pref("ref_method"), **pinned,
                         )
 
                 x = stages.run(
@@ -220,13 +229,25 @@ class VideoPipelineController:
         logger.info("Video saved: %s", output)
 
     def _encode_references(self, images: list[Image.Image],
-                           spec: ResolvedVideo) -> list[torch.Tensor]:
-        """The reference frames fitted to the clip's canvas, then through the codec."""
+                           guides: list[tuple[Image.Image, int]],
+                           spec: ResolvedVideo) -> tuple[list[torch.Tensor],
+                                                         list[torch.Tensor]]:
+        """The clip's frames and its reference conditions, fitted to its canvas and put
+        through the codec.
+
+        Kept apart on the way out because the packing records which pinned row is which,
+        and a reference is fitted by a different rule than a keyframe on purpose.
+        """
         model = self.model
-        fitted = model.fit_references(images, (spec.width, spec.height))
-        return model.encode_references(
-            [pil_to_pixels(f, model.pixel_channels) for f in fitted],
-            frames=spec.frame_count)
+
+        def encoded(pictures, fit):
+            return model.encode_references(
+                [pil_to_pixels(f, model.pixel_channels)
+                 for f in fit(pictures, (spec.width, spec.height))],
+                frames=spec.frame_count)
+
+        return (encoded(images, model.fit_references) if images else [],
+                encoded([image for image, _ in guides], model.fit_guides) if guides else [])
 
     def _denoise(self, x, segment, cond, params, token: Cancellation, progress,
                  done: int, total: int):

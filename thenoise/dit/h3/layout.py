@@ -213,18 +213,24 @@ class Layout:
 
     @classmethod
     def av(cls, text_len: int, latent_t: int, latent_h: int, latent_w: int,
-           audio_t: int, keyframes: Sequence[Keyframe] = ()) -> "Layout":
-        """``[text | keyframes | audio | video]`` — the released audiovisual packing.
+           audio_t: int, keyframes: Sequence[Keyframe] = (),
+           references: Sequence[Keyframe] = ()) -> "Layout":
+        """``[text | conditions | audio | video]`` — the released audiovisual packing.
 
-        Both targets share the spatial grid, so a keyframe is one latent frame of it and
-        the audio's width coordinates are that grid's extremes. ``keyframes`` are pixel
+        Both targets share the spatial grid, so a condition is one latent frame of it and
+        the audio's width coordinates are that grid's extremes. Both sequences hold pixel
         frame indices — the first frame is 0, the last is however many frames the clip
         runs — counted from the target timeline's origin.
+
+        A keyframe and a reference are pinned the same way and share the ``cond`` kind, so
+        the network sees one run of conditions and takes their latents in this order:
+        keyframes first, then references. Splitting them here is the caller's record of
+        which is which, not a fourth thing the DiT has to know.
         """
         frame, w_axis = frame_grid(latent_h, latent_w)
         cursor = float(text_len)
         packing = _Packing(text_len)
-        for index in keyframes:
+        for index in (*keyframes, *references):
             packing.add("cond", frame.shape[0],
                         _frame_rows(frame, cursor + FRAME_RESCALE * index))
         if audio_t:

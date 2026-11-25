@@ -177,6 +177,49 @@ def test_a_keyframe_is_never_written_into_the_clip(model):
     assert torch.equal(out, latents), "a keyframe is a row of its own, not an overwrite"
 
 
+def test_a_reference_is_pinned_like_a_keyframe_on_the_same_frame(model):
+    """A keyframe and a reference differ in which frame, not in how they are pinned."""
+    params = _params(frames=22)
+    streams = model._streams(params)
+    frame = torch.ones(1, 24, 1, *streams.video[2:])
+
+    def positions(**kwargs):
+        model.prepare_latent(model.init_latents(params), _conditioning(), params,
+                             ref_method="index_timestep_zero", **kwargs)
+        return model._layout
+
+    def pinned_time(layout):
+        start, stop, kind = layout.segments[1]
+        assert kind == "cond"
+        return layout.position_ids[start:stop, 0]
+
+    keyframe = positions(ref=[frame])
+    assert [kind for _, _, kind in keyframe.segments] == [
+        "text", "cond", "audio", "video"]
+    assert torch.equal(pinned_time(keyframe), pinned_time(positions(guides=[(frame, 0)])))
+    assert torch.equal(pinned_time(positions(guides=[(frame, -1)])),
+                       pinned_time(positions(guides=[(frame, params.frames - 1)])))
+    assert not torch.equal(pinned_time(positions(guides=[(frame, 12)])),
+                           pinned_time(keyframe))
+    with pytest.raises(ValueError, match="outside a 22-frame clip"):
+        positions(guides=[(frame, 22)])
+
+
+def test_a_reference_alone_is_a_condition_not_a_keyframe(model):
+    params = _params()
+    streams = model._streams(params)
+    frame = torch.ones(1, 24, 1, *streams.video[2:])
+    model.prepare_latent(model.init_latents(params), _conditioning(), params,
+                         guides=[(frame, 0), (frame, 1)],
+                         ref_method="index_timestep_zero")
+    assert [kind for _, _, kind in model._layout.segments] == [
+        "text", "cond", "cond", "audio", "video"]
+    assert len(model._keyframes) == 2
+    with pytest.raises(ValueError, match="reads a condition at the conditioned timestep"):
+        model.prepare_latent(model.init_latents(params), _conditioning(), params,
+                             guides=[(frame, 0)], ref_method="index")
+
+
 def test_the_second_branch_gets_its_own_packing(model):
     params = _params()
     cond = _conditioning()

@@ -7,13 +7,14 @@ import torch
 from conftest import StubVideo, header_of, wan_adapter
 from thenoise.models.config import ModelConfig
 from thenoise.models.video_base import Segment, VideoModel
+from thenoise.video_cli import one_reference
 from thenoise.models.h3_video import H3VideoModel
 from thenoise.models.wan_video import VARIANTS, Wan22Model
 from thenoise.vae.wan22 import WAN22_LATENTS_MEAN, WAN22_LATENTS_STD
 from thenoise.vae.wan_video import _comfy_vae_config
 from thenoise.video.controller import VideoPipelineController
 from thenoise.jobs import Cancellation
-from thenoise.video.spec import ResolvedVideo, VideoSpec, mode_of
+from thenoise.video.spec import Guide, ResolvedVideo, VideoSpec, mode_of
 
 
 def test_video_model_contract_and_shared_latent_statistics():
@@ -189,7 +190,8 @@ def test_a_request_carries_its_references_to_the_model():
     resolved = ResolvedVideo(
         prompt="a fox, like this", negative_prompt="", width=64, height=64, frame_count=5,
         fps=24, steps=4, guidance_scale=1.0, flow_shift=3.0, seed=0, output_format="mp4",
-        image=None, end_image=None, sampler="euler", lora_specs={}, references=(b"ref",))
+        image=None, end_image=None, sampler="euler", lora_specs={},
+        references=(Guide(pixels=b"ref", frame=-1),))
     assert resolved.mode == "ref2v"
 
 
@@ -198,7 +200,14 @@ def test_references_are_refused_where_the_architecture_has_no_place_for_them():
     model = wan_adapter("ti2v_5b")
     with pytest.raises(ValueError, match="does not support ref2v"):
         VideoPipelineController(model).resolve(
-            VideoSpec(prompt="a fox, like this", references=[b"png"]))
+            VideoSpec(prompt="a fox, like this", references=[Guide(pixels=b"png")]))
+
+
+def test_a_reference_names_its_frame_in_the_argument():
+    assert one_reference("dog.png") == ("dog.png", 0)
+    assert one_reference("dog.png@12") == ("dog.png", 12)
+    assert one_reference("dog.png@-1") == ("dog.png", -1)
+    assert one_reference("shots@night.png") == ("shots@night.png", 0)
 
 
 def test_only_h3_answers_ref2v():

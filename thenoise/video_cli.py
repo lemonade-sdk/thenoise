@@ -24,11 +24,24 @@ def _summary(resolved) -> str:
             f"seed {resolved.seed}")
 
 
+def one_reference(value: str) -> tuple[str, int]:
+    """``PATH`` or ``PATH@FRAME``, the frame being the one the reference belongs to.
+
+    The frame travels with the path because a reference is meaningless without it: the
+    packing pins it to a frame of the clip. A trailing ``@`` that is not a number stays
+    part of the path, since paths are allowed to contain one.
+    """
+    path, sep, tail = value.rpartition("@")
+    if sep and (tail.lstrip("-").isdigit() and tail != "-"):
+        return path, int(tail)
+    return value, 0
+
+
 def run_video(args) -> None:
     """Load one model, resolve one request against it, render one clip."""
     from pydantic import ValidationError
 
-    from .video.spec import OUTPUT_FORMATS, VideoSpec
+    from .video.spec import OUTPUT_FORMATS, Guide, VideoSpec
 
     # The spec refuses this pair too, but only on its way to the model's defaults.
     if args.end_image and not args.image:
@@ -47,8 +60,9 @@ def run_video(args) -> None:
             image=read_media(args.image, "video") if args.image else None,
             end_image=(read_media(args.end_image, "video", "--end-image")
                        if args.end_image else None),
-            references=[read_media(path, "video", "--reference")
-                        for path in args.reference],
+            references=[Guide(pixels=read_media(path, "video", "--reference"),
+                              frame=frame)
+                        for path, frame in map(one_reference, args.reference)],
             lora_specs=_lora_specs(args),
         )
     except ValidationError as e:

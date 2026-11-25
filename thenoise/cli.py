@@ -174,10 +174,12 @@ def _add_video_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--end-image", metavar="PATH",
                    help="image the clip ends on, for a model that can be told "
                         "where a clip ends; needs --image")
-    p.add_argument("--reference", action="append", default=[], metavar="PATH",
+    p.add_argument("--reference", action="append", default=[], metavar="PATH[@FRAME]",
                    help="something for the clip to look like rather than the frame it "
-                        "starts or ends on; repeat once per reference. Only a model "
-                        "whose video capabilities answer ref2v takes them.")
+                        "starts or ends on; repeat once per reference. Append "
+                        "@FRAME to say which frame it belongs to, counted from the "
+                        "end when negative (default: the first). Only a model whose "
+                        "video capabilities answer ref2v takes them.")
     p.add_argument("--lora", action="append", default=[], metavar="FILE[:WEIGHT]",
                    help="LoRA for the primary transformer (repeatable)")
     p.add_argument("--lora-low", dest="lora_low", action="append", default=[],

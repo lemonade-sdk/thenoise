@@ -470,8 +470,10 @@ def test_the_frame_that_ends_the_clip_is_the_second_one_the_controller_reads():
                                          frames=9, image=_png("red"), end_image=_png("blue")))
     controller = VideoPipelineController(model)
 
-    encoded = controller._encode_references(controller._reference_images(spec), spec)
-    assert [latent.item() for latent in encoded] == [1.0, 1.0, -1.0, -1.0]
+    keyframes, references = controller._encode_references(
+        controller._reference_images(spec), controller._guides(spec), spec)
+    assert [latent.item() for latent in keyframes] == [1.0, 1.0, -1.0, -1.0]
+    assert references == []
 
 
 def test_a_reference_the_adapter_cannot_place_is_refused():

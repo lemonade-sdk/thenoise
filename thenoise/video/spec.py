@@ -31,7 +31,7 @@ def frame_grid(wanted: float, *, compression: int, upward: bool) -> int:
 
 
 def mode_of(image: bytes | None, end_image: bytes | None,
-            references: tuple[bytes, ...] = ()) -> str:
+            references: tuple[Guide, ...] = ()) -> str:
     """``t2v``, ``i2v``, ``flf2v`` or ``ref2v``, from the conditions a request carries.
 
     References outrank keyframes: a clip given something to look like is a reference run whether
@@ -44,6 +44,18 @@ def mode_of(image: bytes | None, end_image: bytes | None,
     if image is None:
         return "t2v"
     return "flf2v" if end_image is not None else "i2v"
+
+
+@dataclass(frozen=True)
+class Guide:
+    """One reference condition: the picture, and the clip frame it belongs to.
+
+    ``frame`` may be negative, counted from the clip's end, which is how a request names
+    the last frame without knowing the frame count yet.
+    """
+
+    pixels: bytes
+    frame: int = 0
 
 
 @dataclass(frozen=True)
@@ -68,7 +80,7 @@ class ResolvedVideo:
     lora_specs: dict[str, list[str]]
     explicit_frames: bool = False
     #: What the clip is asked to look like, as opposed to the frame it starts or ends on.
-    references: tuple[bytes, ...] = ()
+    references: tuple[Guide, ...] = ()
 
     @property
     def mode(self) -> str:
@@ -112,7 +124,7 @@ class VideoSpec(BaseModel):
     output_format: Literal["mp4", "webm"] | None = None
     image: Annotated[bytes, Field(min_length=1)] | None = None
     end_image: Annotated[bytes, Field(min_length=1)] | None = None
-    references: list[Annotated[bytes, Field(min_length=1)]] = []
+    references: list[Guide] = []
     sampler: Annotated[str, Field(min_length=1)] | None = None
     lora_specs: LoraSpecs = None
 

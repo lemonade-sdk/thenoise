@@ -227,6 +227,11 @@ class H3VideoModel(VideoModel):
             raise ValueError("H3 video keys a clip on its first frame and, at most, its last")
         return [cover_crop(image, target[0], target[1]) for image in images]
 
+    def fit_guides(self, images, target):
+        """The same crop, and no ceiling on how many: the timeline runs out of frames to
+        key, not of things the clip may be asked to resemble."""
+        return [cover_crop(image, target[0], target[1]) for image in images]
+
     def encode_references(self, pixels, frames=1) -> List[torch.Tensor]:
         """One latent per keyframe, in the order the prompt labels them.
 
@@ -300,33 +305,48 @@ class H3VideoModel(VideoModel):
         params: VideoSamplingParams,
         ref: Optional[List[torch.Tensor]] = None,
         ref_method: str = "index",
+        guides: Sequence[Tuple[torch.Tensor, int]] = (),
     ) -> torch.Tensor:
         """Build the packing this run steps through; the latent itself is untouched.
 
-        The keyframes become rows of the same lattice at the timeline's ends, so they shift
+        The conditions become rows of the same lattice at their frame indices, so they shift
         the target's coordinates ahead of them without ever being denoised themselves.
+        ``guides`` pairs each reference latent with the clip frame it belongs to, negative
+        counted from the end.
         """
         keyframes = _as_list(ref)
-        if keyframes and ref_method != "index_timestep_zero":
+        if (keyframes or guides) and ref_method != "index_timestep_zero":
             raise ValueError(
-                "H3 video reads a keyframe at the conditioned timestep and never "
+                "H3 video reads a condition at the conditioned timestep and never "
                 f"denoises it; '{ref_method}' describes overwriting a frame of the clip"
             )
         dev = torch.device(self.device)
         streams = self._streams(params)
         # A keyframe sits on the clip's own timeline: the first frame opens it, the last
-        # closes it, and a lone one is the opening frame.
+        # closes it, and a lone one is the opening frame. A reference sits where the request
+        # put it.
         anchors = [0, params.frames - 1][:len(keyframes)]
+        conditions = list(keyframes)
+        for latent, index in guides:
+            frame = index if index >= 0 else params.frames + index
+            if not 0 <= frame < params.frames:
+                raise ValueError(
+                    f"reference frame {index} falls outside a {params.frames}-frame clip")
+            anchors.append(frame)
+            conditions.append(latent)
+        pinned = anchors[len(keyframes):]
         self._streams_ = streams
         self._shift = float(params.flow_shift)
         self._seed = params.seed
-        self._keyframes = [k.to(dev, self.dtype) for k in keyframes]
+        self._keyframes = [k.to(dev, self.dtype) for k in conditions]
         self._layout = Layout.av(cond.cond.shape[1], *streams.video[1:],
-                                 audio_t=streams.audio[2], keyframes=anchors)
+                                 audio_t=streams.audio[2], keyframes=anchors[:len(keyframes)],
+                                 references=pinned)
         self._null_layout = (
             None if cond.null is None
             else Layout.av(cond.null.shape[1], *streams.video[1:],
-                           audio_t=streams.audio[2], keyframes=anchors)
+                           audio_t=streams.audio[2], keyframes=anchors[:len(keyframes)],
+                           references=pinned)
         )
         self.dit.pe_embedder.clear()
         self.dit.prepare_rope(self._layout, self.dtype)
