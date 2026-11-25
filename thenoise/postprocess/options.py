@@ -16,8 +16,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
-from thenoise.utils.options import (FilterSpec, declared_chain, flat_values,
-                                   option, option_names, validate)
+from thenoise.utils.options import (FilterSpec, chain_in_stage, declared_chain,
+                                   defaults_of, flat_values, option,
+                                   option_names, validate)
 
 #: Right after the VAE decode, at the native decoded resolution.
 DECODE = "decode"
@@ -74,9 +75,7 @@ class PostprocessOptions:
 POSTPROCESS_NAMES = option_names(PostprocessOptions)
 
 #: The default of every knob, which is by definition its "off" value.
-DEFAULTS: Dict[str, Any] = {
-    name: getattr(PostprocessOptions, name) for name in POSTPROCESS_NAMES
-}
+DEFAULTS: Dict[str, Any] = defaults_of(PostprocessOptions)
 
 
 CHAIN = declared_chain(PostprocessOptions)
@@ -84,7 +83,7 @@ CHAIN = declared_chain(PostprocessOptions)
 
 def filter_specs(stage: str) -> Tuple[FilterSpec, ...]:
     """The filters of one stage, in chain order."""
-    return tuple(spec for spec in CHAIN if spec.stage == stage)
+    return chain_in_stage(CHAIN, stage)
 
 
 def flat_options(holder: Any) -> Dict[str, Any]:

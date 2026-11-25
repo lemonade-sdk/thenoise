@@ -7,8 +7,7 @@ from fastapi import FastAPI
 
 from ..jobs import JobPlan, JobQueue
 from ..media_request import MediaRequest
-from ..media_routes import install_media_routes
-from ..utils.options import options_schema
+from ..media_routes import install_knobs_route, install_media_routes
 from .finish.options import MeshFinishOptions
 from .spec import MeshSpec
 
@@ -29,11 +28,7 @@ def install_mesh_routes(app: FastAPI, queue: JobQueue,
                         planner: Callable[[MeshSpec], JobPlan],
                         model_name: str) -> None:
     install_media_routes(app, queue, planner, model_name, "mesh", MeshRequest)
-
-    @app.get("/finish")
-    def finish():
-        """The shape-finish knobs, described for the web UI to build its controls from."""
-        return {"options": options_schema(MeshFinishOptions)}
+    install_knobs_route(app, "/finish", MeshFinishOptions)
 
 
 __all__ = ["MeshRequest", "install_mesh_routes"]

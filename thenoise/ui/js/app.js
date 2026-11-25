@@ -86,7 +86,7 @@ function applySettings(prefix, meta) {
     $(p + 'upscale_type').value = 'refined';
   }
   if (meta.upscale_type) $(p + 'upscale_type').value = meta.upscale_type;
-  restorePostprocess(p, meta);
+  restoreKnobs('postprocess', p, meta);
   if (Array.isArray(meta.lora_specs)) {
     $(p + 'lora_specs').value = meta.lora_specs.join('\n');
   }
@@ -149,7 +149,8 @@ document.addEventListener('click', e => {
 });
 
 loadUpscalers();
-loadPostprocess();
+registerKnobs('postprocess', '/postprocess');
+loadKnobs('postprocess', ['', 'edit_']);
 updateUpscaleMax('');
 updateUpscaleMax('edit_');
 

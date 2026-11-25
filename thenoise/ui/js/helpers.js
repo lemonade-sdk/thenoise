@@ -65,15 +65,19 @@ initToggle({
   apply: applySidebar, next: v => v === 'right' ? 'left' : 'right',
 });
 
-/* ---------- post-decode knobs (declared once server-side: thenoise/postprocess) ----------
+/* ---------- Knob sets: whatever a descriptor endpoint declares ----------
 
-The sidebar's postprocess controls are built from ``GET /postprocess``, so a new knob
-appears in the form, the request body, the settings restore and the info panel without
-a line of UI code. Ids follow the panes' convention: ``<prefix><name>``, where the
-prefix is '' on Generate and 'edit_' on Edit.
+A knob set is one `GET /<name>` descriptor built from an option class declared on the
+server, so a new knob appears in the form, the request body, the settings restore and the
+info panel without a line of UI code. Ids follow the panes' convention:
+``<prefix><knob>`` for a control, ``<prefix><set>_controls`` for its container and
+``<prefix><set>_note`` for the summary a collapsed section would otherwise hide.
 */
-let postprocessOptions = [];
+const knobSets = {};
 
+function registerKnobs(name, url) {
+  knobSets[name] = { options: [], prefixes: [], url };
+}
 function hintSpan(text) {
   const span = document.createElement('span');
   span.className = 'hint';
@@ -88,7 +92,7 @@ function checkControl(prefix, option) {
   input.type = 'checkbox';
   input.id = prefix + option.name;
   input.checked = option.default === true;
-  input.addEventListener('change', refreshPostprocessNotes);
+  input.addEventListener('change', refreshKnobNotes);
   label.append(input, document.createTextNode(' ' + option.label));
   if (option.hint) label.append(hintSpan(option.hint));
   return label;
@@ -122,27 +126,28 @@ function rangeControl(prefix, option) {
   input.value = option.default;
   input.addEventListener('input', () => {
     showRangeValue(prefix, option.name);
-    refreshPostprocessNotes();
+    refreshKnobNotes();
   });
 
   box.append(head, input);
   return box;
 }
 
-function buildPostprocessControls(prefix) {
-  const box = $(prefix + 'postprocess_controls');
+function buildKnobs(name, prefix) {
+  const box = $(prefix + name + '_controls');
   if (!box) return;
   box.innerHTML = '';
-  for (const option of postprocessOptions) {
+  for (const option of knobSets[name].options) {
     box.append(option.type === 'boolean'
       ? checkControl(prefix, option) : rangeControl(prefix, option));
   }
+  box.hidden = !knobSets[name].options.length;
 }
 
-// "Saturation 0.30 · Film grain 0.50" — what the collapsed section would otherwise hide.
-function postprocessNote(prefix) {
+// "Saturation 0.30 · Film grain 0.50" — what a collapsed section would otherwise hide.
+function knobNote(name, prefix) {
   const active = [];
-  for (const option of postprocessOptions) {
+  for (const option of knobSets[name].options) {
     const input = $(prefix + option.name);
     if (!input) continue;
     if (option.type === 'boolean') {
@@ -157,11 +162,13 @@ function postprocessNote(prefix) {
   return active.join(' · ');
 }
 
-// Both panes carry the controls, so both headers are kept truthful.
-function refreshPostprocessNotes() {
-  for (const p of ['', 'edit_']) {
-    const note = $(p + 'postprocess_note');
-    if (note) note.textContent = postprocessNote(p);
+// Every pane carries its own copy of a set, so every header is kept truthful.
+function refreshKnobNotes() {
+  for (const [name, set] of Object.entries(knobSets)) {
+    for (const prefix of set.prefixes) {
+      const note = $(prefix + name + '_note');
+      if (note) note.textContent = knobNote(name, prefix);
+    }
   }
 }
 
@@ -171,9 +178,9 @@ function showRangeValue(prefix, name) {
 }
 
 // The knobs as the request body wants them.
-function collectPostprocess(prefix) {
+function collectKnobs(name, prefix) {
   const body = {};
-  for (const option of postprocessOptions) {
+  for (const option of knobSets[name].options) {
     const input = $(prefix + option.name);
     if (!input) continue;
     body[option.name] = option.type === 'boolean' ? input.checked : input.valueAsNumber;
@@ -181,8 +188,8 @@ function collectPostprocess(prefix) {
   return body;
 }
 
-function restorePostprocess(prefix, meta) {
-  for (const option of postprocessOptions) {
+function restoreKnobs(name, prefix, meta) {
+  for (const option of knobSets[name].options) {
     const input = $(prefix + option.name);
     const value = meta[option.name];
     if (!input || value == null) continue;
@@ -192,26 +199,25 @@ function restorePostprocess(prefix, meta) {
       showRangeValue(prefix, option.name);
     }
   }
-  refreshPostprocessNotes();
+  refreshKnobNotes();
 }
 
-// One row per knob the image was actually made with; a default is not worth showing.
-function postprocessInfoRows(meta) {
+// One row per knob the work was actually made with; a default is not worth showing.
+function knobInfoRows(name, meta) {
   const rows = [];
-  for (const option of postprocessOptions) {
+  for (const option of knobSets[name].options) {
     if (!(option.name in meta) || meta[option.name] === option.default) continue;
     rows.push([option.label, meta[option.name], '']);
   }
   return rows;
 }
 
-async function loadPostprocess() {
-  const data = await fetchJSON('/postprocess');
-  postprocessOptions = (data && data.options) || [];
-  for (const p of ['', 'edit_']) {
-    buildPostprocessControls(p);
-  }
-  refreshPostprocessNotes();
+async function loadKnobs(name, prefixes) {
+  const data = await fetchJSON(knobSets[name].url);
+  knobSets[name].options = (data && data.options) || [];
+  knobSets[name].prefixes = prefixes;
+  for (const prefix of prefixes) buildKnobs(name, prefix);
+  refreshKnobNotes();
 }
 
 /* ---------- LoRA specs ---------- */
@@ -494,7 +500,7 @@ function renderInfo(meta) {
   if ('upscale_factor' in meta) rows.push(['Upscale factor', meta.upscale_factor, '']);
   if ('upscale_type' in meta) rows.push(['Upscale type', meta.upscale_type, '']);
   if ('pixel_upscaler' in meta && meta.pixel_upscaler) rows.push(['Pixel upscaler', meta.pixel_upscaler, '']);
-  rows.push(...postprocessInfoRows(meta));
+  rows.push(...knobInfoRows('postprocess', meta));
   if ('lora_specs' in meta && meta.lora_specs) rows.push([FIELD_LABELS.lora_specs, formatLora(meta.lora_specs), '']);
   renderInfoRows(rows);
 }
@@ -895,7 +901,7 @@ function collectSettings(prefix, extra) {
     upscale_factor: parseFloat($(prefix + 'upscale_factor').value),
     upscale_type: $(prefix + 'upscale_type').value,
     pixel_upscaler: $(prefix + 'pixel_upscaler').value || null,
-    ...collectPostprocess(prefix),
+    ...collectKnobs('postprocess', prefix),
     lora_specs: parseLora($(prefix + 'lora_specs').value),
   };
   addNumbers(body, prefix, ['width', 'height', 'steps', 'seed'], ['guidance_scale']);

@@ -64,32 +64,8 @@ bindDropzone('mesh_dropzone', 'mesh_file', async files => {
 initLora('mesh_');
 
 /* ---------- Finish: whatever this server declares ---------- */
-let finishOptions = [];
-
-function buildFinishControls() {
-  const box = $('mesh_finish_controls');
-  if (!box) return;
-  box.innerHTML = '';
-  for (const option of finishOptions) box.append(rangeControl('mesh_', option));
-  box.hidden = !finishOptions.length;
-}
-
-async function loadFinish() {
-  const data = await fetchJSON('/finish');
-  finishOptions = (data && data.options) || [];
-  buildFinishControls();
-}
-
-function collectFinish() {
-  const body = {};
-  for (const option of finishOptions) {
-    const el = $('mesh_' + option.name);
-    if (el) body[option.name] = el.valueAsNumber;
-  }
-  return body;
-}
-
-loadFinish();
+registerKnobs('finish', '/finish');
+loadKnobs('finish', ['mesh_']);
 
 function collectMeshSettings() {
   const body = {};
@@ -103,7 +79,7 @@ function collectMeshSettings() {
   if (lora_specs) body.lora_specs = lora_specs;
   body.image = meshViews.length === 1 ? meshViews[0].b64
                                       : meshViews.map(view => view.b64);
-  return { ...body, ...collectFinish() };
+  return { ...body, ...collectKnobs('finish', 'mesh_') };
 }
 
 function validateMeshInputs() {

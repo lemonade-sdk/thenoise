@@ -9,6 +9,14 @@ from fastapi import FastAPI
 from .api_errors import error, guarded
 from .jobs import JobPlan, JobQueue
 from .jobs_http import content_response, submit_job
+from .utils.options import options_schema
+
+
+def install_knobs_route(app: FastAPI, path: str, options: type) -> None:
+    """One GET route describing a knob set, which is what a pane builds controls from."""
+    @app.get(path)
+    def knobs():
+        return {"options": options_schema(options)}
 
 
 def install_media_routes(app: FastAPI, queue: JobQueue, planner: Callable[..., JobPlan],

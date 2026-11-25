@@ -79,6 +79,20 @@ class Mesh:
             return self
         return Mesh(self.vertices * factor, self.faces)
 
+    def face_areas(self) -> Tensor:
+        """Area of every triangle, in the mesh's own units."""
+        corners = self.vertices[self.faces]
+        return torch.linalg.cross(corners[:, 1] - corners[:, 0],
+                                  corners[:, 2] - corners[:, 0]).norm(dim=-1) * 0.5
+
+    def select(self, keep_vertices: Tensor, keep_faces: Tensor) -> "Mesh":
+        """The kept faces, renumbered into the kept positions."""
+        lookup = torch.full((self.vertices.shape[0],), -1, dtype=self.faces.dtype,
+                            device=self.faces.device)
+        lookup[keep_vertices] = torch.arange(int(keep_vertices.sum()),
+                                             device=self.faces.device)
+        return Mesh(self.vertices[keep_vertices], lookup[self.faces[keep_faces]])
+
     def signed_volume(self) -> Tensor:
         """The volume the faces enclose, positive when they face outward."""
         triangles = self.vertices[self.faces]

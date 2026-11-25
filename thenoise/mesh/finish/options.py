@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
-from thenoise.utils.options import (FilterSpec, declared_chain, flat_values,
-                                   option, option_names, validate)
+from thenoise.utils.options import (FilterSpec, chain_in_stage, declared_chain,
+                                   defaults_of, flat_values, option,
+                                   option_names, validate)
 
 FINISH = "finish"
 
@@ -30,16 +31,14 @@ class MeshFinishOptions:
 
 FINISH_NAMES = option_names(MeshFinishOptions)
 
-DEFAULTS: Dict[str, Any] = {
-    name: getattr(MeshFinishOptions, name) for name in FINISH_NAMES
-}
+DEFAULTS: Dict[str, Any] = defaults_of(MeshFinishOptions)
 
 CHAIN: Tuple[FilterSpec, ...] = declared_chain(MeshFinishOptions)
 
 
 def filter_specs(stage: str = FINISH) -> Tuple[FilterSpec, ...]:
     """The filters of one stage, in chain order."""
-    return tuple(spec for spec in CHAIN if spec.stage == stage)
+    return chain_in_stage(CHAIN, stage)
 
 
 def flat_options(holder: Any) -> Dict[str, Any]:

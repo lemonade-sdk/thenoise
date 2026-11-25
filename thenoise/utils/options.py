@@ -161,13 +161,39 @@ class FilterSpec:
     stage: str
 
 
-def declared_chain(cls: type) -> Tuple[FilterSpec, ...]:
-    """The filters of a declared surface, in field order, each owning its knobs.
+def defaults_of(cls: type) -> Dict[str, Any]:
+    """Every knob's default: the value that asks for nothing."""
+    return {entry.name: entry.default for entry in fields(cls)}
 
-    Field order *is* chain order, which is why a filter's knobs must be declared
-    together: splitting them across another filter's would ask it for the half it is
-    not handed.
+
+def chain_in_stage(chain: Tuple[FilterSpec, ...],
+                   stage: str) -> Tuple[FilterSpec, ...]:
+    """The filters of one stage, in chain order."""
+    return tuple(spec for spec in chain if spec.stage == stage)
+
+
+def apply_chain(carrier, options, specs: Tuple[FilterSpec, ...], filters: Dict,
+                defaults: Dict[str, Any], check=None, on_filter=None):
+    """Every filter ``specs`` names, in order, over ``carrier``.
+
+    A filter whose knobs all still hold their default is skipped, so a request that asks
+    for nothing returns the very object it was handed: a declared chain costs nothing
+    when nobody asks anything of it.
     """
+    for spec in specs:
+        values = {name: getattr(options, name) for name in spec.options}
+        if all(values[name] == defaults[name] for name in values):
+            continue
+        if on_filter is not None:
+            on_filter(spec)
+        carrier = filters[spec.name](carrier, **values)
+        if check is not None:
+            check()
+    return carrier
+
+
+def declared_chain(cls: type) -> Tuple[FilterSpec, ...]:
+    """The filters of a declared surface, in field order, which is chain order."""
     chain, declared = [], set()
     for entry in fields(cls):
         meta = entry.metadata
@@ -304,7 +330,10 @@ def add_flags(
 __all__ = [
     "FilterSpec",
     "add_flags",
+    "apply_chain",
+    "chain_in_stage",
     "declared_chain",
+    "defaults_of",
     "declared_knobs",
     "flat_values",
     "option",

@@ -32,6 +32,7 @@ from thenoise.controlmap.options import (
 )
 from thenoise.jobs import JobPlan, JobQueue
 from thenoise.jobs_http import install_job_routes, submit_job
+from thenoise.media_routes import install_knobs_route
 from thenoise.postprocess.options import (
     POSTPROCESS_NAMES,
     PostprocessOptions,
@@ -39,7 +40,7 @@ from thenoise.postprocess.options import (
 )
 from thenoise.samplers import SAMPLERS
 from thenoise.utils.image_tensor import load_image
-from thenoise.utils.options import options_schema, wire_fields
+from thenoise.utils.options import wire_fields
 from thenoise.utils.png import pnginfo_of
 from thenoise import __version__
 
@@ -342,10 +343,7 @@ def create_app(runtime, *, jobs: Optional[JobQueue] = None) -> FastAPI:
                 scales[name] = 0
         return {"upscalers": names, "scales": scales}
 
-    @app.get("/postprocess")
-    def postprocess():
-        """The post-decode knobs, described for the web UI to build its controls from."""
-        return {"options": options_schema(PostprocessOptions)}
+    install_knobs_route(app, "/postprocess", PostprocessOptions)
 
     @app.get("/controlmaps")
     def controlmaps():

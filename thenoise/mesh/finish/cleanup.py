@@ -8,24 +8,17 @@ def drop_islands(mesh: Mesh, share: float) -> Mesh:
     if share <= 0.0 or mesh.is_empty:
         return mesh
 
-    faces, corners = mesh.faces, mesh.vertices[mesh.faces]
-    area = torch.linalg.cross(corners[:, 1] - corners[:, 0],
-                              corners[:, 2] - corners[:, 0]).norm(dim=-1) * 0.5
-    labels = _components(faces, mesh.vertices.shape[0])
-    piece = labels[faces[:, 0]]
+    area = mesh.face_areas()
+    labels = _components(mesh.faces, mesh.vertices.shape[0])
+    piece = labels[mesh.faces[:, 0]]
     totals = torch.zeros(int(labels.max()) + 1, dtype=area.dtype, device=area.device)
     totals.scatter_reduce_(0, piece, area, reduce="sum")
-    whole = float(totals.sum())
-    wanted = totals >= share * whole
+    wanted = totals >= share * float(totals.sum())
 
     if not bool(wanted[piece].any()):
         raise ValueError(f"every piece of the cut holds less than {share} of its area: "
                          f"there would be no shape left to write")
-
-    keep = wanted[labels]
-    lookup = torch.full_like(labels, -1)
-    lookup[keep] = torch.arange(int(keep.sum()), device=labels.device)
-    return Mesh(mesh.vertices[keep], lookup[faces[wanted[piece]]])
+    return mesh.select(wanted[labels], wanted[piece])
 
 
 def _components(faces: torch.Tensor, vertices: int) -> torch.Tensor:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Callable, Dict
 
+from thenoise.utils.options import apply_chain
+
 from .options import DEFAULTS, FINISH, filter_specs
 
 
@@ -23,14 +25,9 @@ FILTERS: Dict[str, Callable] = {"floaters": _floaters, "simplify": _simplify}
 def finish_mesh(mesh, options, check: Callable[[], None],
                 progress: Callable[..., None]):
     """What the request asked of the cut, in declared order; the mesh itself if nothing."""
-    for spec in filter_specs(FINISH):
-        values = {name: getattr(options, name) for name in spec.options}
-        if all(values[name] == DEFAULTS[name] for name in values):
-            continue
-        progress("finishing")
-        mesh = FILTERS[spec.name](mesh, **values)
-        check()
-    return mesh
+    return apply_chain(mesh, options, filter_specs(FINISH), FILTERS, DEFAULTS,
+                       check=check,
+                       on_filter=lambda _spec: progress("finishing"))
 
 
 __all__ = ["FILTERS", "finish_mesh"]
