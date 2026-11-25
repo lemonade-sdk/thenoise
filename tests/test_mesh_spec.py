@@ -3,8 +3,8 @@ import math
 import pytest
 
 from thenoise.mesh.spec import (
-    DEFAULT_MESH_SCALE, DENSITY_PRESETS, MAX_OCTREE_RESOLUTION, OUTPUT_FORMATS,
-    MeshSpec, mode_of,
+    BOUNDS_PRESETS, CUT_LEVEL_PRESETS, DEFAULT_MESH_SCALE, DENSITY_PRESETS,
+    MAX_OCTREE_RESOLUTION, OUTPUT_FORMATS, TOKEN_PRESETS, MeshSpec, mode_of,
 )
 from thenoise.utils.attention import DEFAULT_ATTENTION
 
@@ -135,6 +135,22 @@ def test_the_density_presets_double_and_stop_where_the_grid_stops_fitting():
 def test_a_density_past_the_sampled_grid_is_refused_before_a_weight_moves():
     with pytest.raises(ValueError, match="at most"):
         resolve(octree_resolution=MAX_OCTREE_RESOLUTION + 1)
+
+
+def test_every_value_the_pane_offers_as_a_menu_resolves():
+    """These tuples are the pane's menus verbatim, so one the engine refuses is a refusal
+    the user only finds out about by picking it."""
+    for latents in TOKEN_PRESETS:
+        assert resolve(latents=latents).latents == latents
+    for bounds in BOUNDS_PRESETS:
+        assert resolve(bounds=bounds).bounds == bounds
+    for level in CUT_LEVEL_PRESETS:
+        assert resolve(mc_level=level).mc_level == level
+
+
+def test_the_token_menu_doubles_so_each_step_is_the_cost_of_the_one_below():
+    steps = list(TOKEN_PRESETS)
+    assert all(fine == 2 * coarse for coarse, fine in zip(steps, steps[1:])), steps
 
 
 def test_an_unscaled_shape_spans_the_volume_it_was_sampled_from():

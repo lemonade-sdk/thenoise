@@ -57,32 +57,3 @@ Serve over HTTP with the web UI (open <http://localhost:8000/>):
 ./thenoise.sh serve --dit ./models/hunyuan3d-2.1/hunyuan_3d_v2.1.safetensors
 ```
 
-In the web UI a shape is the Generate tab: a dropzone for the picture, the density and
-the seed. Over HTTP the picture travels base64-encoded in the `image`
-field — `POST /mesh` answers with the file itself, `POST /jobs/mesh` queues it and
-`GET /jobs/{id}/content` reads it back:
-
-```bash
-curl -s -X POST localhost:8000/mesh \
-  -H 'Content-Type: application/json' \
-  -d "{\"image\": \"$(base64 -w0 chair.png)\", \"output_format\": \"stl\"}" \
-  --output chair.stl
-```
-
-## Density, bounds, units
-
-- **`--octree-resolution` is what a shape costs.** 96, 192, 384, 768 — each step doubles
-  the grid, which is eight times the cells, a finer surface and a bigger file. 768 is the
-  ceiling, and it is the slowest thing here by a distance: start at 192.
-- **`--bounds`** is the half-width of the volume the surface is cut from, and the default
-  1.01 leaves a margin. An object that touches the edge gets clipped there, and nothing
-  downstream can tell you it happened.
-- **`--scale`** multiplies the coordinates on the way out, because no mesh format says what
-  a unit is: an unscaled shape is about two units wide, which is neither centimetres nor
-  inches until you decide.
-- **`--mc-level`** picks which surface of the field to cut. The default is the reference
-  pipeline's own cut and rarely wants touching.
-- `.stl` gives every triangle its own three corners and its own normal, which is exactly
-  what the cut produces; a slicer welds them to its tolerance. A few numerically flat
-  triangles are kept rather than dropped, because dropping one opens a hole where its
-  neighbour's edge used to be shared.

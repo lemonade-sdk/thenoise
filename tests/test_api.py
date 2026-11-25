@@ -281,6 +281,37 @@ def test_ui_offers_the_density_presets_the_spec_keeps():
     assert offered == ["", *[str(one) for one in DENSITY_PRESETS]], block
 
 
+def test_ui_offers_the_tuning_menus_the_spec_keeps():
+    """Where a knob has a short list of values worth asking for, the pane offers a menu —
+    and the list is the spec's, not a copy of it. ``auto`` leads every one of them, so
+    the model's own value stays the model's."""
+    from thenoise.mesh.spec import BOUNDS_PRESETS, CUT_LEVEL_PRESETS, TOKEN_PRESETS
+
+    with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
+        page = f.read()
+    for field, presets in [("mesh_latents", TOKEN_PRESETS),
+                           ("mesh_bounds", BOUNDS_PRESETS),
+                           ("mesh_mc_level", CUT_LEVEL_PRESETS)]:
+        block = re.search(rf'<select id="{field}">(.*?)</select>', page, re.S)[1]
+        offered = [one.group(1) for one in re.finditer(r'<option value="([^"]*)"', block)]
+        assert offered[0] == "", block
+        assert [float(one) for one in offered[1:]] == list(presets), (field, block)
+
+
+def test_the_cut_level_menu_promises_the_fraction_it_sends():
+    """A cut level reads as its reciprocal (``1/512``, not ``0.001953125``), so the label
+    is the one place this menu could quietly offer something else."""
+    from thenoise.mesh.spec import CUT_LEVEL_PRESETS
+
+    with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
+        block = re.search(r'<select id="mesh_mc_level">(.*?)</select>', f.read(), re.S)[1]
+    rows = re.findall(r'<option value="([^"]*)">([^<]*)</option>', block)
+    for value, label in rows[1:]:
+        over = 1.0 / float(value)
+        assert abs(over - round(over)) < 1e-6, (value, label)
+        assert f"1/{int(round(over))}" in label, (value, label)
+
+
 def test_ui_keeps_the_shape_tuning_behind_one_disclosure():
     """The release's own configuration is folded away rather than removed."""
     tuning = {"mesh_latents", "mesh_steps", "mesh_guidance_scale", "mesh_sampler",

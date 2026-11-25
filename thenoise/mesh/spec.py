@@ -17,6 +17,9 @@ OUTPUT_FORMATS = ("glb", "obj", "stl")
 DENSITY_PRESETS = (96, 192, 384, 768)
 MAX_OCTREE_RESOLUTION = 768
 DEFAULT_MESH_SCALE = 1.0
+TOKEN_PRESETS = (2048, 4096, 8192)
+BOUNDS_PRESETS = (0.9, 1.01, 1.2, 1.5)
+CUT_LEVEL_PRESETS = (1 / 1024, 1 / 512, 1 / 256, 1 / 128)
 
 
 def mode_of(images: tuple[bytes, ...]) -> str:
@@ -131,5 +134,6 @@ class MeshSpec(BaseModel):
         )
 
 
-__all__ = ["DEFAULT_MESH_SCALE", "DENSITY_PRESETS", "MAX_OCTREE_RESOLUTION",
-           "OUTPUT_FORMATS", "MeshSpec", "ResolvedMesh", "mode_of"]
+__all__ = ["BOUNDS_PRESETS", "CUT_LEVEL_PRESETS", "DEFAULT_MESH_SCALE", "DENSITY_PRESETS",
+           "MAX_OCTREE_RESOLUTION", "OUTPUT_FORMATS", "TOKEN_PRESETS",
+           "MeshSpec", "ResolvedMesh", "mode_of"]

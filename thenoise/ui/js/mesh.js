@@ -88,15 +88,11 @@ function validateMeshInputs() {
     return true;
   };
   const whole = (n) => Number.isInteger(n) && n >= 1;
-  const real = (n) => Number.isFinite(n);
-  return check(['latents', 'steps'], whole,
-               'tokens and steps must be positive whole numbers')
+  return check(['steps'], whole, 'steps must be a positive whole number')
     && check(['seed'], (n) => Number.isInteger(n) && n >= 0,
              'seed must be a nonnegative whole number (leave empty for random)')
-    && check(['guidance_scale'], (n) => real(n) && n >= 0,
-             'guidance must be a nonnegative number')
-    && check(['bounds'], (n) => real(n) && n > 0, 'bounds must be positive')
-    && check(['mc_level'], real, 'the cut level must be a number');
+    && check(['guidance_scale'], (n) => Number.isFinite(n) && n >= 0,
+             'guidance must be a nonnegative number');
 }
 
 function meshName(meta) {
