@@ -29,6 +29,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import single_head_attention
 from thenoise.utils.loader import load_codec
 from thenoise.utils.safetensors import Signature, read_header
@@ -82,9 +83,9 @@ class TimestepEmbedder(nn.Module):
     def __init__(self, hidden_size: int, frequency_embedding_size: int = 256):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.Linear(frequency_embedding_size, hidden_size, bias=True),
+            QuantizedLinear(frequency_embedding_size, hidden_size, bias=True),
             nn.SiLU(),
-            nn.Linear(hidden_size, hidden_size, bias=True),
+            QuantizedLinear(hidden_size, hidden_size, bias=True),
         )
         self.frequency_embedding_size = frequency_embedding_size
 
@@ -141,7 +142,7 @@ class DiCoBlock(nn.Module):
 
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(hidden_size, 6 * hidden_size, bias=True),
+            QuantizedLinear(hidden_size, 6 * hidden_size, bias=True),
         )
 
     def forward(self, inp: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
@@ -192,7 +193,7 @@ class NerfEmbedder(nn.Module):
         super().__init__()
         self.max_freqs = max_freqs
         self.embedder = nn.Sequential(
-            nn.Linear(in_channels + max_freqs**2, hidden_size_input, bias=True),
+            QuantizedLinear(in_channels + max_freqs**2, hidden_size_input, bias=True),
         )
 
     def fetch_pos(self, patch_size: int, device, dtype) -> torch.Tensor:
@@ -219,7 +220,7 @@ class NerfFinalLayer(nn.Module):
     def __init__(self, hidden_size: int, out_channels: int):
         super().__init__()
         self.norm = nn.RMSNorm(hidden_size, eps=1e-6)
-        self.linear = nn.Linear(hidden_size, out_channels, bias=True)
+        self.linear = QuantizedLinear(hidden_size, out_channels, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear(self.norm(x))
@@ -232,13 +233,13 @@ class MLPResBlock(nn.Module):
         super().__init__()
         self.in_ln = nn.LayerNorm(channels, eps=1e-6)
         self.mlp = nn.Sequential(
-            nn.Linear(channels, channels, bias=True),
+            QuantizedLinear(channels, channels, bias=True),
             nn.SiLU(),
-            nn.Linear(channels, channels, bias=True),
+            QuantizedLinear(channels, channels, bias=True),
         )
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(channels, 3 * channels, bias=True),
+            QuantizedLinear(channels, 3 * channels, bias=True),
         )
 
     def forward(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -266,8 +267,8 @@ class SimpleMLPAdaLN(nn.Module):
         self.num_res_blocks = num_res_blocks
         self.patch_size = patch_size
 
-        self.cond_embed = nn.Linear(z_channels, patch_size**2 * model_channels)
-        self.input_proj = nn.Linear(in_channels, model_channels)
+        self.cond_embed = QuantizedLinear(z_channels, patch_size**2 * model_channels)
+        self.input_proj = QuantizedLinear(in_channels, model_channels)
 
         self.res_blocks = nn.ModuleList(MLPResBlock(model_channels) for _ in range(num_res_blocks))
 
