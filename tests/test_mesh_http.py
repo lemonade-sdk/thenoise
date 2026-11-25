@@ -215,3 +215,17 @@ def test_views_past_the_ones_the_model_numbers_are_refused_before_the_job(tmp_pa
             assert "at most 4 views" in answer.text
     finally:
         queue.close()
+
+
+def test_a_knob_no_shape_can_use_is_refused_before_the_job(tmp_path):
+    """``bounds: 700`` and a cut level the field never reach refine the whole volume rather
+    than a surface, which is 80 GB of octree spent before anything says so."""
+    queue = JobQueue(tmp_path)
+    try:
+        with _client(_controller(), queue) as client:
+            for knob, value in [("bounds", 700.0), ("mc_level", 3.0), ("latents", 100_000)]:
+                answer = client.post("/jobs/mesh", json={"image": _b64(), knob: value})
+                assert answer.status_code == 400, (knob, answer.text)
+                assert knob in answer.text, (knob, answer.text)
+    finally:
+        queue.close()

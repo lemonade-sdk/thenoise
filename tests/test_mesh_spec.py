@@ -4,7 +4,8 @@ import pytest
 
 from thenoise.mesh.spec import (
     BOUNDS_PRESETS, CUT_LEVEL_PRESETS, DEFAULT_MESH_SCALE, DENSITY_PRESETS,
-    MAX_OCTREE_RESOLUTION, OUTPUT_FORMATS, TOKEN_PRESETS, MeshSpec, mode_of,
+    MAX_BOUNDS, MAX_CUT_LEVEL, MAX_LATENTS, MAX_OCTREE_RESOLUTION, MIN_BOUNDS,
+    MIN_CUT_LEVEL, OUTPUT_FORMATS, TOKEN_PRESETS, MeshSpec, mode_of,
 )
 from thenoise.utils.attention import DEFAULT_ATTENTION
 
@@ -146,6 +147,29 @@ def test_every_value_the_pane_offers_as_a_menu_resolves():
         assert resolve(bounds=bounds).bounds == bounds
     for level in CUT_LEVEL_PRESETS:
         assert resolve(mc_level=level).mc_level == level
+
+
+def test_the_volume_knobs_refuse_only_numbers_no_shape_can_use():
+    """The edges are wide on purpose: a knob is refused where the request cannot work, not
+    where it would look worse."""
+    for bounds in (0.1, 1.01, 2.0, MAX_BOUNDS):   # a tight crop and a roomy one
+        assert resolve(bounds=bounds).bounds == bounds
+    for level in (-0.2, 0.0, 1 / 512, MAX_CUT_LEVEL):
+        assert resolve(mc_level=level).mc_level == level
+    assert resolve(latents=MAX_LATENTS).latents == MAX_LATENTS
+
+    # The two a real request got this far with, and the ends nobody can mean.
+    for field, bad in [("bounds", 700.0), ("bounds", 0.001), ("mc_level", 3.0),
+                       ("mc_level", -40.0), ("latents", MAX_LATENTS * 4)]:
+        with pytest.raises(ValueError, match=field):
+            resolve(**{field: bad})
+
+
+def test_a_refused_knob_names_its_own_range_rather_than_the_neighbour_s():
+    for field, bad, needle in [("bounds", 700.0, f"{MIN_BOUNDS} and {MAX_BOUNDS}"),
+                               ("mc_level", 3.0, f"{MIN_CUT_LEVEL} and {MAX_CUT_LEVEL}")]:
+        with pytest.raises(ValueError, match=needle):
+            resolve(**{field: bad})
 
 
 def test_the_token_menu_doubles_so_each_step_is_the_cost_of_the_one_below():

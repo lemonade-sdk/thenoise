@@ -162,6 +162,11 @@ class Hunyuan3D21ShapeModel(DiffusionModel):
                             device=self.device, bounds=params.bounds,
                             level=params.mc_level, chunk=params.chunk,
                             band=NEAR_BAND)
+        dense = (params.octree_resolution + 1) ** 3
+        logger.info("Volume %d^3: %d codec queries (%.1f%% of the %d a dense sweep asks "
+                    "for), %d cells holding the cut",
+                    params.octree_resolution, volume.queries,
+                    100.0 * volume.queries / dense, dense, int(volume.cells.sum()))
         mesh = extract_surface(volume)
         if mesh.is_empty:
             seen = latents.float()

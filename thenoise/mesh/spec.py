@@ -20,6 +20,9 @@ DEFAULT_MESH_SCALE = 1.0
 TOKEN_PRESETS = (2048, 4096, 8192)
 BOUNDS_PRESETS = (0.9, 1.01, 1.2, 1.5)
 CUT_LEVEL_PRESETS = (1 / 1024, 1 / 512, 1 / 256, 1 / 128)
+MIN_BOUNDS, MAX_BOUNDS = 0.05, 8.0
+MIN_CUT_LEVEL, MAX_CUT_LEVEL = -0.5, 0.5
+MAX_LATENTS = 16384
 
 
 def mode_of(images: tuple[bytes, ...]) -> str:
@@ -107,6 +110,9 @@ class MeshSpec(BaseModel):
             scale = defaults.get("scale", DEFAULT_MESH_SCALE)
         if latents < 1 or steps < 1:
             raise ValueError("latents and steps must be positive")
+        if latents > MAX_LATENTS:
+            raise ValueError(f"latents must be at most {MAX_LATENTS}, got {latents}: the "
+                             f"attention inside it is quadratic")
         if not math.isfinite(guidance_scale) or guidance_scale < 0:
             raise ValueError("guidance_scale must be finite and nonnegative")
         if not sampler:
@@ -115,10 +121,13 @@ class MeshSpec(BaseModel):
             raise ValueError(f"output_format must be one of {', '.join(OUTPUT_FORMATS)}")
         if octree_resolution < 8:
             raise ValueError("octree_resolution must be at least 8")
-        if bounds <= 0 or not math.isfinite(bounds):
-            raise ValueError("bounds must be finite and positive")
-        if not math.isfinite(mc_level):
-            raise ValueError("mc_level must be finite")
+        if not MIN_BOUNDS <= bounds <= MAX_BOUNDS:
+            raise ValueError(f"bounds must be between {MIN_BOUNDS} and {MAX_BOUNDS}, "
+                             f"got {bounds}: a shape fills about ±1")
+        if not MIN_CUT_LEVEL <= mc_level <= MAX_CUT_LEVEL:
+            raise ValueError(f"mc_level must be between {MIN_CUT_LEVEL} and "
+                             f"{MAX_CUT_LEVEL}, got {mc_level}: the codec's field crosses "
+                             "near 0")
         if octree_resolution > MAX_OCTREE_RESOLUTION:
             raise ValueError(f"octree_resolution must be at most {MAX_OCTREE_RESOLUTION}, "
                              f"whose grid is {(MAX_OCTREE_RESOLUTION + 1) ** 3} samples")
@@ -135,5 +144,6 @@ class MeshSpec(BaseModel):
 
 
 __all__ = ["BOUNDS_PRESETS", "CUT_LEVEL_PRESETS", "DEFAULT_MESH_SCALE", "DENSITY_PRESETS",
-           "MAX_OCTREE_RESOLUTION", "OUTPUT_FORMATS", "TOKEN_PRESETS",
-           "MeshSpec", "ResolvedMesh", "mode_of"]
+           "MAX_BOUNDS", "MAX_CUT_LEVEL", "MAX_LATENTS", "MAX_OCTREE_RESOLUTION",
+           "MIN_BOUNDS", "MIN_CUT_LEVEL", "OUTPUT_FORMATS",
+           "TOKEN_PRESETS", "MeshSpec", "ResolvedMesh", "mode_of"]

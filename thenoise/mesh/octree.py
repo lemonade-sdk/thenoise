@@ -135,7 +135,8 @@ def sample_sdf(sdf: SdfFn, resolution: int, *, device, bounds: float = 1.0,
         around = values[inverse.view(-1).view(cells.shape[0], 8)]
         lo, hi = around.amin(dim=1), around.amax(dim=1)
         crossing = (lo <= level) & (hi >= level)
-        held = crossing if band <= 0.0 else crossing | (around.abs().amin(dim=1) < band)
+        held = (crossing if band <= 0.0
+                else crossing | ((around - level).abs().amin(dim=1) < band))
         if size == levels[-1]:
             holding = cells[crossing]
             break
