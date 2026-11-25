@@ -749,24 +749,21 @@ class AutoencoderKLH3Video(nn.Module):
             start = i * plan.chunk_tokens
             clip = z[:, :, start:start + plan.chunk_tokens + plan.overlap_tokens]
             decoded = self._tiled_decode(clip)
-            pieces = [decoded[:, :, plan.pre_padding:clip_frames]]
-            if plan.overlap_tokens:
-                pieces.append(decoded[:, :, clip_frames + plan.pre_padding:])
-
-            for j, piece in enumerate(pieces):
-                if j == 0:
-                    if held is not None:
-                        piece = blend_tiles(held, piece, plan.frame_overlap, dim=2)
-                        held = None
-                    keep, left = _take(piece, left)
-                    if keep is not None:
-                        yield self._finalize(keep)
-                else:
-                    held = piece
+            head = decoded[:, :, plan.pre_padding:clip_frames]
             if held is not None:
-                keep, left = _take(held, left)
-                if keep is not None:
-                    yield self._finalize(keep)
+                head = blend_tiles(held, head, plan.frame_overlap, dim=2)
+            keep, left = _take(head, left)
+            if keep is not None:
+                yield self._finalize(keep)
+            # The clip's tail is the next clip's head re-read, so it is held rather than
+            # emitted — and copied out, which frees the rest of the clip's activations.
+            tail = decoded[:, :, clip_frames + plan.pre_padding:]
+            held = tail.contiguous() if tail.shape[2] else None
+
+        if held is not None:
+            keep, left = _take(held, left)
+            if keep is not None:
+                yield self._finalize(keep)
 
     def decode_to_pixels(self, latents: torch.Tensor) -> torch.Tensor:
         """Canonical latent -> the whole clip. Streams; it does not hold it."""

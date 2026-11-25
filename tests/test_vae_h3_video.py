@@ -165,12 +165,48 @@ def test_decode_answers_the_shape_it_promised(tiny_vae):
 
 def test_decode_hands_frames_out_per_clip(tiny_vae):
     """Eight latent frames is two clips, and the pieces are the clips' parts, not one
-    buffer handed out twice."""
+    buffer handed out twice. The second clip runs out of the promise partway through, and
+    its re-read tail is trimmed away rather than streamed past it."""
     latent = torch.randn(1, 24, 8, 2, 3)
     with torch.no_grad():
         pieces = [p.shape[2] for p in tiny_vae.decode_to_pixel_frames(latent)]
-    assert len(pieces) == 3
-    assert sum(pieces) == tiny_vae.decode_output_shape(tuple(latent.shape))[2]
+    assert pieces == [tiny_vae.clip_length, 9]
+    assert sum(pieces) == TemporalPlan.of(8).frames \
+        == tiny_vae.decode_output_shape(tuple(latent.shape))[2]
+
+
+@pytest.mark.parametrize("latent_t", [2, 5, 8, 13])
+def test_the_walk_hands_every_frame_once_in_order(tiny_vae, monkeypatch, latent_t):
+    """A clip's tail is re-read by the next clip and faded in there, so it has to be
+    *held* — handing it out and then handing it out again inside the blend puts the frames
+    after a seam back where they came from. A stutter no shape check can see.
+
+    Each latent frame carries its own index, so every decoded frame does too and the walk
+    reads as a list of positions. The pixel finalize is a per-channel affine — it cannot
+    reorder frames or merge two — so it is made the identity here and the labels are read
+    as the walk left them.
+    """
+    ratio = tiny_vae.patch_size_t
+    monkeypatch.setattr(tiny_vae, "_finalize", lambda x: x)
+
+    def label(z):
+        index = z[0, 0, :, 0, 0] / latent_t * 2.0
+        frames = index.repeat_interleave(ratio)
+        return frames.view(1, 1, -1, 1, 1).expand(
+            1, 3, -1, z.shape[-2] * tiny_vae.patch_size,
+            z.shape[-1] * tiny_vae.patch_size).clone()
+
+    monkeypatch.setattr(tiny_vae, "_decode_pixels", label)
+    latent = torch.arange(latent_t, dtype=torch.float32).view(1, 1, -1, 1, 1) \
+        .expand(1, 24, latent_t, 2, 3).contiguous()
+
+    with torch.no_grad():
+        frames = list(tiny_vae.decode_to_pixel_frames(latent))
+
+    assert sum(f.shape[2] for f in frames) == TemporalPlan.of(latent_t).frames
+    seen = [round(float(v), 5) for v in torch.cat(frames, dim=2)[0, 0, :, 0, 0]]
+    assert seen == sorted(seen), "a frame came back from earlier in the clip"
+    assert len(set(seen)) == latent_t, "a latent frame was dropped or duplicated"
 
 
 def test_a_lone_latent_is_decoded_inside_a_clip_of_copies(tiny_vae, monkeypatch):
