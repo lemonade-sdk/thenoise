@@ -102,6 +102,17 @@ class DiffusionModel(LoRASupport, ABC):
         return header.identifies(cls.SIGNATURE)
 
     @classmethod
+    def dit_roles(cls, checkpoints: dict[str, Header]) -> dict[str, Header]:
+        """The DiT files among the roles a request named.
+
+        The runtime hands over every role it was given, and a role in
+        :attr:`COMPONENT_ROLES` is a codec or a projection rather than a transformer, so
+        saying anything about DiT files means looking past those.
+        """
+        return {role: header for role, header in checkpoints.items()
+                if role not in cls.COMPONENT_ROLES}
+
+    @classmethod
     def validate_paths(cls, checkpoints: dict[str, Header]) -> None:
         """Reject a set of DiT files this model cannot use, before anything loads.
 
@@ -110,13 +121,13 @@ class DiffusionModel(LoRASupport, ABC):
         need more than the primary checkpoint override this; the role names are theirs,
         so the runtime never has to know them.
         """
-        if len(checkpoints) > 1:
+        if len(cls.dit_roles(checkpoints)) > 1:
             raise ValueError(f"{cls.name} takes one DiT checkpoint")
 
     @classmethod
     def require_same_model(cls, checkpoints: dict[str, Header]) -> None:
         """Refuse an extra DiT file this adapter would not have claimed on its own."""
-        for role, header in checkpoints.items():
+        for role, header in cls.dit_roles(checkpoints).items():
             if role and not cls.detect(header):
                 raise ValueError(
                     f"{header.path} does not match the {cls.SIGNATURE.name} signature: "

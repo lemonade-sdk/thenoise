@@ -12,12 +12,12 @@ import torch
 from PIL import Image
 from types import SimpleNamespace
 
-from conftest import header_of
+from conftest import header_of, write_key_checkpoint
 from test_dit_h3_av import _av_params, av_state
 from test_vae_h3_audio import TINY as AUDIO_GEOMETRY, _fill as fill_audio
 from test_vae_h3_video import _fill as fill_video
 from thenoise.dit.h3 import H3AVDiT
-from thenoise.models.config import VideoSamplingParams
+from thenoise.models.config import ModelConfig, VideoSamplingParams
 from thenoise.models.h3_image import H3ImageModel
 from thenoise.models.h3_video import (
     TRAINING_AREA,
@@ -317,3 +317,22 @@ def test_the_audio_pair_claims_the_video_adapter():
 def test_a_silent_request_is_refused_before_anything_loads():
     with pytest.raises(ValueError, match="--audio-vae"):
         H3VideoModel.validate_paths({"": header_of(av_state())})
+
+
+def test_a_component_role_is_not_counted_as_a_second_transformer(tmp_path):
+    """What a served request hands over: the transformer and the audio codec. Two roles,
+    one DiT — and counting roles refused every valid request this model can serve.
+    """
+    dit = write_key_checkpoint(tmp_path / "minimax_h3_fl2va.safetensors", av_state())
+    audio = write_key_checkpoint(tmp_path / "audio_vae.safetensors", ["decoder"])
+    config = ModelConfig(dit_paths={"": dit}, vae_path="vae.safetensors",
+                         text_encoder_path="text_encoder.safetensors",
+                         offload_device="cpu", extra_paths={"audio_vae": audio})
+    assert set(config.paths) == {"", "audio_vae"}, "--vae is a path, not a role"
+    H3VideoModel.validate_paths(config.all_headers())
+
+
+def test_a_second_transformer_is_refused_even_beside_a_component():
+    with pytest.raises(ValueError, match="one DiT checkpoint"):
+        H3VideoModel.validate_paths({"": header_of(av_state()), "low": header_of(av_state()),
+                                     "audio_vae": header_of(["decoder"])})
