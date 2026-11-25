@@ -12,22 +12,21 @@ import torch
 from safetensors.torch import save_file
 
 from conftest import TINY_HIDDEN, tiny_qwen_config, write_safetensors
-from thenoise.dit.h3_image import sampling
-from thenoise.samplers import sigma_ladder
-from thenoise.dit.kvcache import KVCache
-from thenoise.dit.h3_image.encoder import (
+from thenoise.dit.h3 import sampling
+from thenoise.dit.h3.encoder import (
     _truncate_qwen3_vl,
     layer_count,
     vision_token_tags,
 )
-from thenoise.dit.h3_image.layout import Layout, frame_grid, pad_to_patch
-from thenoise.dit.h3_image.models import COND_TIMESTEP, H3ImageDiT, H3ImageParams, _spans
-from thenoise.dit.h3_image.utils import detect_params, load_h3_image_dit
+from thenoise.dit.h3.image import H3ImageDiT, detect_params, load_h3_image_dit
+from thenoise.dit.h3.layout import Layout, frame_grid, pad_to_patch
+from thenoise.dit.h3.trunk import COND_TIMESTEP, H3Params, _spans
+from thenoise.dit.kvcache import KVCache
+from thenoise.samplers import sigma_ladder
 
 TINY_SIGMAS = (1.0, 0.5, 0.0)
 
-
-def _tiny_params(**over) -> H3ImageParams:
+def _tiny_params(**over) -> H3Params:
     base = dict(
         hidden_size=48,
         num_layers=1,
@@ -43,10 +42,10 @@ def _tiny_params(**over) -> H3ImageParams:
         pdd_steps=2,
         pdd_sigmas=TINY_SIGMAS,
     )
-    return H3ImageParams(**{**base, **over})
+    return H3Params(**{**base, **over})
 
 
-def _tiny_dit(params: H3ImageParams | None = None) -> H3ImageDiT:
+def _tiny_dit(params: H3Params | None = None) -> H3ImageDiT:
     """A built instance with its two empty buffers filled in: unfilled they hold whatever
     the allocator left, usually NaN.
     """
@@ -519,7 +518,7 @@ def test_a_prompt_without_pictures_is_all_text():
 def tiny_conditioner():
     from PIL import Image
 
-    from thenoise.dit.h3_image.encoder import H3ImageTextEncoder
+    from thenoise.dit.h3.encoder import H3ImageTextEncoder
     from thenoise.utils.text_encoder import (
         QWEN25_TOKENIZER_CONFIG_DIR,
         QWEN3_VL_TOKENIZER_OVERRIDES,

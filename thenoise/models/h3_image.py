@@ -17,15 +17,15 @@ from typing import List, Optional, Tuple
 
 import torch
 
-from thenoise.dit.h3_image import sampling as h3_sampling
-from thenoise.dit.h3_image.encoder import load_h3_image_text_encoder
-from thenoise.dit.h3_image.layout import PATCH_SIZE, Layout, pad_to_patch
-from thenoise.dit.h3_image.models import H3ImageParams
-from thenoise.dit.h3_image.utils import (
+from thenoise.dit.h3 import sampling as h3_sampling
+from thenoise.dit.h3.encoder import load_h3_image_text_encoder
+from thenoise.dit.h3.image import (
     H3_IMAGE_SIGNATURE,
     detect_params,
     load_h3_image_dit,
 )
+from thenoise.dit.h3.layout import PATCH_SIZE, Layout, pad_to_patch
+from thenoise.dit.h3.trunk import H3Params
 from thenoise.models.base import (
     VISION_REF_METHOD,
     Conditioning,
@@ -88,7 +88,7 @@ class H3ImageModel(PixelModel):
     def __init__(self, *, config: ModelConfig):
         super().__init__(config=config)
 
-        self.params: H3ImageParams = detect_params(self.header)
+        self.params: H3Params = detect_params(self.header)
         self.dit = load_h3_image_dit(
             self.header, self.params,
             device=self._load_target(self.dit_path), dtype=config.dtype,

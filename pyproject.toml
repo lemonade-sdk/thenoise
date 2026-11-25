@@ -41,7 +41,7 @@ packages = [
     "thenoise.dit",
     "thenoise.dit.lumina",
     "thenoise.dit.fibo2",
-    "thenoise.dit.h3_image",
+    "thenoise.dit.h3",
     "thenoise.dit.hunyuan3d21",
     "thenoise.dit.krea2",
     "thenoise.dit.mage_flow",

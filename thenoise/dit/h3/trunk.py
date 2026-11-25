@@ -1,7 +1,9 @@
-"""The H3-Image DiT: a packed single-stream transformer.
+"""The H3 trunk: a packed single-stream transformer, shared by the image and the
+audiovisual model.
 
 The time embedding is a curve stored in the checkpoint and read between its rows, so it
-stays FP32; the output head is one head per interval of the checkpoint's sigma grid.
+stays FP32. What a variant adds on top of this trunk is its output head and the packing
+its forward runs over: see :mod:`.image`.
 """
 from __future__ import annotations
 
@@ -12,22 +14,30 @@ from typing import NamedTuple, Optional, Sequence, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from thenoise.dit.h3_image.layout import MODALITIES, PATCH_SIZE, Layout, pad_to_patch
-from thenoise.dit.kvcache import KVBuffers, KVCache, attend, cache_mode
+from thenoise.dit.h3.layout import MODALITIES, PATCH_SIZE, Layout
+from thenoise.dit.kvcache import KVBuffers, attend
 from thenoise.dit.quantized import QuantizedLinear
-from thenoise.utils.dynamo import mark_token_axis
 from thenoise.utils.fp32_linear import Fp32Linear
 from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.rope import RopeCache, apply_rope_split_half, split_half_rope_axes
 
-#: A reference row's timestep label; its noise is mixed to match that label.
+#: Whether this model's blocks want the relay store path (``thenoise.utils.layout``).
+RELAY_STORES = True
+
+#: A conditioned row's timestep label: a reference's noise is mixed to match it, and its
+#: own rows are read at it instead of the step's.
 COND_TIMESTEP = 0.999
 
 
 @dataclass(frozen=True)
-class H3ImageParams:
-    """The architecture, as read out of the checkpoint header."""
+class H3Params:
+    """The architecture, as read out of the checkpoint header.
+
+    ``pdd_steps`` is the output head bank's row count and ``pdd_sigmas`` the sigma grid it
+    was distilled on; a model without step-distilled heads reports one row and the
+    two-point grid, which is the plain flow schedule's own endpoints.
+    """
 
     hidden_size: int
     num_layers: int
@@ -168,7 +178,7 @@ def _gate(x: torch.Tensor, spans: Sequence[Span], update: torch.Tensor, attn: bo
 
 
 class DiTBlock(nn.Module):
-    def __init__(self, params: H3ImageParams, compute_dtype: Optional[torch.dtype] = None):
+    def __init__(self, params: H3Params, compute_dtype: Optional[torch.dtype] = None):
         super().__init__()
         self.norm1 = RMSNorm(params.hidden_size, eps=params.norm_eps)
         self.norm2 = RMSNorm(params.hidden_size, eps=params.norm_eps)
@@ -191,7 +201,7 @@ class DiTBlock(nn.Module):
 class RefinerBlock(nn.Module):
     """A plain pre-norm block: the prompt's own stream, unmodulated and unrotated."""
 
-    def __init__(self, params: H3ImageParams):
+    def __init__(self, params: H3Params):
         super().__init__()
         self.norm1 = RMSNorm(params.hidden_size, eps=params.norm_eps)
         self.norm2 = RMSNorm(params.hidden_size, eps=params.norm_eps)
@@ -209,7 +219,7 @@ class TokenRefiner(nn.Module):
     do not depend on the timestep.
     """
 
-    def __init__(self, params: H3ImageParams):
+    def __init__(self, params: H3Params):
         super().__init__()
         self.blocks = nn.ModuleList(
             RefinerBlock(params) for _ in range(params.token_refiner_layers))
@@ -219,63 +229,6 @@ class TokenRefiner(nn.Module):
         for block in self.blocks:
             x = block(x)
         return self.final_norm(x)
-
-
-class FinalLayer(nn.Module):
-    """Modulated output head over the target's rows: ``video_out`` stores one head per
-    interval of ``pdd_sigmas``, row 0 complete and every later row an offset from it.
-    """
-
-    def __init__(self, params: H3ImageParams, compute_dtype: Optional[torch.dtype] = None):
-        super().__init__()
-        self.video_dim = params.video_dim
-        self.pdd_steps = params.pdd_steps
-        self.pdd_sigmas = tuple(params.pdd_sigmas)
-        self.norm = RMSNorm(params.hidden_size, eps=params.final_norm_eps)
-        self.adaln_proj = AdalnProj(params.adaln_dim, params.hidden_size, 2, 1,
-                                    out_dtype=compute_dtype)
-        self.video_out = Fp32Linear(params.hidden_size, params.video_dim * params.pdd_steps,
-                                    bias=True)
-
-    def forward(self, x: torch.Tensor, t_emb: torch.Tensor, target: Tuple[int, int],
-                sigma: float, sample_sigmas: Optional[torch.Tensor]) -> torch.Tensor:
-        """The target rows' velocity; ``target`` is their ``(start, stop)``."""
-        shift, scale = self.adaln_proj(t_emb)
-        start, stop = target
-        h = (self.norm(x[:, start:stop]) * (1.0 + scale[0]) + shift[0]).to(torch.float32)
-        if self.pdd_steps == 1:
-            return self.video_out(h)
-        weight, bias = self._bank(sigma, sample_sigmas)
-        return F.linear(h, weight, bias)
-
-    def _bank(self, sigma: float, sample_sigmas: Optional[torch.Tensor]):
-        """One head for a step: the intervals between its endpoints on the distilled
-        grid, averaged with weights proportional to the sigma distance each covers.
-        """
-        if sample_sigmas is None:
-            raise ValueError(
-                "the PDD head bank needs the sigma schedule this run is stepping "
-                "through; pass it as ``sample_sigmas``"
-            )
-        n = self.pdd_steps
-        grid = self.pdd_sigmas
-        i = int((sample_sigmas - sigma).abs().argmin())
-        sigma_next = float(sample_sigmas[min(i + 1, sample_sigmas.shape[0] - 1)])
-        start = min(range(n + 1), key=lambda k: abs(grid[k] - sigma))
-        stop = min(range(n + 1), key=lambda k: abs(grid[k] - sigma_next))
-        start = min(start, n - 1)
-        stop = max(stop, start + 1)
-
-        dt = [grid[k] - grid[k + 1] for k in range(start, stop)]
-        weight_of = self.video_out.weight
-        w = torch.tensor(dt, dtype=weight_of.dtype, device=weight_of.device) / sum(dt)
-        rows = weight_of.reshape(len(grid) - 1, -1, weight_of.shape[1])
-        bias_rows = self.video_out.bias.reshape(len(grid) - 1, -1)
-        first = max(start, 1)
-        return (
-            rows[0] + torch.einsum("n,noi->oi", w[first - start:], rows[first:stop]),
-            bias_rows[0] + torch.einsum("n,no->o", w[first - start:], bias_rows[first:stop]),
-        )
 
 
 def _spans(rows: Sequence[Tuple[int, int, int]],
@@ -294,13 +247,15 @@ def _spans(rows: Sequence[Tuple[int, int, int]],
     ]
 
 
-class H3ImageDiT(nn.Module):
-    """The image DiT: ``[text | references | target]`` in, the target's velocity out.
+class H3DiT(nn.Module):
+    """What a variant has before it has an output head.
 
-    ``context`` is a refined prompt — :meth:`refine_text` runs once per sampling.
+    ``video_patch_proj`` turns latent rows into stream rows, ``condition_proj`` and
+    ``token_refiner`` turn the text encoder's states into prompt rows, and
+    ``adaln_t_table`` is the modulation curve every block reads.
     """
 
-    def __init__(self, params: H3ImageParams,
+    def __init__(self, params: H3Params,
                  compute_dtype: Optional[torch.dtype] = None):
         super().__init__()
         self.params = params
@@ -315,7 +270,6 @@ class H3ImageDiT(nn.Module):
         self.token_refiner = TokenRefiner(params)
         self.blocks = nn.ModuleList(
             DiTBlock(params, compute_dtype) for _ in range(params.num_layers))
-        self.final_layer = FinalLayer(params, compute_dtype)
         #: Rotary tables by conditioning branch; filled by :meth:`prepare_rope`.
         self.pe_embedder = RopeCache(self._rope_table)
 
@@ -376,102 +330,19 @@ class H3ImageDiT(nn.Module):
         x = rows.reshape(1, h, w, self.params.latents_dim, ph, pw)
         return x.permute(0, 3, 1, 4, 2, 5).reshape(1, self.params.latents_dim, latent_h, latent_w)
 
-    def _codec_rows(self, target: torch.Tensor, refs: Sequence[torch.Tensor],
-                    seed: int) -> torch.Tensor:
-        """Patchified rows in packing order: the target, then the references.
-
-        Each reference restarts the RNG stream on purpose: a second one must not
-        inherit the draws the first consumed.
-        """
-        rows = [self.patchify(target.to(torch.float32))]
-        for ref in refs:
-            padded, _ = pad_to_patch(ref.to(torch.float32), self.params.patch_size)
-            r = self.patchify(padded)
-            gen = torch.Generator(device=r.device).manual_seed(seed)
-            noise = torch.randn(r.shape, generator=gen, device=r.device,
-                                dtype=torch.float32)
-            rows.append(COND_TIMESTEP * r + (1.0 - COND_TIMESTEP) * noise)
-        return torch.cat(rows, dim=0)
-
-    def forward(
-        self,
-        latent: torch.Tensor,
-        sigma: float,
-        context: torch.Tensor,
-        layout: Layout,
-        refs: Sequence[torch.Tensor] = (),
-        tags: Optional[torch.Tensor] = None,
-        seed: int = 0,
-        sample_sigmas: Optional[torch.Tensor] = None,
-        rope: str = "cond",
-        kv: Optional[KVCache] = None,
-    ) -> torch.Tensor:
-        """One forward pass; returns the target's velocity, ``[1, C, H, W]``.
-
-        ``latent`` is repeat-padded to a whole patch, the padding cut back off the
-        result; ``refs`` are the reference latents in :attr:`Layout` order and ``tags``
-        the text encoder's per-token modality tags; ``sample_sigmas`` is the schedule
-        being stepped through, which a head bank of more than one row requires.
-
-        A cached run walks the whole sequence once, then runs its leading rows reading
-        the references back from the buffers — the only rows whose K/V is step-invariant
-        (:data:`COND_TIMESTEP`).
-        """
-        device = latent.device
-        dtype = context.dtype
-        padded, (orig_h, orig_w) = pad_to_patch(latent, self.params.patch_size)
-        lat_h, lat_w = padded.shape[-2], padded.shape[-1]
-        if (lat_h, lat_w) != (layout.latent_h, layout.latent_w):
-            raise ValueError(
-                f"layout was built for a {layout.latent_h}x{layout.latent_w} latent, "
-                f"got {lat_h}x{lat_w}"
-        )
-
-        mode = cache_mode(kv, bool(refs))
-        rows = layout.modulation_rows(tags)
-        cos, sin = self.pe_embedder[rope]
-        if mode == "read":
-            n_rows = layout.target_span[1]
-            rows = [row for row in rows if row[0] < n_rows]
-            cos, sin = cos[..., :n_rows, :], sin[..., :n_rows, :]
-            patched = self.video_patch_proj(self.patchify(padded)).to(dtype)
-            h = torch.cat([context, patched.unsqueeze(0)], dim=1)
-        else:
-            patched = self.video_patch_proj(self._codec_rows(padded, refs, seed)).to(dtype)
-            h = torch.empty(1, layout.seq_len, self.params.hidden_size,
-                            dtype=dtype, device=device)
-            codec = 0
-            for start, stop, kind in layout.segments:
-                if kind == "text":
-                    h[:, start:stop] = context[0]
-                else:
-                    n = stop - start
-                    h[:, start:stop] = patched[codec:codec + n]
-                    codec += n
-
-        # Row 0 of the modulation is this step's timestep, row 1 the reference's pinned
-        # one; the pair keeps its shape at the last step, where they coincide.
-        t = 1.0 - float(sigma)
-        t_emb = self.time_embedding((t, max(t, COND_TIMESTEP)), device)
-        kv_shape = (1, self.params.num_heads, layout.seq_len, self.params.head_dim)
-        mark_token_axis(h, dim=1)
-        mark_token_axis(cos, sin, dim=-2)
-        for i, block in enumerate(self.blocks):
-            # Buffers take the stream's dtype: ``attend`` copies k/v into them, and a
-            # narrower buffer would hand attention a key narrower than the query.
-            bufs = None if kv is None else kv.buffers(("attn", i), mode, kv_shape, h.dtype,
-                                                      device)
-            h = block(h, _spans(rows, block.adaln_proj(t_emb)), (cos, sin), bufs)
-        if kv is not None and mode == "fill":
-            kv.set_filled()
-
-        out = self.final_layer(h, t_emb, layout.target_span, sigma, sample_sigmas)
-        out = self.unpatchify(out[0], lat_h, lat_w)
-        return -out[:, :, :orig_h, :orig_w].to(latent.dtype)
-
 
 __all__ = [
     "COND_TIMESTEP",
-    "H3ImageDiT",
-    "H3ImageParams",
+    "RELAY_STORES",
+    "AdalnProj",
+    "Attention",
+    "DiTBlock",
+    "H3DiT",
+    "H3Params",
+    "MLP",
+    "Mod",
+    "RefinerBlock",
+    "Span",
+    "TokenRefiner",
+    "_spans",
 ]

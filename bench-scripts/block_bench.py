@@ -1180,12 +1180,12 @@ def fibo2_perceiver(ctx: Ctx, tokens: int, scenario: str) -> Case:
 
 def h3_params():
     """The H3-Image geometry ``detect_params`` reads off the shipped checkpoint's header."""
-    from thenoise.dit.h3_image.models import H3ImageParams
+    from thenoise.dit.h3.trunk import H3Params
 
-    return H3ImageParams(hidden_size=5376, num_layers=50, token_refiner_layers=2,
-                         num_heads=56, head_dim=128, ffn_hidden_size=14336,
-                         latents_dim=24, text_dim=5120, rope_inv_freq=16,
-                         adaln_grid=1025, adaln_dim=8, pdd_steps=6, pdd_sigmas=())
+    return H3Params(hidden_size=5376, num_layers=50, token_refiner_layers=2,
+                    num_heads=56, head_dim=128, ffn_hidden_size=14336,
+                    latents_dim=24, text_dim=5120, rope_inv_freq=16,
+                    adaln_grid=1025, adaln_dim=8, pdd_steps=6, pdd_sigmas=())
 
 
 @fixture("h3_image", "block", CACHE_SCENARIOS)
@@ -1195,9 +1195,9 @@ def h3_image_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     References are packed last so the cache can freeze them; the modulation is projected
     outside the compiled block, so ``run`` does both, as the model's block loop does.
     """
-    from thenoise.dit.h3_image.layout import Layout
-    from thenoise.dit.h3_image.models import DiTBlock, _spans
-    from thenoise.dit.h3_image.utils import RELAY_STORES
+    from thenoise.dit.h3.layout import Layout
+    from thenoise.dit.h3.trunk import DiTBlock, _spans
+    from thenoise.dit.h3.trunk import RELAY_STORES
     from thenoise.utils.rope import split_half_rope_axes
 
     params = h3_params()
@@ -1240,8 +1240,8 @@ def h3_image_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
 @fixture("h3_image", "refiner", fixed_seq=True)
 def h3_image_refiner(ctx: Ctx, tokens: int, scenario: str) -> Case:
     """H3-Image's prompt stream: two unmodulated, unrotated blocks over the text."""
-    from thenoise.dit.h3_image.models import RefinerBlock
-    from thenoise.dit.h3_image.utils import RELAY_STORES
+    from thenoise.dit.h3.trunk import RefinerBlock
+    from thenoise.dit.h3.trunk import RELAY_STORES
 
     params = h3_params()
     name = "h3_image/refiner"

@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 from conftest import write_safetensors
 from thenoise.vae import AutoencoderKLH3Image, load_h3_image_vae
-from thenoise.vae.h3_image import (
+from thenoise.vae.h3 import (
     ENCODE_SEED, LATENTS_MEAN, LATENTS_STD, TILE_BLEND, TILE_SIZE, CausalConv3d,
     blend_tiles, split_tiles,
 )

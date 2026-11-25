@@ -1,4 +1,4 @@
-"""The packed token sequence one H3-Image generation runs over.
+"""The packed token sequence one H3 generation runs over.
 
 The prompt, any reference pictures and the target lattice share one row sequence, every
 row carrying a ``(t, h, w)`` rope coordinate. Spatial coordinates are area-normalised —
@@ -47,7 +47,7 @@ def _axis(dim: int, patch: int, sqrt_area: float) -> torch.Tensor:
 def frame_grid(latent_h: int, latent_w: int) -> Tuple[torch.Tensor, torch.Tensor]:
     """The ``(h, w)`` coordinates of one frame's patch rows, and the width axis.
 
-    Row-major, matching the order :func:`thenoise.dit.h3_image.models.patchify` gives.
+    Row-major, matching the order :meth:`thenoise.dit.h3.trunk.H3DiT.patchify` gives.
     """
     area = math.sqrt(latent_h * latent_w)
     h_axis = _axis(latent_h, PATCH_SIZE[1], area)
