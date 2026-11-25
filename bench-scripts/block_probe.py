@@ -1116,6 +1116,141 @@ def sdpa_section(ctx: bb.Ctx, tokens: int, iters: int, verbose: bool = False) ->
         del q, k, v, mask
 
 
+# --------------------------------------------------------------- sparse attention
+#: The trunk's own attention geometry — 56 heads of 128 over the 5376-wide stream, which
+#: is also the only head width ``sol_attn`` is compiled for. The stock clip decoder is
+#: 64 and cannot use it; the trunk can.
+SOL_HEADS, SOL_HEAD_DIM = 56, 128
+
+#: Packs to price, as ``(name, width, height, frames)``: the release's canvas plus the
+#: same one at 544p, each with a short clip so the crossover below the kernel's own ~12 k
+#: token threshold is in the table. The latent grid, the audio length, the spans and the
+#: sequence length all come out of the codec's temporal plan and the layout's frame grid,
+#: so a row is the shape a request builds rather than a rounding of it.
+SOL_PACKS = (
+    ("544p/5f", 960, 544, 5),
+    ("768p/22f", 1344, 768, 22),
+    ("544p/124f", 960, 544, 124),
+    ("768p/124f", 1344, 768, 124),
+)
+SOL_TEXT = 220          # a prompt's worth of rows; the prefix is a sink at any length
+SOL_FPS = 24            # the release's frame rate, which is what sets the audio length
+SOL_BLOCK = 64          # the kernel's query and key block, in rows
+
+
+def sol_pack(width: int, height: int, frames: int, fps: int = SOL_FPS):
+    """One pack as the adapter builds it: latent grid, audio length, layout."""
+    from thenoise.dit.h3.layout import Layout
+    from thenoise.vae.h3 import TemporalPlan
+    from thenoise.vae.h3_audio import LATENTS_PER_SECOND
+
+    plan = TemporalPlan.of_frames(frames)
+    return Layout.av(text_len=SOL_TEXT, latent_t=plan.latent_t,
+                     latent_h=-(-height // 16), latent_w=-(-width // 16),
+                     audio_t=max(1, round(frames / fps * LATENTS_PER_SECOND)))
+
+
+def sol_sinks(layout, mode: str = "exact_rows") -> tuple[tuple[int, int], tuple[int, int]]:
+    """``(exact-KV blocks, dense-query blocks)`` of a pack, :data:`SOL_BLOCK` rows a block.
+
+    Every row before the video span is attended exactly by every query, and on
+    ``exact_rows`` the audio query rows run dense as well: this restates the reference's
+    ``sink_conditioning`` policy for MiniMax-H3 on this engine's spans, and its reason is
+    that routing the audio queries damages the sound.
+    """
+    video = layout.video_span
+    if mode == "off" or video is None or video[0] <= 0:
+        return (0, 0), (0, 0)
+    exact = (0, -(-video[0] // SOL_BLOCK))
+    if mode == "exact":
+        return exact, (0, 0)
+    audio = layout.audio_span
+    return exact, ((audio[0] // SOL_BLOCK, exact[1]) if audio else exact)
+
+
+def sol_section(ctx: bb.Ctx, iters: int, repeats: int, taus: list[float],
+                only: str, sinks: str, verbose: bool = False) -> None:
+    """Dense attention against ``comfy_kitchen.sol_attn``, on the shapes the trunk runs.
+
+    One q/k/v per pack, read the way each path wants it: SDPA takes ``[B, H, T, D]``,
+    which is what a projected stream becomes on its way into the engine's attention, and
+    the kernel takes ``[B, T, H, D]``, which is what that stream is before the transpose.
+    Both are views of the same bytes, so neither is handed a copy the other does not pay.
+
+    ``speedup`` is against the dense call at the same shape. ``rel`` is how far the sparse
+    answer sits from the dense one — but on unit-variance operands, where no query row is
+    selective and every key block carries comparable mass, which is the pessimistic end for
+    a router: the trunk's rows are normed and peaked, and the question of what a finished
+    clip tolerates is not answerable from a microbenchmark. Read the speedup column here and
+    the error from a run. The short packs are in the table because the kernel's own
+    documentation puts the crossover near 12 k tokens, and a device without the compiled
+    kernel reports the refusal per shape rather than leaving a blank.
+    """
+    import comfy_kitchen as ck
+
+    from thenoise.utils.attention import eager_attention
+
+    heads, head_dim = SOL_HEADS, SOL_HEAD_DIM
+    here = ck.sol_attn_is_available(ctx.tdev)
+    print(f"\nsol: sol_attn against dense SDPA, {ctx.dtype}, {heads}x{head_dim}, "
+          f"sinks={sinks}, {iters} iters x {repeats} groups\n"
+          + (f"  kernel available on {ctx.tdev}" if here
+             else "  NO COMPILED KERNEL FOR THIS DEVICE: the dense column only"))
+    print(f"\n{'pack':12s} {'tokens':>7s} {'exact':>9s} {'dense q':>9s} {'ms':>8s} {'TF/s':>6s}"
+          + "".join(f"{f'ms (x) rel @tau {t:g}':>22s}" for t in taus))
+    print(f"{'':12s} {'':7s}   (64-row blocks; a pack's frame count is on the codec's "
+          f"own clip ladder)")
+
+    for name, width, height, frames in SOL_PACKS:
+        if only and name not in (p.strip() for p in only.split(",")):
+            continue
+        layout = sol_pack(width, height, frames)
+        tokens = layout.seq_len
+        sink, sink_q = sol_sinks(layout, sinks)
+        streams = [torch.randn(1, tokens, heads * head_dim, device=ctx.tdev, dtype=ctx.dtype)
+                   for _ in range(3)]
+        bthd = [s.view(1, tokens, heads, head_dim) for s in streams]
+
+        def dense():
+            return eager_attention([t.transpose(1, 2) for t in bthd])
+
+        row = f"{name:12s} {tokens:7d} {sink[1]:9d} {sink_q[1] - sink_q[0]:9d}"
+        try:
+            base = _median_ms(dense, iters, repeats)
+            flops = 4 * heads * head_dim * tokens * tokens
+            row += f" {base:8.1f} {flops / base * 1e-9:6.1f}"
+            reference = dense().float()
+        except torch.cuda.OutOfMemoryError:
+            print(row + "   no room for the dense call at this shape")
+            del streams, bthd
+            torch.cuda.empty_cache()
+            continue
+        for tau in taus:
+
+            def call():
+                return ck.sol_attn(bthd[0], bthd[1], bthd[2], tau=tau,
+                                   sink_blocks=list(sink), sink_q=list(sink_q))
+
+            try:
+                ms = _median_ms(call, iters, repeats)
+                got = call().float().reshape(reference.shape)
+                rel = ((got - reference).norm() / reference.norm()).item()
+                row += f"  {ms:8.1f} ({base / ms:4.2f}x) {rel:6.1e}"
+            except Exception as exc:                                # noqa: BLE001
+                first = str(exc).splitlines()[0]
+                room = "out of memory" in first.lower()
+                row += f"{'no room' if room else 'refused':>22s}"
+                print(f"  {name}: tau {tau:g} {'ran out of room' if room else 'refused'}: "
+                      f"{first[:80]}")
+            finally:
+                torch.cuda.empty_cache()
+        print(row)
+        del streams, bthd, reference
+        torch.cuda.empty_cache()
+    print("  rel is the distance from the dense answer on random operands, the pessimistic\n"
+          "  end for routing: no row of those is selective. What a clip tolerates is a run.")
+
+
 # ------------------------------------------------------------------ eager GEMMs
 def _median_ms(form: Callable[[], object], iters: int, repeats: int) -> float:
     """ms per call: the middle group of ``repeats`` groups of ``iters`` calls.
@@ -1641,7 +1776,16 @@ def main() -> None:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--section", default="ablate",
                     choices=("ablate", "sdpa", "gemm", "profile", "shapes", "buckets",
-                             "all"))
+                             "sol", "all"))
+    ap.add_argument("--sol-tau", default="1.0,1.3,2.0",
+                    help="routing thresholds to price; higher routes fewer key blocks "
+                         "exactly (the reference's default is 1.3)")
+    ap.add_argument("--sol-packs", default="",
+                    help="comma-separated subset of " + ", ".join(p[0] for p in SOL_PACKS)
+                         + "; default all of them")
+    ap.add_argument("--sol-sinks", default="exact_rows", choices=("off", "exact", "exact_rows"),
+                    help="the conditioning rows kept out of the routing: none, the packed "
+                         "prefix as exact keys, or that plus the audio query rows dense")
     ap.add_argument("--arms", default="", help="comma-separated, in order; default all")
     ap.add_argument("--profile-arm", default="baseline")
     ap.add_argument("--profile-iters", type=int, default=3)
@@ -1719,6 +1863,12 @@ def main() -> None:
 
     ctx = bb.Ctx(device=args.device, txt=args.txt, warmup=args.warmup, iters=args.iters,
                  repeats=args.repeats, weights=args.weights)
+    if args.section == "sol":
+        with torch.no_grad():
+            sol_section(ctx, args.iters, args.repeats,
+                        [float(t) for t in args.sol_tau.split(",") if t.strip()],
+                        args.sol_packs, args.sol_sinks, args.verbose)
+        return
     i2v = args.block.endswith("i2v")
     known = args.block in FIXTURES
     fixture = (FIXTURES[args.block](ctx, args.tokens, i2v=i2v) if known
