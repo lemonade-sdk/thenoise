@@ -14,15 +14,53 @@ from thenoise.utils.spec import (Picture, Positive, PositiveFinite, Seed, prefer
                                 resolve_seed)
 
 OUTPUT_FORMATS = ("glb", "obj", "stl")
-DENSITY_PRESETS = (96, 192, 384, 768)
-MAX_OCTREE_RESOLUTION = 768
 DEFAULT_MESH_SCALE = 1.0
-TOKEN_PRESETS = (2048, 4096, 8192)
-BOUNDS_PRESETS = (0.9, 1.01, 1.2, 1.5)
-CUT_LEVEL_PRESETS = (1 / 1024, 1 / 512, 1 / 256, 1 / 128)
-MIN_BOUNDS, MAX_BOUNDS = 0.05, 8.0
-MIN_CUT_LEVEL, MAX_CUT_LEVEL = -0.5, 0.5
-MAX_LATENTS = 16384
+
+_LIMITS = {
+    "latents": (1, 16384, "the attention inside them is quadratic"),
+    "octree_resolution": (8, 768, "each step is eight times the memory of the one below"),
+    "bounds": (0.05, 8.0, "a shape fills about ±1 of the volume"),
+    "mc_level": (-0.5, 0.5, "the codec's field crosses near zero"),
+}
+
+KNOB_STEPS = {
+    "octree_resolution": (("draft", 0.25), ("fine", 0.5), ("standard", 1), ("ultra", 2)),
+    "latents": (("lean", 0.5), ("standard", 1), ("detailed", 2)),
+    "bounds": (("tight", 0.9), ("standard", 1), ("roomy", 1.2), ("wide", 1.5)),
+    "mc_level": (("sharp", 0.5), ("standard", 1), ("fatten", 2), ("extra fatten", 4)),
+}
+
+KNOB_PREFS = {"latents": "num_latents"}
+
+_WHOLE_KNOBS = ("latents", "octree_resolution")
+
+
+def limits(knob: str) -> tuple[float, float, str]:
+    """``knob``'s edges and the reason for them: the check, the refusal and the menu."""
+    try:
+        return _LIMITS[knob]
+    except KeyError:
+        raise KeyError(f"no limit is declared for {knob!r}; known: "
+                       f"{', '.join(sorted(_LIMITS))}") from None
+
+
+def knob_menu(defaults: Mapping[str, Any]) -> dict[str, list[dict]]:
+    """Each step's word with the model's own value scaled by its ratio, a step whose number
+    a request would be refused for left out whole."""
+    menu = {}
+    for knob, steps in KNOB_STEPS.items():
+        own = defaults.get(KNOB_PREFS.get(knob, knob))
+        if own is None:
+            continue
+        low, high, _ = limits(knob)
+        offered = []
+        for name, ratio in steps:
+            value = (round(own * ratio) if knob in _WHOLE_KNOBS
+                     else round(own * ratio, 10))
+            if low <= value <= high and value not in [one["value"] for one in offered]:
+                offered.append({"value": value, "name": name})
+        menu[knob] = offered
+    return menu
 
 
 def mode_of(images: tuple[bytes, ...]) -> str:
@@ -108,29 +146,21 @@ class MeshSpec(BaseModel):
         scale = self.scale
         if scale is None:
             scale = defaults.get("scale", DEFAULT_MESH_SCALE)
-        if latents < 1 or steps < 1:
-            raise ValueError("latents and steps must be positive")
-        if latents > MAX_LATENTS:
-            raise ValueError(f"latents must be at most {MAX_LATENTS}, got {latents}: the "
-                             f"attention inside it is quadratic")
+        if steps < 1:
+            raise ValueError("steps must be positive")
+        for knob, value in (("latents", latents), ("bounds", bounds),
+                            ("mc_level", mc_level),
+                            ("octree_resolution", octree_resolution)):
+            low, high, why = limits(knob)
+            if not low <= value <= high:
+                raise ValueError(f"{knob} must be between {low} and {high}, "
+                                 f"got {value}: {why}")
         if not math.isfinite(guidance_scale) or guidance_scale < 0:
             raise ValueError("guidance_scale must be finite and nonnegative")
         if not sampler:
             raise ValueError("sampler must not be empty")
         if output_format not in OUTPUT_FORMATS:
             raise ValueError(f"output_format must be one of {', '.join(OUTPUT_FORMATS)}")
-        if octree_resolution < 8:
-            raise ValueError("octree_resolution must be at least 8")
-        if not MIN_BOUNDS <= bounds <= MAX_BOUNDS:
-            raise ValueError(f"bounds must be between {MIN_BOUNDS} and {MAX_BOUNDS}, "
-                             f"got {bounds}: a shape fills about ±1")
-        if not MIN_CUT_LEVEL <= mc_level <= MAX_CUT_LEVEL:
-            raise ValueError(f"mc_level must be between {MIN_CUT_LEVEL} and "
-                             f"{MAX_CUT_LEVEL}, got {mc_level}: the codec's field crosses "
-                             "near 0")
-        if octree_resolution > MAX_OCTREE_RESOLUTION:
-            raise ValueError(f"octree_resolution must be at most {MAX_OCTREE_RESOLUTION}, "
-                             f"whose grid is {(MAX_OCTREE_RESOLUTION + 1) ** 3} samples")
         if not math.isfinite(scale) or scale <= 0:
             raise ValueError("scale must be finite and positive")
         return ResolvedMesh(
@@ -143,7 +173,5 @@ class MeshSpec(BaseModel):
         )
 
 
-__all__ = ["BOUNDS_PRESETS", "CUT_LEVEL_PRESETS", "DEFAULT_MESH_SCALE", "DENSITY_PRESETS",
-           "MAX_BOUNDS", "MAX_CUT_LEVEL", "MAX_LATENTS", "MAX_OCTREE_RESOLUTION",
-           "MIN_BOUNDS", "MIN_CUT_LEVEL", "OUTPUT_FORMATS",
-           "TOKEN_PRESETS", "MeshSpec", "ResolvedMesh", "mode_of"]
+__all__ = ["DEFAULT_MESH_SCALE", "KNOB_STEPS", "OUTPUT_FORMATS", "MeshSpec",
+           "ResolvedMesh", "knob_menu", "limits", "mode_of"]

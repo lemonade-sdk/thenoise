@@ -457,8 +457,9 @@ const FIELD_LABELS = {
   mode: 'Mode', frame_count: 'Frames', fps: 'FPS', duration: 'Duration',
   references: 'References', attention: 'Attention',
   flow_shift: 'Flow shift', output_format: 'Output',
-  latents: 'Tokens', octree_resolution: 'Density', bounds: 'Bounds',
-  mc_level: 'Cut level', scale: 'Scale',
+  latents: 'Detail level', octree_resolution: 'Voxel resolution',
+  bounds: 'Bounding volume', mc_level: 'Surface offset', scale: 'Scale',
+  picture: 'Reference image',
 };
 
 function addRow(grid, label, value, cls) {

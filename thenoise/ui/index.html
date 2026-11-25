@@ -495,37 +495,83 @@
 <div class="view hidden" id="view-mesh">
 <aside class="sidebar">
   <div class="field">
-    <label class="label" for="mesh_file">Picture <span class="hint">required</span></label>
+    <label class="label" for="mesh_file">Reference image <span class="hint">required</span></label>
     <div class="dropzone" id="mesh_dropzone">
       <input type="file" id="mesh_file" accept="image/*" hidden>
       <div class="dz-hint" id="mesh_dz_hint">Drag &amp; drop an image here or <span class="kbd">click to browse</span></div>
       <div class="dz-name" id="mesh_dz_name" style="display:none"></div>
     </div>
     <div class="ref-thumbs" id="mesh_refs"></div>
-    <div class="hint">A shape is conditioned on the picture alone; no prompt is read.</div>
-    <div class="hint hidden" id="mesh_views_hint">Several pictures are views of one
-      shape, in front, left, back, right order.</div>
+    <div class="hint hidden" id="mesh_views_hint">Views of one shape: front, left, back, right.</div>
   </div>
 
-  <div class="row">
-    <div class="field">
-      <label class="label" for="mesh_octree_resolution">Mesh density</label>
-      <select id="mesh_octree_resolution">
-        <option value="">auto</option>
-        <option value="96">small (96)</option>
-        <option value="192">medium (192)</option>
-        <option value="384">high (384)</option>
-        <option value="768">ultra high (768)</option>
-      </select>
-      <div class="hint">How finely the surface is cut; each step up costs about eight
-        times the memory of the one below it. Left on auto, the model answers for it.</div>
+
+  <div class="divider"></div>
+
+  <div class="label">Shape</div>
+  <div class="group">
+    <div class="row">
+      <div class="field">
+        <label class="label" for="mesh_latents">Detail level</label>
+        <select id="mesh_latents">
+          <option value="">auto</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="label" for="mesh_steps">Steps</label>
+        <input type="number" id="mesh_steps" placeholder="auto" min="1">
+      </div>
     </div>
+
+    <div class="row">
+      <div class="field">
+        <label class="label" for="mesh_guidance_scale">Guidance</label>
+        <input type="number" id="mesh_guidance_scale" step="0.1" placeholder="auto" min="0">
+      </div>
+      <div class="field">
+        <label class="label" for="mesh_sampler">Sampler</label>
+        <select id="mesh_sampler">
+          <option value="">auto</option>
+        </select>
+      </div>
+    </div>
+
     <div class="field">
       <label class="label" for="mesh_seed">Seed</label>
       <input type="number" id="mesh_seed" placeholder="random" min="0">
     </div>
   </div>
 
+  <div class="divider"></div>
+
+  <div class="label">Surface</div>
+  <div class="group">
+    <div class="row">
+      <div class="field">
+        <label class="label" for="mesh_octree_resolution">Voxel resolution</label>
+        <select id="mesh_octree_resolution">
+          <option value="">auto</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="label" for="mesh_bounds">Bounding volume</label>
+        <select id="mesh_bounds">
+          <option value="">auto</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="field">
+      <label class="label" for="mesh_mc_level">Surface offset</label>
+      <select id="mesh_mc_level">
+        <option value="">auto</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="label">File</div>
   <div class="field">
     <label class="label" for="mesh_output_format">Output</label>
     <select id="mesh_output_format">
@@ -535,68 +581,6 @@
       <option value="stl">stl</option>
     </select>
   </div>
-
-  <details class="collapse" data-pref="thenoise-mesh-tuning-open">
-    <summary class="label">Shape tuning</summary>
-    <div class="group">
-      <div class="row">
-        <div class="field">
-          <label class="label" for="mesh_latents">Tokens</label>
-          <select id="mesh_latents">
-            <option value="">auto</option>
-            <option value="2048">coarse (2048)</option>
-            <option value="4096">trained (4096)</option>
-            <option value="8192">detailed (8192)</option>
-          </select>
-          <div class="hint">How much geometry the latent holds; every step up costs the
-            denoise and the volume both.</div>
-        </div>
-        <div class="field">
-          <label class="label" for="mesh_steps">Steps</label>
-          <input type="number" id="mesh_steps" placeholder="auto" min="1">
-        </div>
-      </div>
-
-      <div class="row">
-        <div class="field">
-          <label class="label" for="mesh_guidance_scale">Guidance</label>
-          <input type="number" id="mesh_guidance_scale" step="0.1" placeholder="auto" min="0">
-        </div>
-        <div class="field">
-          <label class="label" for="mesh_sampler">Sampler</label>
-          <select id="mesh_sampler">
-            <option value="">auto</option>
-          </select>
-        </div>
-      </div>
-
-      <div class="row">
-        <div class="field">
-          <label class="label" for="mesh_bounds">Bounds</label>
-          <select id="mesh_bounds">
-            <option value="">auto</option>
-            <option value="0.9">tight (0.9)</option>
-            <option value="1.01">standard (1.01)</option>
-            <option value="1.2">roomy (1.2)</option>
-            <option value="1.5">wide (1.5)</option>
-          </select>
-          <div class="hint">Half the width of the volume the surface is cut from: raise it
-            when the shape comes back clipped, and the density with it.</div>
-        </div>
-        <div class="field">
-          <label class="label" for="mesh_mc_level">Cut level</label>
-          <select id="mesh_mc_level">
-            <option value="">auto</option>
-            <option value="0.0009765625">sharpen (1/1024)</option>
-            <option value="0.001953125">neutral (1/512)</option>
-            <option value="0.00390625">fatten (1/256)</option>
-            <option value="0.0078125">fatten more (1/128)</option>
-          </select>
-          <div class="hint">Which surface of the field to cut: up fattens, down sharpens.</div>
-        </div>
-      </div>
-    </div>
-  </details>
 
   <div class="divider"></div>
 
@@ -611,7 +595,7 @@
 
 <main class="main">
   <div class="stage" id="mesh_stage">
-    <div class="placeholder" id="meshplaceholder">Drop a picture and click <span class="kbd">Generate shape</span></div>
+    <div class="placeholder" id="meshplaceholder">Drop an image and click <span class="kbd">Generate shape</span></div>
     <div class="stage-file stage-mesh" id="mesh_out">
       <canvas id="mesh_view" class="mesh-view" tabindex="0"
               aria-label="The shape. Drag or use the arrow keys to turn it, plus and minus to zoom, zero to frame it again."></canvas>

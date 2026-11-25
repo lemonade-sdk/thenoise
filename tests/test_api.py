@@ -146,7 +146,40 @@ def test_health_reports_the_loaded_model():
                                    "attention_methods": list(ATTENTION_METHODS)}
     # Every solver this build has, whichever model is loaded.
     assert res["samplers"] == sorted(SAMPLERS)
+    # An image model's knobs are free numbers, so there is nothing for a menu to hold.
+    assert res["knobs"] == {}
     assert res["pixel_channels"] == 4
+
+
+def test_health_publishes_the_shape_knobs_of_the_loaded_model():
+    """A shape model's menus are its own values scaled, so a second one answers with its
+    own numbers and the page changes not at all."""
+    from thenoise.mesh.spec import knob_menu
+
+    hunyuan = {"num_latents": 4096, "octree_resolution": 384, "bounds": 1.01,
+               "mc_level": 1 / 512}
+    runtime = _runtime()
+    runtime._model = type("M", (), {"MEDIUM": "mesh", "default_prefs": hunyuan,
+                                    "CAPABILITIES": {"mesh": {"i2d": True}},
+                                    "REF_METHODS": ()})()
+    knobs = _endpoint(create_app(runtime), "/health")()["knobs"]
+
+    assert knobs == knob_menu(hunyuan)
+    assert [one["value"] for one in knobs["octree_resolution"]] == [96, 192, 384, 768]
+    assert [one["name"] for one in knobs["latents"]] == ["lean", "standard", "detailed"]
+    assert [one["value"] for one in knobs["mc_level"]] == [1/1024, 1/512, 1/256, 1/128]
+
+    # Another model, another set of numbers: same code path, different trained values.
+    runtime._model = type("M", (), {"MEDIUM": "mesh", "default_prefs": {
+        "num_latents": 3072, "octree_resolution": 256, "bounds": 1.0,
+        "mc_level": 1 / 256}, "CAPABILITIES": {"mesh": {"i2d": True}},
+        "REF_METHODS": ()})()
+    knobs = _endpoint(create_app(runtime), "/health")()["knobs"]
+    assert knobs["latents"] == [{"value": 1536, "name": "lean"},
+                               {"value": 3072, "name": "standard"},
+                               {"value": 6144, "name": "detailed"}]
+    assert [one["value"] for one in knobs["octree_resolution"]] == [64, 128, 256, 512]
+    assert [one["value"] for one in knobs["mc_level"]] == [1/512, 1/256, 1/128, 1/64]
 
 
 def test_health_with_nothing_loaded():
@@ -155,6 +188,7 @@ def test_health_with_nothing_loaded():
     assert res["medium"] is None
     assert res["capabilities"] == {}
     assert res["samplers"] == sorted(SAMPLERS)  # a solver needs no weights
+    assert res["knobs"] == {}
     assert res["pixel_channels"] == 3  # nothing loaded -> nothing can be transparent
 
 
@@ -249,10 +283,12 @@ def test_ui_scripts_only_look_up_ids_the_page_has():
 
 
 @pytest.mark.parametrize("menu", ["sampler", "edit_sampler", "video_sampler",
-                                  "mesh_sampler"])
-def test_ui_asks_the_server_which_samplers_exist(menu):
-    """A sampler menu holds no solver name of its own beyond `auto`: the list is the
-    server's to hand out.
+                                  "mesh_sampler", "mesh_latents", "mesh_octree_resolution",
+                                  "mesh_bounds", "mesh_mc_level"])
+def test_ui_menus_hold_no_list_of_their_own(menu):
+    """A menu like this is the server's to fill — solver names, or a shape knob's realistic
+    range, which is the loaded model's own values scaled. The markup keeps ``auto`` and
+    nothing else, so a model that answers differently needs no change to the page.
     """
     with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
         block = re.search(rf'<select id="{menu}">(.*?)</select>', f.read(), re.S)[1]
@@ -270,64 +306,41 @@ def test_ui_offers_every_container_the_mesh_writer_has():
     assert offered == ["", *OUTPUT_FORMATS], block
 
 
-def test_ui_offers_the_density_presets_the_spec_keeps():
-    """The pane's density menu is ``DENSITY_PRESETS``, values and all."""
-    from thenoise.mesh.spec import DENSITY_PRESETS
-
-    with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
-        block = re.search(r'<select id="mesh_octree_resolution">(.*?)</select>',
-                          f.read(), re.S)[1]
-    offered = [one.group(1) for one in re.finditer(r'<option value="([^"]*)"', block)]
-    assert offered == ["", *[str(one) for one in DENSITY_PRESETS]], block
-
-
-def test_ui_offers_the_tuning_menus_the_spec_keeps():
-    """Where a knob has a short list of values worth asking for, the pane offers a menu —
-    and the list is the spec's, not a copy of it. ``auto`` leads every one of them, so
-    the model's own value stays the model's."""
-    from thenoise.mesh.spec import BOUNDS_PRESETS, CUT_LEVEL_PRESETS, TOKEN_PRESETS
-
-    with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
-        page = f.read()
-    for field, presets in [("mesh_latents", TOKEN_PRESETS),
-                           ("mesh_bounds", BOUNDS_PRESETS),
-                           ("mesh_mc_level", CUT_LEVEL_PRESETS)]:
-        block = re.search(rf'<select id="{field}">(.*?)</select>', page, re.S)[1]
-        offered = [one.group(1) for one in re.finditer(r'<option value="([^"]*)"', block)]
-        assert offered[0] == "", block
-        assert [float(one) for one in offered[1:]] == list(presets), (field, block)
-
-
-def test_the_cut_level_menu_promises_the_fraction_it_sends():
-    """A cut level reads as its reciprocal (``1/512``, not ``0.001953125``), so the label
-    is the one place this menu could quietly offer something else."""
-    from thenoise.mesh.spec import CUT_LEVEL_PRESETS
-
-    with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
-        block = re.search(r'<select id="mesh_mc_level">(.*?)</select>', f.read(), re.S)[1]
-    rows = re.findall(r'<option value="([^"]*)">([^<]*)</option>', block)
-    for value, label in rows[1:]:
-        over = 1.0 / float(value)
-        assert abs(over - round(over)) < 1e-6, (value, label)
-        assert f"1/{int(round(over))}" in label, (value, label)
-
-
-def test_ui_keeps_the_shape_tuning_behind_one_disclosure():
-    """The release's own configuration is folded away rather than removed."""
-    tuning = {"mesh_latents", "mesh_steps", "mesh_guidance_scale", "mesh_sampler",
-              "mesh_bounds", "mesh_mc_level"}
-    shown = {"mesh_octree_resolution", "mesh_seed", "mesh_output_format",
-             "mesh_lora_specs", "mesh_file"}
+def test_ui_divides_the_shape_pane_by_what_a_knob_changes():
+    """The shape, the cut and the file are decided in three different places, and a knob
+    sits under the heading of the one it moves: density cannot change a shape, and a
+    different seed is not a finer mesh."""
+    shape = {"mesh_latents", "mesh_steps", "mesh_guidance_scale", "mesh_sampler",
+             "mesh_seed"}
+    surface = {"mesh_octree_resolution", "mesh_bounds", "mesh_mc_level"}
+    file_out = {"mesh_output_format"}
 
     with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
         page = f.read()
     mesh = page[page.index('id="view-mesh"'):page.index("/view-mesh")]
-    group = re.search(r"<details[^>]*thenoise-mesh-tuning-open[^>]*>(.*?)</details>",
-                      mesh, re.S)
-    assert group, "the shape pane has no tuning disclosure"
-    inside = set(re.findall(r'id="(mesh_[a-z_]+)"', group[1]))
-    assert inside == tuning, inside
-    assert shown <= set(re.findall(r'id="(mesh_[a-z_]+)"', mesh)) - inside
+    marks = [(one.group(1), one.start())
+             for one in re.finditer(r'<div class="label">([A-Za-z ]+)</div>', mesh)]
+    names = [name for name, _ in marks]
+    assert names == ["Shape", "Surface", "File"], names
+    sections = {name: set(re.findall(r'id="(mesh_[a-z_]+)"',
+                                     mesh[start:marks[i + 1][1] if i + 1 < len(marks)
+                                          else len(mesh)]))
+                for i, (name, start) in enumerate(marks)}
+    assert sections["Shape"] == shape, sections
+    assert not shape & surface and not surface & file_out
+    assert sections["Surface"] == surface, sections
+    assert file_out <= sections["File"], sections
+
+
+def test_ui_keeps_the_picture_the_only_mandatory_shape_input():
+    """A shape needs a picture and nothing else: no prompt, no size, no reference method."""
+    with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
+        page = f.read()
+    mesh = page[page.index('id="view-mesh"'):page.index("/view-mesh")]
+    assert 'id="mesh_file"' in mesh
+    for absent in ("mesh_prompt", "mesh_negative_prompt", "mesh_width", "mesh_height",
+                   "mesh_scale"):
+        assert absent not in mesh, absent
 
 
 def test_ui_every_named_view_exists():

@@ -312,6 +312,7 @@ def create_app(runtime, *, jobs: Optional[JobQueue] = None) -> FastAPI:
             "medium": runtime.medium,
             "capabilities": runtime.model_capabilities(),
             "samplers": sorted(SAMPLERS),
+            "knobs": runtime.model_knobs(),
             "pixel_channels": runtime.model_pixel_channels(),
         }
 

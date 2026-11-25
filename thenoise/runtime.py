@@ -227,3 +227,11 @@ class Runtime:
         if self._model is None:
             return 3
         return getattr(self._model, "pixel_channels", 3)
+
+    def model_knobs(self) -> dict:
+        """The loaded model's knob menus; empty with no model, or a medium of free numbers."""
+        if self._model is None:
+            return {}
+        from .mediums import knobs_for
+
+        return knobs_for(self.medium, self._model)

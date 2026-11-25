@@ -202,11 +202,33 @@ function fillAttention(methods) {
   }
 }
 
+function knobLabel(knob, value) {
+  if (knob === 'mc_level' && value > 0) {
+    const over = 1 / value;
+    if (over > 1 && Math.abs(over - Math.round(over)) < 1e-6) return '1/' + Math.round(over);
+  }
+  return String(value);
+}
+
+function fillKnobs(knobs) {
+  if (!knobs) return; // unreachable server: only `auto` is offered
+  for (const [knob, steps] of Object.entries(knobs)) {
+    const sel = $('mesh_' + knob);
+    if (!sel || !Array.isArray(steps)) continue;
+    const words = new Map(steps.map(step => [String(step.value), step.name]));
+    const offered = [...words.keys()];
+    const keep = sel.value;
+    fillSelect(sel, ['', ...offered], value => words.get(value) || 'auto');
+    sel.value = offered.includes(keep) ? keep : '';
+  }
+}
+
 // Gate the UI on the loaded model's capabilities, which the pipeline enforces too.
 async function applyModelState() {
   let models = null; // null = /health unreachable: assume a model that can do it all
   let caps = {};
   let samplers = null;
+  let knobs = null;
   let rgba = false; // true when the loaded model's VAE emits an alpha channel
   try {
     const res = await fetchOrGone('/health', undefined, PATIENCE);
@@ -215,6 +237,7 @@ async function applyModelState() {
       models = data.models || [];
       caps = data.capabilities || {};
       samplers = data.samplers || null;
+      knobs = data.knobs || null;
       rgba = (data.pixel_channels || 3) > 3;
     }
   } catch (e) { /* assume a model is present on network errors */ }
@@ -267,6 +290,7 @@ async function applyModelState() {
   $('mesh_views_hint').classList.toggle('hidden', views < 2);
   fillSamplers(samplers);
   fillAttention(caps.attention_methods);
+  fillKnobs(knobs);
 }
 applyModelState();
 

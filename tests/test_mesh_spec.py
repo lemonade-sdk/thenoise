@@ -3,10 +3,9 @@ import math
 import pytest
 
 from thenoise.mesh.spec import (
-    BOUNDS_PRESETS, CUT_LEVEL_PRESETS, DEFAULT_MESH_SCALE, DENSITY_PRESETS,
-    MAX_BOUNDS, MAX_CUT_LEVEL, MAX_LATENTS, MAX_OCTREE_RESOLUTION, MIN_BOUNDS,
-    MIN_CUT_LEVEL, OUTPUT_FORMATS, TOKEN_PRESETS, MeshSpec, mode_of,
+    DEFAULT_MESH_SCALE, OUTPUT_FORMATS, MeshSpec, knob_menu, limits, mode_of,
 )
+from thenoise.models.hunyuan3d21 import Hunyuan3D21ShapeModel
 from thenoise.utils.attention import DEFAULT_ATTENTION
 
 DEFAULTS = {
@@ -126,55 +125,76 @@ def test_every_promised_container_resolves_and_is_written():
         write_mesh(triangle(), "/tmp/nope.ply", "ply")
 
 
-def test_the_density_presets_double_and_stop_where_the_grid_stops_fitting():
-    steps = list(DENSITY_PRESETS)
-    assert all(fine == 2 * coarse for coarse, fine in zip(steps, steps[1:])), steps
-    assert min(steps) >= 8, steps
-    assert max(steps) == MAX_OCTREE_RESOLUTION, "the pane would offer what the engine refuses"
+def named(menu, knob):
+    return [(one["name"], one["value"]) for one in menu[knob]]
 
 
-def test_a_density_past_the_sampled_grid_is_refused_before_a_weight_moves():
-    with pytest.raises(ValueError, match="at most"):
-        resolve(octree_resolution=MAX_OCTREE_RESOLUTION + 1)
+def test_a_shape_model_menus_words_over_its_own_numbers():
+    """The pane's menus are the shipped model's trained values scaled, each keeping the word
+    that step means: a user picks a word, the request carries the number."""
+    menu = knob_menu(Hunyuan3D21ShapeModel.DEFAULT_PREFS)
+    assert named(menu, "octree_resolution") == [("draft", 96), ("fine", 192),
+                                                ("standard", 384), ("ultra", 768)]
+    assert named(menu, "latents") == [("lean", 2048), ("standard", 4096),
+                                      ("detailed", 8192)]
+    assert named(menu, "bounds") == [("tight", 0.909), ("standard", 1.01),
+                                     ("roomy", 1.212), ("wide", 1.515)]
+    assert named(menu, "mc_level") == [("sharp", 1 / 1024), ("standard", 1 / 512),
+                                       ("fatten", 1 / 256), ("extra fatten", 1 / 128)]
 
 
-def test_every_value_the_pane_offers_as_a_menu_resolves():
-    """These tuples are the pane's menus verbatim, so one the engine refuses is a refusal
-    the user only finds out about by picking it."""
-    for latents in TOKEN_PRESETS:
-        assert resolve(latents=latents).latents == latents
-    for bounds in BOUNDS_PRESETS:
-        assert resolve(bounds=bounds).bounds == bounds
-    for level in CUT_LEVEL_PRESETS:
-        assert resolve(mc_level=level).mc_level == level
+def test_another_model_of_the_medium_answers_with_its_own_numbers():
+    menu = knob_menu({"num_latents": 3072, "octree_resolution": 256, "bounds": 1.0,
+                      "mc_level": 1 / 256})
+    assert named(menu, "latents") == [("lean", 1536), ("standard", 3072),
+                                      ("detailed", 6144)]
+    assert named(menu, "octree_resolution") == [("draft", 64), ("fine", 128),
+                                                ("standard", 256), ("ultra", 512)]
+    assert named(menu, "bounds") == [("tight", 0.9), ("standard", 1.0),
+                                     ("roomy", 1.2), ("wide", 1.5)]
+    assert named(menu, "mc_level") == [("sharp", 1 / 512), ("standard", 1 / 256),
+                                       ("fatten", 1 / 128), ("extra fatten", 1 / 64)]
 
 
-def test_the_volume_knobs_refuse_only_numbers_no_shape_can_use():
-    """The edges are wide on purpose: a knob is refused where the request cannot work, not
-    where it would look worse."""
-    for bounds in (0.1, 1.01, 2.0, MAX_BOUNDS):   # a tight crop and a roomy one
-        assert resolve(bounds=bounds).bounds == bounds
-    for level in (-0.2, 0.0, 1 / 512, MAX_CUT_LEVEL):
-        assert resolve(mc_level=level).mc_level == level
-    assert resolve(latents=MAX_LATENTS).latents == MAX_LATENTS
-
-    # The two a real request got this far with, and the ends nobody can mean.
-    for field, bad in [("bounds", 700.0), ("bounds", 0.001), ("mc_level", 3.0),
-                       ("mc_level", -40.0), ("latents", MAX_LATENTS * 4)]:
-        with pytest.raises(ValueError, match=field):
-            resolve(**{field: bad})
+def test_a_menu_stops_where_a_request_would_be_refused():
+    """A model trained near an edge must not be offered past it, and a step that falls away
+    takes its word with it rather than renaming what is left."""
+    menu = knob_menu({"num_latents": 12000, "octree_resolution": 700, "bounds": 7.0,
+                      "mc_level": 0.4})
+    assert named(menu, "latents") == [("lean", 6000), ("standard", 12000)]
+    assert named(menu, "octree_resolution") == [("draft", 175), ("fine", 350),
+                                                ("standard", 700)]
+    assert named(menu, "bounds") == [("tight", 6.3), ("standard", 7.0)]
+    assert named(menu, "mc_level") == [("sharp", 0.2), ("standard", 0.4)]
 
 
-def test_a_refused_knob_names_its_own_range_rather_than_the_neighbour_s():
-    for field, bad, needle in [("bounds", 700.0, f"{MIN_BOUNDS} and {MAX_BOUNDS}"),
-                               ("mc_level", 3.0, f"{MIN_CUT_LEVEL} and {MAX_CUT_LEVEL}")]:
-        with pytest.raises(ValueError, match=needle):
-            resolve(**{field: bad})
+def test_a_knob_the_model_has_no_value_for_offers_no_menu():
+    assert named(knob_menu({"num_latents": 4096}), "latents") == [
+        ("lean", 2048), ("standard", 4096), ("detailed", 8192)]
+    assert knob_menu({}) == {}
 
 
-def test_the_token_menu_doubles_so_each_step_is_the_cost_of_the_one_below():
-    steps = list(TOKEN_PRESETS)
-    assert all(fine == 2 * coarse for coarse, fine in zip(steps, steps[1:])), steps
+def test_every_offered_value_is_one_a_request_can_ask_for():
+    for knob, steps in knob_menu(Hunyuan3D21ShapeModel.DEFAULT_PREFS).items():
+        for step in steps:
+            assert getattr(resolve(**{knob: step["value"]}), knob) == step["value"], step
+
+
+def test_the_numbers_no_shape_can_use_are_refused_by_name():
+    """Wide edges on purpose: refused where the request cannot work, not where it would
+    look worse. These two are the ones a real request reached the octree with."""
+    for knob, bad in [("bounds", 700.0), ("bounds", 0.001), ("mc_level", 3.0),
+                      ("mc_level", -40.0), ("latents", 20_000),
+                      ("octree_resolution", 900), ("octree_resolution", 4)]:
+        with pytest.raises(ValueError, match=knob):
+            resolve(**{knob: bad})
+
+
+def test_a_refusal_names_the_edges_it_was_checked_against():
+    for knob in ("latents", "bounds", "mc_level", "octree_resolution"):
+        low, high, why = limits(knob)
+        with pytest.raises(ValueError, match=f"{knob} must be between {low} and {high}"):
+            resolve(**{knob: high * 1000 if low >= 0 else -high * 1000})
 
 
 def test_an_unscaled_shape_spans_the_volume_it_was_sampled_from():

@@ -8,10 +8,9 @@ from typing import Any, Callable
 class Medium:
     """What a medium runs through, and what it answers on the wire."""
 
-    #: ``(model, pixel_upscalers)`` -> its controller.
     controller: Callable[[Any, Any], Any]
-    #: ``(app, jobs, runtime)`` -> the job routes a queued server installs.
     routes: Callable[[Any, Any, Any], None]
+    knobs: Callable[[Any], dict] | None = None
 
 
 def _image_controller(model, pixel_upscalers):
@@ -45,6 +44,11 @@ def _video_routes(app, jobs, runtime):
     install_video_routes(app, jobs, video_planner(runtime), runtime.model_name)
 
 
+def _mesh_knobs(model):
+    from .mesh.spec import knob_menu
+    return knob_menu(model.default_prefs)
+
+
 def _mesh_routes(app, jobs, runtime):
     from .mesh.http import install_mesh_routes
     from .mesh.service import mesh_planner
@@ -56,7 +60,7 @@ def _mesh_routes(app, jobs, runtime):
 MEDIUMS: dict[str, Medium] = {
     "image": Medium(controller=_image_controller, routes=_image_routes),
     "video": Medium(controller=_video_controller, routes=_video_routes),
-    "mesh": Medium(controller=_mesh_controller, routes=_mesh_routes),
+    "mesh": Medium(controller=_mesh_controller, routes=_mesh_routes, knobs=_mesh_knobs),
 }
 
 #: What an unloaded runtime answers as, so the queue refuses a submit, not the router.
@@ -73,6 +77,12 @@ def install_routes(app, jobs, runtime) -> None:
     _entry(runtime.medium or DEFAULT_MEDIUM).routes(app, jobs, runtime)
 
 
+def knobs_for(medium: str, model) -> dict:
+    """What a pane may offer for a medium's knobs: empty where it offers no lists."""
+    knobs = _entry(medium).knobs
+    return knobs(model) if knobs else {}
+
+
 def _entry(medium: str) -> Medium:
     try:
         return MEDIUMS[medium]
@@ -81,4 +91,5 @@ def _entry(medium: str) -> Medium:
                          f"(known: {', '.join(sorted(MEDIUMS))})") from None
 
 
-__all__ = ["DEFAULT_MEDIUM", "MEDIUMS", "Medium", "controller_for", "install_routes"]
+__all__ = ["DEFAULT_MEDIUM", "MEDIUMS", "Medium", "controller_for", "install_routes",
+           "knobs_for"]

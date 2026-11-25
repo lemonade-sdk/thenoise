@@ -15,7 +15,7 @@ function meshCeiling() {
 }
 
 function meshViewLabel(index) {
-  return meshCeiling() > 1 ? 'view ' + (index + 1) : 'picture';
+  return meshCeiling() > 1 ? 'view ' + (index + 1) : 'image';
 }
 
 function meshFail(message) {
@@ -49,7 +49,7 @@ async function loadMeshPicture(file) {
   const ceiling = meshCeiling();
   if (meshViews.length >= ceiling) {
     return meshFail(ceiling > 1 ? 'a shape takes at most ' + ceiling + ' views'
-                                : 'this model conditions on one picture');
+                                : 'this model takes one image');
   }
   const image = await readImageFile(file);
   if (!image) return;
@@ -79,7 +79,7 @@ function collectMeshSettings() {
 }
 
 function validateMeshInputs() {
-  if (!meshViews.length) return meshFail('a shape needs a picture');
+  if (!meshViews.length) return meshFail('a shape needs an image');
   const check = (fields, ok, message) => {
     for (const f of fields) {
       const v = $('mesh_' + f).value;
@@ -174,9 +174,11 @@ function renderMeshInfo() {
   if (m.mode) rows.push([FIELD_LABELS.mode, MESH_MODES[m.mode] || m.mode, '']);
   for (const key of ['latents', 'steps', 'guidance_scale', 'sampler', 'octree_resolution',
                      'bounds', 'mc_level', 'scale', 'seed', 'output_format']) {
-    if (m[key] != null && m[key] !== '') rows.push([FIELD_LABELS[key], m[key], '']);
+    if (m[key] != null && m[key] !== '') {
+      rows.push([FIELD_LABELS[key], knobLabel(key, m[key]), '']);
+    }
   }
-  if (m.picture) rows.push(['Picture', m.picture, '']);
+  if (m.picture) rows.push([FIELD_LABELS.picture, m.picture, '']);
   const lora = m.lora_specs;
   const hasLora = Array.isArray(lora) ? lora.length : (lora ? Object.keys(lora).length : 0);
   if (hasLora) rows.push(['LoRA', formatLora(lora), 'prompt']);
