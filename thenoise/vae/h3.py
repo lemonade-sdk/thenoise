@@ -1,25 +1,29 @@
-"""H3-Image codec — a 3D causal CNN encoder over a single-frame 2D ViT decoder.
+"""H3 codecs — a 3D causal CNN encoder over a ViT pixel decoder.
 
 Ported from ComfyUI's ``comfy/ldm/minimax/vae.py`` with its module tree — and with it
-the checkpoint key names — verbatim; only the ops differ. It is a video codec used as a
-still one: the encoder's convs see a lone frame through their last temporal tap, and the
-decoder drops the length-1 time axis the reference carries, which is why
-``post_quant_conv`` is 2D while ``quant_conv`` stays 3D.
+the checkpoint key names — verbatim; only the ops differ. Two checkpoints share this
+tree: the video one decodes a clip through ``patch_size_t = 4`` and 3D rope, the image
+one drops the time axis the reference carries and decodes a frame at a time, which is
+why its ``post_quant_conv`` is 2D while ``quant_conv`` stays 3D.
 
 The latent is 24 channels at 16 pixels per cell, normalized by the constants below — the
-checkpoint ships none, so they are their one home. Encoding returns a posterior *sample*
-on :data:`ENCODE_SEED`, never the mean: the decoder was trained on samples.
+image checkpoint ships none, so they are their one home; the video checkpoint ships its
+own and :func:`load_h3_video_vae` reads them off the file. Encoding an image returns a
+posterior *sample* on :data:`ENCODE_SEED`, never the mean: the decoder was trained on
+samples. Encoding a clip returns the mean, as the reference does.
 """
 from __future__ import annotations
 
 import logging
 import math
-from typing import Optional, Tuple, Union
+from dataclasses import dataclass
+from typing import Callable, Iterator, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.attention import eager_attention
 from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.rope import apply_rope_split_half, split_half_rope_axes
@@ -67,10 +71,17 @@ SPACE_DOWN = (2, 2, 2, 2, 1, 1)
 TIME_DOWN = (1, 2, 2, 1, 1, 1)
 Z_CHANNELS = 24
 
+#: What a clip's frames compress to along the time axis, and therefore what one latent
+#: frame stands for on the way back out.
+TIME_RATIO = math.prod(TIME_DOWN)
+
 #: Decoder geometry. ``HEAD_DIM`` is what the rope is a ratio of, so the head count
-#: follows from the width the checkpoint states.
+#: follows from the width the checkpoint states. The two checkpoints disagree on how
+#: much of the head the rope turns and over how many axes: the image decoder knows
+#: ``(h, w)``, the video one ``(t, h, w)``.
 HEAD_DIM = 64
 ROPE_DIM_RATIO = 0.5
+VIDEO_ROPE_DIM_RATIO = 0.75
 ROPE_THETA = 100.0
 NUM_REGISTER_TOKENS = 4
 NORM_EPS = 1e-5
@@ -80,16 +91,22 @@ NORM_EPS = 1e-5
 TILE_SIZE = 256
 TILE_BLEND = 64
 
+#: Frames the video codec encodes per clip, and the tokens it throws away at the end of
+#: each. Both feed :class:`TemporalPlan`, and both are stated by the checkpoint.
+CLIP_LENGTH = 17
+TOKEN_DROP = 3
+
 
 # --------------------------------------------------------------------------- encoder
 
 
 class CausalConv3d(nn.Conv3d):
-    """Reflect-spatial, causal-temporal 3D convolution over a single frame.
+    """Reflect-spatial, causal-temporal 3D convolution.
 
     ``padding`` is the (temporal, height, width) radius. At ``T = 1`` everything padded
     in front is zero, so the frame is convolved with the kernel's last temporal tap
-    instead of building the padded video.
+    instead of building the padded video; a longer input is padded with the zeros a
+    causal conv wants and sees every tap.
     """
 
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0):
@@ -104,24 +121,51 @@ class CausalConv3d(nn.Conv3d):
             x = F.silu(pre_norm(x))
         if any(spatial_pad):
             x = F.pad(x, (*spatial_pad, 0, 0), mode="reflect")
-        out = F.conv3d(x, self.weight[:, :, -1:], self.bias, self.stride)
+        weight = self.weight
+        if pad_t:
+            if x.shape[2] == 1:
+                weight = self.weight[:, :, -1:]
+            else:
+                x = F.pad(x, (0, 0, 0, 0, 2 * pad_t, 0))
+        out = F.conv3d(x, weight, self.bias, self.stride)
         return out if residual is None else out.add_(residual)
 
 
+class TemporalIsolatedGroupNorm(nn.GroupNorm):
+    """GroupNorm whose statistics come from one frame at a time.
+
+    Time rides in the batch dimension while they are taken, so no frame learns its
+    scale from its neighbours'. One frame needs no isolating, and the still path takes
+    the plain norm straight through.
+    """
+
+    def forward(self, x):
+        if x.ndim != 5 or x.shape[2] == 1:
+            return super().forward(x)
+        batch, channels, frames, height, width = x.shape
+        y = super().forward(x.permute(0, 2, 1, 3, 4).reshape(batch * frames, channels, 1,
+                                                             height, width))
+        return y.view(batch, frames, channels, height, width).permute(0, 2, 1, 3, 4).contiguous()
+
+
 def group_norm_3d(num_channels: int) -> nn.GroupNorm:
-    """GroupNorm over a single frame — the video path's per-frame norm, at ``T = 1``."""
-    return nn.GroupNorm(num_groups=32, num_channels=num_channels, eps=1e-6, affine=True)
+    """The codec's norm: 32 groups, per-frame statistics."""
+    return TemporalIsolatedGroupNorm(num_groups=32, num_channels=num_channels, eps=1e-6, affine=True)
 
 
 class Downsample3D(nn.Module):
-    """Stride convolution, spatially asymmetric-padded so the odd edge is kept."""
+    """Stride convolution, spatially asymmetric-padded so the odd edge is kept.
 
-    def __init__(self, in_channels, out_channels, space_stride=2):
+    The temporal stride needs no such care: the causal padding in front is what rounds a
+    clip's last frame up, whichever stride it is read at.
+    """
+
+    def __init__(self, in_channels, out_channels, space_stride=2, time_stride=1):
         super().__init__()
         self.space_stride = space_stride
         self.conv = CausalConv3d(
             in_channels, out_channels, kernel_size=3, padding=(1, 0, 0),
-            stride=(1, space_stride, space_stride),
+            stride=(time_stride, space_stride, space_stride),
         )
 
     def forward(self, x):
@@ -175,7 +219,9 @@ class EncoderFCN3D(nn.Module):
                 for i in range(num_res_blocks)
             )
             if space_down[i_level] * time_down[i_level] > 1:
-                level.downsample = Downsample3D(block_mid[i_level], mult * ch, space_stride=space_down[i_level])
+                level.downsample = Downsample3D(block_mid[i_level], mult * ch,
+                                                space_stride=space_down[i_level],
+                                                time_stride=time_down[i_level])
             self.down.append(level)
 
         self.norm_out = group_norm_3d(block_mid[-1])
@@ -194,14 +240,17 @@ class EncoderFCN3D(nn.Module):
 # --------------------------------------------------------------------------- decoder
 
 
-def token_ids(dims: Tuple[int, int], device, dtype) -> torch.Tensor:
-    """Cell centres of the latent grid, each axis normalized to ``[-1, 1]``."""
+def token_ids(dims: Tuple[int, ...], device, dtype) -> torch.Tensor:
+    """Cell centres of the latent grid, each axis normalized to ``[-1, 1]``.
+
+    ``(t, h, w)`` for a clip, ``(h, w)`` for a frame or for the image decoder's rope.
+    """
     axes = [(torch.arange(0.5, dim, dtype=dtype, device=device) / dim) * 2.0 - 1.0 for dim in dims]
-    return torch.stack(torch.meshgrid(*axes, indexing="ij"), dim=-1).flatten(0, 1)
+    return torch.stack(torch.meshgrid(*axes, indexing="ij"), dim=-1).flatten(0, len(dims) - 1)
 
 
-class RotaryEmbedding2D(nn.Module):
-    """Split-half rope over the ``(h, w)`` latent axes, over ``dim`` of the head.
+class RotaryEmbedding(nn.Module):
+    """Split-half rope over ``axes`` latent axes, over ``dim`` of the head.
 
     Coordinates arrive in ``[-1, 1]``, so a whole axis spans one turn of the lowest
     frequency, and the angles are duplicated to fill ``dim`` because
@@ -209,14 +258,15 @@ class RotaryEmbedding2D(nn.Module):
     ``i + dim/2``.
     """
 
-    def __init__(self, dim: int, rotary_base: float = ROPE_THETA, n_dim: int = 2):
+    def __init__(self, dim: int, rotary_base: float = ROPE_THETA, axes: int = 2):
         super().__init__()
+        self.axes = axes
         self.angle_scale = 2.0 * math.pi
-        inv_freq = 1 / rotary_base ** torch.arange(0, 1, 2 * n_dim / dim, dtype=torch.float32)
+        inv_freq = 1 / rotary_base ** torch.arange(0, 1, 2 * axes / dim, dtype=torch.float32)
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward(self, ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """``[S, n_dim]`` -> the ``(cos, sin)`` pair ``[S, 1, 1, dim]``."""
+        """``[S, axes]`` -> the ``(cos, sin)`` pair ``[1, 1, S, dim // 2]``."""
         return split_half_rope_axes(self.inv_freq, self.angle_scale)(ids)
 
 
@@ -229,8 +279,8 @@ class Attention(nn.Module):
         self.dim_head = dim_head
         inner = heads * dim_head
         self.eps = eps
-        self.to_qkv = nn.Linear(inner, inner * 3, bias=bias)
-        self.to_out = nn.Linear(inner, inner, bias=bias)
+        self.to_qkv = QuantizedLinear(inner, inner * 3, bias=bias)
+        self.to_out = QuantizedLinear(inner, inner, bias=bias)
 
     def forward(self, x, rope, pre_norm, residual, residual_scale):
         batch, seq, _ = x.shape
@@ -257,8 +307,8 @@ class FeedForward(nn.Module):
     def __init__(self, dim: int, mult: int = 4, bias: bool = True):
         super().__init__()
         inner = dim * mult
-        self.w1 = nn.Linear(dim, inner * 2, bias=bias)
-        self.w2 = nn.Linear(inner, dim, bias=bias)
+        self.w1 = QuantizedLinear(dim, inner * 2, bias=bias)
+        self.w2 = QuantizedLinear(inner, dim, bias=bias)
 
     def forward(self, x, pre_norm, residual, residual_scale):
         gate, up = self.w1(pre_norm(x)).chunk(2, dim=-1)
@@ -281,24 +331,30 @@ class TransformerBlock(nn.Module):
         return self.ff(x, self.norm2, residual=x, residual_scale=self.scale2)
 
 
-class ViTImageDecoder(nn.Module):
-    """The image checkpoint's decoder: a 2D ViT that turns latent cells into pixels.
+class ViTDecoder(nn.Module):
+    """The H3 pixel decoder: a ViT over patchified latent cells.
 
-    The sequence ends in the learnable register tokens plus one spare row
-    (``mask_token``) that inference never reads.
+    A token is one latent cell and ``proj_out`` answers the pixels held inside it,
+    ``patch_size`` per spatial axis and ``patch_size_t`` in time — 4 for the video
+    checkpoint, 1 for the image one, which is then taken and returned a frame at a
+    time. The sequence ends in the learnable register tokens plus one spare row
+    (``mask_token``) that inference never reads, parked at the grid origin so the rope
+    reads them as background.
     """
 
-    def __init__(self, patch_size: int, dim: int, num_layers: int,
+    def __init__(self, patch_size: int, dim: int, num_layers: int, patch_size_t: int = 1,
                  in_channels: int = Z_CHANNELS, out_channels: int = 3,
                  dim_head: int = HEAD_DIM, rope_dim_ratio: float = ROPE_DIM_RATIO,
-                 num_register_tokens: int = NUM_REGISTER_TOKENS, eps: float = NORM_EPS):
+                 rope_axes: int = 2, num_register_tokens: int = NUM_REGISTER_TOKENS,
+                 eps: float = NORM_EPS):
         super().__init__()
         self.patch_size = patch_size
+        self.patch_size_t = patch_size_t
         self.out_channels = out_channels
         self.num_register_tokens = num_register_tokens
 
-        self.pos_embed = RotaryEmbedding2D(int(dim_head * rope_dim_ratio))
-        self.x_embedder = nn.Linear(in_channels, dim)
+        self.pos_embed = RotaryEmbedding(int(dim_head * rope_dim_ratio), axes=rope_axes)
+        self.x_embedder = QuantizedLinear(in_channels, dim)
         self.register_tokens = nn.Parameter(torch.empty(1, num_register_tokens, dim))
         # Unused at inference; kept so the checkpoint loads without leftover keys.
         self.register_buffer("mask_token", torch.empty(1, 1, dim))
@@ -313,29 +369,37 @@ class ViTImageDecoder(nn.Module):
         )
 
         self.norm_out = nn.LayerNorm(dim, eps=eps)
-        self.proj_out = nn.Linear(dim, out_channels * patch_size * patch_size)
+        self.proj_out = QuantizedLinear(dim, out_channels * patch_size_t * patch_size * patch_size)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """``[B, z, H, W]`` latent -> ``[B, 3, H * patch, W * patch]`` pixels."""
-        batch, _, height, width = x.shape
+        """``[B, z, h, w]`` or ``[B, z, t, h, w]`` latent -> pixels of the same rank."""
+        still = x.ndim == 4
+        if still:
+            x = x.unsqueeze(2)
+        batch, _, frames, height, width = x.shape
+
         h = self.x_embedder(x.flatten(2).transpose(1, 2))
         num_patches = h.shape[1]
 
         registers = self.register_tokens.expand(batch, -1, -1)
         h = torch.cat([h, registers, torch.zeros_like(h[:, 0:1, :])], dim=1)
 
-        ids = token_ids((height, width), x.device, torch.float32)
-        suffix = torch.zeros(1 + self.num_register_tokens, 2, device=ids.device, dtype=ids.dtype)
+        axes = self.pos_embed.axes
+        ids = token_ids((frames, height, width)[-axes:], x.device, torch.float32)
+        suffix = torch.zeros(1 + self.num_register_tokens, axes, device=ids.device, dtype=ids.dtype)
         rope = self.pos_embed(torch.cat([ids, suffix], dim=0))
 
         for block in self.transformer_blocks:
             h = block(h, rope)
 
         out = self.proj_out(self.norm_out(h))[:, :num_patches]
-        patches = out.view(batch, height, width, self.out_channels, self.patch_size, self.patch_size)
-        return patches.permute(0, 3, 1, 4, 2, 5).reshape(
-            batch, self.out_channels, height * self.patch_size, width * self.patch_size
-        )
+        p = self.patch_size
+        pixels = out.view(batch, frames, height, width, self.out_channels,
+                          self.patch_size_t, p, p)
+        pixels = pixels.permute(0, 4, 1, 5, 2, 6, 3, 7).reshape(
+            batch, self.out_channels, frames * self.patch_size_t,
+            height * p, width * p)
+        return pixels.squeeze(2) if still else pixels
 
 
 # --------------------------------------------------------------------------- tiling
@@ -388,7 +452,339 @@ def blend_tiles(a: torch.Tensor, b: torch.Tensor, extent: int, dim: int) -> torc
     return blended
 
 
-# --------------------------------------------------------------------------- the codec
+def tiled_moments(x: torch.Tensor, encode: Callable[[torch.Tensor], torch.Tensor],
+                  cell_px: int, tile_size: int, blend: int) -> torch.Tensor:
+    """Encode ``x``'s spatial extent as overlapping tiles, cross-fading the seams.
+
+    ``encode(tile)`` answers the latent cells of one tile. Neighbours are blended in
+    latent space, where a cell is ``cell_px`` pixels wide.
+    """
+    p = cell_px
+    y_at, y_len, y_blend = split_tiles(x.shape[-2], tile_size, blend, p)
+    x_at, x_len, x_blend = split_tiles(x.shape[-1], tile_size, blend, p)
+
+    rows = [[encode(x[..., i:i + li, j:j + lj]) for j, lj in zip(x_at, x_len)]
+            for i, li in zip(y_at, y_len)]
+    y_blend = [b // p for b in y_blend]
+    x_blend = [b // p for b in x_blend]
+
+    out_rows = []
+    for i, row in enumerate(rows):
+        out = []
+        for j, tile in enumerate(row):
+            if i > 0:
+                tile = blend_tiles(rows[i - 1][j], tile, y_blend[i - 1], dim=-2)
+            if j > 0:
+                tile = blend_tiles(row[j - 1], tile, x_blend[j - 1], dim=-1)
+            if i < len(rows) - 1:
+                tile = tile[..., :-y_blend[i], :]
+            if j < len(row) - 1:
+                tile = tile[..., :, :-x_blend[j]]
+            out.append(tile)
+        out_rows.append(torch.cat(out, dim=-1))
+    return torch.cat(out_rows, dim=-2)
+
+
+def tiled_canvas(z: torch.Tensor, decode: Callable[[torch.Tensor], torch.Tensor],
+                 cell_px: int, tile_size: int, blend: int) -> torch.Tensor:
+    """Decode ``z``'s spatial extent as overlapping tiles, cross-fading the seams.
+
+    ``decode(tile)`` answers the pixels of one tile, ``cell_px`` of them to a latent
+    cell. Each tile is a grid of its own, which keeps every tile's rope span inside the
+    range the decoder was trained on, and only one row of tiles is alive at a time:
+    a tile can only blend against the row above it and the tile to its left.
+    """
+    height, width = z.shape[-2] * cell_px, z.shape[-1] * cell_px
+    y_at, y_len, y_blend = split_tiles(height, tile_size, blend, cell_px)
+    x_at, x_len, x_blend = split_tiles(width, tile_size, blend, cell_px)
+
+    canvas: Optional[torch.Tensor] = None
+    strip: Optional[torch.Tensor] = None
+    out_y = 0
+    for i, (y, yl) in enumerate(zip(y_at, y_len)):
+        row = z[..., y // cell_px:y // cell_px + yl // cell_px, :]
+        new_strip = None
+        left_tail = None
+        out_x = 0
+        tile_height = 0
+        for j, x in enumerate(x_at):
+            tile = decode(row[..., x // cell_px:x // cell_px + x_len[j] // cell_px])
+            if i > 0:
+                tile = blend_tiles(strip[..., :, x:x + x_len[j]], tile, y_blend[i - 1], dim=-2)
+            if j > 0:
+                tile = blend_tiles(left_tail, tile, x_blend[j - 1], dim=-1)
+            last_x = j == len(x_at) - 1
+            left_tail = None if last_x else tile[..., :, -x_blend[j]:].clone()
+            if not last_x:
+                tile = tile[..., :, :-x_blend[j]]
+            last_y = i == len(y_at) - 1
+            if not last_y:
+                if new_strip is None:
+                    new_strip = torch.empty((*tile.shape[:-2], y_blend[i], width),
+                                            dtype=tile.dtype, device=tile.device)
+                new_strip[..., :, out_x:out_x + tile.shape[-1]] = tile[..., -y_blend[i]:, :]
+                tile = tile[..., :-y_blend[i], :]
+            if canvas is None:
+                canvas = torch.empty((*tile.shape[:-2], height, width),
+                                     dtype=tile.dtype, device=tile.device)
+            canvas[..., out_y:out_y + tile.shape[-2], out_x:out_x + tile.shape[-1]].copy_(tile)
+            tile_height = tile.shape[-2]
+            out_x += tile.shape[-1]
+        strip = new_strip
+        out_y += tile_height
+    return canvas
+
+
+# --------------------------------------------------------------------------- temporal plan
+
+
+@dataclass(frozen=True)
+class TemporalPlan:
+    """How the video codec walks a latent's frames on the way out.
+
+    The encoder is causal with a temporal stride of ``ratio_t``, so a decoded clip opens
+    with ``pre_padding`` frames standing in for context it does not have, and they are
+    dropped. Consecutive clips therefore re-read ``overlap_tokens`` latent frames and
+    cross-fade the ``frame_overlap`` pixels that buys, so no frame is ever decoded cold;
+    the same overlap is what costs the sequence ``token_drop`` tokens at the end.
+
+    :attr:`frames` is the closed form of that walk: the first latent of every group of
+    ``chunk_tokens`` carries the frame the padding took from it and the rest carry
+    ``ratio_t`` each, which is the same schedule the DiT lays its own time axis out by.
+    """
+
+    latent_t: int
+    ratio_t: int
+    chunk_tokens: int
+    pre_padding: int
+    overlap_tokens: int
+    frame_overlap: int
+    pad_tokens: int
+    clips: int
+    frames: int
+
+    @classmethod
+    def of(cls, latent_t: int, clip_length: int = CLIP_LENGTH, token_drop: int = TOKEN_DROP,
+           ratio_t: int = TIME_RATIO) -> "TemporalPlan":
+        pre_padding = (-clip_length) % ratio_t
+        chunk = -(-clip_length // ratio_t)
+        overlap = (-token_drop) % chunk
+        padded = latent_t + token_drop
+        pad = (-padded) % chunk
+        clips = (padded + pad) // chunk - int(token_drop > 0)
+        if clips < 1:
+            # Too few tokens for one clip: pad a whole clip's worth more, because a clip
+            # decoded cold is worse than a padded one.
+            pad += chunk
+            clips = 1
+        head = clip_length - (chunk - 1) * ratio_t
+        whole, rest = divmod(latent_t, chunk)
+        return cls(
+            latent_t=latent_t, ratio_t=ratio_t, chunk_tokens=chunk, pre_padding=pre_padding,
+            overlap_tokens=overlap, frame_overlap=max(overlap * ratio_t - pre_padding, 0),
+            pad_tokens=pad, clips=clips,
+            frames=whole * clip_length + (0 if rest == 0 else head + ratio_t * (rest - 1)),
+        )
+
+
+# --------------------------------------------------------------------------- video codec
+
+
+class AutoencoderKLH3Video(nn.Module):
+    """H3 video codec: canonical ``[B, 24, t, h, w]`` latents, frames in and out of
+    the range ``[-1, 1]``.
+
+    A decode is chunked in time and tiled in space, and hands frames out as they finish:
+    the whole clip never exists at once, which on a 124-frame clip is the difference
+    between a working set and an allocator error.
+    """
+
+    compute_dtype = COMPUTE_DTYPE
+
+    z_dim = Z_CHANNELS
+    spatial_compression = math.prod(SPACE_DOWN)
+    temporal_compression = math.prod(TIME_DOWN)
+    pixel_channels = 3
+
+    def __init__(self, ch: int = CH, ch_mult=CH_MULT, space_down=SPACE_DOWN,
+                 time_down=TIME_DOWN, dim: int = 2048, num_layers: int = 36,
+                 clip_length: int = CLIP_LENGTH, token_drop: int = TOKEN_DROP,
+                 latents_mean=LATENTS_MEAN, latents_std=LATENTS_STD,
+                 tile_size: int = TILE_SIZE, tile_blend: int = TILE_BLEND):
+        """The release's geometry by default, as :func:`load_h3_video_vae` checks it; the
+        arguments exist so the codec can be exercised at a fraction of the width.
+
+        The decoder un-patchifies exactly what the encoder's strides compressed, so the
+        two patch sizes are read off ``space_down``/``time_down`` rather than stated
+        again: a file disagreeing with them is not this codec.
+        """
+        super().__init__()
+        self.patch_size = math.prod(space_down)
+        self.patch_size_t = math.prod(time_down)
+        self.clip_length = clip_length
+        self.token_drop = token_drop
+        self.tile_size = tile_size
+        self.tile_blend = tile_blend
+
+        self.encoder = EncoderFCN3D(ch=ch, ch_mult=ch_mult, space_down=space_down,
+                                    time_down=time_down)
+        self.quant_conv = nn.Conv3d(2 * Z_CHANNELS, 2 * Z_CHANNELS, 1)
+        self.post_quant_conv = nn.Conv3d(Z_CHANNELS, Z_CHANNELS, 1)
+        self.decoder = ViTDecoder(self.patch_size, dim=dim, num_layers=num_layers,
+                                  patch_size_t=self.patch_size_t,
+                                  rope_dim_ratio=VIDEO_ROPE_DIM_RATIO, rope_axes=3)
+
+        self.register_buffer("latents_mean", torch.tensor(list(latents_mean)).view(1, -1, 1, 1, 1),
+                             persistent=True)
+        self.register_buffer("latents_std", torch.tensor(list(latents_std)).view(1, -1, 1, 1, 1),
+                             persistent=True)
+        self.register_buffer("pixel_mean", torch.tensor(PIXEL_MEAN).view(1, 3, 1, 1, 1), persistent=False)
+        self.register_buffer("pixel_std", torch.tensor(PIXEL_STD).view(1, 3, 1, 1, 1), persistent=False)
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return next(self.decoder.parameters()).dtype
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.decoder.parameters()).device
+
+    def decode_output_shape(self, latent_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+        """The pixel shape a latent of this shape decodes to."""
+        batch, _, frames, height, width = latent_shape
+        return (batch, self.pixel_channels,
+                TemporalPlan.of(frames, self.clip_length, self.token_drop,
+                             ratio_t=self.patch_size_t).frames,
+                height * self.patch_size, width * self.patch_size)
+
+    def _encode_moments(self, x: torch.Tensor) -> torch.Tensor:
+        return self.quant_conv(self.encoder(x))
+
+    def _tiled_moments(self, x: torch.Tensor) -> torch.Tensor:
+        return tiled_moments(x, self._encode_moments, self.patch_size,
+                             self.tile_size, self.tile_blend)
+
+    def _decode_pixels(self, z: torch.Tensor) -> torch.Tensor:
+        """Un-normalized latent -> raw decoder pixels of the whole clip."""
+        return self.decoder(self.post_quant_conv(z))
+
+    def _tiled_decode(self, z: torch.Tensor, frames: slice = slice(None)) -> torch.Tensor:
+        """One clip's latent -> pixels, tiled spatially, keeping only ``frames``.
+
+        The frames are dropped per tile rather than per clip: a tile's pixels are the
+        largest thing this decode holds.
+        """
+        return tiled_canvas(z, lambda tile: self._decode_pixels(tile)[:, :, frames],
+                            self.patch_size, self.tile_size, self.tile_blend)
+
+    def decode_to_pixel_frames(self, latents: torch.Tensor) -> Iterator[torch.Tensor]:
+        """Canonical latent -> clamped frames, handed out as they are decoded.
+
+        Each clip is decoded with its predecessor's tail re-read and cross-faded in, and
+        opens by dropping the padding frames a clip always stands in for.
+        """
+        z = latents.to(self.device, self.dtype)
+        z = z * self.latents_std.to(z) + self.latents_mean.to(z)
+
+        plan = TemporalPlan.of(z.shape[2], self.clip_length, self.token_drop,
+                                 ratio_t=self.patch_size_t)
+
+        if z.shape[2] == 1:
+            # A lone latent decodes badly on its own: the decoder only ever saw a frame
+            # inside a clip, so it is decoded as a clip of copies and the frame it stands
+            # for is kept from past the warm-up.
+            clip = z.expand(-1, -1, plan.chunk_tokens, -1, -1)
+            frame = slice(plan.pre_padding, plan.pre_padding + 1)
+            yield self._finalize(self._tiled_decode(clip, frames=frame))
+            return
+
+        if plan.pad_tokens:
+            z = torch.cat([z, z[:, :, -1:].expand(-1, -1, plan.pad_tokens, -1, -1)], dim=2)
+
+        left = plan.frames
+        held: Optional[torch.Tensor] = None
+        clip_frames = plan.chunk_tokens * plan.ratio_t
+
+        for i in range(plan.clips):
+            start = i * plan.chunk_tokens
+            clip = z[:, :, start:start + plan.chunk_tokens + plan.overlap_tokens]
+            decoded = self._tiled_decode(clip)
+            pieces = [decoded[:, :, plan.pre_padding:clip_frames]]
+            if plan.overlap_tokens:
+                pieces.append(decoded[:, :, clip_frames + plan.pre_padding:])
+
+            for j, piece in enumerate(pieces):
+                if j == 0:
+                    if held is not None:
+                        piece = blend_tiles(held, piece, plan.frame_overlap, dim=2)
+                        held = None
+                    keep, left = _take(piece, left)
+                    if keep is not None:
+                        yield self._finalize(keep)
+                else:
+                    held = piece
+            if held is not None:
+                keep, left = _take(held, left)
+                if keep is not None:
+                    yield self._finalize(keep)
+
+    def decode_to_pixels(self, latents: torch.Tensor) -> torch.Tensor:
+        """Canonical latent -> the whole clip. Streams; it does not hold it."""
+        return torch.cat(list(self.decode_to_pixel_frames(latents)), dim=2)
+
+    def encode_pixels_to_latents(self, pixels: torch.Tensor) -> torch.Tensor:
+        """Frames in ``[-1, 1]`` -> the normalized canonical latent.
+
+        The posterior *mean*, where the image codec takes a sample: a clip is encoded
+        once and a keyframe is only ever the first latent of one.
+        """
+        x = pixels.to(self.device, self.dtype)
+        if x.ndim == 4:
+            x = x.unsqueeze(2)
+        x = ((x + 1.0) * 0.5 - self.pixel_mean.to(x)) / self.pixel_std.to(x)
+
+        moments = self._encode(x).float()
+        mean = moments[:, :self.z_dim]
+        return (mean - self.latents_mean.to(mean)) / self.latents_std.to(mean)
+
+    def _encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Pixel-normalized frames -> posterior moments, a clip at a time."""
+        if x.shape[2] == 1:
+            return self._tiled_moments(x)[:, :, -1:]
+
+        clips = []
+        for start in range(0, x.shape[2], self.clip_length):
+            clip = x[:, :, start:start + self.clip_length]
+            short = self.clip_length - clip.shape[2]
+            if short > 0:
+                clip = torch.cat([clip, clip[:, :, -1:].expand(-1, -1, short, -1, -1)], dim=2)
+            clips.append(self._tiled_moments(clip))
+
+        moments = torch.cat(clips, dim=2)
+        return moments[:, :, :-self.token_drop] if self.token_drop else moments
+
+    def _finalize(self, pixels: torch.Tensor) -> torch.Tensor:
+        """Codec-space pixels -> the ``[-1, 1]`` the pipeline works in."""
+        pixels = (pixels * self.pixel_std.to(pixels) + self.pixel_mean.to(pixels)) * 2.0 - 1.0
+        return pixels.clamp(-1.0, 1.0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.decode_to_pixels(self.encode_pixels_to_latents(x))
+
+
+def _take(piece: torch.Tensor, left: int) -> tuple[Optional[torch.Tensor], int]:
+    """The first ``left`` frames of ``piece``, and what is left of the budget after it.
+
+    The plan says how many frames a latent is owed; the last clip's tail is padding that
+    has to be trimmed to that promise rather than streamed past it.
+    """
+    if left <= 0 or piece.shape[2] <= 0:
+        return None, left
+    keep = piece[:, :, :left]
+    return keep, left - keep.shape[2]
+
+
+# --------------------------------------------------------------------------- image codec
 
 
 class AutoencoderKLH3Image(nn.Module):
@@ -418,7 +814,7 @@ class AutoencoderKLH3Image(nn.Module):
         self.encoder = EncoderFCN3D(ch=ch, ch_mult=ch_mult)
         self.quant_conv = nn.Conv3d(2 * Z_CHANNELS, 2 * Z_CHANNELS, 1)
         self.post_quant_conv = nn.Conv2d(Z_CHANNELS, Z_CHANNELS, 1)
-        self.decoder = ViTImageDecoder(self.patch_size, dim=dim, num_layers=num_layers)
+        self.decoder = ViTDecoder(self.patch_size, dim=dim, num_layers=num_layers)
 
         self.register_buffer("latents_mean", torch.tensor(LATENTS_MEAN).view(1, -1, 1, 1), persistent=False)
         self.register_buffer("latents_std", torch.tensor(LATENTS_STD).view(1, -1, 1, 1), persistent=False)
@@ -442,76 +838,12 @@ class AutoencoderKLH3Image(nn.Module):
         return self.decoder(self.post_quant_conv(z))
 
     def _tiled_moments(self, x: torch.Tensor) -> torch.Tensor:
-        """Encode each tile on its own, then cross-fade the seams in latent space."""
-        p = self.patch_size
-        y_at, y_len, y_blend = split_tiles(x.shape[-2], self.tile_size, self.tile_blend, p)
-        x_at, x_len, x_blend = split_tiles(x.shape[-1], self.tile_size, self.tile_blend, p)
-
-        rows = [[self._encode_moments(x[..., i:i + li, j:j + lj])
-                 for j, lj in zip(x_at, x_len)] for i, li in zip(y_at, y_len)]
-        y_blend = [b // p for b in y_blend]
-        x_blend = [b // p for b in x_blend]
-
-        out_rows = []
-        for i, row in enumerate(rows):
-            out = []
-            for j, tile in enumerate(row):
-                if i > 0:
-                    tile = blend_tiles(rows[i - 1][j], tile, y_blend[i - 1], dim=-2)
-                if j > 0:
-                    tile = blend_tiles(row[j - 1], tile, x_blend[j - 1], dim=-1)
-                if i < len(rows) - 1:
-                    tile = tile[..., :-y_blend[i], :]
-                if j < len(row) - 1:
-                    tile = tile[..., :, :-x_blend[j]]
-                out.append(tile)
-            out_rows.append(torch.cat(out, dim=-1))
-        return torch.cat(out_rows, dim=-2)
+        return tiled_moments(x, self._encode_moments, self.patch_size,
+                             self.tile_size, self.tile_blend)
 
     def _tiled_decode(self, z: torch.Tensor) -> torch.Tensor:
-        """Decode each latent tile on its own and cross-fade the seams in pixels.
-
-        Each tile is decoded as a frame of its own, which keeps every tile's rope span
-        inside the range the decoder was trained on.
-        """
-        p = self.patch_size
-        height, width = z.shape[-2] * p, z.shape[-1] * p
-        y_at, y_len, y_blend = split_tiles(height, self.tile_size, self.tile_blend, p)
-        x_at, x_len, x_blend = split_tiles(width, self.tile_size, self.tile_blend, p)
-
-        canvas = torch.empty((z.shape[0], self.pixel_channels, height, width),
-                             dtype=z.dtype, device=z.device)
-        strip: Optional[torch.Tensor] = None
-        out_y = 0
-        for i, (y, yl) in enumerate(zip(y_at, y_len)):
-            row = z[..., y // p:y // p + yl // p, :]
-            new_strip = None
-            left_tail = None
-            out_x = 0
-            tile_height = 0
-            for j, x in enumerate(x_at):
-                tile = self._decode_pixels(row[..., x // p:x // p + x_len[j] // p])
-                if i > 0:
-                    tile = blend_tiles(strip[..., :, x:x + x_len[j]], tile, y_blend[i - 1], dim=-2)
-                if j > 0:
-                    tile = blend_tiles(left_tail, tile, x_blend[j - 1], dim=-1)
-                last_x = j == len(x_at) - 1
-                left_tail = None if last_x else tile[..., :, -x_blend[j]:].clone()
-                if not last_x:
-                    tile = tile[..., :, :-x_blend[j]]
-                last_y = i == len(y_at) - 1
-                if not last_y:
-                    if new_strip is None:
-                        new_strip = torch.empty((*tile.shape[:-2], y_blend[i], width),
-                                                dtype=tile.dtype, device=tile.device)
-                    new_strip[..., :, out_x:out_x + tile.shape[-1]] = tile[..., -y_blend[i]:, :]
-                    tile = tile[..., :-y_blend[i], :]
-                canvas[..., out_y:out_y + tile.shape[-2], out_x:out_x + tile.shape[-1]].copy_(tile)
-                tile_height = tile.shape[-2]
-                out_x += tile.shape[-1]
-            strip = new_strip
-            out_y += tile_height
-        return canvas
+        return tiled_canvas(z, self._decode_pixels, self.patch_size,
+                            self.tile_size, self.tile_blend)
 
     def encode_pixels_to_latents(self, pixels: torch.Tensor) -> torch.Tensor:
         """``[B, 3, H, W]`` in [-1, 1] -> the normalized canonical latent.
@@ -592,12 +924,114 @@ def load_h3_image_vae(
                       dtype=dtype)
 
 
+#: What the video checkpoint calls its own geometry inside ``__metadata__``.
+VIDEO_GEOMETRY_SECTION = "minimax_h3_video_vae"
+
+#: The video codec's own claim. The Sol decoder is a different module tree —
+#: ``decoder.blocks.N``, no ``x_embedder`` — so it fails this one on its face rather
+#: than half-loading.
+H3_VIDEO_SIGNATURE = Signature("H3 video codec",
+                               keys=("decoder.x_embedder.weight",
+                                     "decoder.transformer_blocks.0.attn.to_qkv.weight",
+                                     "encoder.conv_in.weight"))
+
+
+def _video_geometry(header: Header) -> dict:
+    """The widths, the depth and the clip policy, as the file states them.
+
+    The released checkpoint carries a :data:`VIDEO_GEOMETRY_SECTION` metadata section with
+    the encoder's stage widths and strides, the decoder's rope and the clip length, and
+    ships its latent statistics as tensors. A file with no such section — a re-export, or
+    a test fixture — is taken to be the release's geometry, which is what the module
+    constants say it is.
+    """
+    conv_in = header.shapes.get("encoder.conv_in.weight")
+    embed = header.shapes.get("decoder.x_embedder.weight")
+    if conv_in is None or conv_in[1:] != (3, 3, 3, 3):
+        raise ValueError(
+            f"{header.path}: 'encoder.conv_in.weight' taking 3 pixel channels is "
+            "missing (not an H3 video VAE?)"
+        )
+    if embed is None or embed[1] != Z_CHANNELS:
+        raise ValueError(
+            f"{header.path}: 'decoder.x_embedder.weight' taking {Z_CHANNELS} latent "
+            "channels is missing (not an H3 video VAE?)"
+        )
+
+    config = header.metadata_json(VIDEO_GEOMETRY_SECTION)
+    meta = config.get("source_config") or {}
+    geometry = {
+        "ch": conv_in[0],
+        "ch_mult": tuple(meta.get("ch_mult", CH_MULT)),
+        "space_down": tuple(meta.get("space_down", SPACE_DOWN)),
+        "time_down": tuple(meta.get("time_down", TIME_DOWN)),
+        "dim": embed[0],
+        "num_layers": header.block_count("decoder.transformer_blocks."),
+        "clip_length": config.get("vae_clip_length", CLIP_LENGTH),
+        "token_drop": config.get("vae_token_drop", TOKEN_DROP),
+    }
+
+    # The decoder answers the pixels one latent cell holds, so its output width is the
+    # encoder's own compression. A file that disagrees pairs an encoder with a decoder
+    # this module cannot build for it.
+    out = header.shapes.get("decoder.proj_out.weight")
+    pixels = (AutoencoderKLH3Video.pixel_channels * math.prod(geometry["time_down"])
+              * math.prod(geometry["space_down"]) ** 2)
+    if out is None or out[0] != pixels:
+        raise ValueError(
+            f"{header.path}: 'decoder.proj_out.weight' answering {pixels} pixels per "
+            "latent cell is missing (not an H3 video VAE?)"
+        )
+    return geometry
+
+
+def _video_state(state_dict: dict, model: torch.nn.Module) -> dict:
+    """Reshape the shipped latent statistics to the codec's broadcast-ready layout."""
+    for name in ("latents_mean", "latents_std"):
+        if name in state_dict:
+            state_dict[name] = state_dict[name].view(1, -1, 1, 1, 1)
+    return state_dict
+
+
+def load_h3_video_vae(
+    vae_path: str,
+    device: Union[str, torch.device],
+    dtype: Optional[torch.dtype] = None,
+) -> AutoencoderKLH3Video:
+    """Load the H3 video VAE from ``vae_path``.
+
+    The codec runs in its own :attr:`AutoencoderKLH3Video.compute_dtype`; ``dtype`` is an
+    override, not a request for FP32.
+    """
+
+    def construct(header: Header) -> AutoencoderKLH3Video:
+        geometry = _video_geometry(header)
+        logger.info("H3 video VAE: encoder %d channels, %d-wide %d-layer decoder, "
+                    "%d-frame clips dropping %d tokens",
+                    geometry["ch"], geometry["dim"], geometry["num_layers"],
+                    geometry["clip_length"], geometry["token_drop"])
+        return AutoencoderKLH3Video(**geometry)
+
+    return load_codec(vae_path, device,
+                      what="H3 video VAE",
+                      signature=H3_VIDEO_SIGNATURE,
+                      construct=construct,
+                      state_map=_video_state,
+                      dtype=dtype)
+
+
 __all__ = [
     "AutoencoderKLH3Image",
+    "AutoencoderKLH3Video",
+    "TemporalPlan",
     "load_h3_image_vae",
+    "load_h3_video_vae",
+    "CLIP_LENGTH",
     "ENCODE_SEED",
     "LATENTS_MEAN",
     "LATENTS_STD",
     "PIXEL_MEAN",
     "PIXEL_STD",
+    "TIME_RATIO",
+    "TOKEN_DROP",
 ]

@@ -20,7 +20,12 @@ from .qwen_image import (
 from .flux import AutoencoderKLFlux, load_flux_vae
 from .flux2 import AutoencoderKLFlux2, load_flux2_vae
 from .mage_flow import AutoencoderKLMageFlow, load_mage_family_vae, load_mage_vae
-from .h3 import AutoencoderKLH3Image, load_h3_image_vae
+from .h3 import (
+    AutoencoderKLH3Image,
+    AutoencoderKLH3Video,
+    load_h3_image_vae,
+    load_h3_video_vae,
+)
 from .wan22 import AutoencoderKLWan22, load_wan22_vae
 from .wan_video import AutoencoderKLWanVideo, load_wan_video_vae
 
@@ -37,7 +42,9 @@ __all__ = [
     "load_mage_family_vae",
     "load_mage_vae",
     "AutoencoderKLH3Image",
+    "AutoencoderKLH3Video",
     "load_h3_image_vae",
+    "load_h3_video_vae",
     "AutoencoderKLWan22",
     "load_wan22_vae",
     "AutoencoderKLWanVideo",
