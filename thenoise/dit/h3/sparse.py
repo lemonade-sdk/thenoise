@@ -1,59 +1,47 @@
-"""Sol block-sparse attention on the trunk: what it takes to run it, and with what numbers.
+"""Sol attention on the MiniMax-H3 trunk: which runs route, and with what numbers.
 
-``comfy_kitchen.sol_attn`` routes each 64-token query block to a subset of key blocks
-exactly and covers the rest with one pooled term per block, so the whole sequence still
-carries the softmax denominator. The routing is training-free — adaptive thresholding on a
-proxy row — which is why it can be turned on for weights that never saw it, and why the
-question it raises is a quality question about a finished clip rather than a checkpoint
-question.
+The generic half — the kernel's rules, its operand order, what a threshold kept — is in
+:mod:`thenoise.utils.sol_attention`. What is H3's own is short: the sinks, because only a
+packing can say which rows are conditioning, and the family rules, because only this model
+knows what routing did to its own output.
 
-It is on whenever it applies. There is no request for it and no way to ask for dense: a run
-whose tensors fit the kernel uses it, and logs the decision once. What decides is here.
+It is on whenever it applies and there is no request for it: a run whose tensors fit uses
+it and logs the decision, token count and sink ranges and the kept fraction, or logs why it
+stayed dense. If device testing turns up a failure the answer is a per-request knob added
+then, not a hatch installed now.
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import torch
-from comfy_kitchen import sol_attn, sol_attn_is_available
+
+from thenoise.utils.sol_attention import (BLOCK, DTYPES, HEAD_DIM, TOKEN_AUG_MAX,
+                                          SolAttention, available)
 
 logger = logging.getLogger(__name__)
 
-#: The kernel's query and key block, in tokens: sinks are counted in these.
-BLOCK = 64
-#: The head width the fused backends are built for. The trunk is 56x128; the clip decoder
-#: is 64 wide, which is why this is a trunk feature and not an engine-wide one.
-HEAD_DIM = 128
-#: Routing threshold in sigmas of the proxy row. Higher routes fewer key blocks exactly:
-#: cheaper and less accurate. 1.3 keeps about 11 % of them.
+#: Routing threshold in sigmas of the proxy row: how far a key block's mean score has to
+#: stand above an independence null to be attended exactly rather than pooled. It is a
+#: significance level, not a budget, so the fraction it keeps moves with the content —
+#: see :func:`thenoise.utils.sol_attention.routing_stats`.
 TAU = 1.3
-#: Tokens per query block routed individually rather than as part of a block — the
-#: highest-scoring ones outside the routed subset, and the kernel's own default for H3.
-TOKEN_AUG = 256
 #: Below this the dense path is faster. The kernel names the same crossover; on gfx1151 the
 #: kernel already wins at 1.3 k tokens, by 2 ms, which is not worth an opinion about.
 MIN_TOKENS = 12288
 #: Percents of the schedule inside which routing is used; the earliest steps stay dense,
-#: where the run decides its structure. Converted to sigmas on the run's own schedule, so
-#: what they protect is steps rather than a sigma no shift would reach.
+#: where the run decides its structure. The reference defaults to 0.2; the practice in the
+#: literature (SVG2, carried by later work) is 0.3, which on a 4-step run is the whole run.
 WINDOW = (0.2, 1.0)
-#: What the fused backends read. Every weight mode this engine runs computes in one of
-#: them — an int8-convrot trunk hands attention bf16 operands — so this is a question
-#: about activations, not about how the checkpoint stores its weights.
-DTYPES = (torch.bfloat16, torch.float16)
-
-
-@dataclass(frozen=True)
-class SolAttention:
-    """What one run's trunk calls the kernel with. Both sink pairs are block indices."""
-
-    tau: float
-    token_aug: int
-    sink_blocks: Tuple[int, int]
-    sink_q: Tuple[int, int]
+#: Stills do not route. Routed at 16,384 tokens (a 4096x4096 canvas) H3-Image degraded
+#: visibly and badly, and the mechanism is consistent with that: the threshold is fitted to
+#: proxy rows that look near-Gaussian, which is what video scores look like and a smooth
+#: spatial field does not — on smooth operands it keeps only the always-exact diagonal and
+#: stops responding to tau at all. Revisit with a kept-fraction readout from a real image
+#: run, not with a different tau.
+STILL_HELD_DENSE = "a still: routing measured visibly degrading at 16,384 tokens"
 
 
 def sol_sinks(layout, *, audio_rows_dense: bool = True
@@ -95,18 +83,23 @@ def window_sigmas(sample_sigmas: torch.Tensor,
 
 
 def sol_plan(*, layout, tokens: int, dtype: torch.dtype, head_dim: int, device,
-             sigma: float, sample_sigmas: Optional[torch.Tensor],
-             cached: bool) -> Optional[SolAttention]:
+             sigma: float, sample_sigmas: Optional[torch.Tensor], cached: bool,
+             held_dense: Optional[str] = None) -> Optional[SolAttention]:
     """This run's kernel arguments, or ``None`` to keep the step dense.
 
     The whole step takes one answer, decided outside the compiled blocks: the alternative is
     reading a per-step sigma inside them, which dynamo would guard on and recompile every
     block of every step. The first transition from dense to sparse recompiles once, which is
     the cost the window buys and is paid whether or not the window exists.
+
+    ``held_dense`` is a family's own veto, stated as the reason a log should give.
     """
     def dense(reason: str) -> None:
         _log_once(reason, "dense at %d tokens: %s", tokens, reason)
 
+    if held_dense is not None:
+        dense(held_dense)
+        return None
     if tokens < MIN_TOKENS:
         dense(f"under {MIN_TOKENS} tokens")
         return None
@@ -130,37 +123,19 @@ def sol_plan(*, layout, tokens: int, dtype: torch.dtype, head_dim: int, device,
         dense(f"layout describes {layout.seq_len} rows, the call has {tokens}")
         return None
     if sample_sigmas is None:
-        dense("no schedule to place the start/end window on")
+        dense("no schedule to place the window on")
         return None
     high, low = window_sigmas(sample_sigmas)
     if sigma > high or sigma < low:
         dense(f"sigma {sigma:.3g} outside the {WINDOW[0]}-{WINDOW[1]} window")
         return None
-    if not sol_attn_is_available(device):
+    if not available(device):
         dense("no compiled sol_attn kernel for this GPU")
         return None
     sinks, rows = sol_sinks(layout)
     _log_once("sparse", "sol attention: %d tokens, tau %g, sinks %s/%s", tokens, TAU,
               sinks, rows)
-    return SolAttention(TAU, TOKEN_AUG, sinks, rows)
-
-
-@torch._dynamo.disable()
-def sol_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                  plan: SolAttention) -> torch.Tensor:
-    """The kernel, on ``[B, T, H, D]`` operands, returning the same order.
-
-    An island of its own because it is an external kernel the compiled block has no reason
-    to trace, and because its arguments are block counts in Python.
-
-    The operands arrive as the fused ``qkv_proj``'s three slices, so a token's pitch is
-    ``3 * H * D`` rather than ``H * D``. The kernel reads that: strided and packed operands
-    come back bit-identical on gfx1151, at a length that is not a multiple of the block and
-    a length that is. Nothing is copied on the way in, which the dense path does not get to
-    say about itself — see :func:`thenoise.utils.attention.uniform_layout`.
-    """
-    return sol_attn(q, k, v, tau=plan.tau, sink_blocks=list(plan.sink_blocks),
-                    sink_q=list(plan.sink_q), token_aug=plan.token_aug)
+    return SolAttention(TAU, TOKEN_AUG_MAX, sinks, rows)
 
 
 _LOGGED = set()

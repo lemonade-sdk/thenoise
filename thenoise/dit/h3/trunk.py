@@ -14,13 +14,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from thenoise.dit.h3.layout import MODALITIES, PATCH_SIZE, Layout
-from thenoise.dit.h3.sparse import SolAttention, sol_attention
 from thenoise.dit.kvcache import KVBuffers, attend
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.fp32_linear import Fp32Linear
 from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.rms_norm import RMSNorm
 from thenoise.utils.rope import RopeCache, apply_rope_split_half, split_half_rope_axes
+from thenoise.utils.sol_attention import SolAttention, sol_attention
 
 #: Whether this model's blocks want the relay store path (``thenoise.utils.layout``).
 RELAY_STORES = True

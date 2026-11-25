@@ -13,7 +13,7 @@ from typing import Optional, Sequence
 import torch
 
 from thenoise.dit.h3.layout import COND_TIMESTEP, Layout, pad_to_patch
-from thenoise.dit.h3.sparse import sol_plan
+from thenoise.dit.h3.sparse import STILL_HELD_DENSE, sol_plan
 from thenoise.dit.h3.trunk import FinalLayer, H3DiT, H3Params, _spans
 from thenoise.dit.kvcache import KVCache, cache_mode
 from thenoise.utils.dynamo import mark_token_axis
@@ -116,7 +116,8 @@ class H3ImageDiT(H3DiT):
         # cached run's keys are the buffers, which no layout describes, so it stays dense.
         sol = sol_plan(layout=layout, tokens=h.shape[1], dtype=h.dtype, device=device,
                        head_dim=self.params.head_dim, sigma=sigma,
-                       sample_sigmas=sample_sigmas, cached=mode != "off")
+                       sample_sigmas=sample_sigmas, cached=mode != "off",
+                       held_dense=STILL_HELD_DENSE)
         for i, block in enumerate(self.blocks):
             # Buffers take the stream's dtype: ``attend`` copies k/v into them, and a
             # narrower buffer would hand attention a key narrower than the query.

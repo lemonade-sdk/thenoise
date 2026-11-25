@@ -15,13 +15,17 @@ import pytest
 import torch
 
 import thenoise.dit.h3.av as av
+import thenoise.dit.h3.image as image_mod
 import thenoise.dit.h3.sparse as sparse
 import thenoise.dit.h3.trunk as trunk
+import thenoise.utils.sol_attention as sol
 from test_dit_h3_av import _av_dit, _av_layout, _run
+from test_dit_h3_image import TINY_SIGMAS, _forward, _tiny_dit
 from thenoise.dit.h3.layout import Layout
-from thenoise.dit.h3.sparse import (BLOCK, DTYPES, HEAD_DIM, MIN_TOKENS, TAU, TOKEN_AUG,
-                                    WINDOW, SolAttention, sol_plan, sol_sinks,
-                                    window_sigmas)
+from thenoise.dit.h3.sparse import (MIN_TOKENS, STILL_HELD_DENSE, TAU, WINDOW, SolAttention,
+                                    sol_plan, sol_sinks, window_sigmas)
+from thenoise.utils.sol_attention import (BLOCK, DTYPES, HEAD_DIM, TOKEN_AUG_MAX,
+                                          routing_stats)
 
 CUDA = SimpleNamespace(type="cuda")
 CPU = SimpleNamespace(type="cpu")
@@ -49,11 +53,12 @@ def _gate_small_enough(monkeypatch):
 @pytest.fixture(autouse=True)
 def _fresh_log():
     sparse.reset_log()
+    sol.reset_probes()
 
 
 @pytest.fixture
 def kernel_present(monkeypatch):
-    monkeypatch.setattr(sparse, "sol_attn_is_available", lambda device: True)
+    monkeypatch.setattr(sparse, "available", lambda device: True)
 
 
 def _plan(**over) -> SolAttention:
@@ -123,7 +128,7 @@ def test_a_two_step_schedule_leaves_every_step_inside_the_window():
 
 
 def test_a_long_bf16_clip_on_a_gpu_with_the_kernel_goes_sparse(kernel_present):
-    assert _plan() == SolAttention(TAU, TOKEN_AUG, *sol_sinks(_lay()))
+    assert _plan() == SolAttention(TAU, TOKEN_AUG_MAX, *sol_sinks(_lay()))
 
 
 def test_fp16_operands_go_sparse_too(kernel_present):
@@ -154,15 +159,93 @@ def test_a_layout_that_does_not_describe_the_call_keeps_it_dense(kernel_present)
 
 
 def test_no_compiled_kernel_means_dense(monkeypatch):
-    monkeypatch.setattr(sparse, "sol_attn_is_available", lambda device: False)
+    monkeypatch.setattr(sparse, "available", lambda device: False)
     assert _plan() is None
+
+
+def test_a_still_is_held_dense_on_every_other_qualifying_detail(kernel_present, caplog):
+    """The same run, one argument different: the family says no.
+
+    Not the token gate in disguise — a 4096x4096 canvas clears the crossover with room to
+    spare, which is how it came to be routed and measured degrading.
+    """
+    caplog.set_level("INFO")
+    assert _plan() is not None
+    assert _plan(held_dense=STILL_HELD_DENSE) is None
+    assert any("a still" in r.getMessage() for r in caplog.records)
+
+
+def test_the_image_trunk_asks_to_be_held_dense(monkeypatch):
+    dit = _tiny_dit()
+    seen = {}
+    monkeypatch.setattr(image_mod, "sol_plan", lambda **kw: seen.update(kw) or None)
+    latent = torch.randn(1, dit.params.latents_dim, 6, 6)
+    _forward(dit, latent, 0.75, torch.randn(1, 5, dit.params.hidden_size),
+             Layout.image(5, 6, 6), sample_sigmas=torch.tensor(TINY_SIGMAS))
+    assert seen["held_dense"] == STILL_HELD_DENSE
+
+
+def test_the_av_trunk_leaves_that_veto_alone(monkeypatch):
+    """The reason is about stills; a clip must not inherit it."""
+    dit, lay = _av_dit(), _av_layout()
+    seen = {}
+    monkeypatch.setattr(av, "sol_plan", lambda **kw: seen.update(kw) or None)
+    _run(dit, lay)
+    assert "held_dense" not in seen
 
 
 def test_the_defaults_are_the_releases():
     """Pinned to the reference's, so a local edit is a decision and not a slip."""
-    assert (TAU, TOKEN_AUG, MIN_TOKENS, WINDOW) == (1.3, 256, 12288, (0.2, 1.0))
-    assert (HEAD_DIM, BLOCK) == (128, 64)
+    assert (TAU, MIN_TOKENS, WINDOW) == (1.3, 12288, (0.2, 1.0))
+    assert (HEAD_DIM, BLOCK, TOKEN_AUG_MAX) == (128, 64, 256)
     assert DTYPES == (torch.bfloat16, torch.float16)
+
+
+def test_the_kept_fraction_moves_with_tau_and_stops_at_the_forced_neighbourhood():
+    """The readout counts the kernel's own test, so a profile can be argued about."""
+    torch.manual_seed(0)
+    q, k = torch.randn(1, 512, 4, 128), torch.randn(1, 512, 4, 128)
+    low, high = routing_stats(q, k, 0.5), routing_stats(q, k, 4.0)
+    assert low.blocks == 8
+    assert low.routed > high.routed
+    assert high.routed == 0.0
+    # What the threshold keeps nothing of is still attended: one key block either side.
+    assert high.kept == pytest.approx((3 * high.blocks - 2) / high.blocks ** 2)
+    assert low.kept > high.kept
+
+
+def test_the_sink_ranges_are_part_of_the_kept_budget():
+    torch.manual_seed(0)
+    q, k = torch.randn(1, 512, 4, 128), torch.randn(1, 512, 4, 128)
+    assert routing_stats(q, k, 9.0, sink_blocks=(0, 8)).kept == 1.0
+    some = routing_stats(q, k, 9.0, sink_blocks=(0, 2)).kept
+    assert routing_stats(q, k, 9.0).kept < some < 1.0
+
+
+def test_the_probe_reports_once_per_shape(monkeypatch, caplog):
+    """One measurement per (threshold, length), because it is not free."""
+    caplog.set_level("INFO")
+    calls = []
+    monkeypatch.setattr(sol, "sol_attn",
+                        lambda q, k, v, **kw: calls.append(k.shape) or torch.zeros_like(q))
+    plan = SolAttention(TAU, TOKEN_AUG_MAX, (0, 2), (2, 4))
+    q, k, v = (torch.randn(1, 256, 2, 128, dtype=torch.bfloat16) for _ in range(3))
+    for _ in range(4):
+        sol.sol_attention(q, k, v, plan)
+    assert len(calls) == 4
+    assert len([r for r in caplog.records if "sol routing kept" in r.getMessage()]) == 1
+    assert sol.LAST_STATS.tokens == 256
+    sol.reset_probes()
+    sol.sol_attention(q, k, v, plan)
+    assert len([r for r in caplog.records if "sol routing kept" in r.getMessage()]) == 2
+
+
+def test_the_probe_can_be_switched_off(monkeypatch, caplog):
+    caplog.set_level("INFO")
+    monkeypatch.setattr(sol, "sol_attn", lambda q, k, v, **kw: torch.zeros_like(q))
+    sol.sol_attention(*(torch.randn(1, 128, 2, 128, dtype=torch.bfloat16) for _ in range(3)),
+                      SolAttention(TAU, probe=False))
+    assert not [r for r in caplog.records if "sol routing kept" in r.getMessage()]
 
 
 def test_a_run_says_why_once(kernel_present, caplog):
@@ -223,7 +306,7 @@ def test_dense_hands_the_backend_head_major_operands(monkeypatch):
 def test_the_sparse_branch_reaches_the_kernel_token_major(monkeypatch):
     backend = Backend(token_major=True)
     monkeypatch.setattr(trunk, "sol_attention", backend)
-    plan = SolAttention(TAU, TOKEN_AUG, (0, 1), (0, 1))
+    plan = SolAttention(TAU, TOKEN_AUG_MAX, (0, 1), (0, 1))
     _attention()(torch.randn(1, TOKENS, HIDDEN), _rope(), None, plan)
     q, k, v, handed = backend.args
     assert handed is plan
@@ -241,7 +324,7 @@ def test_the_two_branches_rotate_the_same_queries(monkeypatch):
     monkeypatch.setattr(trunk, "sol_attention", sparsed)
     x, rope = torch.randn(1, TOKENS, HIDDEN), _rope()
     _attention()(x, rope)
-    _attention()(x, rope, None, SolAttention(TAU, TOKEN_AUG, (0, 1), (0, 1)))
+    _attention()(x, rope, None, SolAttention(TAU, TOKEN_AUG_MAX, (0, 1), (0, 1)))
     for i in (0, 1, 2):
         assert torch.equal(dense.args[i].transpose(1, 2), sparsed.args[i])
 
@@ -251,7 +334,7 @@ def test_the_two_branches_rotate_the_same_queries(monkeypatch):
 
 def test_the_av_trunk_hands_the_steps_plan_to_every_block(monkeypatch):
     dit, lay = _av_dit(), _av_layout()
-    plan = SolAttention(TAU, TOKEN_AUG, (0, 2), (1, 2))
+    plan = SolAttention(TAU, TOKEN_AUG_MAX, (0, 2), (1, 2))
     seen = []
 
     def kernel(q, k, v, handed):
