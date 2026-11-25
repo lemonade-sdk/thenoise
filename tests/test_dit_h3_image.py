@@ -528,21 +528,11 @@ def test_a_prompt_without_pictures_is_all_text():
 def tiny_conditioner():
     from PIL import Image
 
-    from thenoise.dit.h3.encoder import H3TextEncoder
-    from thenoise.utils.text_encoder import (
-        PICTURE_LABEL,
-        QWEN25_TOKENIZER_CONFIG_DIR,
-        QWEN3_VL_TOKENIZER_OVERRIDES,
-        load_qwen3_vl_processor,
-        load_qwen3_vl_tokenizer,
-    )
+    from thenoise.dit.h3.encoder import H3TextEncoder, h3_tokenizer
+    from thenoise.utils.text_encoder import PICTURE_LABEL, load_qwen3_vl_processor
 
     model = _truncate_qwen3_vl(tiny_qwen_config(), 2).eval().requires_grad_(False)
-    tokenizer, _ = load_qwen3_vl_tokenizer(
-        QWEN25_TOKENIZER_CONFIG_DIR,
-        max_length=4096,
-        overrides=QWEN3_VL_TOKENIZER_OVERRIDES,
-    )
+    tokenizer = h3_tokenizer()
     encoder = H3TextEncoder(model, tokenizer, load_qwen3_vl_processor(tokenizer),
                     picture_label=PICTURE_LABEL)
     return encoder.eval(), Image.new("RGB", (64, 64), "white")
@@ -589,6 +579,33 @@ def test_the_conditioner_embeds_the_prompt_it_assembled(tiny_conditioner):
 
     again, _, again_tags = encoder.encode("make it red", [picture])
     assert torch.equal(again, embeds) and torch.equal(again_tags, tags)
+
+
+def test_the_releases_own_tokens_reach_the_model_whole(tiny_conditioner):
+    """`<d>` and the caption markers are one id each, at the ids the tokenizer ships.
+
+    Unregistered they are ordinary text, which reads the wrong embedding rows; a prompt
+    is allowed to contain them because the training data does.
+    """
+    from thenoise.utils.text_encoder import H3_SPECIAL_TOKENS
+
+    encoder, _ = tiny_conditioner
+    ids = encoder.processor(text=["<d>hello</d> <|caption_start|> keep <|cutoff|>"],
+                            images=None)["input_ids"][0]
+
+    for name in ("<d>", "</d>", "<|caption_start|>", "<|cutoff|>"):
+        assert ids.count(H3_SPECIAL_TOKENS[name]) == 1, name
+
+
+def test_a_special_token_that_lands_elsewhere_is_refused():
+    """The released ids are only free while the base table stops where it does."""
+    from thenoise.utils.text_encoder import add_fixed_special_tokens, load_tokenizer
+
+    tokenizer = load_tokenizer()
+    add_fixed_special_tokens(tokenizer, {"<nope>": 151669})
+
+    with pytest.raises(ValueError, match="elsewhere than the released ids"):
+        add_fixed_special_tokens(tokenizer, {"<nope>": 151670})
 
 
 def test_an_empty_prompt_is_one_token_not_none(tiny_conditioner):

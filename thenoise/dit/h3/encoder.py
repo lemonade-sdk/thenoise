@@ -19,6 +19,7 @@ from thenoise.dit.quantized import replace_linears
 from thenoise.utils.qwen_configs import QWEN3_VL_32B_H3_CONFIG
 from thenoise.utils.safetensors import read_header
 from thenoise.utils.text_encoder import (
+    H3_SPECIAL_TOKENS,
     QWEN25_TOKENIZER_CONFIG_DIR,
     QWEN3_VL_TOKENIZER_OVERRIDES,
     find_tokenizer_dir,
@@ -162,6 +163,21 @@ class H3TextEncoder(nn.Module):
         return self.encode(prompt, images)
 
 
+def h3_tokenizer(tokenizer_dir: Optional[str] = None):
+    """The conditioner's tokenizer: the shared Qwen3-VL table plus the release's own tokens.
+
+    A checkpoint's own ``tokenizer/`` directory wins when it ships one; the vendored
+    table is the fallback and is where the extra ids have to be registered by hand.
+    """
+    tokenizer, _ = load_qwen3_vl_tokenizer(
+        tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR,
+        max_length=QWEN3_VL_32B_H3_CONFIG["text_config"]["max_position_embeddings"],
+        overrides=QWEN3_VL_TOKENIZER_OVERRIDES,
+        additional_special_tokens=H3_SPECIAL_TOKENS,
+    )
+    return tokenizer
+
+
 def load_h3_text_encoder(
     path: str,
     *,
@@ -179,12 +195,8 @@ def load_h3_text_encoder(
         config=QWEN3_VL_32B_H3_CONFIG,
         model_factory=lambda config: _truncate_qwen3_vl(config, layers),
     )
-    tokenizer_dir = tokenizer_dir or find_tokenizer_dir(path) or QWEN25_TOKENIZER_CONFIG_DIR
-    tokenizer, _ = load_qwen3_vl_tokenizer(
-        tokenizer_dir,
-        max_length=QWEN3_VL_32B_H3_CONFIG["text_config"]["max_position_embeddings"],
-        overrides=QWEN3_VL_TOKENIZER_OVERRIDES,
-    )
+    tokenizer_dir = tokenizer_dir or find_tokenizer_dir(path)
+    tokenizer = h3_tokenizer(tokenizer_dir)
     encoder = H3TextEncoder(qwen, tokenizer, load_qwen3_vl_processor(tokenizer),
                     picture_label=picture_label)
     logger.info("Loaded H3 text encoder (Qwen3-VL-32B, %d layers) from %s",
@@ -196,6 +208,7 @@ __all__ = [
     "H3TextEncoder",
     "VIDEO_PICTURE_LABEL",
     "VISION_SHORT_EDGE",
+    "h3_tokenizer",
     "layer_count",
     "load_h3_text_encoder",
     "vision_token_tags",

@@ -66,6 +66,20 @@ QWEN3_VL_TOKENIZER_OVERRIDES = {
 }
 QWEN2_5_VL_TOKENIZER_OVERRIDES: dict = {}
 
+#: The tokens the H3 releases add to the Qwen3-VL table, at the ids their tokenizer
+#: fixes. Both releases read them: unregistered, a prompt's caption or lyrics marker
+#: arrives as a run of text pieces instead of the one embedding row it was trained on —
+#: and the released table already has those rows, 151936 of them.
+H3_SPECIAL_TOKENS = {
+    "<d>": 151669,
+    "</d>": 151670,
+    "<|cutoff|>": 151671,
+    "<|lyrics_start|>": 151672,
+    "<|lyrics_end|>": 151673,
+    "<|caption_start|>": 151674,
+    "<|caption_end|>": 151675,
+}
+
 #: The chat and vision marker spellings shared by every multimodal conditioner here.
 #: A processor looks the vision ones up by name on its tokenizer; ``VISION_BLOCK`` is
 #: one reference image as the language model sees it.
@@ -151,18 +165,38 @@ def find_tokenizer_dir(text_encoder_path: str, max_depth: int = 3) -> Optional[s
     return None
 
 
+def add_fixed_special_tokens(tokenizer, tokens: dict) -> None:
+    """Register tokens whose ids a release fixed, and refuse when they did not land.
+
+    ``add_special_tokens`` hands out the next free ids in list order, which is the
+    released numbering only while the base table stops where it does. A wrong id here is
+    another token's embedding row at inference, not an error, so it is checked here.
+    """
+    tokenizer.add_special_tokens({"additional_special_tokens": list(tokens)})
+    misplaced = {name: tokenizer.convert_tokens_to_ids(name) for name in tokens
+                 if tokenizer.convert_tokens_to_ids(name) != tokens[name]}
+    if misplaced:
+        raise ValueError(
+            "tokenizer registered these special tokens elsewhere than the released ids: "
+            + ", ".join(f"{name} -> {got} not {tokens[name]}"
+                        for name, got in misplaced.items())
+        )
+
+
 def load_tokenizer(
     tokenizer_dir: str = QWEN25_TOKENIZER_CONFIG_DIR,
     *,
     max_length: Optional[int] = None,
     local_files_only: bool = True,
     overrides: Optional[dict] = None,
+    additional_special_tokens: Optional[dict] = None,
 ):
     """Load a tokenizer from a local directory via HF ``AutoTokenizer``.
 
     ``tokenizer_dir`` must contain ``tokenizer.json`` (``vocab.json``/``merges.txt``
     are embedded in it). ``overrides`` are ``tokenizer_config.json`` fields applied
-    after loading.
+    after loading, and ``additional_special_tokens`` maps a token to the id it must
+    take.
     """
     kwargs = {}
     if max_length is not None:
@@ -173,6 +207,8 @@ def load_tokenizer(
     if overrides:
         for key, value in overrides.items():
             setattr(tokenizer, key, value)
+    if additional_special_tokens:
+        add_fixed_special_tokens(tokenizer, additional_special_tokens)
     return tokenizer
 
 
@@ -354,11 +390,13 @@ def load_qwen35_processor(tokenizer, *, image_processor=None):
 
 
 def load_qwen3_vl_tokenizer(
-    tokenizer_dir: Optional[str] = None, *, max_length: int, overrides: Optional[dict] = None
+    tokenizer_dir: Optional[str] = None, *, max_length: int, overrides: Optional[dict] = None,
+    additional_special_tokens: Optional[dict] = None,
 ) -> tuple:
     """Load a Qwen3-VL tokenizer + fast processor (the same AutoTokenizer)."""
     tokenizer = load_tokenizer(
-        tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR, max_length=max_length, overrides=overrides
+        tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR, max_length=max_length, overrides=overrides,
+        additional_special_tokens=additional_special_tokens,
     )
     return tokenizer, tokenizer
 
@@ -465,5 +503,7 @@ __all__ = [
     "prompt_with_pictures",
     "QWEN3_06B_TOKENIZER_OVERRIDES",
     "QWEN3_VL_TOKENIZER_OVERRIDES",
+    "H3_SPECIAL_TOKENS",
+    "add_fixed_special_tokens",
     "QWEN2_5_VL_TOKENIZER_OVERRIDES",
 ]
