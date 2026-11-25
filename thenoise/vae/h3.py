@@ -586,6 +586,46 @@ class TemporalPlan:
             frames=whole * clip_length + (0 if rest == 0 else head + ratio_t * (rest - 1)),
         )
 
+    @classmethod
+    def of_frames(cls, pixel_frames: int, clip_length: int = CLIP_LENGTH,
+                  token_drop: int = TOKEN_DROP,
+                  ratio_t: int = TIME_RATIO) -> "TemporalPlan":
+        """The plan whose clip runs exactly ``pixel_frames`` — :meth:`of` upside down.
+
+        Only the counts the walk can reach have a plan: a clip opens with the one frame the
+        padding leaves and then advances ``ratio_t`` at a time. A count off that ladder is
+        an error naming the ladder rather than a rounding, because which reachable length a
+        request becomes is a policy the caller owns.
+        """
+        chunk = -(-clip_length // ratio_t)
+        whole, rest = divmod(pixel_frames, clip_length)
+        if rest and rest % ratio_t != 1:
+            raise ValueError(
+                f"this codec runs {clip_length} frames per clip, opening with 1 and then "
+                f"{ratio_t} per latent frame: a clip is {clip_length}k + "
+                f"{', '.join(str(1 + ratio_t * i) for i in range(chunk))} frames long, "
+                f"not {pixel_frames}"
+            )
+        return cls.of(whole * chunk + (0 if rest == 0 else rest // ratio_t + 1),
+                      clip_length=clip_length, token_drop=token_drop, ratio_t=ratio_t)
+
+
+def snap_frames(wanted: int, *, upward: bool, clip_length: int = CLIP_LENGTH,
+                token_drop: int = TOKEN_DROP, ratio_t: int = TIME_RATIO) -> int:
+    """The clip length this codec runs, nearest the one that was asked for.
+
+    The decoder takes any latent frame count, but the release only ever runs the shortest
+    clip it trained on and whole clips more: :meth:`TemporalPlan.of_frames` reaches
+    ``clip_length`` further per step. An explicit frame count goes upward, because a
+    request that names a length wants it kept; a duration takes the nearest, ties away
+    from zero, because it names a length that may be rounded.
+    """
+    shortest = TemporalPlan.of(2, clip_length, token_drop, ratio_t=ratio_t).frames
+    offset = wanted - shortest
+    steps = (-(-offset // clip_length) if upward
+             else math.floor(offset / clip_length + 0.5))
+    return shortest + max(steps, 0) * clip_length
+
 
 # --------------------------------------------------------------------------- video codec
 
@@ -1024,6 +1064,7 @@ __all__ = [
     "AutoencoderKLH3Image",
     "AutoencoderKLH3Video",
     "TemporalPlan",
+    "snap_frames",
     "load_h3_image_vae",
     "load_h3_video_vae",
     "CLIP_LENGTH",

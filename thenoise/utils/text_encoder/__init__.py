@@ -81,13 +81,15 @@ VISION_BLOCK = VISION_START + IMAGE_PAD + VISION_END
 PICTURE_LABEL = "Picture {}: "
 
 
-def prompt_with_pictures(prompt: str, num_images: int) -> str:
+def prompt_with_pictures(prompt: str, num_images: int,
+                         label: str = PICTURE_LABEL) -> str:
     """The conditioning text: one labelled vision block per reference, then the prompt.
 
     One :data:`VISION_BLOCK` per picture, not one per vision token: the processor is
-    what widens it into the run the vision grid needs.
+    what widens it into the run the vision grid needs. ``label`` is the release's own
+    spelling, which is a format string taking the 1-based picture number.
     """
-    labels = "".join(PICTURE_LABEL.format(i + 1) + VISION_BLOCK
+    labels = "".join(label.format(i + 1) + VISION_BLOCK
                      for i in range(num_images))
     return labels + prompt
 

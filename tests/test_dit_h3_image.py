@@ -528,8 +528,9 @@ def test_a_prompt_without_pictures_is_all_text():
 def tiny_conditioner():
     from PIL import Image
 
-    from thenoise.dit.h3.encoder import H3ImageTextEncoder
+    from thenoise.dit.h3.encoder import H3TextEncoder
     from thenoise.utils.text_encoder import (
+        PICTURE_LABEL,
         QWEN25_TOKENIZER_CONFIG_DIR,
         QWEN3_VL_TOKENIZER_OVERRIDES,
         load_qwen3_vl_processor,
@@ -542,7 +543,8 @@ def tiny_conditioner():
         max_length=4096,
         overrides=QWEN3_VL_TOKENIZER_OVERRIDES,
     )
-    encoder = H3ImageTextEncoder(model, tokenizer, load_qwen3_vl_processor(tokenizer))
+    encoder = H3TextEncoder(model, tokenizer, load_qwen3_vl_processor(tokenizer),
+                    picture_label=PICTURE_LABEL)
     return encoder.eval(), Image.new("RGB", (64, 64), "white")
 
 

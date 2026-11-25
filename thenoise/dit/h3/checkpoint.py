@@ -18,6 +18,7 @@ from typing import Union
 
 import torch
 
+from thenoise.dit.h3.av import H3AVDiT
 from thenoise.dit.h3.image import H3ImageDiT
 from thenoise.dit.h3.layout import PATCH_SIZE
 from thenoise.dit.h3.trunk import H3Params, RELAY_STORES
@@ -169,6 +170,30 @@ def _audio_dim(header: Header):
     return patch[1]
 
 
+def load_h3_av_dit(
+    checkpoint: Union[str, Header],
+    params: H3Params,
+    device,
+    dtype: torch.dtype,
+) -> H3AVDiT:
+    """The audiovisual DiT, built and loaded the way :func:`load_h3_image_dit` builds its own.
+
+    The two differ only in the class, which is the whole of the difference between the
+    releases: the audio stream's projection and second head are what the file carries and
+    the audiovisual trunk wires.
+    """
+    model = build_dit(
+        lambda: H3AVDiT(params, compute_dtype=dtype),
+        checkpoint,
+        device=device,
+        dtype=None,
+        key_map=qk_norm_key_map,
+        relay_stores=RELAY_STORES,
+    )
+    model.to(dtype=dtype)
+    return model
+
+
 def load_h3_image_dit(
     checkpoint: Union[str, Header],
     params: H3Params,
@@ -199,5 +224,6 @@ __all__ = [
     "H3_IMAGE_SIGNATURE",
     "RELAY_STORES",
     "detect_params",
+    "load_h3_av_dit",
     "load_h3_image_dit",
 ]

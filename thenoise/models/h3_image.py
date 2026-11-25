@@ -18,7 +18,7 @@ from typing import List, Optional, Tuple
 import torch
 
 from thenoise.dit.h3 import sampling as h3_sampling
-from thenoise.dit.h3.encoder import load_h3_image_text_encoder
+from thenoise.dit.h3.encoder import VISION_SHORT_EDGE, load_h3_text_encoder
 from thenoise.dit.h3.checkpoint import (
     H3_IMAGE_SIGNATURE,
     detect_params,
@@ -35,15 +35,11 @@ from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.samplers import Step, sigma_ladder
 from thenoise.upscale import LatentUpscaler, VAEPixelUpscaler
 from thenoise.utils.image_tensor import ReferenceSizing, resize_to_short_edge
+from thenoise.utils.text_encoder import PICTURE_LABEL
 from thenoise.utils.math import round_up
 from thenoise.vae import load_h3_image_vae
 
 logger = logging.getLogger(__name__)
-
-#: Short edge of the picture the language model is shown. The DiT is shown a larger one
-#: (up to :attr:`REFERENCE_SIZING`'s cap): the vision tower compresses 32x32 pixels into
-#: one token, so a bigger copy buys detail the text stream cannot use.
-VISION_SHORT_EDGE = 1024
 
 #: The model's own canvas multiple.
 CANVAS_MULTIPLE = 32
@@ -95,10 +91,11 @@ class H3ImageModel(PixelModel):
         )
 
         logger.info("Loading H3-Image text encoder from %s", config.text_encoder_path)
-        self.text_encoder = load_h3_image_text_encoder(
+        self.text_encoder = load_h3_text_encoder(
             config.text_encoder_path,
             dtype=config.dtype,
             device=self._load_target(config.text_encoder_path),
+            picture_label=PICTURE_LABEL,
         )
 
         logger.info("Loading H3-Image VAE from %s", self.vae_path)

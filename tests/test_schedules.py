@@ -100,6 +100,9 @@ BARE = {
     "wan22": {"variant": VARIANTS["ti2v_5b"]},
     "ltx23": {},
     "ltx25": {},
+    # The clip's ladder is the shifted-flow grid at the request's ``flow_shift``: no VAE,
+    # no DiT and no frame count enters it. The audio stream rides the same steps.
+    "h3_video": {},
     "hunyuan3d21": {"checkpoint_prefs": {}},
 }
 

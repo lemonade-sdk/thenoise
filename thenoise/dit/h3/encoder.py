@@ -86,14 +86,29 @@ def layer_count(path: str) -> int:
     return layers
 
 
-class H3ImageTextEncoder(nn.Module):
-    """Qwen3-VL-32B conditioner: ``(prompt, images) -> (embeds, mask, tags)``."""
+#: How the audiovisual release labels a keyframe in the conditioning text. The image
+#: release spells the same thing without the brackets.
+VIDEO_PICTURE_LABEL = "<Picture {}>: "
 
-    def __init__(self, qwen: nn.Module, tokenizer, processor) -> None:
+#: Short edge of the picture the language model is shown, whichever release is asking. The
+#: DiT is shown a larger one: the vision tower compresses 32x32 pixels into one token, so a
+#: bigger copy buys detail the text stream cannot use.
+VISION_SHORT_EDGE = 1024
+
+
+class H3TextEncoder(nn.Module):
+    """Qwen3-VL-32B conditioner: ``(prompt, images) -> (embeds, mask, tags)``.
+
+    Both H3 releases train on the same weights and the same splice-a-labelled-vision-block
+    presentation; ``picture_label`` is the one place they spell it differently.
+    """
+
+    def __init__(self, qwen: nn.Module, tokenizer, processor, picture_label: str) -> None:
         super().__init__()
         self.qwen = qwen
         self.tokenizer = tokenizer
         self.processor = processor
+        self.picture_label = picture_label
 
     @property
     def dtype(self) -> torch.dtype:
@@ -112,7 +127,7 @@ class H3ImageTextEncoder(nn.Module):
         them. One sequence is encoded at a time, so ``mask`` is all ones.
         """
         images = [] if images is None else list(images)
-        text = prompt_with_pictures(prompt, len(images))
+        text = prompt_with_pictures(prompt, len(images), self.picture_label)
         inputs = self.processor(text=[text], images=images or None)
 
         input_ids = torch.as_tensor(inputs["input_ids"]).to(self.device, torch.long)
@@ -147,13 +162,14 @@ class H3ImageTextEncoder(nn.Module):
         return self.encode(prompt, images)
 
 
-def load_h3_image_text_encoder(
+def load_h3_text_encoder(
     path: str,
     *,
     dtype: torch.dtype,
     device,
+    picture_label: str,
     tokenizer_dir: Optional[str] = None,
-) -> H3ImageTextEncoder:
+) -> H3TextEncoder:
     """Load the truncated Qwen3-VL-32B conditioner plus its tokenizer and processor."""
     layers = layer_count(path)
     qwen = load_qwen3_vl_model(
@@ -169,15 +185,18 @@ def load_h3_image_text_encoder(
         max_length=QWEN3_VL_32B_H3_CONFIG["text_config"]["max_position_embeddings"],
         overrides=QWEN3_VL_TOKENIZER_OVERRIDES,
     )
-    encoder = H3ImageTextEncoder(qwen, tokenizer, load_qwen3_vl_processor(tokenizer))
-    logger.info("Loaded H3-Image text encoder (Qwen3-VL-32B, %d layers) from %s",
+    encoder = H3TextEncoder(qwen, tokenizer, load_qwen3_vl_processor(tokenizer),
+                    picture_label=picture_label)
+    logger.info("Loaded H3 text encoder (Qwen3-VL-32B, %d layers) from %s",
                 layers, path)
     return encoder
 
 
 __all__ = [
-    "H3ImageTextEncoder",
+    "H3TextEncoder",
+    "VIDEO_PICTURE_LABEL",
+    "VISION_SHORT_EDGE",
     "layer_count",
-    "load_h3_image_text_encoder",
+    "load_h3_text_encoder",
     "vision_token_tags",
 ]
