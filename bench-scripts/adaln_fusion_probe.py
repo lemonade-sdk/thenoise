@@ -28,7 +28,8 @@ from thenoise.utils.rms_norm import RMSNorm
 
 
 def _measure(fn, iters: int):
-    out = fn()
+    with torch.no_grad():          # a graph would inflate the peak we are measuring
+        out = fn()
     torch.cuda.synchronize()
     baseline = torch.cuda.memory_allocated()
     times, peak = [], 0

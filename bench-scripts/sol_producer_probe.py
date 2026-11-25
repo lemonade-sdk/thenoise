@@ -42,6 +42,7 @@ HEAD_DIM = 128
 NORM_ROPE = ("engine", "engine_bf16bands", "ck_fused")
 
 
+@torch.no_grad()              # a grad graph would inflate the peak being measured
 def _measure(fn, iters: int):
     """Median milliseconds and the largest allocation the calls caused, in bytes."""
     out = fn()                                   # warm, so the baseline is honest
@@ -167,7 +168,7 @@ def main() -> None:
         if name not in got or other not in got:
             return ""
         a, b = got[name][0], got[other][0]
-        return f"  vs {other.split('+')[0]:>16} {float((a - b).norm() / b.norm()):.3e}"
+        return f"  vs {other:>18} {float((a - b).norm() / b.norm()):.3e}"
 
     for mode, attention in rows:
         name = f"{mode}+{attention}"
