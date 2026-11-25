@@ -315,12 +315,15 @@ jobs:
             --root "$ROOT" --model-dir "$MODEL_DIR" \
             --out "$WORK/qualification-report.json"
 
-      - name: Upload qualification report
+      - name: Upload qualification report and image
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: qualification-gfx1151
-          path: ${{ runner.temp }}/thenoise-qual/*.json
+          path: |
+            ${{ runner.temp }}/thenoise-qual/*.json
+            ${{ runner.temp }}/thenoise-qual/qualification.png
+            ${{ runner.temp }}/thenoise-qual/*.log
           if-no-files-found: warn
 
       - name: Clean up
@@ -377,12 +380,16 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File build-scripts/qualify_thenoise.ps1 `
             -Root $root -ModelDir $modelDir -Out (Join-Path $work "qualification-report.json")
 
-      - name: Upload qualification report
+      - name: Upload qualification report and image
         if: always()
         uses: actions/upload-artifact@v4
         with:
+          # qualification-*.png covers the eager and compiled generations.
           name: qualification-gfx1151-win
-          path: ${{ runner.temp }}/thenoise-qual-win/*.json
+          path: |
+            ${{ runner.temp }}/thenoise-qual-win/*.json
+            ${{ runner.temp }}/thenoise-qual-win/qualification-*.png
+            ${{ runner.temp }}/thenoise-qual-win/generate-*.log
           if-no-files-found: warn
 
       - name: Clean up
