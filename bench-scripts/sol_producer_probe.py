@@ -1,26 +1,23 @@
-"""What the chunked producer would buy, before any trunk is changed for it.
+"""What the chunked producer and a fused norm+rope would each buy, before changing a trunk.
 
-``sol_attn_chunked`` takes chunks of the fused qkv projection and never materialises Q/K/V:
-its promise is memory, and its price is that K and V are carried as int8. Both sides are
-measurable against operands rather than against a refactoring, so this script reproduces the
-producer's contract (chunks of ``[M, 3*H*128]``, 64-aligned starts, ``B=1``, norm and rope
-done inside) beside the path the engine ships, and reports the three numbers the decision
-needs: peak memory, time, and how far the output moves from dense.
+Two candidate changes to the attention path, measured on the same operands rather than argued
+about:
 
-Arms, same operands throughout:
+``sol_attn_chunked``  takes chunks of the fused qkv projection and does QK-norm and RoPE inside
+                      the kernel, carrying K and V as int8. Never materialises Q/K/V.
+``rms_rope_split_half`` (Triton)  one kernel for QK-norm and RoPE over ``[B, T, H, D]`` operands,
+                      replacing this engine's ``QKNorm`` + ``apply_rope_split_half``, which
+                      broadcast fp32 phases against bf16 queries and so compute in fp32.
 
-``dense``      fused projection, QKNorm and rope outside, SDPA. The shipped dense path.
-``routed``     ... and the plain kernel on the projection's three slices. What ships today.
-``producer``   the projection itself in chunks, straight into the kernel, K/V as int8.
-``producer@0`` the same at tau 0, routing nothing: its error is the int8 carriers alone.
-
-Run with identity rope coefficients first (the default): then any difference between
-``producer`` and ``dense`` is quantization and convention, nothing else. With ``--rope random``
-a difference also means the rotation table was read wrong, which is the convention most likely
-to be got wrong in a real adoption.
+Both promise memory. Each row of the matrix is one norm+rope choice feeding one attention
+choice, and the peak allocation, the time and the output's distance from the shipped
+``engine + dense`` are printed for every row. The dense consumer is in the matrix because the
+dense path is not a rare case: it is every step of every still, every step outside the routing
+window, and the first step of every routed run.
 
     .venv/bin/python bench-scripts/sol_producer_probe.py --tokens 16384 --heads 56
     .venv/bin/python bench-scripts/sol_producer_probe.py --tokens 16384 --rope random
+    .venv/bin/python bench-scripts/sol_producer_probe.py --tokens 40114 --heads 42 --iters 1
 """
 
 from __future__ import annotations
@@ -29,18 +26,19 @@ import argparse
 import statistics
 
 import torch
-from comfy_kitchen import sol_attn, sol_attn_chunked
+from comfy_kitchen import rms_rope_split_half as ck_rms_rope, sol_attn, sol_attn_chunked
 
 from thenoise.dit.kvcache import attend
 from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.rope import apply_rope_split_half
 
 HEAD_DIM = 128
+NORM_ROPE = ("engine", "engine_bf16bands", "ck_fused")
 
 
 def _measure(fn, iters: int):
     """Median milliseconds and the largest allocation the calls caused, in bytes."""
-    out = fn()                                   # warm, and the baseline is then honest
+    out = fn()                                   # warm, so the baseline is honest
     torch.cuda.synchronize()
     baseline = torch.cuda.memory_allocated()
     times, peak = [], 0
@@ -65,107 +63,124 @@ def main() -> None:
     ap.add_argument("--tau", type=float, default=1.3)
     ap.add_argument("--sink-blocks", type=int, default=4,
                     help="key blocks held exact, as a clip's first frame would be")
-    ap.add_argument("--rope", choices=("identity", "random"), default="identity")
+    ap.add_argument("--rope", choices=("identity", "random"), default="identity",
+                    help="identity keeps the rotation out of the comparison; random puts the "
+                         "table's convention in it, which is how a wrong table shows up")
     ap.add_argument("--iters", type=int, default=3)
+    ap.add_argument("--skip", action="append", default=[],
+                    help="rows to skip, e.g. --skip ck_fused+dense")
     args = ap.parse_args()
 
     dev, dt = "cuda", torch.bfloat16
     t, heads = args.tokens, args.heads
     inner, width, rot = heads * HEAD_DIM, 3 * heads * HEAD_DIM, HEAD_DIM
+    half = rot // 2
     gen = torch.Generator(device=dev).manual_seed(0)
     x = torch.randn(1, t, inner, device=dev, dtype=dt, generator=gen) * 0.5
     wT = (torch.randn(width, inner, device=dev, dtype=dt, generator=gen)
           * inner ** -0.5).t().contiguous()
 
-    # One rotation, in both dialects: cos/sin for the engine's helper, and the kernel's table
-    # of [[c, -s], [s, c]] per pair.
-    half = rot // 2
     if args.rope == "identity":
-        angle = torch.zeros(1, 1, t, half, device=dev)
+        angle = torch.zeros(1, t, 1, half, device=dev)
     else:
-        angle = torch.randn(1, 1, t, half, device=dev, generator=gen)
-    # Both arms norm and rotate token-major, which is bit-identical to the head-major order.
-    cos = torch.cos(angle).permute(0, 2, 1, 3).contiguous()
-    sin = torch.sin(angle).permute(0, 2, 1, 3).contiguous()
-    table = torch.empty(1, t, half, 2, 2, device=dev, dtype=torch.float32)
-    table[..., 0, 0], table[..., 0, 1] = cos.reshape(t, half), -sin.reshape(t, half)
-    table[..., 1, 0], table[..., 1, 1] = sin.reshape(t, half), cos.reshape(t, half)
+        angle = torch.randn(1, t, 1, half, device=dev, generator=gen)
+    cos, sin = torch.cos(angle), torch.sin(angle)
+    # The kernel's table is the same dialect the chunked producer takes: per pair, [[c,-s],[s,c]].
+    table = torch.empty(1, t, 1, half, 2, 2, device=dev, dtype=torch.float32)
+    table[..., 0, 0], table[..., 0, 1] = cos, -sin
+    table[..., 1, 0], table[..., 1, 1] = sin, cos
 
-    norm = QKNorm(HEAD_DIM, eps=1e-5).to(dev)
-    with torch.no_grad():
-        for p in norm.parameters():
-            p.fill_(1.0)
-    weights = (torch.ones(HEAD_DIM, device=dev, dtype=dt),
-               torch.ones(HEAD_DIM, device=dev, dtype=dt))
+    # A bf16 model carries its QK-norm weight in bf16, which is what lets rms_norm fuse.
+    norm = QKNorm(HEAD_DIM, eps=1e-5).to(dev, dt)
+    scale = torch.ones(HEAD_DIM, device=dev, dtype=dt)
     sink, sink_q = [0, args.sink_blocks], [0, 0]
 
-    def normed():
-        qkv = x @ wT
-        q, k, v = (s.view(1, t, heads, HEAD_DIM) for s in qkv.split(inner, dim=-1))
+    def projection():
+        return (s.view(1, t, heads, HEAD_DIM) for s in (x @ wT).split(inner, dim=-1))
+
+    def norm_rope(mode: str):
+        """q, k, v token-major, normed and rotated, by one of the candidate implementations."""
+        q, k, v = projection()
+        if mode == "ck_fused":
+            return (*ck_rms_rope(q, k, table, scale, scale, 1e-5, rot), v)
         q, k = norm(q, k)
-        return apply_rope_split_half(q, cos, sin), apply_rope_split_half(k, cos, sin), v
+        if mode == "engine_bf16bands":
+            q = apply_rope_split_half(q, cos.to(dt), sin.to(dt))
+            k = apply_rope_split_half(k, cos.to(dt), sin.to(dt))
+        else:
+            q = apply_rope_split_half(q, cos, sin)
+            k = apply_rope_split_half(k, cos, sin)
+        return q, k, v
 
-    def project():
-        def arm():
-            q, k, v = normed()
-            return q.flatten(2)
-        return arm
+    pooled: dict = {}
 
-    def shipped(kernel: bool):
+    def row(mode: str, attention: str):
         def arm():
-            q, k, v = normed()
-            if kernel:
+            if attention == "producer":
+                def chunks():
+                    for start in range(0, t, args.chunk):
+                        yield x[:, start:start + args.chunk] @ wT
+                # Stats carried as an adopted trunk would carry them, so the timed call is a
+                # single pass rather than the bootstrap's two.
+                out, kmean, vscale = sol_attn_chunked(
+                    chunks, t, heads, table, (scale, scale), kmean=pooled.get("k"),
+                    vscale=pooled.get("v"), tau=args.tau, sink_blocks=sink, sink_q=sink_q,
+                    token_aug=256, rope_eps=1e-5, rope_split_half=True)
+                pooled["k"], pooled["v"] = kmean, vscale
+                return out.flatten(2)
+            q, k, v = norm_rope(mode)
+            if attention == "none":
+                return q.flatten(2)
+            if attention == "routed":
                 return sol_attn(q, k, v, tau=args.tau, sink_blocks=sink, sink_q=sink_q,
                                 token_aug=256).flatten(2)
             return attend(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2))
         return arm
 
-    pooled: dict = {}
+    print(f"sol attention-path probe: {t} tokens, {heads}x{HEAD_DIM}, chunk {args.chunk}, "
+          f"tau {args.tau:g}, rope {args.rope}, norm weight {norm.query_norm.weight.dtype}")
+    print(f"  a full-length fused projection is {t * width * 2 / 2**20:,.0f} MiB; a chunk of "
+          f"{args.chunk} is {args.chunk * width * 2 / 2**20:,.0f} MiB\n")
 
-    def producer(at_tau: float):
-        def chunks():
-            for start in range(0, t, args.chunk):
-                yield x[:, start:start + args.chunk] @ wT
-
-        def arm():
-            out, kmean, vscale = sol_attn_chunked(
-                chunks, t, heads, table, weights, kmean=pooled.get("k"),
-                vscale=pooled.get("v"), tau=at_tau, sink_blocks=sink, sink_q=sink_q,
-                token_aug=256, rope_eps=1e-5, rope_split_half=True)
-            pooled["k"], pooled["v"] = kmean, vscale
-            return out.flatten(2)
-        return arm
-
-    print(f"sol producer probe: {t} tokens, {heads}x{HEAD_DIM}, chunk {args.chunk}, "
-          f"tau {args.tau:g}, rope {args.rope}")
-    print(f"  a full-length fused projection is {t * width * 2 / 2**20:,.0f} MiB; "
-          f"one chunk of {args.chunk} is {args.chunk * width * 2 / 2**20:,.0f} MiB, so the "
-          f"producer's ceiling on that buffer is "
-          f"{(t - args.chunk) * width * 2 / 2**20:,.0f} MiB\n")
-
-    dense = routed = None
-    for name, arm in (("project", project()), ("dense", shipped(False)),
-                      ("routed", shipped(True)), ("producer", producer(args.tau))):
-        try:
-            out, ms, peak = _measure(arm, args.iters)
-        except Exception as exc:                        # a contract change is a result too
-            print(f"  {name:>11}  refused: {type(exc).__name__}: {exc}")
+    rows = [("engine", "none"), ("engine_bf16bands", "none"), ("ck_fused", "none"),
+            ("engine", "dense"), ("engine_bf16bands", "dense"), ("ck_fused", "dense"),
+            ("engine", "routed"), ("engine_bf16bands", "routed"), ("ck_fused", "routed"),
+            ("producer", "producer")]
+    got: dict = {}
+    for mode, attention in rows:
+        name = f"{mode}+{attention}"
+        if name in args.skip:
             continue
-        against = ""
-        if name != "project":
-            if dense is None:
-                dense = out
-            against = f"  vs dense {float((out - dense).norm() / dense.norm()):.3e}"
-        if name == "routed":
-            routed = out
-        elif name == "producer" and routed is not None:
-            # The same routing rule on the same operands, so this difference is the int8
-            # carriers and the fused norm-and-rope, and nothing else.
-            against += f"  vs routed {float((out - routed).norm() / routed.norm()):.3e}"
-        print(f"  {name:>11}  {ms:8.1f} ms  peak {peak / 2**20:8,.0f} MiB{against}")
-    print("\n  'project' is what the trunk holds before any attention: the producer's saving "
-          "over it\n  is the projection buffer it never forms. 'vs routed' at equal tau is the "
-          "int8 price alone.")
+        try:
+            got[name] = _measure(row(mode, attention), args.iters)
+        except Exception as exc:                        # a contract change is a result too
+            print(f"  {name:>26}  refused: {type(exc).__name__}: {str(exc)[:80]}")
+
+    def against(name, other):
+        """Relative distance between two rows that are supposed to compute the same thing."""
+        if name not in got or other not in got:
+            return ""
+        a, b = got[name][0], got[other][0]
+        return f"  vs {other.split('+')[0]:>16} {float((a - b).norm() / b.norm()):.3e}"
+
+    for mode, attention in rows:
+        name = f"{mode}+{attention}"
+        if name not in got:
+            continue
+        out, ms, peak = got[name]
+        mate = f"{mode}+{attention}"
+        peer = "engine+none" if attention == "none" else "engine+dense"
+        line = f"  {name:>26}  {ms:8.1f} ms  peak {peak / 2**20:8,.0f} MiB"
+        line += "" if name == peer else against(name, peer)
+        if name == "producer+producer":
+            line += against("producer+producer", "engine+routed")
+        print(line)
+
+    print("\n  Each norm+rope row is the same operands through three implementations of QK-norm and "
+          "\n  rope; each attention row adds one attention. Error is against the engine's own "
+          "row,\n  so a routed row's number carries the routing error on Gaussian content as "
+          "well as\n  whatever the row costs -- compare routed to routed, never to dense. "
+          "The producer\n  carries norm and rope inside it, hence no norm+rope counterpart.")
 
 
 if __name__ == "__main__":
