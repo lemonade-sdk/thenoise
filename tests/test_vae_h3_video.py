@@ -13,6 +13,7 @@ import torch.nn.functional as F
 
 from conftest import write_safetensors
 from thenoise.vae import AutoencoderKLH3Video, load_h3_video_vae
+from thenoise.dit.h3.layout import FRAME_PER_TOKEN, FRAME_RESCALE, time_spans
 from thenoise.vae.h3 import (
     CLIP_LENGTH, LATENTS_MEAN, LATENTS_STD, TIME_RATIO, TOKEN_DROP, VIDEO_GEOMETRY_SECTION,
     AutoencoderKLH3Image, CausalConv3d, Downsample3D, TemporalIsolatedGroupNorm,
@@ -64,9 +65,20 @@ def test_frame_plan_is_the_frames_each_latent_carries():
     """The first latent of every group carries the frame the warm-up took from it."""
     for latent_t in range(1, 60):
         plan = TemporalPlan.of(latent_t)
-        per_token = (CLIP_LENGTH - (plan.chunk_tokens - 1) * TIME_RATIO,
-                     *([TIME_RATIO] * (plan.chunk_tokens - 1)))
-        assert plan.frames == sum(per_token[k % plan.chunk_tokens] for k in range(latent_t))
+        assert plan.frames == sum(FRAME_PER_TOKEN[k % plan.chunk_tokens]
+                                  for k in range(latent_t))
+
+
+def test_the_dit_and_the_decoder_share_one_time_axis():
+    """The DiT spaces its latent frames by ``FRAME_PER_TOKEN``; the codec derives the same
+    schedule from the clip length it was trained on. Two modules, one number, and this is
+    where they are tied."""
+    per_token = (CLIP_LENGTH - (TemporalPlan.of(1).chunk_tokens - 1) * TIME_RATIO,
+                 *([TIME_RATIO] * (TemporalPlan.of(1).chunk_tokens - 1)))
+    assert tuple(per_token) == FRAME_PER_TOKEN
+    for latent_t in range(1, 40):
+        plan = TemporalPlan.of(latent_t)
+        assert sum(time_spans(latent_t)) == pytest.approx(plan.frames * FRAME_RESCALE)
 
 
 @pytest.mark.parametrize(("latent_t", "pad", "clips"), [
