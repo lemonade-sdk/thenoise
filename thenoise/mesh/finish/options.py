@@ -15,12 +15,13 @@ class MeshFinishOptions:
     """What a request asks of a shape once its surface has been cut."""
 
     floaters: float = option(
-        0.0, label="Drop floaters", ge=0.0, le=1.0, step=0.001, ui_max=0.02,
-        help="discard pieces of the surface holding less than this share of its area",
+        0.0, label="Drop floaters", ge=0.0, le=1.0, step=0.01,
+        help="discard pieces reaching less than this fraction across the whole shape; the "
+             "widest piece reaches all of it, so 0.15 keeps anything spanning a sixth as far",
         filter="floaters", stage=FINISH)
 
     triangles: float = option(
-        1.0, label="Triangles", ge=0.001, le=1.0, step=0.01,
+        1.0, label="Triangles", ge=0.001, le=1.0, step=0.01, ui_min=0.01,
         help="keep this fraction of the triangles the surface was cut with; the shape "
              "keeps its detail where it has any and loses it where it is flat",
         filter="simplify", stage=FINISH)

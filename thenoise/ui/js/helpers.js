@@ -117,13 +117,23 @@ function rangeControl(prefix, option) {
   const input = document.createElement('input');
   input.type = 'range';
   input.id = id;
-  // The knob's own range is what the server accepts; ui_min/ui_max is what is worth
-  // offering on a slider (film grain is accepted to 10 but sane to 1).
-  for (const [key, attr] of [['min', 'min'], ['max', 'max'], ['step', 'step']]) {
-    if (option['ui_' + key] !== undefined) input[attr] = option['ui_' + key];
-    else if (option[key] !== undefined) input[attr] = option[key];
+  const bounds = ['min', 'max'].map(key => option['ui_' + key] ?? option[key]);
+  const step = option.ui_step ?? option.step;
+  if (bounds.includes(undefined) || step === undefined) {
+    for (const [key, attr] of [['min', 'min'], ['max', 'max'], ['step', 'step']]) {
+      if (option['ui_' + key] !== undefined) input[attr] = option['ui_' + key];
+      else if (option[key] !== undefined) input[attr] = option[key];
+    }
+    input.value = option.default;
+  } else {
+    const { unit, decimals } = ticks(step);
+    input.dataset.unit = unit;
+    input.dataset.decimals = decimals;
+    input.min = Math.round(bounds[0] * unit);
+    input.max = Math.round(bounds[1] * unit);
+    input.step = 1;
+    input.value = Math.round(option.default * unit);
   }
-  input.value = option.default;
   input.addEventListener('input', () => {
     showRangeValue(prefix, option.name);
     refreshKnobNotes();
@@ -154,9 +164,9 @@ function knobNote(name, prefix) {
       if (input.checked !== option.default) active.push(option.label);
       continue;
     }
-    const value = input.valueAsNumber;
+    const value = knobValue(input);
     if (Number.isFinite(value) && value !== option.default) {
-      active.push(option.label + ' ' + value.toFixed(2));
+      active.push(option.label + ' ' + value.toFixed(knobUnit(input).decimals));
     }
   }
   return active.join(' · ');
@@ -172,9 +182,23 @@ function refreshKnobNotes() {
   }
 }
 
+function ticks(step) {
+  const decimals = Math.min(6, (String(step).split('.')[1] || '').length);
+  return { unit: 10 ** decimals, decimals };
+}
+
+function knobUnit(input) {
+  return { unit: Number(input.dataset.unit || 1), decimals: Number(input.dataset.decimals || 2) };
+}
+
+function knobValue(input) {
+  return input.valueAsNumber / knobUnit(input).unit;
+}
+
 function showRangeValue(prefix, name) {
+  const input = $(prefix + name);
   const val = $(prefix + name + '_val');
-  if (val) val.textContent = parseFloat($(prefix + name).value).toFixed(2);
+  if (val && input) val.textContent = knobValue(input).toFixed(knobUnit(input).decimals);
 }
 
 // The knobs as the request body wants them.
@@ -183,7 +207,7 @@ function collectKnobs(name, prefix) {
   for (const option of knobSets[name].options) {
     const input = $(prefix + option.name);
     if (!input) continue;
-    body[option.name] = option.type === 'boolean' ? input.checked : input.valueAsNumber;
+    body[option.name] = option.type === 'boolean' ? input.checked : knobValue(input);
   }
   return body;
 }
@@ -195,7 +219,7 @@ function restoreKnobs(name, prefix, meta) {
     if (!input || value == null) continue;
     if (option.type === 'boolean') input.checked = !!value;
     else {
-      input.value = value;
+      input.value = Math.round(value * knobUnit(input).unit);
       showRangeValue(prefix, option.name);
     }
   }

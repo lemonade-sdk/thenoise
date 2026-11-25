@@ -17,16 +17,15 @@ MIN_LEVEL_RESOLUTION = 63
 
 #: Points per geometry-decoder call while sampling.
 CHUNK = 8192
-
-CORNER_BYTES = 32
+LEVEL_BYTES_PER_CORNER = 32
 CUT_BYTES_PER_CORNER = 48
 
 
 def volume_bytes(resolution: int) -> int:
-    """What a cut at ``resolution`` asks the device to have: 48 bytes per corner of its grid,
-    which is where the stage was measured to land (19.9 GiB at 768^3 on gfx1151, of which the
-    dense grids are 2.8). The rest is the widest level's working set, which no refinement can
-    promise to keep narrow."""
+    """What a cut at ``resolution`` asks the device to have, per corner of its grid.
+
+    Measured on gfx1151 rather than derived: the widest level's working set is most of it.
+    """
     return (resolution + 1) ** 3 * CUT_BYTES_PER_CORNER
 
 
@@ -149,7 +148,7 @@ def sample_sdf(sdf: SdfFn, resolution: int, *, device, bounds: float = 1.0,
     queried = 0
     holding = None
     for size in levels:
-        _room(device, cells.shape[0] * CORNER_BYTES * 8,
+        _room(device, cells.shape[0] * LEVEL_BYTES_PER_CORNER * 8,
               f"level {size} of a {resolution}^3 cut")
         step = resolution // size
         index = (cells[:, None, :] + CORNERS.to(device)).reshape(-1, 3)

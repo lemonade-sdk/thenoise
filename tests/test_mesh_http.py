@@ -62,7 +62,7 @@ def test_the_finish_knobs_a_pane_sends_reach_the_written_file(tmp_path):
     try:
         with _client(MeshPipelineController(_JunkFactory()), queue) as client:
             answer = client.post("/jobs/mesh", json={"image": _b64(), "output_format": "obj",
-                                                     "floaters": 0.1, "triangles": 0.5})
+                                                     "floaters": 0.15, "triangles": 0.5})
             assert answer.status_code == 202
             ident = answer.json()["id"]
             until(lambda: client.get(f"/jobs/{ident}").json()["status"] == "completed")

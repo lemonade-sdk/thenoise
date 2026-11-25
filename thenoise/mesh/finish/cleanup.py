@@ -1,34 +1,83 @@
+import logging
+
 import torch
 
 from ..extract import Mesh
 
+logger = logging.getLogger(__name__)
 
-def drop_islands(mesh: Mesh, share: float) -> Mesh:
-    """Every piece of ``mesh`` holding at least ``share`` of its area; 0 keeps all."""
-    if share <= 0.0 or mesh.is_empty:
+
+def drop_islands(mesh: Mesh, size: float) -> Mesh:
+    """Every piece of ``mesh`` reaching at least ``size`` as far as the widest; 1 keeps that one."""
+    if size <= 0.0 or mesh.is_empty:
         return mesh
 
-    area = mesh.face_areas()
     labels = _components(mesh.faces, mesh.vertices.shape[0])
-    piece = labels[mesh.faces[:, 0]]
-    totals = torch.zeros(int(labels.max()) + 1, dtype=area.dtype, device=area.device)
-    totals.scatter_reduce_(0, piece, area, reduce="sum")
-    wanted = totals >= share * float(totals.sum())
+    roots = torch.unique(labels)
+    where = torch.searchsorted(roots, labels)
+    piece = where[mesh.faces[:, 0]]
+    corner = where[:, None].expand(-1, 3)
+    low = mesh.vertices.new_full((roots.numel(), 3), float("inf"))
+    high = mesh.vertices.new_full((roots.numel(), 3), float("-inf"))
+    low.scatter_reduce_(0, corner, mesh.vertices, reduce="amin")
+    high.scatter_reduce_(0, corner, mesh.vertices, reduce="amax")
 
-    if not bool(wanted[piece].any()):
-        raise ValueError(f"every piece of the cut holds less than {share} of its area: "
-                         f"there would be no shape left to write")
-    return mesh.select(wanted[labels], wanted[piece])
+    reach = (high - low).norm(dim=-1)
+    farthest = float(reach.max())
+    wanted = reach >= size * farthest
+    if bool((~wanted[piece]).any()):
+        area = mesh.face_areas()
+        logger.info("floaters: dropped %d of %d pieces (under %d%% of the widest piece, "
+                    "largest %d%%), %.2f%% of the area",
+                    int((~wanted).sum()), len(roots), round(100 * size),
+                    round(100 * float(reach[~wanted].max()) / farthest),
+                    100 * float(area[~wanted[piece]].sum()) / float(area.sum()))
+    else:
+        logger.info("floaters: %d pieces, all reaching %d%% of the widest",
+                    len(roots), round(100 * size))
+    return mesh.select(wanted[where], wanted[piece])
+
+
+ROUNDS = 32
 
 
 def _components(faces: torch.Tensor, vertices: int) -> torch.Tensor:
     """One label per vertex, shared by everything reachable along an edge."""
     label = torch.arange(vertices, device=faces.device)
     corners = faces.reshape(-1)
-    while True:
+    for _round in range(ROUNDS):
         before = label.clone()
         smallest = label[faces].amin(dim=1, keepdim=True).expand(-1, 3).reshape(-1)
         label.scatter_reduce_(0, corners, smallest, reduce="amin")
         label = label[label]
-        if torch.equal(label, before):
+        if not bool(before.ne(label).any()):
             return label
+    return _settled_by_hand(label, faces)
+
+
+def _settled_by_hand(label: torch.Tensor, faces: torch.Tensor) -> torch.Tensor:
+    """Merge the labels the rounds left disagreeing, in the number of pieces rather than vertices.
+
+    Nothing bounds the round count on a real cut; the bound is safe because this pass is exact.
+    """
+    a, b, c = (label[faces[:, i]] for i in (0, 1, 2))
+    joined = faces[(a != b) | (b != c) | (c != a)]
+    x, y, z = (label[joined[:, i]] for i in (0, 1, 2))
+    pairs = torch.unique(torch.cat([torch.stack([x, y], 1), torch.stack([y, z], 1),
+                                    torch.stack([z, x], 1)]), dim=0)
+    logger.warning("components: no fixpoint in %d rounds, merging %d label pairs by hand",
+                   ROUNDS, len(pairs))
+
+    roots = torch.unique(label)
+    parent = {int(one): int(one) for one in roots}
+
+    def find(one: int) -> int:
+        while parent[one] != one:
+            parent[one] = parent[parent[one]]
+            one = parent[one]
+        return one
+
+    for near, far in pairs.tolist():
+        parent[find(near)] = find(far)
+    return torch.tensor([find(int(one)) for one in roots],
+                        device=label.device)[torch.searchsorted(roots, label)]

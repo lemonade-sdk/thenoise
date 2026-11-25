@@ -16,10 +16,12 @@ from thenoise.mesh.extract import Mesh, extract_surface
 from thenoise.mesh.finish import (CHAIN, DEFAULTS as OFF, FILTERS, FINISH_NAMES,
                                   MeshFinishOptions, filter_specs, finish_mesh,
                                   flat_options, options_from)
+from thenoise.mesh.finish import cleanup
 from thenoise.mesh.finish.cleanup import drop_islands
 from thenoise.mesh.finish.simplify import reduce_to
 from thenoise.mesh.octree import sample_sdf
 from thenoise.mesh.spec import MeshSpec
+from thenoise.postprocess.options import PostprocessOptions
 from thenoise.utils.options import options_schema
 
 
@@ -63,6 +65,11 @@ def pieces(mesh: Mesh) -> int:
         for a, b in zip(face, face[1:] + face[:1]):
             parent[find(a)] = find(b)
     return len({find(v) for v in parent})
+
+
+def diagonal(mesh: Mesh) -> float:
+    """The diagonal of the space a mesh occupies: what `floaters` measures pieces against."""
+    return float((mesh.vertices.amax(dim=0) - mesh.vertices.amin(dim=0)).norm())
 
 
 def area(mesh: Mesh) -> float:
@@ -121,11 +128,14 @@ def test_the_declaration_needs_no_compiled_library_to_build_the_flags():
 
 def test_the_pane_is_told_the_words_the_bounds_and_the_defaults():
     described = {entry["name"]: entry for entry in options_schema(MeshFinishOptions)}
+    # 0.001 stays the floor a request may ask for; 0.01 is where the slider starts, so that
+    # its steps land on 1.0 instead of stopping at 0.991.
     assert described["triangles"] == {"name": "triangles", "label": "Triangles",
-                                     "type": "number", "default": 1.0,
-                                     "min": 0.001, "max": 1.0, "step": 0.01}
-    assert described["floaters"]["max"] == 1.0
-    assert described["floaters"]["ui_max"] == 0.02
+                                      "type": "number", "default": 1.0, "min": 0.001,
+                                      "ui_min": 0.01, "max": 1.0, "step": 0.01}
+    assert described["floaters"] == {"name": "floaters", "label": "Drop floaters",
+                                     "type": "number", "default": 0.0, "min": 0.0,
+                                     "max": 1.0, "step": 0.01}
 
 
 # ------------------------------------------------------------------ the chain
@@ -153,32 +163,62 @@ def test_both_filters_run_and_the_declared_order_is_kept(monkeypatch):
     finish_mesh(cut, MeshFinishOptions(floaters=0.01, triangles=0.5),
                 (observer := _NothingAsked()).check, observer.progress)
     assert seen == ["floaters", "simplify"]
-    assert observer.stages == ["finishing", "finishing"]
+    assert observer.stages == ["finishing: floaters", "finishing: simplify"]
+
+
+def test_a_chain_that_never_returns_still_names_the_filter_it_entered(caplog):
+    """The one piece of evidence a hung job leaves is the last line it wrote, so each filter
+    says what it was handed before it starts, not only what it gave back when it finishes."""
+    cut, keep = sphere(32), MeshFinishOptions(floaters=0.01, triangles=0.5)
+    with caplog.at_level("INFO", logger="thenoise.mesh.finish.chain"):
+        finish_mesh(cut, keep, (observer := _NothingAsked()).check, observer.progress)
+    lines = [record.getMessage() for record in caplog.records]
+    faces = len(cut.faces)
+    assert [line for line in lines if line.endswith("triangles")] == [
+        f"finishing floaters over {faces} triangles",
+        f"finishing simplify over {faces} triangles"]
+    assert [line.split(" in ")[0] for line in lines if " triangles in " in line] == [
+        f"finishing floaters: {faces} -> {faces} triangles",
+        f"finishing simplify: {faces} -> {round(faces * keep.triangles)} triangles"]
 
 
 # ---------------------------------------------------------------- floaters
 
 
 def test_a_piece_that_is_not_the_shape_is_cut_away():
-    """The share is the whole contract: below a piece's own share of the area it stays,
-    above it the piece is gone and the shape is exactly what it was."""
-    shape = sphere(48)
-    with_piece = beside_the_shape(shape, tetra())
-    junk = area(tetra()) / area(with_piece)
+    """Below a piece's own reach it stays, above it the piece is gone, and the shape is exactly
+    what it was."""
+    shape, junk = sphere(48), tetra()
+    with_piece = beside_the_shape(shape, junk)
+    small = diagonal(junk) / diagonal(shape)
     assert pieces(with_piece) == 2
+    assert 0.1 < small < 0.2
 
-    assert pieces(drop_islands(with_piece, junk / 2)) == 2
-    kept = drop_islands(with_piece, junk * 2)
+    assert pieces(drop_islands(with_piece, small / 2)) == 2
+    kept = drop_islands(with_piece, small * 2)
     assert pieces(kept) == 1
     assert len(kept.faces) == len(shape.faces)
     assert len(kept.vertices) == len(shape.vertices)
     assert area(kept) == pytest.approx(area(shape), rel=1e-6)
 
 
-def test_the_share_is_of_area_so_a_second_shape_survives():
-    """Two spheres of one request are two pieces of comparable area: neither is junk."""
+def test_a_thin_part_is_not_dust_how_little_area_it_holds():
+    """The ruler is a diagonal because a piece can span the shape and hold almost no area: this
+    sheet is 0.02% of it and reaches 58% as far, so an area share would have eaten it."""
+    shape = sphere(48)
+    corners = torch.tensor([[-0.4, 0.0, 0.0], [0.4, 0.0, 0.0], [0.0, 0.0, 0.001]],
+                           dtype=torch.float32)
+    sheet = Mesh(corners, torch.tensor([[0, 1, 2]]))
+    with_sheet = beside_the_shape(shape, sheet)
+    assert area(sheet) < 0.0005 * area(shape)
+    assert pieces(drop_islands(with_sheet, 0.5)) == 2
+    assert pieces(drop_islands(with_sheet, 0.6)) == 1
+
+
+def test_two_shapes_reaching_the_same_far_are_both_kept():
+    """Two spheres of one request reach equally far: neither is junk at any threshold."""
     two = beside_the_shape(sphere(48), sphere(48))
-    assert len(drop_islands(two, 0.4).faces) == len(two.faces)
+    assert len(drop_islands(two, 0.9).faces) == len(two.faces)
 
 
 def test_zero_keeps_every_piece_because_only_the_request_knows():
@@ -186,14 +226,48 @@ def test_zero_keeps_every_piece_because_only_the_request_knows():
     assert drop_islands(with_piece, 0.0) is with_piece
 
 
-def test_a_share_that_leaves_nothing_is_refused_rather_than_writing_nothing():
-    with pytest.raises(ValueError, match="no shape left"):
-        drop_islands(beside_the_shape(sphere(32), tetra()), 1.0)
+def test_the_whole_ruler_keeps_the_widest_piece_and_only_that():
+    """The top of the range is a setting, not an error: one piece always ties the widest."""
+    shape = sphere(32)
+    kept = drop_islands(beside_the_shape(shape, tetra()), 1.0)
+    assert pieces(kept) == 1
+    assert len(kept.faces) == len(shape.faces)
 
 
 def test_an_empty_cut_needs_no_components():
     empty = Mesh(torch.zeros((0, 3)), torch.zeros((0, 3), dtype=torch.long))
     assert drop_islands(empty, 0.01) is empty
+
+
+def strip(triangles: int) -> Mesh:
+    """Triangles in a row, neighbours sharing an edge: one piece, and a label entering at one
+    end has the whole strip to cross before it reaches the other."""
+    vertices = torch.tensor([[float(one // 2), float(one % 2), 0.0]
+                             for one in range(triangles + 2)], dtype=torch.float32)
+    return Mesh(vertices, torch.tensor([[one, one + 1, one + 2] for one in range(triangles)]))
+
+
+
+def test_a_strip_long_enough_to_crawl_is_still_one_piece(monkeypatch):
+    """The pathology the rounds cannot be trusted with: a chain of triangles, where a label
+    advances a little each round. Bounded, and the pieces are still exactly right."""
+    strand = strip(2000)
+    assert pieces(strand) == 1
+    monkeypatch.setattr(cleanup, "ROUNDS", 3)
+    assert pieces(drop_islands(strand, 0.0001)) == 1
+    assert pieces(drop_islands(strand, 0.5)) == 1
+
+
+def test_the_round_budget_costs_the_partition_nothing(monkeypatch):
+    """The bound on the rounds is a promise about time, not about the answer: whatever the
+    rounds left apart is merged exactly, so one round and thirty give the same pieces."""
+    shape, junk = sphere(48), tetra()
+    with_piece = beside_the_shape(shape, junk)
+    share = diagonal(junk) / diagonal(shape) * 2
+    monkeypatch.setattr(cleanup, "ROUNDS", 1)
+    assert pieces(drop_islands(with_piece, share)) == 1
+    assert len(drop_islands(with_piece, share).faces) == len(shape.faces)
+
 
 
 # ------------------------------------------------------------- the reduction
@@ -257,3 +331,18 @@ def test_the_knobs_read_off_anything_that_carries_them():
 
     assert flat_options(Holder()) == {"floaters": 0.02, "triangles": 0.4}
     assert set(FINISH_NAMES) == {"floaters", "triangles"}
+
+
+def test_every_filter_knob_lands_where_a_slider_can_put_it():
+    """The pane counts whole ticks of the step, so both edges of a knob's range have to sit on
+    that grid: a min of 0.001 with step 0.01 would tick to a tenth of a step, and a rounded min
+    is a slider offering a value the server rejects."""
+    for holder in (MeshFinishOptions, PostprocessOptions):
+        for entry in options_schema(holder):
+            if entry["type"] != "number":
+                continue
+            ticks = 10 ** min(6, len(str(entry["step"]).partition(".")[2]))
+            low = entry.get("ui_min", entry["min"])
+            for value in (entry["default"], low, entry.get("ui_max", entry["max"])):
+                assert abs(value * ticks - round(value * ticks)) < 1e-9, (
+                    f"{holder.__name__}.{entry['name']} cannot be ticked to {value}")

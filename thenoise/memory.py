@@ -80,9 +80,7 @@ def claim(pixels: Optional[int] = None,
           reserve: Optional[int] = None) -> Tuple[int, Tuple[str, int]]:
     """What a stage asks to be left, and the bucket a measurement of it is filed under.
 
-    Pixels are for work that moves an image and bytes for work that moves anything else: a
-    768^3 volume and a two-megapixel picture are not comparable quantities. A byte claim
-    still rises to the fixed floor, because the arithmetic behind it is the caller's own.
+    Pixels for work that moves an image, bytes for work that moves anything else.
     """
     if pixels is None and reserve is None:
         raise ValueError("a stage must size its transient: pixels, or reserve in bytes")

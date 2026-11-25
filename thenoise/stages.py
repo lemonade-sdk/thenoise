@@ -19,8 +19,7 @@ class Stages:
         """``work(*args)`` with ``resident`` held, cached under ``cache`` when named."""
         if cache is not None and self._cache.hit(cache, key):
             return self._cache.get(cache)
-        with self._model.memory.stage(*resident, pixels=pixels,
-                                      reserve=reserve) as stage:
+        with self._model.memory.stage(*resident, pixels=pixels, reserve=reserve) as stage:
             if prepare is not None:
                 prepare()
             value = stage.run(work, *args, **kwargs)

@@ -280,7 +280,7 @@ def test_the_file_carries_the_finished_mesh_not_the_cut(tmp_path):
     reduced into the shape would be part of the triangle count forever."""
     model = _TwoPieceModel()
     controller = MeshPipelineController(model)
-    resolved = controller.resolve(MeshSpec(floaters=0.1, triangles=0.5,
+    resolved = controller.resolve(MeshSpec(floaters=0.15, triangles=0.5,
                                            output_format="obj", **picture()))
     out = tmp_path / "shape.obj"
     seen: list[str] = []
@@ -290,7 +290,8 @@ def test_the_file_carries_the_finished_mesh_not_the_cut(tmp_path):
     written_vertices, written_faces = _obj_counts(out)
     assert written_faces == max(4, round(shape_faces * 0.5))
     assert written_vertices < len(model.cut.vertices)
-    assert seen.count("finishing") == 2
+    assert [one for one in seen if one.startswith("finishing")] == [
+        "finishing: floaters", "finishing: simplify"]
 
 
 def test_a_named_shape_lora_reaches_the_transformer_that_can_wear_it():
