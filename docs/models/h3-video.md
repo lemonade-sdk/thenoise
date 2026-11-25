@@ -115,6 +115,14 @@ wired up here yet.
 | Text encoder | Qwen3-VL-32B, int8-convrot; a picture arrives as vision tokens |
 | Released defaults | 1344×768, 124 frames at 24 fps, 20 steps, guidance 1.0, Euler, flow shift 12 |
 
+On a GPU where `comfy_kitchen` compiled its block-sparse attention kernel, the trunk's
+attention is routed rather than dense: each 64-row query block attends the key blocks that
+matter exactly and pools the rest, with every prompt, keyframe and audio row held exact for
+every query because pooling those is how a run loses them. At the release's own shape that
+measured 4.6x on the attention call (gfx1151, bf16, tau 1.3). There is no option for it — a
+run uses it when its tensors fit and says so once in the log, naming the token count and the
+sink ranges, or naming why it stayed dense.
+
 Two more releases exist upstream and are refused rather than half-supported: the unpruned
 checkpoints, which condition each block from a 2688-wide timestep embedding (24 GB of the
 file) where this engine reads the pruned release's distilled curve; and the `sol` codec,

@@ -13,6 +13,7 @@ from typing import Optional, Sequence, Tuple
 import torch
 
 from thenoise.dit.h3.layout import COND_TIMESTEP, SEG_EMBED, Layout, pad_to_patch
+from thenoise.dit.h3.sparse import sol_plan
 from thenoise.dit.h3.trunk import (
     FinalLayer,
     H3DiT,
@@ -119,8 +120,13 @@ class H3AVDiT(H3DiT):
         cos, sin = self.pe_embedder[rope]
         mark_token_axis(h, dim=1)
         mark_token_axis(cos, sin, dim=-2)
+        # One answer for the whole step, read outside the compiled blocks: a sigma read
+        # inside them would be a guard, and every block would recompile every step.
+        sol = sol_plan(layout=layout, tokens=h.shape[1], dtype=h.dtype, device=device,
+                       head_dim=self.params.head_dim, sigma=sigma,
+                       sample_sigmas=sample_sigmas, cached=False)
         for block in self.blocks:
-            h = block(h, _spans(rows, block.adaln_proj(t_emb)), (cos, sin), None)
+            h = block(h, _spans(rows, block.adaln_proj(t_emb)), (cos, sin), None, sol)
 
         video_seg = (*layout.video_span, timesteps.rows["video"])
         audio_seg = (*layout.audio_span, timesteps.rows["audio"])

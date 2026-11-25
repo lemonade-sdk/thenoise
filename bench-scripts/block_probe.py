@@ -123,6 +123,7 @@ from thenoise.dit.quantized import PITCH_MIN_BYTES, PITCH_MIN_ROWS, PITCH_PAD_EL
 from thenoise.utils.layout import TRANSPOSE_MIN_RATIO
 from thenoise.utils.attention import eager_attention
 from thenoise.utils.dynamo import apply_recompile_limit
+from thenoise.dit.h3.sparse import BLOCK as SOL_BLOCK, sol_sinks as sink_policy
 
 #: Below this a delta is smaller than the box's own drift over a ladder.
 FLOOR_PCT = 1.0
@@ -1135,7 +1136,6 @@ SOL_PACKS = (
 )
 SOL_TEXT = 220          # a prompt's worth of rows; the prefix is a sink at any length
 SOL_FPS = 24            # the release's frame rate, which is what sets the audio length
-SOL_BLOCK = 64          # the kernel's query and key block, in rows
 
 
 def sol_pack(width: int, height: int, frames: int, fps: int = SOL_FPS):
@@ -1151,21 +1151,16 @@ def sol_pack(width: int, height: int, frames: int, fps: int = SOL_FPS):
 
 
 def sol_sinks(layout, mode: str = "exact_rows") -> tuple[tuple[int, int], tuple[int, int]]:
-    """``(exact-KV blocks, dense-query blocks)`` of a pack, :data:`SOL_BLOCK` rows a block.
+    """The engine's sink policy for a pack, in the mode this run is pricing.
 
-    Every row before the video span is attended exactly by every query, and on
-    ``exact_rows`` the audio query rows run dense as well: this restates the reference's
-    ``sink_conditioning`` policy for MiniMax-H3 on this engine's spans, and its reason is
-    that routing the audio queries damages the sound.
+    :func:`thenoise.dit.h3.sparse.sol_sinks` is the policy a run uses — every row before the
+    video span exact-KV for every query, and on ``exact_rows`` the audio query rows dense as
+    well, because routing them damages the sound. ``off`` and ``exact`` exist here and not in
+    the engine to price that policy rather than assume it.
     """
-    video = layout.video_span
-    if mode == "off" or video is None or video[0] <= 0:
+    if mode == "off":
         return (0, 0), (0, 0)
-    exact = (0, -(-video[0] // SOL_BLOCK))
-    if mode == "exact":
-        return exact, (0, 0)
-    audio = layout.audio_span
-    return exact, ((audio[0] // SOL_BLOCK, exact[1]) if audio else exact)
+    return sink_policy(layout, audio_rows_dense=mode == "exact_rows")
 
 
 def sol_section(ctx: bb.Ctx, iters: int, repeats: int, taus: list[float],

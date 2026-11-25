@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from thenoise.dit.h3.layout import MODALITIES, PATCH_SIZE, Layout
+from thenoise.dit.h3.sparse import SolAttention, sol_attention
 from thenoise.dit.kvcache import KVBuffers, attend
 from thenoise.dit.quantized import QuantizedLinear
 from thenoise.utils.fp32_linear import Fp32Linear
@@ -101,26 +102,35 @@ class Attention(nn.Module):
 
     def forward(self, x: torch.Tensor,
                 rope: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-                bufs: Optional[KVBuffers] = None) -> torch.Tensor:
+                bufs: Optional[KVBuffers] = None,
+                sol: Optional[SolAttention] = None) -> torch.Tensor:
         """``x`` is ``[B, S, hidden]``; ``rope`` the run's ``(cos, sin)``, ``[1, 1, S, rot/2]``;
-        ``bufs`` this block's run-long K/V (see :func:`.kvcache.attend`).
+        ``bufs`` this block's run-long K/V (see :func:`.kvcache.attend`); ``sol`` this
+        step's block-sparse plan or ``None`` for dense (see :mod:`.sparse`).
         """
         batch, rows, _ = x.shape
         inner = self.heads * self.head_dim
         q, k, v = self.qkv_proj(x).split(inner, dim=-1)
-
-        def heads_(t: torch.Tensor) -> torch.Tensor:
-            return t.view(batch, rows, self.heads, self.head_dim).transpose(1, 2)
-
-        q, k, v = heads_(q), heads_(k), heads_(v)
+        # Token-major first, because that is what the fused projection already is: the
+        # sparse kernel reads it as it stands, and dense transposes to head-major and
+        # copies, which is what it did before the kernel existed.
+        q, k, v = (t.view(batch, rows, self.heads, self.head_dim) for t in (q, k, v))
+        cos, sin = rope if rope is not None else (None, None)
+        if sol is None:
+            q, k, v = (t.transpose(1, 2) for t in (q, k, v))
+        elif cos is not None:
+            # The table is shaped for head-major queries; the rotation itself is per
+            # (row, head) and reads the same either way.
+            cos, sin = cos.transpose(-2, -3), sin.transpose(-2, -3)
         # The checkpoint's q_norm/k_norm: without them the QK magnitudes grow with the
         # trunk width and the softmax saturates.
         q, k = self.qk_norm(q, k)
-        if rope is not None:
-            cos, sin = rope
+        if cos is not None:
             q = apply_rope_split_half(q, cos, sin)
             k = apply_rope_split_half(k, cos, sin)
-        return self.out_proj(attend(q, k, v, bufs))
+        if sol is None:
+            return self.out_proj(attend(q, k, v, bufs))
+        return self.out_proj(sol_attention(q, k, v, sol).reshape(batch, rows, inner))
 
 
 class MLP(nn.Module):
@@ -193,9 +203,10 @@ class DiTBlock(nn.Module):
     @torch.compile(fullgraph=False)
     def forward(self, x: torch.Tensor, spans: Sequence[Span],
                 rope: Tuple[torch.Tensor, torch.Tensor],
-                bufs: Optional[KVBuffers]) -> torch.Tensor:
+                bufs: Optional[KVBuffers],
+                sol: Optional[SolAttention] = None) -> torch.Tensor:
         h = _modulate(x, spans, self.norm1, attn=True)
-        x = _gate(x, spans, self.attn(h, rope, bufs), attn=True)
+        x = _gate(x, spans, self.attn(h, rope, bufs, sol), attn=True)
         h = _modulate(x, spans, self.norm2, attn=False)
         return _gate(x, spans, self.mlp(h), attn=False)
 
