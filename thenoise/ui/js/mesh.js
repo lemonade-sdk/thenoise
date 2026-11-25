@@ -1,11 +1,21 @@
 
+const MESH_GLYPH = 'data:image/svg+xml;utf8,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+  + '<g fill="none" stroke="#8b8fa3" stroke-width="3" stroke-linejoin="round">'
+  + '<path d="M32 6 58 20v24L32 58 6 44V20z"/><path d="M6 20l26 14 26-14M32 34v24"/></g></svg>');
+
+let meshSource = null;
+let meshGone = null;        
+let meshKept = new Set();
 let meshOutUrl = null;
 let meshOutMeta = null;
-let meshShown = 0;   // a shape still being read when the next one arrives is stale
+let meshShown = 0;   
 
 const meshJob = { id: null };
-const MESH_PROGRESS = { root: 'mesh_progress', label: 'mesh_progress_label', bar: 'mesh_bar' };
-const MESH_MODES = {i2d: 'image-to-shape', mv2d: 'views-to-shape', t2d: 'text-to-shape'};
+const MESH_PROGRESS = { root: 'mesh_progress', label: 'mesh_progress_label', bar: 'mesh_bar',
+  labels: { conditioning: 'reading the image', sampling: 'shaping', finish: 'tidying up' } };
+const MESH_MODES = {i2d: 'image-to-shape', mv2d: 'views-to-shape', t2d: 'text-to-shape',
+                    shape: 'cut again from a kept shape'};
 const MESH_FORMATS = { glb: 'model/gltf-binary', obj: 'text/plain', stl: 'model/stl' };
 const MESH_MAX_VIEWS = 4;
 const meshViews = [];   // {b64, dataUrl, name}, in view order
@@ -53,6 +63,7 @@ async function loadMeshPicture(file) {
   }
   const image = await readImageFile(file);
   if (!image) return;
+  meshSource = meshGone = null;   // an image is a shape being made, not one being cut again
   meshViews.push({ dataUrl: image.dataUrl, b64: image.b64, name: file.name });
   renderMeshViews();
   resetMeshResult();
@@ -63,7 +74,54 @@ bindDropzone('mesh_dropzone', 'mesh_file', async files => {
 });
 initLora('mesh_');
 
-/* ---------- Finish: whatever this server declares ---------- */
+const meshHist = makeHistory({
+  containerId: 'mesh_history_items', rootId: 'mesh_history', alt: 'shape',
+  onSelect: showMeshShape,
+});
+
+async function showMeshShape(item) {
+  meshOutMeta = item.meta;
+  meshOutUrl = item.url;
+  meshSource = meshKept.has(item.meta.job) ? item.meta.job : null;
+  meshGone = meshSource || !item.meta.job ? null : item.meta.job;
+  describeMeshSource();
+  applyMeshSettings(item.meta);
+  try {
+    const answer = await fetch(item.url);
+    if (!answer.ok) throw new Error('the browser has let it go');
+    showMeshResult(await answer.blob());
+  } catch (error) {
+    meshFail('cannot show that shape again: ' + error.message);
+  }
+}
+
+function applyMeshSettings(meta) {
+  for (const key of ['latents', 'steps', 'guidance_scale', 'sampler', 'seed',
+                     'octree_resolution', 'bounds', 'mc_level', 'scale', 'output_format']) {
+    const el = $('mesh_' + key);
+    if (el && meta[key] != null && meta[key] !== '') el.value = meta[key];
+  }
+}
+
+function describeMeshSource() {
+  const clear = $('mesh_shape_clear');
+  clear.textContent = meshSource
+    ? 'cutting #' + meshSource.slice(4, 10) + ' again \u2014 click to shape a new one' : '';
+  clear.classList.toggle('hidden', !meshSource);
+  const note = $('mesh_shape_note');
+  note.textContent = meshGone
+    ? 'shape #' + meshGone.slice(4, 10) + ' is gone from the server: its latents did not '
+      + 'outlive a restart, and only the newest 10 are kept while it runs' : '';
+  note.classList.toggle('hidden', !meshGone);
+  $('mesh_file').disabled = !!meshSource;
+  $('mesh_dropzone').inert = !!meshSource;
+}
+
+async function loadMeshShapes() {
+  const listing = await fetchJSON('/shapes');
+  meshKept = new Set((listing && listing.shapes) || []);
+}
+
 registerKnobs('finish', '/finish');
 loadKnobs('finish', ['mesh_']);
 
@@ -77,13 +135,16 @@ function collectMeshSettings() {
   }
   const lora_specs = parseLora($('mesh_lora_specs').value);
   if (lora_specs) body.lora_specs = lora_specs;
-  body.image = meshViews.length === 1 ? meshViews[0].b64
-                                      : meshViews.map(view => view.b64);
+  if (meshSource) body.from_shape = meshSource;
+  else body.image = meshViews.length === 1 ? meshViews[0].b64
+                                           : meshViews.map(view => view.b64);
   return { ...body, ...collectKnobs('finish', 'mesh_') };
 }
 
 function validateMeshInputs() {
-  if (!meshViews.length) return meshFail('a shape needs an image');
+  if (!meshViews.length && !meshSource) {
+    return meshFail('a shape needs an image \u2014 or pick one from History to cut it again');
+  }
   const check = (fields, ok, message) => {
     for (const f of fields) {
       const v = $('mesh_' + f).value;
@@ -113,27 +174,32 @@ function resetMeshResult() {
   $('meshplaceholder').style.display = '';
 }
 
-function showMeshResult(blob) {
+function showMeshResult(blob, remember) {
   $('meshplaceholder').style.display = 'none';
   $('mesh_out').style.display = 'flex';
   $('mesh_out_name').textContent = meshName(meshOutMeta);
   setStageActions($('mesh_download'), $('mesh_info_btn'), true);
   const note = $('mesh_out_note');
   if (!meshViewerReady()) {
-    note.textContent = 'no webgl2 in this browser — download it to look at the shape';
+    note.textContent = 'this browser cannot show 3D — download it to look at the shape';
+    if (remember) remember(null);
     return;
   }
-  note.textContent = 'reading the shape\u2026';
+  note.textContent = 'putting it on screen\u2026';
   const shown = meshShown;
   showMeshBlob(blob, meshOutMeta.output_format).then(
     (shape) => {
+      if (remember) remember(shown === meshShown ? meshSnapshot() : null);
       if (shown !== meshShown) return;
       $('mesh_wire').disabled = false;
       note.textContent = shape.triangles.toLocaleString() + ' triangles, '
-        + shape.vertices.toLocaleString() + ' vertices \u2014 drag to turn, wheel to zoom';
+        + shape.vertices.toLocaleString() + ' vertices'
+        + (meshOutMeta.summary ? ' \u00b7 ' + meshOutMeta.summary : '')
+        + ' \u2014 drag to turn, wheel to zoom';
     },
     (error) => {
-      if (shown === meshShown) note.textContent = 'this viewer cannot read it: ' + error.message;
+      if (remember) remember(null);
+      if (shown === meshShown) note.textContent = 'could not open it: ' + error.message;
     },
   );
 }
@@ -153,17 +219,30 @@ $('mesh_generate').addEventListener('click', () => {
     timerTextEl: 'mesh_timer_text',
     progress: MESH_PROGRESS,
     onArtifact: async (blob, status) => {
-      if (meshOutUrl) URL.revokeObjectURL(meshOutUrl);
-      const { image, ...sent } = body;
-      meshOutMeta = { ...sent, ...status.resolved, model: status.model,
-                         picture: meshViews.map(view => view.name).join(', ') };
-      meshOutUrl = URL.createObjectURL(new Blob([blob], {
+      const { image, ...sent } = body;   // history holds the shape, not its pixels
+      meshOutMeta = { ...sent, ...status.resolved, model: status.model, job: status.id,
+                      summary: status.summary || '',
+                      picture: body.from_shape ? 'shape #' + body.from_shape.slice(4, 10)
+                                               : meshViews.map(view => view.name).join(', ') };
+      const url = URL.createObjectURL(new Blob([blob], {
         type: MESH_FORMATS[meshOutMeta.output_format] || 'application/octet-stream',
       }));
-      showMeshResult(blob);
+      meshOutUrl = url;
+      const meta = meshOutMeta;   // a newer shape may take the stage before this one is drawn
+      showMeshResult(blob, (still) => {
+        meshHist.add(url, meta, still || MESH_GLYPH);
+        loadMeshShapes();
+      });
     },
   });
 });
+
+$('mesh_shape_clear').addEventListener('click', () => {
+  meshSource = meshGone = null;
+  describeMeshSource();
+});
+describeMeshSource();
+loadMeshShapes();
 
 $('mesh_cancel').addEventListener('click', () => cancelJob(meshJob, $('mesh_cancel')));
 
@@ -183,6 +262,7 @@ function renderMeshInfo() {
     }
   }
   if (m.picture) rows.push([FIELD_LABELS.picture, m.picture, '']);
+  if (m.summary) rows.push(['Made', m.summary, '']);
   const lora = m.lora_specs;
   const hasLora = Array.isArray(lora) ? lora.length : (lora ? Object.keys(lora).length : 0);
   if (hasLora) rows.push(['LoRA', formatLora(lora), 'prompt']);

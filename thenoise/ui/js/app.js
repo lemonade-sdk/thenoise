@@ -297,7 +297,9 @@ applyModelState();
 
 // Each screen keeps the job it has in flight, for its Cancel button to name.
 const genJob = { id: null };
-const GEN_PROGRESS = { root: 'genprogress', label: 'genprogress_label', bar: 'genbar' };
+const GEN_PROGRESS = { root: 'genprogress', label: 'genprogress_label', bar: 'genbar',
+  labels: { conditioning: 'reading the prompt', sampling: 'drawing',
+            decoding: 'finishing the image' } };
 
 $('generate').addEventListener('click', () => {
   if (!validateDims('')) return;
@@ -506,7 +508,9 @@ function editExtras() {
 }
 
 const editJob = { id: null };
-const EDIT_PROGRESS = { root: 'editprogress', label: 'editprogress_label', bar: 'editbar' };
+const EDIT_PROGRESS = { root: 'editprogress', label: 'editprogress_label', bar: 'editbar',
+  labels: { conditioning: 'reading the image', sampling: 'redrawing',
+            decoding: 'finishing the image' } };
 
 $('edit_btn').addEventListener('click', () => {
   if (editRefs.length === 0) return;

@@ -419,6 +419,20 @@ async function showMeshBlob(blob, format) {
   return parsed;
 }
 
+const MESH_THUMB = 240;
+
+function meshSnapshot() {
+  if (!MESH_VIEW.gl || !MESH_VIEW.surface) return null;
+  drawMesh();
+  const seen = $('mesh_view');
+  const shrink = Math.min(1, MESH_THUMB / Math.max(seen.width, seen.height));
+  const still = document.createElement('canvas');
+  still.width = Math.max(1, Math.round(seen.width * shrink));
+  still.height = Math.max(1, Math.round(seen.height * shrink));
+  still.getContext('2d').drawImage(seen, 0, 0, still.width, still.height);
+  return still.toDataURL('image/png');
+}
+
 function clearMesh() {
   const gl = MESH_VIEW.gl;
   if (!gl) return;

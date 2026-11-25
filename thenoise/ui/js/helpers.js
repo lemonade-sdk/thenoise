@@ -530,7 +530,7 @@ function renderInfo(meta) {
 }
 
 function makeHistory({ containerId, rootId, alt, onSelect, video: isVideo = false }) {
-  const items = []; // newest first, capped at 10: {url, meta, time}
+  const items = []; // newest first, capped at 10: {url, meta, time, thumb}
   function select(i) {
     const item = items[i];
     if (!item) return;
@@ -538,8 +538,8 @@ function makeHistory({ containerId, rootId, alt, onSelect, video: isVideo = fals
     $(containerId).querySelectorAll('.hist-item')
       .forEach((el, idx) => el.classList.toggle('current', idx === i));
   }
-  function add(url, meta) {
-    items.unshift({ url, meta, time: Date.now() });
+  function add(url, meta, thumb) {
+    items.unshift({ url, meta, thumb, time: Date.now() });
     if (items.length > 10) {
       const removed = items.pop();
       if (removed.url) URL.revokeObjectURL(removed.url);
@@ -562,7 +562,7 @@ function makeHistory({ containerId, rootId, alt, onSelect, video: isVideo = fals
       } else {
         el.alt = alt + ' ' + (i + 1);
       }
-      el.src = item.url;
+      el.src = item.thumb || item.url;
       div.appendChild(el);
       const seed = document.createElement('span');
       seed.className = 'hist-seed';
@@ -769,8 +769,12 @@ async function postJSONData(url, body) {
 const JOB_POLL_MS = 500;
 const JOB_POLL_RETRIES = 5;
 
-// Stage names are their own labels except this one.
-const JOB_STAGE_LABELS = { postprocessing: 'post-processing' };
+const STAGE_WORDS = {
+  queued: 'in line', loading: 'starting', conditioning: 'understanding the request',
+  sampling: 'working', cutting: 'cutting the surface', decoding: 'finishing the pixels',
+  encoding: 'writing the frames', upscaling: 'upscaling', postprocessing: 'polishing',
+  finish: 'cleaning up', completed: 'done', canceled: 'canceled', failed: 'failed',
+};
 
 const sleep = (ms) => new Promise(done => setTimeout(done, ms));
 
@@ -815,7 +819,7 @@ async function pollJob(id, onProgress) {
 // els: {root, label, bar} — the ids of one pane's progress block.
 function setProgress(els, p) {
   $(els.root).classList.remove('hidden');
-  const stage = JOB_STAGE_LABELS[p.stage] || p.stage || 'waiting';
+  const stage = (els.labels || {})[p.stage] || STAGE_WORDS[p.stage] || p.stage || 'waiting';
   const bar = $(els.bar);
   if (p.of > 0) {
     $(els.label).textContent = `${stage} ${p.step}/${p.of}`;

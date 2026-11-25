@@ -1,11 +1,9 @@
-/* video.js — the layout Generate shows for a video model: T2V, I2V and FLF2V through
-   POST /jobs/video and the shared job read. Plain global script, loaded AFTER helpers.js. */
-
-let vOutUrl = null;       // object URL of the current result
-let vOutMeta = null;      // request + server-resolved settings of the current result
+let vOutUrl = null;       
 
 const videoJob = { id: null }; // in flight, for the Cancel button to name
-const VIDEO_PROGRESS = { root: 'v_progress', label: 'v_progress_label', bar: 'v_bar' };
+const VIDEO_PROGRESS = { root: 'v_progress', label: 'v_progress_label', bar: 'v_bar',
+  labels: { conditioning: 'reading the prompt', sampling: 'rendering',
+            decoding: 'building the frames', encoding: 'writing the video' } };
 const VIDEO_MODES = {t2v: 'text-to-video', i2v: 'image-to-video',
                      flf2v: 'first and last frame', ref2v: 'reference-to-video'};
 

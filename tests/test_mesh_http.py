@@ -1,5 +1,6 @@
 import base64
 import io
+import os
 
 import torch
 from fastapi import FastAPI
@@ -11,13 +12,13 @@ from thenoise.jobs import JobQueue
 from thenoise.mesh.controller import MeshPipelineController
 from thenoise.mesh.http import install_mesh_routes
 from thenoise.mesh.service import mesh_planner
+from thenoise.mesh.shapes import ShapeStore
 
 MODEL = "hunyuan3d21"
 
 
 def test_the_shape_server_declares_its_finish_chain(tmp_path):
-    """The pane builds its Finish sliders from this and nothing else, so the words, the
-    bounds and the default live on the server rather than in a second copy of JavaScript."""
+    """The pane builds its Finish sliders from this, so the words and bounds live on the server."""
     queue = JobQueue(tmp_path)
     try:
         with _client(_controller(), queue) as client:
@@ -73,8 +74,7 @@ def test_the_finish_knobs_a_pane_sends_reach_the_written_file(tmp_path):
 
 
 def test_the_wire_knows_the_finish_knobs_it_offers(tmp_path):
-    """A knob the pane was told about is a field the request model accepts: a name it
-    forbids would come back 422 on a slider the server itself advertised."""
+    """A knob the server advertises is a field the request accepts, or a slider returns 422."""
     queue = JobQueue(tmp_path)
     try:
         with _client(_controller(), queue) as client:
@@ -106,12 +106,12 @@ class _Runtime:
         return action(self.pipeline)
 
 
-def _client(pipeline, queue):
+def _client(pipeline, queue, shapes=None):
     app = FastAPI()
     from thenoise.jobs_http import install_job_routes
 
     install_job_routes(app, queue)
-    install_mesh_routes(app, queue, mesh_planner(_Runtime(pipeline)), MODEL)
+    install_mesh_routes(app, queue, mesh_planner(_Runtime(pipeline), shapes), MODEL, shapes)
     return TestClient(app)
 
 
@@ -122,7 +122,7 @@ def _controller(body=b"glTF fake"):
         # The real resolve, so what the controller refuses is what the route answers 400.
         resolve = real.resolve
 
-        def render(self, spec, token, progress, output):
+        def render(self, spec, token, progress, output, shapes=None):
             progress("sampling", spec.steps, spec.steps)
             output.write_bytes(body)
 
@@ -134,7 +134,7 @@ def _failing(failure):
         def resolve(self, spec):
             raise failure
 
-        def render(self, spec, token, progress, output):
+        def render(self, spec, token, progress, output, shapes=None):
             raise failure
 
     return Controller()
@@ -241,6 +241,50 @@ def test_a_request_without_a_picture_cannot_ask_for_a_shape(tmp_path):
         queue.close()
 
 
+def test_a_saved_shape_can_stand_in_for_an_image(tmp_path):
+    """A request bringing both an image and a shape is refused, not decided for."""
+    queue = JobQueue(tmp_path)
+    try:
+        with _client(_controller(), queue) as client:
+            answer = client.post("/jobs/mesh", json={"from_shape": "job_first"})
+            assert answer.status_code == 202
+            ident = answer.json()["id"]
+            until(lambda: client.get(f"/jobs/{ident}").json()["status"] == "completed")
+            resolved = client.get(f"/jobs/{ident}").json()["resolved"]
+            assert resolved["mode"] == "shape"
+            assert resolved["from_shape"] == "job_first"
+
+            answer = client.post("/mesh", json={"image": _b64(), "from_shape": "job_first"})
+            assert answer.status_code == 400
+            assert "either image or from_shape" in answer.text
+    finally:
+        queue.close()
+
+
+def test_the_shapes_a_request_can_name_are_listed_newest_first(tmp_path):
+    """The list the refusals speak from: what the server holds now, and nothing after a restart."""
+    queue = JobQueue(tmp_path)
+    shapes = ShapeStore(tmp_path)
+    try:
+        with _client(_controller(), queue, shapes) as client:
+            assert client.get("/shapes").json() == {"shapes": []}
+            shapes.save("job_alpha", torch.zeros(1, 2, 2))
+            shapes.save("job_beta", torch.zeros(1, 2, 2))
+            os.utime(shapes.path("job_beta"), (1, 1))
+            assert client.get("/shapes").json() == {"shapes": ["job_alpha", "job_beta"]}
+    finally:
+        queue.close()
+
+
+def test_an_engine_without_a_jobs_directory_answers_no_shapes(tmp_path):
+    queue = JobQueue(tmp_path)
+    try:
+        with _client(_controller(), queue) as client:
+            assert client.get("/shapes").status_code == 404
+    finally:
+        queue.close()
+
+
 def test_a_controller_refusal_is_a_bad_request_not_a_crash(tmp_path):
     queue = JobQueue(tmp_path)
     try:
@@ -291,8 +335,7 @@ def test_views_past_the_ones_the_model_numbers_are_refused_before_the_job(tmp_pa
 
 
 def test_a_knob_no_shape_can_use_is_refused_before_the_job(tmp_path):
-    """``bounds: 700`` and a cut level the field never reach refine the whole volume rather
-    than a surface, which is 80 GB of octree spent before anything says so."""
+    """An unreachable knob is refused before the job, not after 80 GB of octree."""
     queue = JobQueue(tmp_path)
     try:
         with _client(_controller(), queue) as client:

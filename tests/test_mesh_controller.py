@@ -132,20 +132,29 @@ class FakeShapeModel:
         return triangle_mesh()
 
 
-def render(model, **overrides):
+def render(model, progress=lambda *a: None, **overrides):
     controller = MeshPipelineController(model)
     resolved = controller.resolve(MeshSpec(**{**picture(), **overrides}))
     out = Path(f"/tmp/thenoise-mesh-{len(model.events)}.{resolved.output_format}")
     out.unlink(missing_ok=True)
     model.token = Cancellation()
-    controller.render(resolved, model.token, lambda *a: None, out)
+    controller.render(resolved, model.token, progress, out)
     return out
+
+
+def test_a_shape_reports_the_parts_of_itself_that_would_otherwise_be_silent(tmp_path):
+    """A job that says nothing while it cuts the volume is a hang to whoever watches it."""
+    seen = []
+    model = FakeShapeModel()
+    render(model, progress=lambda stage, *_: seen.append(stage))
+    assert seen[0] == "conditioning"
+    assert seen[-1] == "cutting", "the volume must not be reported as the solver's last step"
+    assert "sampling" in seen[1:-1]
 
 
 
 def test_a_shape_stage_asks_for_room_in_the_units_it_actually_moves():
-    """A volume is not a picture: the octree and the transformer state bytes, and only
-    the conditioning stage, which reads images, is allowed to say pixels."""
+    """A volume is not an image: only the conditioning stage may speak in pixels."""
     model = FakeShapeModel()
     render(model, octree_resolution=64, latents=512)
     sized = {names: (pixels, reserve) for names, pixels, reserve in model.memory.sized}
@@ -194,8 +203,7 @@ def test_more_views_than_the_model_numbers_are_refused():
 
 
 def test_a_model_with_no_multi_view_tower_refuses_the_second_picture():
-    """Refused, not ignored: a tower never marked with a view cannot read the marking, and
-    a quietly dropped picture is a shape nobody asked for."""
+    """A quietly dropped image is a shape nobody asked for: refused, not ignored."""
     one_picture = FakeShapeModel(caps={"i2d": True, "t2d": False})
     with pytest.raises(ValueError, match="no multi-view tower"):
         MeshPipelineController(one_picture).resolve(MeshSpec(image=[PNG, OTHER]))
@@ -276,8 +284,7 @@ def _obj_counts(path: Path) -> tuple[int, int]:
 
 
 def test_the_file_carries_the_finished_mesh_not_the_cut(tmp_path):
-    """The junk goes before the budget is taken, and the file is what is left: an island
-    reduced into the shape would be part of the triangle count forever."""
+    """The junk goes before the budget is taken, and the file is what is left."""
     model = _TwoPieceModel()
     controller = MeshPipelineController(model)
     resolved = controller.resolve(MeshSpec(floaters=0.15, triangles=0.5,

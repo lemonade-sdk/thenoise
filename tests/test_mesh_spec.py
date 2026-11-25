@@ -102,9 +102,10 @@ def test_the_echo_leaves_the_picture_out():
     public = resolve(image=b"png").public()
     assert "image" not in public
     assert public["mode"] == "i2d"
-    assert set(public) <= {"mode", "latents", "steps", "guidance_scale", "sampler",
-                           "seed", "attention", "output_format", "octree_resolution",
-                           "bounds", "mc_level", "scale", "lora_specs", "finish"}
+    assert set(public) <= {"mode", "from_shape", "latents", "steps", "guidance_scale",
+                           "sampler", "seed", "attention", "output_format",
+                           "octree_resolution", "bounds", "mc_level", "scale", "lora_specs",
+                           "finish"}
     # The knobs travel back as the run resolved them, which is how a pane tells a knob that
     # arrived from one that its browser dropped on the floor.
     assert public["finish"] == FINISH_DEFAULTS

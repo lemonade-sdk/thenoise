@@ -52,8 +52,11 @@ def _mesh_knobs(model):
 def _mesh_routes(app, jobs, runtime):
     from .mesh.http import install_mesh_routes
     from .mesh.service import mesh_planner
+    from .mesh.shapes import ShapeStore
 
-    install_mesh_routes(app, jobs, mesh_planner(runtime), runtime.model_name)
+    shapes = ShapeStore(jobs.root)
+    install_mesh_routes(app, jobs, mesh_planner(runtime, shapes),
+                        runtime.model_name, shapes)
 
 
 #: Imports are inside the factories, so an image model never imports ``thenoise.video``.
