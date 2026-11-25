@@ -17,6 +17,7 @@ from thenoise.utils.dynamo import mark_token_axis
 from thenoise.utils.positions import grid_positions
 from thenoise.utils.qk_norm import QKNorm
 from thenoise.utils.rope import RopeCache, apply_rope, matrix_rope
+from thenoise.utils.sol_attention import SolAttention, sol_attention
 from thenoise.utils.safetensors import (
     Header,
     Signature,
@@ -157,9 +158,21 @@ class WanNativeAttention(nn.Module):
         self.qk_norm = QKNorm(dim, eps=eps)
         self.to_out = QuantizedLinear(dim, dim)
 
-    def forward(self, x: Tensor, context: Tensor | None, rope: Tensor | None) -> Tensor:
+    def forward(self, x: Tensor, context: Tensor | None, rope: Tensor | None,
+                sol: SolAttention | None = None) -> Tensor:
         source = x if context is None else context
         q, k = self.qk_norm(self.to_q(x), self.to_k(source))
+        if sol is not None and context is None:
+            # Routing is offered to self-attention only, and asked for twice so a caller
+            # that hands a plan to the text branch is refused rather than surprised. The
+            # kernel reads tokens in row order, so the head-major transpose is what drops
+            # out here; the rope broadcast moves to the head axis instead, measured
+            # bit-identical to transposing the operands.
+            q, k, v = (t.unflatten(-1, (self.heads, -1))
+                       for t in (q, k, self.to_v(source)))
+            if rope is not None:
+                q, k = apply_rope(q, k, rope, head_axis=2)
+            return self.to_out(sol_attention(q, k, v, sol).reshape(q.shape[0], q.shape[1], -1))
         q = q.unflatten(-1, (self.heads, -1)).transpose(1, 2)
         k = k.unflatten(-1, (self.heads, -1)).transpose(1, 2)
         v = self.to_v(source).unflatten(-1, (self.heads, -1)).transpose(1, 2)
@@ -181,8 +194,12 @@ class WanNativeBlock(nn.Module):
         self.ffn_out = QuantizedLinear(params.ffn_dim, params.dim)
         self.scale_shift_table = nn.Parameter(torch.empty(1, 6, params.dim))
 
-    @torch.compile(fullgraph=True)
-    def forward(self, x: Tensor, context: Tensor, temb: Tensor, rope: Tensor) -> Tensor:
+    # fullgraph=False for the routed variant: the kernel is an island a compiled block does
+    # not trace, so the step's graph is cut around the attention call. A dense step still
+    # compiles whole, because the branch is taken outside the compiled region.
+    @torch.compile(fullgraph=False)
+    def forward(self, x: Tensor, context: Tensor, temb: Tensor, rope: Tensor,
+                sol: SolAttention | None = None) -> Tensor:
         # I2V supplies [B, N, 6, D]; T2V supplies [B, 6, D].
         if temb.ndim == 4:
             mod = (self.scale_shift_table.unsqueeze(0) + temb.float()).unbind(dim=2)
@@ -191,7 +208,7 @@ class WanNativeBlock(nn.Module):
         shift, scale, gate, shift_ff, scale_ff, gate_ff = mod
 
         y = (self.norm1(x.float()) * (1 + scale) + shift).to(x.dtype)
-        x = (x.float() + self.attn1(y, None, rope) * gate).to(x.dtype)
+        x = (x.float() + self.attn1(y, None, rope, sol) * gate).to(x.dtype)
         x = x + self.attn2(self.norm2(x.float()).to(x.dtype), context, None)
         y = (self.norm3(x.float()) * (1 + scale_ff) + shift_ff).to(x.dtype)
         y = self.ffn_out(F.gelu(self.ffn_in(y), approximate="tanh"))
@@ -306,6 +323,7 @@ class WanNativeDiT(nn.Module):
         hidden_states: Tensor,
         timestep: Tensor,
         encoder_hidden_states: Tensor,
+        sol: SolAttention | None = None,
     ) -> Tensor:
         b, c, t, h, w = hidden_states.shape
         params = self.params
@@ -323,7 +341,7 @@ class WanNativeDiT(nn.Module):
         if modulation.ndim == 4:
             mark_token_axis(modulation)
         for block in self.blocks:
-            x = block(x, encoder_hidden_states, modulation, rope)
+            x = block(x, encoder_hidden_states, modulation, rope, sol)
         x = self.head(x, temb)
         x = x.reshape(b, t // pt, h // ph, w // pw, pt, ph, pw, -1)
         x = x.permute(0, 7, 1, 4, 2, 5, 3, 6).flatten(6, 7).flatten(4, 5).flatten(2, 3)

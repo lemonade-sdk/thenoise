@@ -40,12 +40,17 @@ def matrix_rope(dims: list[int], theta: float):
 
 
 def apply_rope(
-    xq: torch.Tensor, xk: torch.Tensor, freqs: torch.Tensor
+    xq: torch.Tensor, xk: torch.Tensor, freqs: torch.Tensor, head_axis: int = 1
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply ``freqs`` ``[B, L, dim/2, 2, 2]`` to query/key ``[B, H, L, D]``."""
+    """Apply ``freqs`` ``[B, L, dim/2, 2, 2]`` to query/key ``[B, H, L, D]``.
+
+    ``head_axis`` says which axis of the operands holds the heads, so the same table serves a
+    head-major path and a token-major one (``head_axis=2``) without a transpose. Block-sparse
+    kernels read tokens in row order, which is the token-major case.
+    """
     xq_ = xq.float().reshape(*xq.shape[:-1], -1, 1, 2)
     xk_ = xk.float().reshape(*xk.shape[:-1], -1, 1, 2)
-    freqs = freqs.unsqueeze(1)  # [B, 1, L, dim/2, 2, 2]
+    freqs = freqs.unsqueeze(head_axis)  # [B, 1, L, dim/2, 2, 2] head-major
     xq_out = freqs[..., 0] * xq_[..., 0] + freqs[..., 1] * xq_[..., 1]
     xk_out = freqs[..., 0] * xk_[..., 0] + freqs[..., 1] * xk_[..., 1]
     return xq_out.reshape(*xq.shape).type_as(xq), xk_out.reshape(*xk.shape).type_as(xk)

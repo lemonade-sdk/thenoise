@@ -9,7 +9,8 @@ whether its family routes at all — and the engine asks it for a plan.
 The kept-fraction readout exists because ``tau`` is a significance level on a proxy row
 rather than a budget: the same value keeps a different fraction of the sequence depending
 on how the scores happen to be distributed, so a run tuned without that number visible is
-tuned blind. It is measured on the operands of one attention call per shape per process.
+tuned blind. It is a measurement rather than a record of a rule, and it runs only under
+debug logging: once per threshold and sequence length, on the operands of a real call.
 """
 
 from __future__ import annotations
@@ -37,6 +38,13 @@ DTYPES = (torch.bfloat16, torch.float16)
 #: One token per query block routes individually; 256 is the kernel's maximum.
 TOKEN_AUG_MAX = 256
 
+#: Below this many tokens a call is not worth routing: dense is faster. The kernel's
+#: crossover moves with head width — which every 128-wide trunk in this catalog shares —
+#: rather than with what a model generates, so they share this number until one measures a
+#: different one. On gfx1151 the kernel already wins at 1.3 k tokens, by 2 ms, which is not
+#: worth an opinion about.
+MIN_TOKENS = 12288
+
 
 @dataclass(frozen=True)
 class SolAttention:
@@ -46,8 +54,6 @@ class SolAttention:
     token_aug: int = TOKEN_AUG_MAX
     sink_blocks: Tuple[int, int] = (0, 0)
     sink_q: Tuple[int, int] = (0, 0)
-    #: Report what this threshold kept, once per shape. Cheap enough to leave on.
-    probe: bool = True
 
 
 @dataclass(frozen=True)
@@ -67,13 +73,68 @@ class RoutingStats:
                 f"({self.routed:.1%} by threshold) over {self.tokens} tokens")
 
 
-#: The last readout, for a bench or a test to read rather than parse from the log.
-LAST_STATS: Optional[RoutingStats] = None
-
-
 def available(device) -> bool:
     """Whether a compiled sol kernel exists for this device."""
     return bool(sol_attn_is_available(device))
+
+
+_LOGGED: set = set()
+_LOG_LIMIT = 32
+
+
+def claim(key) -> bool:
+    """Whether this key is new, claiming it if so.
+
+    Separate from :func:`log_once` because the kept-fraction readout is a pass over the
+    operands rather than a string, and work whose only consumer is a log line should be
+    skipped by the same test that skips the line.
+    """
+    if key in _LOGGED or len(_LOGGED) >= _LOG_LIMIT:
+        return False
+    _LOGGED.add(key)
+    return True
+
+
+def log_once(key, level: int, message: str, *args) -> None:
+    """One line per distinct key per process, so a run says anything once and not 1000x.
+
+    A run that flips between dense and sparse produces a bounded number of keys either way
+    (reason, token count); the cap is only so a pathological loop cannot grow it.
+    """
+    if claim(key):
+        logger.log(level, message, *args)
+
+
+def reset_log() -> None:
+    """Forget what has been reported. For tests, and for a second run in one process."""
+    _LOGGED.clear()
+
+
+def dense_reason(*, tokens: int, dtype: torch.dtype, head_dim: int, device,
+                 min_tokens: Optional[int] = None,
+                 cached: bool = False) -> Optional[str]:
+    """Why this call cannot be routed, or ``None`` when it can be.
+
+    The kernel's limits — width, dtype, device, and a length below which dense wins — plus
+    one that is not the kernel's but is never worth trying: a call whose keys live in a
+    cache buffer has no honest sink range to hand over, and the sinks are why a routed run of
+    a conditioned model can be trusted at all.
+
+    ``min_tokens`` defaults to :data:`MIN_TOKENS` read at call time, not bound as a default,
+    so a trunk can lower it for a test without restating the rest of the gates.
+    """
+    floor = MIN_TOKENS if min_tokens is None else min_tokens
+    if tokens < floor:
+        return f"under {floor} tokens"
+    if head_dim != HEAD_DIM:
+        return f"head_dim {head_dim} != {HEAD_DIM}"
+    if dtype not in DTYPES:
+        return f"dtype {dtype}, the fused backends take bf16 or fp16"
+    if device.type != "cuda":
+        return f"device {device}"
+    if cached:
+        return "the K/V cache holds this call's keys"
+    return None
 
 
 def routing_stats(q: torch.Tensor, k: torch.Tensor, tau: float,
@@ -120,13 +181,29 @@ def routing_stats(q: torch.Tensor, k: torch.Tensor, tau: float,
                         float(routed.float().mean()), float(exact.float().mean()))
 
 
+def _probe(q: torch.Tensor, k: torch.Tensor, plan: SolAttention) -> None:
+    """Report what the threshold kept, once per ``(threshold, length)``.
+
+    A block-pooled pass over the operands, which is a millisecond no production run owes
+    anybody: the number is only interesting while somebody is investigating, so this runs when
+    debug logging is on and never otherwise.
+    """
+    if not claim(("sol", plan.tau, q.shape[1])):
+        return
+    logger.debug("sol routing kept %s",
+                 routing_stats(q, k, plan.tau, plan.sink_blocks, plan.sink_q))
+
+
 @torch._dynamo.disable()
 def sol_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                   plan: SolAttention) -> torch.Tensor:
     """The kernel, on ``[B, T, H, D]`` operands, returning the same order.
 
-    An island of its own because it is an external kernel a compiled block has no reason to
-    trace, and because its arguments are Python block counts.
+    An island of its own because its arguments are Python block counts that dynamo would
+    otherwise guard on, and because the readout is a side effect that tracing would bake into
+    the graph. Letting the kernel be traced instead measured at equal speed — the call is
+    already a ``torch.library`` custom op with a fake — so this is the simpler of two options,
+    not the faster one.
 
     The operands arrive as a fused qkv projection's three slices, so a token's pitch is
     ``3 * H * D`` rather than ``H * D``; the kernel reads that, measured bit-identical to
@@ -134,27 +211,7 @@ def sol_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     is copied on the way in, which a dense path does not get to say about itself: see
     :func:`thenoise.utils.attention.uniform_layout`.
     """
-    global LAST_STATS
-    if plan.probe and _unprobed(plan.tau, q.shape[1]):
-        stats = routing_stats(q, k, plan.tau, plan.sink_blocks, plan.sink_q)
-        LAST_STATS = stats
-        logger.info("sol routing kept %s", stats)
+    if logger.isEnabledFor(logging.DEBUG):
+        _probe(q, k, plan)
     return sol_attn(q, k, v, tau=plan.tau, sink_blocks=list(plan.sink_blocks),
                     sink_q=list(plan.sink_q), token_aug=plan.token_aug)
-
-
-_PROBED: set = set()
-_PROBE_LIMIT = 16
-
-
-def _unprobed(tau: float, tokens: int) -> bool:
-    """One measurement per (threshold, sequence length) per process."""
-    if len(_PROBED) >= _PROBE_LIMIT or (tau, tokens) in _PROBED:
-        return False
-    _PROBED.add((tau, tokens))
-    return True
-
-
-def reset_probes() -> None:
-    """Allow the readout again. For tests, and for a second run in one process."""
-    _PROBED.clear()

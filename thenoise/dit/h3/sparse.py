@@ -19,19 +19,14 @@ from typing import Optional, Tuple
 
 import torch
 
-from thenoise.utils.sol_attention import (BLOCK, DTYPES, HEAD_DIM, TOKEN_AUG_MAX,
-                                          SolAttention, available)
-
-logger = logging.getLogger(__name__)
+from thenoise.utils.sol_attention import (BLOCK, TOKEN_AUG_MAX, SolAttention, available,
+                                          dense_reason, log_once, reset_log)
 
 #: Routing threshold in sigmas of the proxy row: how far a key block's mean score has to
 #: stand above an independence null to be attended exactly rather than pooled. It is a
 #: significance level, not a budget, so the fraction it keeps moves with the content —
 #: see :func:`thenoise.utils.sol_attention.routing_stats`.
 TAU = 1.3
-#: Below this the dense path is faster. The kernel names the same crossover; on gfx1151 the
-#: kernel already wins at 1.3 k tokens, by 2 ms, which is not worth an opinion about.
-MIN_TOKENS = 12288
 #: Percents of the schedule inside which routing is used; the earliest steps stay dense,
 #: where the run decides its structure. The reference defaults to 0.2; the practice in the
 #: literature (SVG2, carried by later work) is 0.3, which on a 4-step run is the whole run.
@@ -96,27 +91,15 @@ def sol_plan(*, layout, tokens: int, dtype: torch.dtype, head_dim: int, device,
     ``held_dense`` is a family's own veto, stated as the reason a log should give.
     """
     def dense(reason: str) -> None:
-        _log_once(reason, logging.DEBUG, "sol dense at %d tokens: %s", tokens, reason)
+        log_once(reason, logging.DEBUG, "sol dense at %d tokens: %s", tokens, reason)
 
     if held_dense is not None:
         dense(held_dense)
         return None
-    if tokens < MIN_TOKENS:
-        dense(f"under {MIN_TOKENS} tokens")
-        return None
-    if head_dim != HEAD_DIM:
-        dense(f"head_dim {head_dim} != {HEAD_DIM}")
-        return None
-    if dtype not in DTYPES:
-        dense(f"dtype {dtype}, the fused backends take bf16 or fp16")
-        return None
-    if device.type != "cuda":
-        dense(f"device {device}")
-        return None
-    if cached:
-        # The KV-cache path attends a longer key than query out of a buffer the layout does
-        # not describe, so there is no honest sink range to give the kernel.
-        dense("the K/V cache holds this call's keys")
+    reason = dense_reason(tokens=tokens, dtype=dtype, head_dim=head_dim, device=device,
+                          cached=cached)
+    if reason is not None:
+        dense(reason)
         return None
     if layout.seq_len != tokens:
         # Sinks are the whole reason a sparse run of this model is trustworthy, and a
@@ -134,27 +117,6 @@ def sol_plan(*, layout, tokens: int, dtype: torch.dtype, head_dim: int, device,
         dense("no compiled sol_attn kernel for this GPU")
         return None
     sinks, rows = sol_sinks(layout)
-    _log_once("sparse", logging.DEBUG, "sol attention: %d tokens, tau %g, sinks %s/%s",
-              tokens, TAU, sinks, rows)
+    log_once("sparse", logging.DEBUG, "sol attention: %d tokens, tau %g, sinks %s/%s",
+             tokens, TAU, sinks, rows)
     return SolAttention(TAU, TOKEN_AUG_MAX, sinks, rows)
-
-
-_LOGGED = set()
-_LOG_LIMIT = 32
-
-
-def _log_once(key: str, level: int, message: str, *args) -> None:
-    """One line per distinct key per process, so a run says anything once and not 1000x.
-
-    A run that flips between dense and sparse every step produces a bounded number of keys
-    either way (reason, token count); the cap is only so a pathological loop cannot grow it.
-    """
-    if key in _LOGGED or len(_LOGGED) >= _LOG_LIMIT:
-        return
-    _LOGGED.add(key)
-    logger.log(level, message, *args)
-
-
-def reset_log() -> None:
-    """Forget what has been reported. For tests, and for a second run in one process."""
-    _LOGGED.clear()

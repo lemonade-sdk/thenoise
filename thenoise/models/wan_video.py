@@ -18,6 +18,7 @@ from thenoise.dit.wan_video.model import (
     Wan22Params,
     detect_params,
 )
+from thenoise.dit.wan_video.sparse import wan_plan, window_sigmas
 from thenoise.models.base import Conditioning
 from thenoise.models.config import EncodePromptArgs, VideoSamplingParams
 from thenoise.models.pixel_base import expect_latent_width
@@ -26,6 +27,7 @@ from thenoise.samplers import Step, sigma_steps
 from thenoise.text_encoders.wan_video import load_wan_text_encoder
 from thenoise.utils.image_tensor import cover_crop
 from thenoise.utils.safetensors import Header
+from thenoise.utils.sol_attention import SolAttention
 from thenoise.utils.wan_weights import wan_dit_key
 from thenoise.vae.wan_video import detect_latent_width, load_wan_video_vae, TEMPORAL_COMPRESSION
 from thenoise.video.spec import ResolvedVideo, VideoSpec, frame_grid
@@ -451,15 +453,32 @@ class Wan22Model(VideoModel):
                                   device=x.device, dtype=torch.float32)
         else:
             timestep = clip.timestep_mask * timestep
-        vel = self._velocity(module, x, timestep, cond.cond)
+        sigma = float(t)
+        vel = self._velocity(module, x, timestep, cond.cond, self._sol(module, x, sigma))
         if cond.null is None:
             return vel
-        uncond = self._velocity(module, x, timestep, cond.null)
+        uncond = self._velocity(module, x, timestep, cond.null, self._sol(module, x, sigma))
         return uncond + guidance_scale * (vel - uncond)
 
+    def _sol(self, module, x: torch.Tensor, sigma: float) -> SolAttention | None:
+        """Whether this step's self-attention routes, and with what sinks.
+
+        The patchified geometry is all the trunk's policy needs beside the sigma: the token
+        count decides whether routing is worth its overhead, the tokens in a frame where the
+        first frame's exact range ends. Both come out of the latent shape the step already
+        has, so nothing new is plumbed through the sampler.
+        """
+        pt, ph, pw = module.params.patch_size
+        _, _, t, h, w = x.shape
+        return wan_plan(tokens=(t // pt) * (h // ph) * (w // pw),
+                        tokens_per_frame=(h // ph) * (w // pw), dtype=x.dtype,
+                        head_dim=module.params.head_dim, device=x.device, sigma=sigma,
+                        window=window_sigmas(self.percent_to_sigma))
+
     @staticmethod
-    def _velocity(module, x, timestep, context) -> torch.Tensor:
-        return module(x, timestep=timestep, encoder_hidden_states=context).float()
+    def _velocity(module, x, timestep, context,
+                  sol: SolAttention | None = None) -> torch.Tensor:
+        return module(x, timestep=timestep, encoder_hidden_states=context, sol=sol).float()
 
     # ------------------------------------------------------------ codec
     def decode_frames(self, latents: torch.Tensor,

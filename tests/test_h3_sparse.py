@@ -22,9 +22,9 @@ import thenoise.utils.sol_attention as sol
 from test_dit_h3_av import _av_dit, _av_layout, _run
 from test_dit_h3_image import TINY_SIGMAS, _forward, _tiny_dit
 from thenoise.dit.h3.layout import Layout
-from thenoise.dit.h3.sparse import (MIN_TOKENS, STILL_HELD_DENSE, TAU, WINDOW, SolAttention,
+from thenoise.dit.h3.sparse import (STILL_HELD_DENSE, TAU, WINDOW, SolAttention,
                                     sol_plan, sol_sinks, window_sigmas)
-from thenoise.utils.sol_attention import (BLOCK, DTYPES, HEAD_DIM, TOKEN_AUG_MAX,
+from thenoise.utils.sol_attention import (BLOCK, DTYPES, HEAD_DIM, MIN_TOKENS, TOKEN_AUG_MAX,
                                           routing_stats)
 
 CUDA = SimpleNamespace(type="cuda")
@@ -47,13 +47,12 @@ def _gate_small_enough(monkeypatch):
     Refusing it is a case of its own, and it reads the patched value so the gate itself is
     still what is being exercised.
     """
-    monkeypatch.setattr(sparse, "MIN_TOKENS", 8)
+    monkeypatch.setattr(sol, "MIN_TOKENS", 8)
 
 
 @pytest.fixture(autouse=True)
 def _fresh_log():
     sparse.reset_log()
-    sol.reset_probes()
 
 
 @pytest.fixture
@@ -138,7 +137,7 @@ def test_fp16_operands_go_sparse_too(kernel_present):
 
 
 @pytest.mark.parametrize("change, why", [
-    (dict(tokens=sparse.MIN_TOKENS - 1), "below the crossover"),
+    (dict(tokens=MIN_TOKENS - 1), "below the crossover"),
     (dict(head_dim=64), "the clip decoder's head width"),
     (dict(dtype=torch.float32), "not a dtype the fused backends read"),
     (dict(device=CPU), "no kernel off CUDA"),
@@ -236,36 +235,43 @@ def test_the_sink_ranges_are_part_of_the_kept_budget():
     assert routing_stats(q, k, 9.0).kept < some < 1.0
 
 
-def test_the_probe_reports_once_per_shape(monkeypatch, caplog):
-    """One measurement per (threshold, length), because it is not free."""
-    caplog.set_level("INFO")
+def test_the_kept_fraction_is_measured_once_and_only_while_debugging(monkeypatch, caplog):
+    """A millisecond per threshold and length, which a run at info does not pay.
+
+    Both halves matter: the number is the only forensics a default-on feature has, and it
+    costs a pass over the operands that nothing reads unless somebody asked.
+    """
     calls = []
     monkeypatch.setattr(sol, "sol_attn",
-                        lambda q, k, v, **kw: calls.append(k.shape) or torch.zeros_like(q))
+                        lambda q, k, v, **kw: calls.append(k.shape[1]) or torch.zeros_like(q))
+    measured = []
+    monkeypatch.setattr(sol, "routing_stats",
+                        lambda q, k, tau, *rest: measured.append((tau, k.shape[1]))
+                        or sol.RoutingStats(k.shape[1], 4, tau, 0.2, 0.3))
     plan = SolAttention(TAU, TOKEN_AUG_MAX, (0, 2), (2, 4))
-    q, k, v = (torch.randn(1, 256, 2, 128, dtype=torch.bfloat16) for _ in range(3))
-    for _ in range(4):
-        sol.sol_attention(q, k, v, plan)
-    assert len(calls) == 4
-    assert len([r for r in caplog.records if "sol routing kept" in r.getMessage()]) == 1
-    assert sol.LAST_STATS.tokens == 256
-    sol.reset_probes()
-    sol.sol_attention(q, k, v, plan)
-    assert len([r for r in caplog.records if "sol routing kept" in r.getMessage()]) == 2
 
-
-def test_the_probe_can_be_switched_off(monkeypatch, caplog):
     caplog.set_level("INFO")
-    monkeypatch.setattr(sol, "sol_attn", lambda q, k, v, **kw: torch.zeros_like(q))
-    sol.sol_attention(*(torch.randn(1, 128, 2, 128, dtype=torch.bfloat16) for _ in range(3)),
-                      SolAttention(TAU, probe=False))
-    assert not [r for r in caplog.records if "sol routing kept" in r.getMessage()]
+    for _ in range(4):
+        sol.sol_attention(*(torch.randn(1, 256, 2, 128, dtype=torch.bfloat16)
+                            for _ in range(3)), plan)
+    assert len(calls) == 4
+    assert not measured
+    assert not [r for r in caplog.records if "kept" in r.getMessage()]
+
+    caplog.set_level("DEBUG", logger="thenoise.utils.sol_attention")
+    short = torch.randn(1, 128, 2, 128, dtype=torch.bfloat16)
+    for _ in range(3):
+        sol.sol_attention(*(torch.randn(1, 256, 2, 128, dtype=torch.bfloat16)
+                            for _ in range(3)), plan)
+    sol.sol_attention(short, short, short, plan)
+    assert measured == [(TAU, 256), (TAU, 128)]
+    assert len([r for r in caplog.records if "sol routing kept" in r.getMessage()]) == 2
 
 
 def test_a_run_says_why_once(kernel_present, caplog):
     caplog.set_level("DEBUG")
     for _ in range(40):
-        assert _plan(tokens=sparse.MIN_TOKENS - 1) is None
+        assert _plan(tokens=MIN_TOKENS - 1) is None
     assert len([r for r in caplog.records if "dense at" in r.getMessage()]) == 1
     sparse.reset_log()
     for _ in range(40):
