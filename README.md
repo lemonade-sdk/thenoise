@@ -75,6 +75,7 @@ model repainting the picture it was given. Ask for it with `ref_method: vision`.
 | **Wan 2.2 I2V-A14B**, the same experts at 36 input channels | — | ✓ | ✓ | [wan22](docs/models/wan22.md#i2v-a14b) |
 | **LTX 2.3 Distilled**, audiovisual generation | ✓ | ✓ | ✓ | [ltx](docs/models/ltx.md) |
 | **LTX 2.5 Distilled**, audiovisual generation | ✓ | ✓ | ✓ | [ltx](docs/models/ltx.md) |
+| **MiniMax-H3 Video**, one transformer holding picture and sound | ✓ | ✓ | ✓ | [h3-video](docs/models/h3-video.md) |
 
 ### Mesh models
 
