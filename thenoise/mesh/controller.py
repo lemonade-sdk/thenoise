@@ -15,6 +15,7 @@ from thenoise.utils.image_tensor import load_image
 from thenoise.utils.lora_roles import check_lora_roles
 from thenoise.utils.pipeline_cache import PipelineCache, content_digest
 
+from .finish import finish_mesh
 from .spec import MeshSpec, ResolvedMesh
 from .write import write_mesh
 
@@ -22,7 +23,8 @@ logger = logging.getLogger(__name__)
 
 
 class MeshPipelineController:
-    """The shape pipeline: picture, denoise, volume, file. Nothing past sampling caches."""
+    """The shape pipeline: picture, denoise, volume, finish, file. Nothing past
+    sampling caches."""
 
     def __init__(self, model):
         self.model = model
@@ -94,9 +96,12 @@ class MeshPipelineController:
                                  bounds=spec.bounds, mc_level=spec.mc_level),
                 resident=("codec",), pixels=work,
             )
-            write_mesh(mesh.scaled(spec.scale), output, spec.output_format)
-            logger.info("Mesh: %d vertices, %d triangles, resolution %d",
-                        mesh.vertices.shape[0], mesh.faces.shape[0], spec.octree_resolution)
+            mesh = finish_mesh(mesh.scaled(spec.scale), spec.finish, token.check,
+                               progress)
+            write_mesh(mesh, output, spec.output_format)
+            logger.info("Mesh: %d vertices, %d triangles written at resolution %d",
+                        mesh.vertices.shape[0], mesh.faces.shape[0],
+                        spec.octree_resolution)
 
     @staticmethod
     def _cache_key(spec: ResolvedMesh) -> tuple:

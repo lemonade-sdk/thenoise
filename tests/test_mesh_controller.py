@@ -235,6 +235,49 @@ def test_the_requests_own_checks_run_before_anything_is_loaded():
                                     **picture()))
 
 
+class _TwoPieceModel(FakeShapeModel):
+    """A codec whose cut has a piece of its own next to the shape."""
+
+    def decode_mesh(self, latents, params):
+        from thenoise.mesh.extract import extract_surface
+        from thenoise.mesh.octree import sample_sdf
+
+        self.events.append("decode")
+        shape = extract_surface(sample_sdf(lambda points: points.norm(dim=-1) - 0.4, 32,
+                                           device="cpu", bounds=1.0, level=0.0, start=8))
+        corners = torch.tensor([[1, 1, 1], [-1, -1, 1], [-1, 1, -1], [1, -1, -1]],
+                               dtype=torch.float32) * 0.05
+        corners += torch.tensor([3.0, 3.0, 3.0], dtype=torch.float32)
+        piece = torch.tensor([[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]])
+        self.cut = Mesh(torch.cat((shape.vertices, corners)),
+                        torch.cat((shape.faces, piece + len(shape.vertices))))
+        return self.cut
+
+
+def _obj_counts(path: Path) -> tuple[int, int]:
+    lines = path.read_text().splitlines()
+    return (sum(1 for line in lines if line.startswith("v ")),
+            sum(1 for line in lines if line.startswith("f ")))
+
+
+def test_the_file_carries_the_finished_mesh_not_the_cut(tmp_path):
+    """The junk goes before the budget is taken, and the file is what is left: an island
+    reduced into the shape would be part of the triangle count forever."""
+    model = _TwoPieceModel()
+    controller = MeshPipelineController(model)
+    resolved = controller.resolve(MeshSpec(floaters=0.1, triangles=0.5,
+                                           output_format="obj", **picture()))
+    out = tmp_path / "shape.obj"
+    seen: list[str] = []
+    controller.render(resolved, Cancellation(), lambda stage, *rest: seen.append(stage), out)
+
+    shape_faces = len(model.cut.faces) - 4
+    written_vertices, written_faces = _obj_counts(out)
+    assert written_faces == max(4, round(shape_faces * 0.5))
+    assert written_vertices < len(model.cut.vertices)
+    assert seen.count("finishing") == 2
+
+
 def test_a_named_shape_lora_reaches_the_transformer_that_can_wear_it():
     """`lora_specs` are keyed by role, so a lookup by another name loads nothing."""
     model = FakeShapeModel()

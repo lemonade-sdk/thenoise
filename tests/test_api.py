@@ -316,6 +316,7 @@ def test_ui_divides_the_shape_pane_by_what_a_knob_changes():
              "mesh_seed"}
     surface = {"mesh_octree_resolution", "mesh_bounds", "mesh_mc_level"}
     file_out = {"mesh_scale", "mesh_output_format"}
+    finish = {"mesh_finish_controls"}
 
     with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
         page = f.read()
@@ -323,14 +324,15 @@ def test_ui_divides_the_shape_pane_by_what_a_knob_changes():
     marks = [(one.group(1), one.start())
              for one in re.finditer(r'<div class="label">([A-Za-z ]+)</div>', mesh)]
     names = [name for name, _ in marks]
-    assert names == ["Shape", "Surface", "File"], names
+    assert names == ["Shape", "Surface", "Finish", "File"], names
     sections = {name: set(re.findall(r'id="(mesh_[a-z_]+)"',
                                      mesh[start:marks[i + 1][1] if i + 1 < len(marks)
                                           else len(mesh)]))
                 for i, (name, start) in enumerate(marks)}
     assert sections["Shape"] == shape, sections
-    assert not shape & surface and not surface & file_out
+    assert not shape & surface and not surface & finish and not finish & file_out
     assert sections["Surface"] == surface, sections
+    assert sections["Finish"] == finish, sections
     assert file_out <= sections["File"], sections
 
 

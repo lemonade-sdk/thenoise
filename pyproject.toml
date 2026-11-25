@@ -22,6 +22,7 @@ dependencies = [
     "pillow>=11.3.0",
     "comfy-kitchen>=0.2.42",
     "numpy",
+    "fast-simplification>=0.2",
     "tqdm",
     "av>=14",
     "sentencepiece>=0.2",

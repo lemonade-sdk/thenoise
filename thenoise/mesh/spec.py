@@ -6,9 +6,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator
 
+from thenoise.mesh.finish.options import MeshFinishOptions, options_from
 from thenoise.utils.lora_roles import LoraSpecs, lora_specs_by_role
+from thenoise.utils.options import wire_fields
 
 from thenoise.utils.spec import (Picture, Positive, PositiveFinite, Seed, prefer,
                                 resolve_seed)
@@ -88,6 +90,7 @@ class ResolvedMesh:
     mc_level: float
     scale: float
     lora_specs: dict[str, list[str]]
+    finish: MeshFinishOptions
 
     @property
     def mode(self) -> str:
@@ -105,8 +108,8 @@ class ResolvedMesh:
         }
 
 
-class MeshSpec(BaseModel):
-    """What a mesh request asks for; a field left ``None`` takes the model's preference."""
+class _MeshBody(BaseModel):
+    """The shape knobs; one left ``None`` takes the model's preference."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -171,7 +174,12 @@ class MeshSpec(BaseModel):
             output_format=output_format, octree_resolution=octree_resolution,
             bounds=bounds, mc_level=mc_level, scale=scale,
             lora_specs=lora_specs_by_role(self.lora_specs),
+            finish=options_from(self),
         )
+
+
+MeshSpec = create_model("MeshSpec", __base__=_MeshBody, **wire_fields(MeshFinishOptions))
+MeshSpec.__doc__ = "What a mesh request asks for, from cutting the surface to writing it."
 
 
 __all__ = ["DEFAULT_MESH_SCALE", "KNOB_STEPS", "OUTPUT_FORMATS", "MeshSpec",

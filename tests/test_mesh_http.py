@@ -14,6 +14,38 @@ from thenoise.mesh.service import mesh_planner
 MODEL = "hunyuan3d21"
 
 
+def test_the_shape_server_declares_its_finish_chain(tmp_path):
+    """The pane builds its Finish sliders from this and nothing else, so the words, the
+    bounds and the default live on the server rather than in a second copy of JavaScript."""
+    queue = JobQueue(tmp_path)
+    try:
+        with _client(_controller(), queue) as client:
+            described = client.get("/finish").json()["options"]
+    finally:
+        queue.close()
+    assert [entry["name"] for entry in described] == ["floaters", "triangles"]
+    assert all(entry["type"] == "number" for entry in described)
+    assert {entry["name"]: entry["default"] for entry in described} == {"floaters": 0.0,
+                                                                       "triangles": 1.0}
+    assert {entry["name"]: entry["max"] for entry in described} == {"floaters": 1.0,
+                                                                   "triangles": 1.0}
+
+
+def test_the_wire_knows_the_finish_knobs_it_offers(tmp_path):
+    """A knob the pane was told about is a field the request model accepts: a name it
+    forbids would come back 422 on a slider the server itself advertised."""
+    queue = JobQueue(tmp_path)
+    try:
+        with _client(_controller(), queue) as client:
+            for body in ({"floaters": 0.01}, {"triangles": 0.25}):
+                answer = client.post("/jobs/mesh", json={"image": _b64(), **body})
+                assert answer.status_code == 202
+                ident = answer.json()["id"]
+                until(lambda: client.get(f"/jobs/{ident}").json()["status"] == "completed")
+    finally:
+        queue.close()
+
+
 def _b64(color="red") -> str:
     buffer = io.BytesIO()
     Image.new("RGB", (40, 30), color=color).save(buffer, format="PNG")

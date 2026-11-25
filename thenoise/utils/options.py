@@ -26,8 +26,8 @@ forget to say what it accepts.
 from __future__ import annotations
 
 import argparse
-from dataclasses import field, fields
-from typing import Any, Dict, Optional, Sequence, get_type_hints
+from dataclasses import dataclass, field, fields
+from typing import Any, Dict, Optional, Sequence, Tuple, get_type_hints
 
 #: The JSON type the web UI builds each knob's control from.
 _JSON_TYPE = {bool: "boolean", int: "integer", float: "number", str: "string"}
@@ -152,6 +152,52 @@ def wire_fields(source: type) -> Dict[str, Any]:
     return specs
 
 
+@dataclass(frozen=True)
+class FilterSpec:
+    """One filter in a declared chain: the knobs it reads, and the stage it runs in."""
+
+    name: str
+    options: Tuple[str, ...]
+    stage: str
+
+
+def declared_chain(cls: type) -> Tuple[FilterSpec, ...]:
+    """The filters of a declared surface, in field order, each owning its knobs.
+
+    Field order *is* chain order, which is why a filter's knobs must be declared
+    together: splitting them across another filter's would ask it for the half it is
+    not handed.
+    """
+    chain, declared = [], set()
+    for entry in fields(cls):
+        meta = entry.metadata
+        for key in ("filter", "stage"):
+            if key not in meta:
+                raise ValueError(f"{entry.name} declares no {key}")
+        name, stage = meta["filter"], meta["stage"]
+        if name in declared and chain[-1][0] != name:
+            # a filter is handed all its knobs at once, so they cannot be split
+            raise ValueError(
+                f"{name} knobs must be declared together: {entry.name} splits them"
+            )
+        declared.add(name)
+        if chain and chain[-1][0] == name:
+            chain[-1] = (name, chain[-1][1] + (entry.name,), stage)
+        else:
+            chain.append((name, (entry.name,), stage))
+    return tuple(FilterSpec(name, options, stage) for name, options, stage in chain)
+
+
+def flat_values(source: type, holder: Any, noun: str = "knob") -> Dict[str, Any]:
+    """The knobs of ``source`` read off anything that carries them flat — a request, an
+    argparse namespace, a wire model — naming what a holder is missing."""
+    missing = [entry.name for entry in fields(source) if not hasattr(holder, entry.name)]
+    if missing:
+        raise ValueError(f"{type(holder).__name__} carries no {noun} field "
+                         f"{', '.join(missing)}")
+    return {entry.name: getattr(holder, entry.name) for entry in fields(source)}
+
+
 def validate(options) -> None:
     """Reject a value outside ``ge``/``le``, or a choice that is not offered."""
     kind = getattr(options, "kind", "")
@@ -256,8 +302,11 @@ def add_flags(
 
 
 __all__ = [
+    "FilterSpec",
     "add_flags",
+    "declared_chain",
     "declared_knobs",
+    "flat_values",
     "option",
     "option_meta",
     "option_names",

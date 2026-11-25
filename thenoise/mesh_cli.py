@@ -19,6 +19,7 @@ def run_mesh(args) -> None:
     """Load one model, resolve one request against it, render one shape."""
     from pydantic import ValidationError
 
+    from .mesh.finish import flat_options
     from .mesh.spec import MeshSpec, OUTPUT_FORMATS
 
     check_solver(args.sampler, "mesh")
@@ -31,6 +32,7 @@ def run_mesh(args) -> None:
             output_format=container_of(args.out, args.output_format, OUTPUT_FORMATS),
             octree_resolution=args.octree_resolution, bounds=args.bounds,
             mc_level=args.mc_level, scale=args.scale, lora_specs=args.lora or None,
+            **flat_options(args),
         )
     except ValidationError as e:
         raise SystemExit("mesh: " + "; ".join(err["msg"] for err in e.errors())) from e
