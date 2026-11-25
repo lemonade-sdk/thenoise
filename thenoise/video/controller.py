@@ -141,10 +141,11 @@ class VideoPipelineController:
             cond_raw = stages.run(
                 model.encode_prompt,
                 EncodePromptArgs(prompt=spec.prompt, negative_prompt=spec.negative_prompt,
-                                 guidance_scale=spec.guidance_scale, image=images or None),
+                                 guidance_scale=spec.guidance_scale,
+                                 image=[*images, *[image for image, _ in guides]] or None),
                 resident=("text_encoder",),
                 pixels=max(pixels, sum(image.width * image.height
-                                       for image in images)),
+                                       for image in [*images, *[i for i, _ in guides]])),
                 cache="prompt", key=prompt_key)
             token.check()
 
