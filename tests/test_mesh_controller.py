@@ -7,7 +7,8 @@ import torch
 from PIL import Image
 
 from thenoise.jobs import Cancellation, JobCancelled
-from thenoise.mesh.controller import MeshPipelineController
+from thenoise.mesh.controller import MeshPipelineController, _sampling_bytes
+from thenoise.mesh.octree import volume_bytes
 from thenoise.mesh.extract import Mesh
 from thenoise.mesh.spec import MeshSpec
 from thenoise.models.base import Conditioning, DiffusionModel
@@ -49,11 +50,13 @@ class FakeMemory:
 
     def __init__(self, events=None):
         self.held: list[tuple[str, ...]] = []
+        self.sized: list[tuple[tuple[str, ...], int, int]] = []
         self.events = events if events is not None else []
 
     @contextmanager
-    def stage(self, *names, pixels):
-        assert pixels > 0
+    def stage(self, *names, pixels=None, reserve=None):
+        assert pixels or reserve, "a stage must size its transient"
+        self.sized.append((names, pixels, reserve))
         self.held.append(names)
         self.events.append("hold:" + "+".join(names))
         try:
@@ -138,6 +141,18 @@ def render(model, **overrides):
     controller.render(resolved, model.token, lambda *a: None, out)
     return out
 
+
+
+def test_a_shape_stage_asks_for_room_in_the_units_it_actually_moves():
+    """A volume is not a picture: the octree and the transformer state bytes, and only
+    the conditioning stage, which reads images, is allowed to say pixels."""
+    model = FakeShapeModel()
+    render(model, octree_resolution=64, latents=512)
+    sized = {names: (pixels, reserve) for names, pixels, reserve in model.memory.sized}
+    assert sized[("codec",)] == (None, volume_bytes(64))
+    assert sized[("dit",)] == (None, _sampling_bytes(512))
+    pixels, reserve = sized[("conditioner",)]
+    assert pixels and reserve is None, "a picture is the one thing measured in pixels"
 
 
 def test_the_three_components_are_brought_in_the_order_the_pipeline_needs_them():

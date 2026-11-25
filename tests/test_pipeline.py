@@ -1133,9 +1133,9 @@ def test_the_prompt_stage_claims_the_pixels_the_encoder_sees(monkeypatch):
     stage = memory.stage
     asked: list[tuple[tuple[str, ...], int]] = []
 
-    def spy(*names, pixels):
+    def spy(*names, pixels, reserve=None):
         asked.append((names, pixels))
-        return stage(*names, pixels=pixels)
+        return stage(*names, pixels=pixels, reserve=reserve)
 
     memory.stage = spy
     _controller(model).edit(_request(image=Image.new("RGB", (32, 48)), steps=1))
@@ -1151,9 +1151,9 @@ def test_a_stage_sizes_its_room_by_the_pixels_it_moves(monkeypatch):
     stage = memory.stage
     asked: list[tuple[tuple[str, ...], int]] = []
 
-    def spy(*names, pixels):
+    def spy(*names, pixels, reserve=None):
         asked.append((names, pixels))
-        return stage(*names, pixels=pixels)
+        return stage(*names, pixels=pixels, reserve=reserve)
 
     memory.stage = spy
     _controller(model).generate(_request(width=64, height=64, upscale=True))

@@ -11,7 +11,7 @@ from torch import nn
 
 import pytest
 from conftest import TrackedModule, cuda_only, stub_room
-from thenoise.memory import MemoryManager
+from thenoise.memory import MemoryManager, reserve_bytes
 
 
 class _Comp(nn.Module):
@@ -309,8 +309,8 @@ def _reserves(mm: MemoryManager) -> list[int]:
     seen: list[int] = []
     original = mm._reserve_for
 
-    def spy(names, pixels):
-        room = original(names, pixels)
+    def spy(names, keep, bucket):
+        room = original(names, keep, bucket)
         seen.append(room)
         return room
 
@@ -480,7 +480,7 @@ def test_a_stage_measures_only_itself_and_not_the_weights_under_it(monkeypatch):
 
     with mm.stage("dit", pixels=2_000_000):
         pass
-    assert seen == [100] and mm._peaks[("dit",)][2] == 500
+    assert seen == [100] and mm._peaks[("dit",)][("megapixels", 2)] == 500
 
 
 # ------------------------------------------------------- running out of room
@@ -666,3 +666,30 @@ def test_weight_bytes_counts_a_component_as_it_sits_in_memory():
     mm.register("fp32", TrackedModule(_mib(3)))
     assert mm.weight_bytes("fp32") == _mib(3)
     assert mm.weight_bytes("absent") == 0
+
+
+def test_a_stage_that_moves_no_pixels_asks_in_bytes():
+    from thenoise.memory import _RESERVE_BASE_BYTES, claim
+
+    keep, bucket = claim(reserve=1 << 30)
+    assert keep == _RESERVE_BASE_BYTES, "a byte claim still rises to the fixed floor"
+    assert bucket == ("bytes", 1 << 30)
+    assert claim(pixels=4_000_000) == (reserve_bytes(4_000_000), ("megapixels", 4))
+
+
+def test_a_byte_claim_is_measured_against_itself(monkeypatch):
+    _reserve(monkeypatch, 0, per_megapixel=_mib(1))
+    _measures(monkeypatch, _mib(9))
+    mm = MemoryManager("cpu", "meta")
+    asked = _reserves(mm)
+
+    with mm.stage("codec", reserve=_mib(4)):
+        pass
+    with mm.stage("codec", reserve=_mib(4)):
+        pass
+    assert asked == [_mib(4), _mib(9)]
+
+
+def test_a_stage_that_sizes_nothing_is_refused():
+    with pytest.raises(ValueError, match="must size its transient"):
+        MemoryManager("cpu", "meta").stage("dit").__enter__()

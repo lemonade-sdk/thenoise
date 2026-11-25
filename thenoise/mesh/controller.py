@@ -16,10 +16,17 @@ from thenoise.utils.lora_roles import check_lora_roles
 from thenoise.utils.pipeline_cache import PipelineCache, content_digest
 
 from .finish import finish_mesh
+from .octree import volume_bytes
 from .spec import MeshSpec, ResolvedMesh
 from .write import write_mesh
 
 logger = logging.getLogger(__name__)
+
+
+def _sampling_bytes(latents: int) -> int:
+    """A sampling step's transient is the attention the latent tokens hold, which is
+    quadratic in them; the manager's own floor covers the rest."""
+    return latents * latents * 2
 
 
 class MeshPipelineController:
@@ -65,15 +72,13 @@ class MeshPipelineController:
                 attention=spec.attention, num_latents=spec.latents,
             )
             stages = Stages(model, self._cache)
-            # A shape has no pixel grid of its own: its token count sizes the reserve.
-            work = spec.latents
 
             cond = stages.run(
                 model.encode_prompt,
                 EncodePromptArgs(prompt="", guidance_scale=spec.guidance_scale,
                                  image=images or None),
                 resident=("conditioner",),
-                pixels=sum(image.width * image.height for image in images) or work,
+                pixels=sum(image.width * image.height for image in images),
                 cache="prompt", key=self._cache_key(spec),
             )
             token.check()
@@ -86,7 +91,8 @@ class MeshPipelineController:
                     model.switch_loras(spec.lora_specs.get(role), component, role)
 
             x = stages.run(self._denoise, latents, model.fuse_text(cond), params, spec,
-                           token, progress, resident=("dit",), pixels=work,
+                           token, progress, resident=("dit",),
+                           reserve=_sampling_bytes(spec.latents),
                            prepare=wear_loras)
             token.check()
 
@@ -94,8 +100,9 @@ class MeshPipelineController:
                 model.decode_mesh, x,
                 MeshDecodeParams(octree_resolution=spec.octree_resolution,
                                  bounds=spec.bounds, mc_level=spec.mc_level),
-                resident=("codec",), pixels=work,
+                resident=("codec",), reserve=volume_bytes(spec.octree_resolution),
             )
+            logger.info("Cut: %d triangles; finish %s", mesh.faces.shape[0], spec.finish)
             mesh = finish_mesh(mesh.scaled(spec.scale), spec.finish, token.check,
                                progress)
             write_mesh(mesh, output, spec.output_format)

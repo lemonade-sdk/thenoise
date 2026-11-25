@@ -7,6 +7,8 @@ from typing import Callable, Tuple
 import torch
 from torch import Tensor
 
+from thenoise.utils.device import spare_bytes
+
 #: The eight corners of a cell, offsets from its index.
 CORNERS = torch.tensor(list(product((0, 1), repeat=3)), dtype=torch.long)
 
@@ -15,6 +17,30 @@ MIN_LEVEL_RESOLUTION = 63
 
 #: Points per geometry-decoder call while sampling.
 CHUNK = 8192
+
+CORNER_BYTES = 32
+CUT_BYTES_PER_CORNER = 48
+
+
+def volume_bytes(resolution: int) -> int:
+    """What a cut at ``resolution`` asks the device to have: 48 bytes per corner of its grid,
+    which is where the stage was measured to land (19.9 GiB at 768^3 on gfx1151, of which the
+    dense grids are 2.8). The rest is the widest level's working set, which no refinement can
+    promise to keep narrow."""
+    return (resolution + 1) ** 3 * CUT_BYTES_PER_CORNER
+
+
+def _amount(nbytes: int) -> str:
+    return (f"{nbytes / (1 << 30):.1f} GiB" if nbytes >= 1 << 30
+            else f"{nbytes / (1 << 20):.0f} MiB")
+
+
+def _room(device, need: int, saying: str) -> None:
+    """Refuse work the machine cannot take, before it is asked for."""
+    spare = spare_bytes(device)
+    if spare is not None and need > spare:
+        raise ValueError(f"{saying} needs {_amount(need)} and the device would give it "
+                         f"{_amount(spare)}: lower the voxel resolution")
 
 SdfFn = Callable[[Tensor], Tensor]
 
@@ -113,6 +139,7 @@ def sample_sdf(sdf: SdfFn, resolution: int, *, device, bounds: float = 1.0,
         raise ValueError(f"bounds must be positive, got {bounds}")
     if chunk < 1:
         raise ValueError(f"chunk must be positive, got {chunk}")
+    _room(device, volume_bytes(resolution), f"a cut at {resolution}^3")
     levels = octree_levels(resolution, start)
     grid = torch.zeros((resolution + 1,) * 3, dtype=torch.float32, device=device)
     sampled = torch.zeros((resolution + 1,) * 3, dtype=torch.bool, device=device)
@@ -122,6 +149,8 @@ def sample_sdf(sdf: SdfFn, resolution: int, *, device, bounds: float = 1.0,
     queried = 0
     holding = None
     for size in levels:
+        _room(device, cells.shape[0] * CORNER_BYTES * 8,
+              f"level {size} of a {resolution}^3 cut")
         step = resolution // size
         index = (cells[:, None, :] + CORNERS.to(device)).reshape(-1, 3)
         stride = size + 1

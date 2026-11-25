@@ -55,6 +55,19 @@ def get_free_memory(device: Optional[Union[str, torch.device]]) -> Optional[int]
         return None
 
 
+def spare_bytes(device: Optional[Union[str, torch.device]]) -> Optional[int]:
+    """Bytes ``device`` could still hand out: the driver's free figure plus what the
+    caching allocator holds and has not been asked for."""
+    free = get_free_memory(device)
+    if free is None:
+        return None
+    try:
+        kept = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
+    except (RuntimeError, AttributeError):
+        return free
+    return free + max(0, kept)
+
+
 def synchronize_device(device: Optional[Union[str, torch.device]]):
     if device is None:
         return

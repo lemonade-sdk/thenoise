@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator
@@ -104,7 +104,7 @@ class ResolvedMesh:
             "seed": self.seed, "output_format": self.output_format,
             "octree_resolution": self.octree_resolution, "bounds": self.bounds,
             "mc_level": self.mc_level, "scale": self.scale,
-            "lora_specs": self.lora_specs,
+            "lora_specs": self.lora_specs, "finish": asdict(self.finish),
         }
 
 

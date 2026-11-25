@@ -186,5 +186,6 @@ function renderMeshInfo() {
   const lora = m.lora_specs;
   const hasLora = Array.isArray(lora) ? lora.length : (lora ? Object.keys(lora).length : 0);
   if (hasLora) rows.push(['LoRA', formatLora(lora), 'prompt']);
+  rows.push(...knobInfoRows('finish', m.finish || {}));
   renderInfoRows(rows);
 }

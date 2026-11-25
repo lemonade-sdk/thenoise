@@ -1,6 +1,7 @@
 import base64
 import io
 
+import torch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -29,6 +30,46 @@ def test_the_shape_server_declares_its_finish_chain(tmp_path):
                                                                        "triangles": 1.0}
     assert {entry["name"]: entry["max"] for entry in described} == {"floaters": 1.0,
                                                                    "triangles": 1.0}
+
+
+def _cut_with_junk():
+    from thenoise.mesh.extract import Mesh, extract_surface
+    from thenoise.mesh.octree import sample_sdf
+
+    shape = extract_surface(sample_sdf(lambda points: points.norm(dim=-1) - 0.4, 32,
+                                       device="cpu", bounds=1.0, level=0.0, start=8))
+    corners = torch.tensor([[1, 1, 1], [-1, -1, 1], [-1, 1, -1], [1, -1, -1]],
+                           dtype=torch.float32) * 0.05
+    corners += torch.tensor([3.0, 3.0, 3.0], dtype=torch.float32)
+    piece = torch.tensor([[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]])
+    return Mesh(torch.cat((shape.vertices, corners)),
+                torch.cat((shape.faces, piece + len(shape.vertices))))
+
+
+_CUT = _cut_with_junk()
+
+
+class _JunkFactory(FakeShapeModel):
+    """The defaults and the latents of the fake model, with a cut that has junk beside it."""
+
+    def decode_mesh(self, latents, params):
+        return _CUT
+
+
+def test_the_finish_knobs_a_pane_sends_reach_the_written_file(tmp_path):
+    """One HTTP body to the bytes on disk: the wire field, the resolved spec, the chain."""
+    queue = JobQueue(tmp_path)
+    try:
+        with _client(MeshPipelineController(_JunkFactory()), queue) as client:
+            answer = client.post("/jobs/mesh", json={"image": _b64(), "output_format": "obj",
+                                                     "floaters": 0.1, "triangles": 0.5})
+            assert answer.status_code == 202
+            ident = answer.json()["id"]
+            until(lambda: client.get(f"/jobs/{ident}").json()["status"] == "completed")
+            written = client.get(f"/jobs/{ident}/content").text.count("f ")
+    finally:
+        queue.close()
+    assert written == max(4, round((len(_CUT.faces) - 4) * 0.5))
 
 
 def test_the_wire_knows_the_finish_knobs_it_offers(tmp_path):

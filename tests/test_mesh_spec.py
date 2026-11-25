@@ -2,6 +2,7 @@ import math
 
 import pytest
 
+from thenoise.mesh.finish.options import DEFAULTS as FINISH_DEFAULTS
 from thenoise.mesh.spec import (
     DEFAULT_MESH_SCALE, OUTPUT_FORMATS, MeshSpec, knob_menu, limits, mode_of,
 )
@@ -103,7 +104,10 @@ def test_the_echo_leaves_the_picture_out():
     assert public["mode"] == "i2d"
     assert set(public) <= {"mode", "latents", "steps", "guidance_scale", "sampler",
                            "seed", "attention", "output_format", "octree_resolution",
-                           "bounds", "mc_level", "scale", "lora_specs"}
+                           "bounds", "mc_level", "scale", "lora_specs", "finish"}
+    # The knobs travel back as the run resolved them, which is how a pane tells a knob that
+    # arrived from one that its browser dropped on the floor.
+    assert public["finish"] == FINISH_DEFAULTS
 
 
 def test_a_request_names_no_loras_unless_asked():
