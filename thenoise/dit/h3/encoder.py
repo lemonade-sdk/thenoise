@@ -87,8 +87,9 @@ def layer_count(path: str) -> int:
     return layers
 
 
-#: How the audiovisual release labels a keyframe in the conditioning text. The image
-#: release spells the same thing without the brackets.
+#: How the audiovisual release labels a picture condition in the conditioning text,
+#: numbered across however many the request carried. The image release spells the same
+#: thing without the brackets.
 VIDEO_PICTURE_LABEL = "<Picture {}>: "
 
 #: Short edge of the picture the language model is shown, whichever release is asking. The
