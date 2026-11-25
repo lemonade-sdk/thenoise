@@ -87,6 +87,11 @@ class VideoPipelineController:
     # ------------------------------------------------------------ render
     def render(self, spec: ResolvedVideo, token: Cancellation,
                progress: Callable[[str, int, int], None], output: Path) -> None:
+        # ``resolve`` already refused a model with no place for references; this is the
+        # adapter that has the place and not yet the stage that fills it.
+        if spec.references:
+            raise NotImplementedError(
+                f"{self.model.name} declares ref2v but anchors no reference stage yet")
         try:
             self._render(spec, token, progress, output)
         finally:

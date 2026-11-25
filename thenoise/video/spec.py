@@ -30,8 +30,17 @@ def frame_grid(wanted: float, *, compression: int, upward: bool) -> int:
     return compression * max(1, math.ceil(cells) if upward else math.floor(cells + 0.5)) + 1
 
 
-def mode_of(image: bytes | None, end_image: bytes | None) -> str:
-    """``t2v``, ``i2v`` or ``flf2v``, from the reference frames a request carries."""
+def mode_of(image: bytes | None, end_image: bytes | None,
+            references: tuple[bytes, ...] = ()) -> str:
+    """``t2v``, ``i2v``, ``flf2v`` or ``ref2v``, from the conditions a request carries.
+
+    References outrank keyframes: a clip given something to look like is a reference run whether
+    or not it also names its first frame. Which architectures have anywhere to put one is the
+    ``ref2v`` capability, so this answers from what arrived rather than from a mode a caller also
+    has to set and keep in agreement.
+    """
+    if references:
+        return "ref2v"
     if image is None:
         return "t2v"
     return "flf2v" if end_image is not None else "i2v"
@@ -58,10 +67,12 @@ class ResolvedVideo:
     #: different set on each; every model has at least the default role to answer for.
     lora_specs: dict[str, list[str]]
     explicit_frames: bool = False
+    #: What the clip is asked to look like, as opposed to the frame it starts or ends on.
+    references: tuple[bytes, ...] = ()
 
     @property
     def mode(self) -> str:
-        return mode_of(self.image, self.end_image)
+        return mode_of(self.image, self.end_image, self.references)
 
     def public(self) -> dict:
         return {
@@ -101,6 +112,7 @@ class VideoSpec(BaseModel):
     output_format: Literal["mp4", "webm"] | None = None
     image: Annotated[bytes, Field(min_length=1)] | None = None
     end_image: Annotated[bytes, Field(min_length=1)] | None = None
+    references: list[Annotated[bytes, Field(min_length=1)]] = []
     sampler: Annotated[str, Field(min_length=1)] | None = None
     lora_specs: LoraSpecs = None
 
@@ -113,7 +125,7 @@ class VideoSpec(BaseModel):
 
     @property
     def mode(self) -> str:
-        return mode_of(self.image, self.end_image)
+        return mode_of(self.image, self.end_image, tuple(self.references))
 
     @field_validator("seed")
     @classmethod
@@ -163,4 +175,5 @@ class VideoSpec(BaseModel):
             output_format=output_format, image=self.image, end_image=self.end_image,
             sampler=sampler, lora_specs=lora_specs_by_role(self.lora_specs),
             explicit_frames=self.frames is not None,
+            references=tuple(self.references),
         )

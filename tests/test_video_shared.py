@@ -7,12 +7,13 @@ import torch
 from conftest import StubVideo, header_of, wan_adapter
 from thenoise.models.config import ModelConfig
 from thenoise.models.video_base import Segment, VideoModel
+from thenoise.models.h3_video import H3VideoModel
 from thenoise.models.wan_video import VARIANTS, Wan22Model
 from thenoise.vae.wan22 import WAN22_LATENTS_MEAN, WAN22_LATENTS_STD
 from thenoise.vae.wan_video import _comfy_vae_config
 from thenoise.video.controller import VideoPipelineController
 from thenoise.jobs import Cancellation
-from thenoise.video.spec import VideoSpec
+from thenoise.video.spec import ResolvedVideo, VideoSpec, mode_of
 
 
 def test_video_model_contract_and_shared_latent_statistics():
@@ -173,3 +174,33 @@ def test_a_frame_count_lands_on_the_grid_a_codec_can_pack():
     for wanted in (0, -3, float("nan"), float("inf")):
         with pytest.raises(ValueError, match="positive and finite"):
             frame_grid(wanted, compression=8, upward=True)
+
+
+def test_reference_conditions_decide_the_mode():
+    """The mode is read off what arrived, so no second switch can disagree with it."""
+    assert mode_of(None, None) == "t2v"
+    assert mode_of(b"png", None) == "i2v"
+    assert mode_of(b"png", b"png") == "flf2v"
+    for keyframes in ((None, None), (b"png", None), (b"png", b"png")):
+        assert mode_of(*keyframes, references=(b"png",)) == "ref2v"
+
+
+def test_a_request_carries_its_references_to_the_model():
+    resolved = ResolvedVideo(
+        prompt="a fox, like this", negative_prompt="", width=64, height=64, frame_count=5,
+        fps=24, steps=4, guidance_scale=1.0, flow_shift=3.0, seed=0, output_format="mp4",
+        image=None, end_image=None, sampler="euler", lora_specs={}, references=(b"ref",))
+    assert resolved.mode == "ref2v"
+
+
+def test_references_are_refused_where_the_architecture_has_no_place_for_them():
+    """The refusal is the vocabulary answering, not a check stacked beside it."""
+    model = wan_adapter("ti2v_5b")
+    with pytest.raises(ValueError, match="does not support ref2v"):
+        VideoPipelineController(model).resolve(
+            VideoSpec(prompt="a fox, like this", references=[b"png"]))
+
+
+def test_only_h3_answers_ref2v():
+    assert Wan22Model.CAPABILITIES["video"]["ref2v"] is False
+    assert H3VideoModel.CAPABILITIES["video"]["ref2v"] is True

@@ -47,6 +47,8 @@ def run_video(args) -> None:
             image=read_media(args.image, "video") if args.image else None,
             end_image=(read_media(args.end_image, "video", "--end-image")
                        if args.end_image else None),
+            references=[read_media(path, "video", "--reference")
+                        for path in args.reference],
             lora_specs=_lora_specs(args),
         )
     except ValidationError as e:
