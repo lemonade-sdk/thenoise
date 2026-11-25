@@ -61,7 +61,7 @@ def kernel_present(monkeypatch):
     monkeypatch.setattr(sparse, "available", lambda device: True)
 
 
-def _plan(**over) -> SolAttention:
+def _plan(**over) -> Optional[SolAttention]:
     """The plan for a run that passes every gate, with these few details changed."""
     lay = over.pop("layout", _lay())
     args = dict(layout=lay, tokens=lay.seq_len, dtype=torch.bfloat16, device=CUDA,
@@ -169,10 +169,24 @@ def test_a_still_is_held_dense_on_every_other_qualifying_detail(kernel_present, 
     Not the token gate in disguise — a 4096x4096 canvas clears the crossover with room to
     spare, which is how it came to be routed and measured degrading.
     """
-    caplog.set_level("INFO")
+    caplog.set_level("DEBUG")
     assert _plan() is not None
     assert _plan(held_dense=STILL_HELD_DENSE) is None
     assert any("a still" in r.getMessage() for r in caplog.records)
+
+
+def test_which_route_a_call_took_says_nothing_at_info(kernel_present, caplog):
+    """The user cannot act on a rule evaluation, and the rule is readable in the constants.
+
+    What survives at info is the measured kept fraction, in utils.sol_attention.
+    """
+    caplog.set_level("INFO")
+    assert _plan() is not None
+    _plan(tokens=16)
+    _plan(dtype=torch.float32)
+    _plan(head_dim=64)
+    _plan(cached=True)
+    assert not [r for r in caplog.records if "sol" in r.getMessage()]
 
 
 def test_the_image_trunk_asks_to_be_held_dense(monkeypatch):
@@ -249,7 +263,7 @@ def test_the_probe_can_be_switched_off(monkeypatch, caplog):
 
 
 def test_a_run_says_why_once(kernel_present, caplog):
-    caplog.set_level("INFO")
+    caplog.set_level("DEBUG")
     for _ in range(40):
         assert _plan(tokens=sparse.MIN_TOKENS - 1) is None
     assert len([r for r in caplog.records if "dense at" in r.getMessage()]) == 1

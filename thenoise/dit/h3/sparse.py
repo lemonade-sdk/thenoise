@@ -5,10 +5,11 @@ The generic half — the kernel's rules, its operand order, what a threshold kep
 packing can say which rows are conditioning, and the family rules, because only this model
 knows what routing did to its own output.
 
-It is on whenever it applies and there is no request for it: a run whose tensors fit uses
-it and logs the decision, token count and sink ranges and the kept fraction, or logs why it
-stayed dense. If device testing turns up a failure the answer is a per-request knob added
-then, not a hatch installed now.
+It is on whenever it applies and there is no request for it. Which route a call took follows
+from the constants below, so that is debug traffic; what a run measured -- the fraction of
+key blocks the kernel kept -- is the one thing reported, by
+:mod:`thenoise.utils.sol_attention`. If device testing turns up a failure the answer is a
+per-request knob added then, not a hatch installed now.
 """
 
 from __future__ import annotations
@@ -95,7 +96,7 @@ def sol_plan(*, layout, tokens: int, dtype: torch.dtype, head_dim: int, device,
     ``held_dense`` is a family's own veto, stated as the reason a log should give.
     """
     def dense(reason: str) -> None:
-        _log_once(reason, "dense at %d tokens: %s", tokens, reason)
+        _log_once(reason, logging.DEBUG, "sol dense at %d tokens: %s", tokens, reason)
 
     if held_dense is not None:
         dense(held_dense)
@@ -133,8 +134,8 @@ def sol_plan(*, layout, tokens: int, dtype: torch.dtype, head_dim: int, device,
         dense("no compiled sol_attn kernel for this GPU")
         return None
     sinks, rows = sol_sinks(layout)
-    _log_once("sparse", "sol attention: %d tokens, tau %g, sinks %s/%s", tokens, TAU,
-              sinks, rows)
+    _log_once("sparse", logging.DEBUG, "sol attention: %d tokens, tau %g, sinks %s/%s",
+              tokens, TAU, sinks, rows)
     return SolAttention(TAU, TOKEN_AUG_MAX, sinks, rows)
 
 
@@ -142,8 +143,8 @@ _LOGGED = set()
 _LOG_LIMIT = 32
 
 
-def _log_once(key: str, message: str, *args) -> None:
-    """One line per distinct reason per process, so a dense run says why once and not 1000x.
+def _log_once(key: str, level: int, message: str, *args) -> None:
+    """One line per distinct key per process, so a run says anything once and not 1000x.
 
     A run that flips between dense and sparse every step produces a bounded number of keys
     either way (reason, token count); the cap is only so a pathological loop cannot grow it.
@@ -151,7 +152,7 @@ def _log_once(key: str, message: str, *args) -> None:
     if key in _LOGGED or len(_LOGGED) >= _LOG_LIMIT:
         return
     _LOGGED.add(key)
-    logger.info(message, *args)
+    logger.log(level, message, *args)
 
 
 def reset_log() -> None:
