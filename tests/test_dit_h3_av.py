@@ -369,3 +369,89 @@ def test_the_forward_refuses_a_pack_the_layout_does_not_describe():
 def test_a_model_without_the_stream_is_not_an_audiovisual_one():
     with pytest.raises(ValueError, match="no audio stream"):
         H3AVDiT(_av_params(audio_dim=None))
+
+
+# ---------------------------------------------------------------- the two schedules
+#
+# One solver steps the video's sigma while the audio stream reads its own, and the audio
+# slice of the pack travels in between. The algebra here is what makes that exact rather
+# than fudged; SHIFT is the released video shift.
+
+from thenoise.dit.h3.sampling import (
+    AUDIO_SHIFT,
+    audio_sigma,
+    audio_velocity,
+    carry,
+    carry_ratio,
+    get_sigmas,
+    reshift,
+    shift_ratio,
+)
+
+SHIFT = 12.0
+
+
+def test_the_ladder_runs_the_shifted_schedule_from_noise_to_clean():
+    sigmas = get_sigmas(20, shift=SHIFT)
+    assert len(sigmas) == 21
+    assert sigmas[0] == 1.0 and sigmas[-1] == 0.0
+    assert all(a > b for a, b in zip(sigmas, sigmas[1:]))
+
+
+def test_the_two_schedules_share_their_endpoints():
+    """Noise is noise and clean is clean under either shift; only between differs."""
+    for sigma in get_sigmas(12, shift=SHIFT):
+        own = audio_sigma(sigma, shift=SHIFT)
+        assert own <= sigma
+        assert reshift(own, from_shift=AUDIO_SHIFT, to_shift=SHIFT) == pytest.approx(sigma)
+
+
+def test_the_carry_is_the_ratio_of_the_two_sigmas():
+    # The closed form is also the only answer at the clean end, where both sigmas are 0.
+    for sigma in get_sigmas(20, shift=SHIFT)[1:-1]:
+        assert carry_ratio(sigma, shift=SHIFT) == pytest.approx(
+            sigma / audio_sigma(sigma, shift=SHIFT), rel=1e-12)
+
+
+def test_the_carry_is_linear_in_the_video_sigma_and_unscaled_at_the_start():
+    """The start needs no scaling because the two schedules meet at noise; the clean end
+    is where the pack's audio slice has grown to ``S`` times the stream's own latent.
+    """
+    assert carry_ratio(1.0, shift=SHIFT) == 1.0
+    assert carry_ratio(0.0, shift=SHIFT) == shift_ratio(SHIFT) == 4.0
+    assert carry_ratio(0.5, shift=SHIFT) == pytest.approx(2.5)
+    assert carry(carry_ratio(0.3, shift=SHIFT) * torch.ones(2), 0.3, shift=SHIFT) \
+        == pytest.approx(torch.ones(2))
+
+
+def test_the_carrys_two_derivatives_are_constant_in_the_base_grid():
+    """The identities that let a velocity be converted without a Jacobian."""
+    h = 1e-6
+    for sigma in (0.05, 0.3, 0.7, 0.99):
+        r = carry_ratio(sigma, shift=SHIFT)
+        d_r = (carry_ratio(sigma + h, shift=SHIFT) - carry_ratio(sigma - h, shift=SHIFT)) / (2 * h)
+        assert d_r == pytest.approx(1.0 - shift_ratio(SHIFT), abs=1e-5)
+        d_a = (audio_sigma(sigma + h, shift=SHIFT) - audio_sigma(sigma - h, shift=SHIFT)) / (2 * h)
+        assert r * d_a == pytest.approx(1.0 + (shift_ratio(SHIFT) - 1.0)
+                                        * audio_sigma(sigma, shift=SHIFT), abs=1e-5)
+
+
+def test_the_velocity_conversion_is_the_derivative_of_the_carry():
+    """Step a stream along its own schedule, carry it along the video's, and compare the
+    finite difference with what :func:`audio_velocity` answers.
+    """
+    x0 = torch.tensor([[-1.7, 0.4]], dtype=torch.float64)
+    noise = torch.tensor([[2.2, -0.9]], dtype=torch.float64)
+    h = 1e-5
+
+    def carried(sigma_video):
+        sigma_audio = audio_sigma(sigma_video, shift=SHIFT)
+        own = (1.0 - sigma_audio) * x0 + sigma_audio * noise
+        return carry_ratio(sigma_video, shift=SHIFT) * own
+
+    for sigma in (0.2, 0.55, 0.9):
+        finite = (carried(sigma + h) - carried(sigma - h)) / (2 * h)
+        sigma_audio = audio_sigma(sigma, shift=SHIFT)
+        own = (1.0 - sigma_audio) * x0 + sigma_audio * noise
+        predicted = audio_velocity(noise - x0, own, sigma=sigma, shift=SHIFT)
+        assert torch.allclose(predicted, finite, atol=1e-6)

@@ -15,6 +15,16 @@ def generalized_time_shift(t, mu: float, sigma: float) -> float:
     return math.exp(mu) / (math.exp(mu) + (1 / t - 1) ** sigma)
 
 
+def time_shift(t: float, shift: float) -> float:
+    """A flow-matching time under a shift: ``shift·t / (1 + t·(shift − 1))``.
+
+    ``generalized_time_shift(t, log(shift), 1.0)`` in closed form: the same curve — to the
+    last bit or within one — without the ``1/t`` at the clean end, which a schedule that
+    runs to it cannot afford, or an ``exp``/``log`` round trip.
+    """
+    return shift * t / (1.0 + t * (shift - 1.0))
+
+
 
 def calculate_shift(
     image_seq_len: int,
