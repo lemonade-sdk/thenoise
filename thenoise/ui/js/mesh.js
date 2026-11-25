@@ -82,8 +82,12 @@ const meshHist = makeHistory({
 async function showMeshShape(item) {
   meshOutMeta = item.meta;
   meshOutUrl = item.url;
-  meshSource = meshKept.has(item.meta.job) ? item.meta.job : null;
-  meshGone = meshSource || !item.meta.job ? null : item.meta.job;
+  await loadMeshShapes();   // the answer the verdict below is made from
+  // The browser still holds the shape to look at; only the server's latents can be cut again.
+  const kept = meshKept.has(item.meta.job);
+  meshSource = kept ? item.meta.job : null;
+  meshGone = kept || !item.meta.job ? null : item.meta.job;
+  if (!kept) adoptMeshImages(item.meta);
   describeMeshSource();
   applyMeshSettings(item.meta);
   try {
@@ -93,6 +97,16 @@ async function showMeshShape(item) {
   } catch (error) {
     meshFail('cannot show that shape again: ' + error.message);
   }
+}
+
+// A shape whose latents are gone can still be sampled again from the images it was cut from.
+function adoptMeshImages(meta) {
+  if (!meta.images || !meta.images.length) return;
+  meshViews.length = 0;
+  for (const dataUrl of meta.images) {
+    meshViews.push({dataUrl, b64: dataUrl.slice(dataUrl.indexOf(',') + 1), name: 'from history'});
+  }
+  renderMeshViews();
 }
 
 function applyMeshSettings(meta) {
@@ -109,9 +123,11 @@ function describeMeshSource() {
     ? 'cutting #' + meshSource.slice(4, 10) + ' again \u2014 click to shape a new one' : '';
   clear.classList.toggle('hidden', !meshSource);
   const note = $('mesh_shape_note');
-  note.textContent = meshGone
-    ? 'shape #' + meshGone.slice(4, 10) + ' is gone from the server: its latents did not '
-      + 'outlive a restart, and only the newest 10 are kept while it runs' : '';
+  note.textContent = !meshGone ? ''
+    : meshViews.length
+      ? 'its latents are gone \u2014 its images are back in the box, so this samples again'
+      : 'shape #' + meshGone.slice(4, 10) + ' is not on the server: only the newest 10 are '
+        + 'kept, and nothing survives a restart';
   note.classList.toggle('hidden', !meshGone);
   $('mesh_file').disabled = !!meshSource;
   $('mesh_dropzone').inert = !!meshSource;
@@ -143,7 +159,12 @@ function collectMeshSettings() {
 
 function validateMeshInputs() {
   if (!meshViews.length && !meshSource) {
-    return meshFail('a shape needs an image \u2014 or pick one from History to cut it again');
+    if (meshGone) {
+      return meshFail('that shape is no longer on the server \u2014 add an image for a new one');
+    }
+    return meshFail(meshHist.items.length
+      ? 'a shape needs an image \u2014 or pick one from History to cut it again'
+      : 'a shape needs an image');
   }
   const check = (fields, ok, message) => {
     for (const f of fields) {
@@ -222,6 +243,7 @@ $('mesh_generate').addEventListener('click', () => {
       const { image, ...sent } = body;   // history holds the shape, not its pixels
       meshOutMeta = { ...sent, ...status.resolved, model: status.model, job: status.id,
                       summary: status.summary || '',
+                      images: meshViews.map(view => view.dataUrl),
                       picture: body.from_shape ? 'shape #' + body.from_shape.slice(4, 10)
                                                : meshViews.map(view => view.name).join(', ') };
       const url = URL.createObjectURL(new Blob([blob], {

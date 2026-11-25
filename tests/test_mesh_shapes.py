@@ -61,6 +61,14 @@ def test_naming_a_shape_cuts_it_again_without_picture_or_solver(tmp_path):
     assert "job_alpha left behind" in how
 
 
+def test_a_recut_keeps_what_it_cut_so_the_chain_continues(tmp_path):
+    store = ShapeStore(tmp_path)
+    _render(_Watching(), store, name="job_first", image=PNG)
+    _render(_Watching(), store, name="job_second", from_shape="job_first")
+    assert store.path("job_second").exists()
+    _render(_Watching(), store, name="job_third", from_shape="job_second")
+
+
 def test_a_shape_that_was_pruned_is_refused_with_the_window_it_fell_out_of(tmp_path):
     store = ShapeStore(tmp_path)
     with pytest.raises(ValueError, match=f"newest {SHAPES_LIMIT}"):

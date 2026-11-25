@@ -112,8 +112,9 @@ class MeshPipelineController:
                        "nothing sampled" if again else
                        f"{params.num_latents} latents sampled in "
                        f"{time.perf_counter() - began:.1f} s")
-                if shapes is not None:
-                    shapes.save(output.stem, x)
+            if shapes is not None:
+                # Even a re-cut keeps what it cut: an entry the pane offers must stay cuttable.
+                shapes.save(output.stem, x)
             token.check()
 
             progress("cutting")
