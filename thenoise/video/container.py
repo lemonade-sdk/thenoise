@@ -16,9 +16,27 @@ import numpy as np
 from thenoise.jobs import Cancellation
 from .spec import ResolvedVideo
 
-#: The audio codec each container carries, with the frame length its encoder consumes:
-#: AAC frames are 1024 samples, Opus in WebM is 20 ms.
-AUDIO_CODECS = {"mp4": ("aac", 1024), "webm": ("libopus", 960)}
+#: The audio codec each container carries, the rate its encoder is opened at, and the
+#: frame length that encoder consumes. Opus opens only at 8, 12, 16, 24 or 48 kHz and eats
+#: 20 ms at a time, so WebM encodes at 48 kHz whatever rate the model's codec answered
+#: (H3's is 32 kHz) and the samples are moved there first; AAC takes the rate it is handed
+#: and frames itself at 1024 samples.
+AUDIO_CODECS = {"mp4": ("aac", None, 1024), "webm": ("libopus", 48000, 960)}
+
+
+def _resample(samples, src_rate: int, dst_rate: int, layout: str) -> np.ndarray:
+    """Move PCM to the rate a container's codec opens at, through libswresample.
+
+    Whole array in, whole array out: the caller needs sample positions to pad and trim
+    against, which a frame-at-a-time resampler would hand back with its own clock.
+    """
+    frame = av.AudioFrame.from_ndarray(samples, format="fltp", layout=layout)
+    frame.sample_rate = src_rate
+    resampler = av.AudioResampler(format="fltp", layout=layout, rate=dst_rate)
+    parts = [moved.to_ndarray()
+             for chunk in (resampler.resample(frame), resampler.resample(None))
+             for moved in chunk]
+    return np.ascontiguousarray(np.concatenate(parts, axis=1))
 
 
 def _prepare_audio(audio, sample_rate, np):
@@ -41,8 +59,13 @@ def _prepare_audio(audio, sample_rate, np):
 def encode_video(frames: Iterable, spec: ResolvedVideo, token: Cancellation, out: Path,
                  progress, *, audio=None, sample_rate: int | None = None) -> None:
     samples = _prepare_audio(audio, sample_rate, np) if audio is not None else None
-    audio_codec, audio_frame = AUDIO_CODECS[spec.output_format]
+    audio_codec, audio_rate, audio_frame = AUDIO_CODECS[spec.output_format]
+    layout = ""
     if samples is not None:
+        layout = "mono" if samples.shape[0] == 1 else "stereo"
+        if audio_rate and sample_rate != audio_rate:
+            samples = _resample(samples, sample_rate, audio_rate, layout)
+            sample_rate = audio_rate
         # Pad/trim the generated audio to the requested video timeline.
         wanted = round(spec.frame_count * sample_rate / spec.fps)
         if samples.shape[1] < wanted:
@@ -63,8 +86,7 @@ def encode_video(frames: Iterable, spec: ResolvedVideo, token: Cancellation, out
             audio_pos = 0
             if samples is not None:
                 audio_stream = container.add_stream(audio_codec, rate=sample_rate)
-                audio_layout = "mono" if samples.shape[0] == 1 else "stereo"
-                audio_stream.layout = audio_layout
+                audio_stream.layout = layout
                 audio_timebase = Fraction(1, sample_rate)
 
             def encode_audio_until(limit):
@@ -84,7 +106,7 @@ def encode_video(frames: Iterable, spec: ResolvedVideo, token: Cancellation, out
                         count = audio_frame
                     else:
                         break
-                    aframe = av.AudioFrame.from_ndarray(chunk, format="fltp", layout=audio_layout)
+                    aframe = av.AudioFrame.from_ndarray(chunk, format="fltp", layout=layout)
                     aframe.sample_rate = sample_rate
                     aframe.time_base = audio_timebase
                     aframe.pts = audio_pos
