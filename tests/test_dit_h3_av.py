@@ -413,6 +413,30 @@ def test_the_carry_is_the_ratio_of_the_two_sigmas():
             sigma / audio_sigma(sigma, shift=SHIFT), rel=1e-12)
 
 
+def test_the_audio_schedule_is_the_released_one_whatever_the_video_shift_is():
+    """Every released recipe fixes the audio at shift 3.0 while the video shift is a knob:
+    12.0 for the base model and the 544p turbos, 6.0 for the 768p ones. So the audio's own
+    ladder depends on the step count alone; only the carry ratio follows the video.
+    """
+    for video_shift in (12.0, 6.0, 3.0):
+        ladder = get_sigmas(4, shift=video_shift)[:-1]
+        own = [audio_sigma(sigma, shift=video_shift) for sigma in ladder]
+        assert own == pytest.approx([1.0, 0.9, 0.75, 0.5], abs=1e-12)
+        assert shift_ratio(video_shift) == pytest.approx(video_shift / AUDIO_SHIFT)
+
+
+def test_the_ladder_matches_the_released_turbo_recipe():
+    """LightX2V's turbo spec states the same grid from the other direction: NFE 4 at video
+    shift 12 is ``q = [1, .75, .5, .25]`` shifted, giving video sigmas
+    ``[1, .9730, .9231, .8000]`` and audio ``[1, .9000, .7500, .5000]``, each list using
+    exactly four evaluations. Agrees to the decimals they publish.
+    """
+    video = get_sigmas(4, shift=12.0)
+    assert video == pytest.approx([1.0, 0.9730, 0.9231, 0.8000, 0.0], abs=5e-5)
+    assert [audio_sigma(sigma, shift=12.0) for sigma in video] == pytest.approx(
+        [1.0, 0.9000, 0.7500, 0.5000, 0.0], abs=5e-5)
+
+
 def test_the_carry_is_linear_in_the_video_sigma_and_unscaled_at_the_start():
     """The start needs no scaling because the two schedules meet at noise; the clean end
     is where the pack's audio slice has grown to ``S`` times the stream's own latent.
