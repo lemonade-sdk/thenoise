@@ -33,20 +33,6 @@ def plan(render=write_out, *, seed=1, steps=1, **kwargs):
     return JobPlan(**defaults)
 
 
-def test_a_renderer_says_in_its_own_words_what_it_did(tmp_path):
-    """A tenth of a second and a minute look alike, so the renderer's words ride along."""
-    queue = JobQueue(tmp_path)
-    try:
-        told = queue.submit(plan(render=lambda *_: "cut from latents still held"))
-        quiet = queue.submit(plan())
-        for ident in (told["id"], quiet["id"]):
-            wait_until(lambda ident=ident: queue.status(ident)["status"] == "completed")
-        assert queue.status(told["id"])["summary"] == "cut from latents still held"
-        assert "summary" not in queue.status(quiet["id"])
-    finally:
-        queue.close()
-
-
 def test_cancel_running_job_does_not_kill_worker_or_next_job(tmp_path):
     entered = threading.Event()
     release = threading.Event()

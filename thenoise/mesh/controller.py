@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import io
 import logging
-import time
 from pathlib import Path
 from typing import Callable
 
@@ -52,7 +51,7 @@ class MeshPipelineController:
         return resolved
 
     def render(self, spec: ResolvedMesh, token: Cancellation,
-               progress: Callable[[str, int, int], None], output: Path) -> str:
+               progress: Callable[[str, int, int], None], output: Path) -> None:
         model = self.model
         images = [load_image(io.BytesIO(one)) for one in spec.images]
         with inference():
@@ -87,14 +86,12 @@ class MeshPipelineController:
 
             key = self._sampling_key(spec)
             # A sampling hit implies a prompt hit: the sampling key carries it.
-            again = self._cache.hit("sampling", key)
-            began = time.perf_counter()
+            if self._cache.hit("sampling", key):
+                logger.info("Reusing the latents this server still holds, nothing resampled")
             x = stages.run(self._denoise, latents, model.fuse_text(cond), params, spec,
                            token, progress, resident=("dit",), pixels=work,
                            prepare=wear_loras,
                            cache="sampling", key=key)
-            how = ("cut from the latents this server still held, nothing resampled"
-                   if again else f"shaped in {time.perf_counter() - began:.1f} s")
             token.check()
 
             progress("cutting")
@@ -111,7 +108,6 @@ class MeshPipelineController:
             logger.info("Mesh: %d vertices, %d triangles written at resolution %d",
                         drawn.vertices.shape[0], drawn.faces.shape[0],
                         spec.octree_resolution)
-        return how
 
     @staticmethod
     def _cache_key(spec: ResolvedMesh) -> tuple:

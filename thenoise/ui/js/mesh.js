@@ -177,7 +177,6 @@ function showMeshResult(blob) {
       $('mesh_wire').disabled = false;
       note.textContent = shape.triangles.toLocaleString() + ' triangles, '
         + shape.vertices.toLocaleString() + ' vertices'
-        + (meshOutMeta.summary ? ' \u00b7 ' + meshOutMeta.summary : '')
         + ' \u2014 drag to turn, wheel to zoom';
       return meshSnapshot();
     },
@@ -204,7 +203,6 @@ $('mesh_generate').addEventListener('click', () => {
     progress: MESH_PROGRESS,
     onArtifact: async (blob, status) => {
       meshOutMeta = { ...status.resolved, model: status.model, job: status.id,
-                      summary: status.summary || '',
                       files: meshViews.map(view => view.file),
                       picture: meshViews.map(view => view.name).join(', ') };
       const url = URL.createObjectURL(new Blob([blob], {
@@ -238,7 +236,6 @@ function renderMeshInfo() {
     }
   }
   if (m.picture) rows.push([FIELD_LABELS.picture, m.picture, '']);
-  if (m.summary) rows.push(['Made', m.summary, '']);
   const lora = m.lora_specs;
   const hasLora = Array.isArray(lora) ? lora.length : (lora ? Object.keys(lora).length : 0);
   if (hasLora) rows.push(['LoRA', formatLora(lora), 'prompt']);
