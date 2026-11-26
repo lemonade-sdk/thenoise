@@ -313,10 +313,7 @@ def n_refs(ctx: Ctx, scenario: str) -> int:
 
 def grid_side(tokens: int) -> int:
     """Square latent side for a token count (snapped, since grids are square)."""
-    side = int(round(math.sqrt(max(tokens, 1))))
-    if side * side != tokens:
-        print(f"  (snapping {tokens} image tokens to {side * side})", file=sys.stderr)
-    return side
+    return int(round(math.sqrt(max(tokens, 1))))
 
 
 def gemm_params(module: nn.Module) -> int:
@@ -1218,7 +1215,10 @@ def h3_image_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
                                            dtype=torch.float32) / params.rope_inv_freq)
     pos = layout.position_ids.to(ctx.tdev, torch.float32)[:n]
     cos, sin = (t.to(ctx.dtype) for t in split_half_rope_axes(inv_freq)(pos))
-    rows = [row for row in layout.modulation_rows() if row[0] < n]
+    # Any step below the pinned condition timestep answers two rows, which is what
+    # ``t_emb`` carries: the step's, and the one the references read.
+    steps = layout.timesteps(video=0.5)
+    rows = [row for row in layout.modulation_rows(steps) if row[0] < n]
 
     bufs = None
     kv_shape = (1, params.num_heads, layout.seq_len, params.head_dim)
@@ -1283,9 +1283,6 @@ def _wan_case(ctx: Ctx, tokens: int, role: str, geometry: dict, token_temb: bool
     heads, head_dim = params.heads, params.head_dim
     frames = WAN_FRAMES
     side = int(round(math.sqrt(max(tokens, frames) / frames)))
-    if frames * side * side != tokens:
-        print(f"  (snapping {tokens} video tokens to {frames}x{side}x{side})",
-              file=sys.stderr)
     n = frames * side * side
     txt = ctx.txt
 
@@ -1405,9 +1402,6 @@ def _ltx_case(ctx: Ctx, tokens: int, role: str, token_timestep: bool) -> Case:
     vctx, actx = vdim, adim           # a release ships each prompt width as its trunk
     frames = LTX_FRAMES
     side = int(round(math.sqrt(max(tokens, frames) / frames)))
-    if frames * side * side != tokens:
-        print(f"  (snapping {tokens} video tokens to {frames}x{side}x{side})",
-              file=sys.stderr)
     n = frames * side * side
     seconds = ((LTX_VIDEO_SCALE * (frames - 1) + 1) / LTX_FPS)
     audio_tokens = max(1, round(seconds * LTX_AUDIO_TPS))
