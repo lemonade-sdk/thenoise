@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import logging
 import math
-import random
 from dataclasses import dataclass, replace
 from typing import Mapping, Optional, Sequence, Tuple
 
@@ -49,6 +48,7 @@ from thenoise.utils.lora_roles import (
     check_lora_roles, flat_lora_specs, lora_specs_by_role,
 )
 from thenoise.utils.png import build_pnginfo
+from thenoise.utils.spec import resolve_seed
 
 logger = logging.getLogger(__name__)
 
@@ -618,10 +618,7 @@ class PipelineController:
                 "conditioned at timestep zero"
             )
 
-        # seed=-1 means "random"
-        seed = request.seed
-        if seed is None or seed == -1:
-            seed = random.randint(0, 2**32 - 1)
+        seed = resolve_seed(request.seed)
 
         return ResolvedImage(
             width=width, height=height, steps=steps, sigmas=sigmas,
