@@ -159,7 +159,7 @@ bars the solver's steps and the written frames as it goes.
 | `--image` | no | — | image the clip starts on |
 | `--end-image` | no | — | image the clip ends on; needs `--image`, and a model that can be told where a clip ends ([FLF2V](models/wan22.md#first-and-last-frame-flf2v)) |
 | `--reference` | no | — | something for the clip to look like rather than a frame it starts or ends on; repeatable. `path@FRAME` pins it to that frame instead, counted from the end when negative. Needs a model that answers `ref2v` ([references](models/h3-video.md#references)) |
-| `--attention` | no | `auto` | `auto` lets the model decide, `full` is exact attention, `optimized` is the model's faster route where it has one; `/health` lists the words the loaded model answers |
+| `--attention` | no | `auto` | How attention is computed: `auto` picks block-sparse or exact at every step, `full` is always exact, `optimized` is block-sparse even on a clip too short for it to pay off. Only a model with block-sparse attention takes `optimized` — `/health` lists what the loaded model accepts |
 | `--lora` | no | — | LoRA for the primary transformer; repeatable, `file:weight` |
 | `--lora-low` | no | — | LoRA for the low-noise expert of a `--dit-low` model; a LoRA meant for the whole clip goes to both flags |
 | `--output-format` | no | model default | `mp4` or `webm`; `--out`'s extension answers when this is left out |

@@ -169,7 +169,7 @@ def test_references_carry_their_frame_on_the_wire():
     spec = VideoRequest(prompt="a fox, like this",
                         references=[_b64_png("red"),
                                     {"image": _b64_png("blue"), "frame": -1}]).to_spec()
-    assert [guide.frame for guide in spec.references] == [0, -1]
+    assert [guide.frame for guide in spec.references] == [None, -1]
     assert all(guide.pixels[:8] == b"\x89PNG\r\n\x1a\n" for guide in spec.references)
 
 

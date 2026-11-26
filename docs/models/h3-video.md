@@ -125,8 +125,8 @@ would be at 12.
 newer 8-step v1.2 is deliberately not among them: besides the attention and MLP projections
 every other turbo touches, it carries 51 `adaln_proj.linear` targets whose input is 2688 wide
 — the *unpruned* trunk's width, which a pruned checkpoint does not have — so there is nothing
-for it to attach to. `ref2v` turbos belong to the reference-to-video release, which is not
-wired up here yet.
+for it to attach to. The `ref2v` turbos target the reference-to-video release, whose
+requests carry [references](#references) rather than keyframes.
 
 ## What it is
 
@@ -141,11 +141,15 @@ wired up here yet.
 
 On a GPU where `comfy_kitchen` compiled its block-sparse attention kernel, the trunk's
 attention is routed rather than dense: each 64-row query block attends the key blocks that
-matter exactly and pools the rest, with every prompt, keyframe and audio row held exact for
+matter exactly and pools the rest, with every prompt, conditioned picture and audio row held exact for
 every query because pooling those is how a run loses them. At the release's own shape that
-measured 4.6x on the attention call (gfx1151, bf16, tau 1.3). There is no option for it — a
-run uses it when its tensors fit and says so once in the log, naming the token count and the
-sink ranges, or naming why it stayed dense.
+measured 4.6x on the attention call (gfx1151, bf16, tau 1.3).
+
+`--attention` decides when it runs, and a run says which it got once in the log: the token
+count and the sink ranges when it routed, the reason when it did not. `auto`, the default,
+routes a clip long enough for routing to be the faster of the two and stays exact on a short
+one. `full` never routes. `optimized` routes whatever the clip's length, which is how you
+measure the difference yourself on a clip the engine would have left alone.
 
 Two more releases exist upstream and are refused rather than half-supported: the unpruned
 checkpoints, which condition each block from a 2688-wide timestep embedding (24 GB of the

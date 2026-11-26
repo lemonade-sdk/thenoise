@@ -14,10 +14,11 @@ from .spec import Guide, VideoSpec
 
 
 class GuideRequest(BaseModel):
-    """One reference condition as the wire carries it: a picture, and its frame."""
+    """One reference condition as the wire carries it: a picture, and the frame of the
+    clip it is one of -- omitted when it is none."""
 
     image: str
-    frame: int = 0
+    frame: Optional[int] = None
 
 
 class VideoRequest(MediaRequest, VideoSpec):
@@ -25,8 +26,9 @@ class VideoRequest(MediaRequest, VideoSpec):
     base64-encoded where the spec wants their bytes.
 
     ``references`` is a list whose items are either a bare base64 picture or
-    ``{"image": ..., "frame": n}``, that frame being the one the reference belongs to and
-    counted from the clip's end when negative.
+    ``{"image": ..., "frame": n}``: with a frame the picture is one of the clip's frames,
+    counted from its end when negative, and without one the clip is only asked to
+    resemble it.
     """
 
     SPEC: ClassVar[type] = VideoSpec
@@ -41,7 +43,7 @@ class VideoRequest(MediaRequest, VideoSpec):
         decoded["references"] = [
             Guide(pixels=verified_picture(
                 "references", item.image if isinstance(item, GuideRequest) else item),
-                frame=item.frame if isinstance(item, GuideRequest) else 0)
+                frame=item.frame if isinstance(item, GuideRequest) else None)
             for item in (self.references or [])]
         return decoded
 
