@@ -18,6 +18,7 @@ def _serve(args) -> None:
         device=args.device, host=args.host, port=args.port,
         upscaler_dir=args.upscaler_dir, offload_device=args.offload_device,
         controlmap_dir=args.controlmap_dir,
+        devices=args.devices, placement=args.place,
     )
 
     runtime = Runtime(settings)
@@ -48,12 +49,12 @@ def _serve(args) -> None:
     app = create_app(runtime, jobs=jobs)
     medium = runtime.medium
     if medium == "image":
-        print(f"thenoise serving model '{runtime.model_name}' on {settings.device}")
+        print(f"thenoise serving model '{runtime.model_name}' on {runtime.device}")
     elif medium:
         print(f"thenoise serving {medium} model '{runtime.model_name}' "
-              f"on {settings.device}")
+              f"on {runtime.device}")
     else:
-        print(f"thenoise serving WITHOUT a model on {settings.device} "
+        print(f"thenoise serving WITHOUT a model on {runtime.device} "
               f"(only upscaling and control-map extraction are available)")
     logging.getLogger("uvicorn.access").addFilter(_QuietReads())
     uvicorn.run(app, host=settings.host, port=settings.port)

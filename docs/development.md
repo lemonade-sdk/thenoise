@@ -20,6 +20,7 @@ thenoise/                  the package
   controlmap/              control-map extractors (canny, lineart, softedge, depth, pose)
   postprocess/             grain, sharpening, Qwen-VAE enhance
   ui/                      web UI served by `serve`
+  multigpu.py              `--devices` / `--place`: split or place one model over several GPUs
   mediums.py               per-medium controllers and routes (`image`, `video`, …)
   api.py / cli.py          HTTP API and CLI entry points
 scripts/                   download.py — the unified model download helper

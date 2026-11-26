@@ -127,6 +127,7 @@ class _FakeRuntime:
 
     def __init__(self, settings):
         self.settings = settings
+        self.device = settings.device
         self.loaded = None
         self.medium = None
         self.pipeline = _FakePipeline()

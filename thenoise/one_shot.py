@@ -34,7 +34,8 @@ def load(args, medium: str, command: str):
     from .cli import component_paths
     from .runtime import ModelPaths, Runtime, Settings
 
-    runtime = Runtime(Settings(device=args.device))
+    runtime = Runtime(Settings(device=args.device, devices=args.devices,
+                               placement=args.place))
     # A command declares only the checkpoint flags its medium can read.
     runtime.load(ModelPaths(
         dit_path=args.dit, vae_path=getattr(args, "vae", ""),

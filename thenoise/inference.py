@@ -50,19 +50,23 @@ def inference():
 M = TypeVar("M", bound=Any)
 
 
+def held_modules(component: Any) -> tuple[nn.Module, ...]:
+    """The modules behind ``component``: itself, or what a plain wrapper holds."""
+    if isinstance(component, nn.Module):
+        return (component,)
+    return tuple(value for value in getattr(component, "__dict__", {}).values()
+                 if isinstance(value, nn.Module))
+
+
 def freeze(module: M) -> M:
     """Put ``module`` in eval mode with frozen weights, returning it.
 
     The engine's only load-time primitive. Accepts the plain wrappers the memory
     manager also takes by freezing the ``nn.Module`` attributes they hold.
     """
-    if isinstance(module, nn.Module):
-        module.eval().requires_grad_(False)
-        return module
-    for value in getattr(module, "__dict__", {}).values():
-        if isinstance(value, nn.Module):
-            value.eval().requires_grad_(False)
+    for held in held_modules(module):
+        held.eval().requires_grad_(False)
     return module
 
 
-__all__ = ["inference", "freeze", "inference_lock"]
+__all__ = ["inference", "freeze", "held_modules", "inference_lock"]

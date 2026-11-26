@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from thenoise.errors import ModelReloadNeeded
+from thenoise import multigpu
 from thenoise.inference import inference, inference_lock
 from thenoise.utils.device import release_device_memory
 
@@ -25,6 +26,8 @@ class Settings:
     port: int = 8000
     upscaler_dir: str = ""     # directory of pixel-domain upscaler models
     controlmap_dir: str = ""  # directory of control-map checkpoints
+    devices: str = ""         # "cuda:0,cuda:1": stack GPUs for one model (multigpu.py)
+    placement: str = ""       # "dit=split,text_encoder=cuda:1" (default: multigpu.default_placement)
 
 
 @dataclass
@@ -63,17 +66,21 @@ class Runtime:
         from .upscale_controller import PixelUpscaleController
 
         self._settings = settings
+        # Refused here, before anything loads. With --devices the first is the compute device.
+        self._stack_spec = multigpu.parse_stack(settings.devices, settings.placement)
+        self._device = str(self._stack_spec.primary or settings.device)
+        self._spreads: dict[str, multigpu.Spread] = {}
         self._paths: Optional[ModelPaths] = None
         self._model: Any = None
         self._model_name: Optional[str] = None
         # Shared pixel-domain upscaler pool (model-free, server-level).
         self._pixel_upscalers = PixelUpscalerManager(
-            upscaler_dir=settings.upscaler_dir, device=settings.device
+            upscaler_dir=settings.upscaler_dir, device=self._device
         )
         self._upscaler = PixelUpscaleController(self._pixel_upscalers)
         # Control-map checkpoints: model-free too, and independent of the upscalers.
         self._controlmaps = ControlMapManager(
-            device=settings.device, controlmap_dir=settings.controlmap_dir
+            device=self._device, controlmap_dir=settings.controlmap_dir
         )
         self._controlmap = ControlMapController(self._controlmaps)
         self._pipeline = None
@@ -98,7 +105,7 @@ class Runtime:
             headers={"": header},
             vae_path=paths.vae_path,
             text_encoder_path=paths.text_encoder_path,
-            device=self._settings.device,
+            device=self._device,
             offload_device=self._settings.offload_device,
             lora_dir=paths.lora_dir or None,
             extra_paths=paths.extra_paths,
@@ -109,17 +116,34 @@ class Runtime:
             raise ValueError(f"{name} has no use for --"
                              + ", --".join(role.replace("_", "-") for role in unwanted))
         cls.validate_paths(config.all_headers())
+        dit_roles: list[str] = []
+        if self._stack_spec.devices:   # without --devices a load is exactly what it was
+            dit_roles = [f"dit_{role}" if role else "dit"
+                         for role in cls.dit_roles(config.all_headers())]
+            multigpu.check_dit_placement(self._stack_spec, dit_roles)
 
         self._unload()  # swap: only one model resident at a time
         logger.info("Loading model '%s'", name)
         with inference():
             model = cls(config=config)
+            self._stack(model, dit_roles)
         self._model = model
         self._model_name = name
         self._paths = paths
         # Every medium gets a controller, so `run` — the lock, the rebuild-and-retry of a
         # model that reports itself unfit — is one path whatever was loaded.
         self._pipeline = controller_for(model, self._pixel_upscalers)
+
+    def _stack(self, model, dit_roles) -> None:
+        """Spread ``model`` over ``--devices`` and move what ``--place`` names."""
+        spec = self._stack_spec
+        if not spec.devices:
+            return
+        plan = multigpu.default_placement(dit_roles, model.memory.component_names(), spec.devices)
+        plan.update(spec.placement)
+        logger.info("stacking %s over %s: %s", type(model).__name__,
+                    ", ".join(map(str, spec.devices)), plan)
+        self._spreads = multigpu.apply(model, spec, plan)
 
     def reload(self) -> None:
         """Rebuild the loaded model from its checkpoints, which clears an unfit state."""
@@ -162,7 +186,17 @@ class Runtime:
         self._model.unload()  # drops the references the instance itself holds
         self._model = None
         self._model_name = None
-        release_device_memory(self._settings.device)
+        for spread in self._spreads.values():
+            spread.remove()
+        self._spreads = {}
+        release_device_memory(self._device)
+        for dev in self._stack_spec.devices[1:]:
+            release_device_memory(str(dev))
+
+    @property
+    def device(self) -> str:
+        """The compute device: ``--devices``' first, else ``--device``."""
+        return self._device
 
     @property
     def model(self) -> Any:

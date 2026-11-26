@@ -29,7 +29,7 @@ from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Set, Union
 import torch
 from torch import nn
 
-from thenoise.inference import freeze
+from thenoise.inference import freeze, held_modules
 from thenoise.utils.device import (
     clean_memory_on_device,
     get_device_memory,
@@ -85,12 +85,7 @@ def _owned_tensors(component: Any) -> tuple[torch.Tensor, ...]:
     """Every weight and buffer ``component`` owns. A plain wrapper is read through the
     module it holds, as ``freeze`` does.
     """
-    if isinstance(component, nn.Module):
-        modules: tuple[nn.Module, ...] = (component,)
-    else:
-        modules = tuple(held for held in getattr(component, "__dict__", {}).values()
-                        if isinstance(held, nn.Module))
-    return tuple(tensor for held in modules
+    return tuple(tensor for held in held_modules(component)
                  for tensor in (*held.parameters(), *held.buffers()))
 
 
@@ -148,6 +143,8 @@ class MemoryManager:
         self._weights: Dict[str, int] = {}
         self._resident: Set[str] = set()
         self._held: Set[str] = set()
+        # Components moved by multigpu.py: never placed or offloaded.
+        self._pinned: Set[str] = set()
         self._peaks: Dict[tuple, Dict[int, int]] = {}
         self._depth = 0
 
@@ -187,6 +184,19 @@ class MemoryManager:
     def resident(self) -> Set[str]:
         """Names of components currently resident on the load device."""
         return set(self._resident)
+
+    def component(self, name: str) -> Optional[nn.Module]:
+        """The module registered under ``name`` (``None`` if absent or a placeholder)."""
+        return self._components.get(name)
+
+    def component_names(self) -> Set[str]:
+        return set(self._components)
+
+    def pin(self, name: str) -> None:
+        """Keep ``name`` where it is: never placed or offloaded."""
+        if name not in self._components:
+            raise KeyError(f"no component {name!r}")
+        self._pinned.add(name)
 
     def weight_bytes(self, name: str) -> int:
         """What ``name`` occupies on the device it is loaded onto (0 if unmeasurable)."""
@@ -296,7 +306,7 @@ class MemoryManager:
             return
         moved = False
         for name in names:
-            if name not in self._resident or name in self._held:
+            if name not in self._resident or name in self._held or name in self._pinned:
                 continue
             module = self._components.get(name)
             if module is None:
@@ -313,7 +323,7 @@ class MemoryManager:
         Zero means nothing was left to take, so a retry would fail the same way.
         """
         before = self.free_bytes()
-        self.offload(*(self._resident - self._held))
+        self.offload(*(self._resident - self._held - self._pinned))
         after = self.free_bytes()
         if before is None or after is None:
             return 0
@@ -338,7 +348,8 @@ class MemoryManager:
     def _place(self, names: Sequence[str], reserve: int) -> None:
         """Put ``names`` on the compute device, with ``reserve`` left over afterwards."""
         waiting = [n for n in names
-                   if n not in self._resident and self._components.get(n) is not None]
+                   if n not in self._resident and n not in self._pinned
+                   and self._components.get(n) is not None]
         self._make_room(reserve + sum(self.weight_bytes(n) for n in waiting))
         for name in waiting:
             module = self._components[name]
@@ -352,7 +363,7 @@ class MemoryManager:
         free = self.free_bytes()
         if free is None or free >= nbytes:
             return
-        victims = self._resident - self._held
+        victims = self._resident - self._held - self._pinned
         for _, name in sorted((self.weight_bytes(n), n) for n in victims)[::-1]:
             self.offload(name)
             free = self.free_bytes()
