@@ -7,6 +7,7 @@ so a step is the real packing, the real rope and the real shift maps — only sm
 """
 from __future__ import annotations
 
+import io
 import pytest
 import thenoise.models.h3_video as h3_video_module
 import torch
@@ -30,7 +31,7 @@ from thenoise.samplers import create_sampler
 from thenoise.utils.attention import ATTENTION_METHODS
 from thenoise.vae import AutoencoderKLH3Audio, AutoencoderKLH3Video
 from thenoise.vae.h3 import TemporalPlan
-from thenoise.video.spec import VideoSpec
+from thenoise.video.spec import Guide, VideoSpec
 
 #: Prompt tokens, and the canvas the tiny codecs can still round-trip.
 TEXT = 5
@@ -267,6 +268,57 @@ def test_a_reference_is_packed_ahead_of_the_clip_it_conditions(model):
     # A reference keeps the grid it arrived with, not the clip's.
     small = layout_of(Condition(video=torch.ones(1, 24, 1, 2, 4)))
     assert small.segments[1][1] - small.segments[1][0] == 2
+
+
+# --- what a reference is resized to -------------------------------------------
+
+
+def _png(width: int, height: int) -> bytes:
+    stream = io.BytesIO()
+    Image.new("RGB", (width, height)).save(stream, format="PNG")
+    return stream.getvalue()
+
+
+def test_a_reference_is_fitted_to_the_canvas_area_rather_than_cropped_to_it():
+    """Both sides come down onto a whole lattice cell, so the aspect is as close as
+    the grid allows rather than exact."""
+    [fitted] = H3VideoModel.fit_guides(_canvas(), [Image.new("RGB", (3840, 2160))],
+                                       (1344, 768))
+    assert fitted.size == (1344, 736)
+
+
+def test_a_reference_smaller_than_the_canvas_is_not_enlarged():
+    [kept] = H3VideoModel.fit_guides(_canvas(), [Image.new("RGB", (512, 288))],
+                                     (1344, 768))
+    assert kept.size == (512, 288)
+
+
+def test_a_reference_is_floored_onto_whole_latent_cells():
+    """A side that is no whole cell is brought down to one rather than up: a reference
+    never gains pixels it did not arrive with."""
+    [fitted] = H3VideoModel.fit_guides(_canvas(), [Image.new("RGB", (1920, 400))],
+                                       (1344, 768))
+    assert fitted.size == (1920, 384)
+
+
+def test_a_keyframe_is_still_the_canvas_it_opens():
+    [fitted] = H3VideoModel.fit_references(_canvas(), [Image.new("RGB", (1920, 400))],
+                                           (1344, 768))
+    assert fitted.size == (1344, 768)
+
+
+def test_a_reference_run_that_names_no_size_borrows_the_first_pictures_aspect():
+    resolved = H3VideoModel.resolve_video(
+        _canvas(), VideoSpec(prompt="a clip", references=[Guide(pixels=_png(600, 1200))]))
+    assert abs(resolved.width / resolved.height - 0.5) < 0.02
+    assert (resolved.width, resolved.height) != (1344, 768)
+
+
+def test_a_named_size_outranks_the_first_reference():
+    resolved = H3VideoModel.resolve_video(
+        _canvas(), VideoSpec(prompt="a clip", width=1024, height=576,
+                             references=[Guide(pixels=_png(600, 1200))]))
+    assert (resolved.width, resolved.height) == (1024, 576)
 
 
 def test_an_audio_condition_is_refused_for_the_reason_it_is_one(model):

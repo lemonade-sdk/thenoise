@@ -96,6 +96,12 @@ class VideoModel(PixelModel):
             width, height = self.size_from_reference(
                 spec.width, spec.height, load_image(io.BytesIO(spec.image)))
             spec = spec.model_copy(update={"width": width, "height": height})
+        elif (spec.width is None and spec.height is None and spec.references
+              and self.capability("video").get("ref2v")):
+            # Nothing keys a size but the first thing the clip was given to look like.
+            width, height = self.size_from_reference(
+                None, None, load_image(io.BytesIO(spec.references[0].pixels)))
+            spec = spec.model_copy(update={"width": width, "height": height})
         resolved = spec.resolve(self.default_prefs)
         if resolved.attention not in self.ATTENTION_METHODS:
             raise ValueError(

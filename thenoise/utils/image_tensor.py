@@ -202,13 +202,15 @@ class ReferenceSizing:
     enlarges up from ``floor``.
 
     The result is floored to ``align`` pixels, which keeps a reference on whole latent
-    cells and inside the cap.
+    cells and inside the cap. ``down_only`` asks the rule never to enlarge, so a
+    reference already inside it is encoded at the size it came in.
     """
 
     fit: str = "area"
     cap: int = 1024 * 1024
     align: int = 16
     floor: int = 0
+    down_only: bool = False
 
     def __post_init__(self) -> None:
         if self.fit not in REF_FITS:
@@ -239,6 +241,8 @@ class ReferenceSizing:
             scale = min(max(short, self.floor), self.cap) / short
         else:
             scale = (self.cap / (width * height)) ** 0.5
+        if self.down_only:
+            scale = min(1.0, scale)
         return (
             align_down(round(width * scale), self.align, self.align),
             align_down(round(height * scale), self.align, self.align),

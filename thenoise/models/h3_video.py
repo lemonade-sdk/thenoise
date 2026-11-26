@@ -37,7 +37,8 @@ from thenoise.models.config import (
 from thenoise.models.video_base import Condition, VideoModel, Waveform
 from thenoise.samplers import Step
 from thenoise.utils.sol_attention import routing_unavailable
-from thenoise.utils.image_tensor import cover_crop, resize_to_short_edge
+from thenoise.utils.image_tensor import (
+    ReferenceSizing, cover_crop, resize_to_short_edge)
 from thenoise.utils.safetensors import Header
 from thenoise.vae import load_h3_audio_vae, load_h3_video_vae
 from thenoise.vae.h3 import TemporalPlan, snap_frames
@@ -118,6 +119,13 @@ class H3VideoModel(VideoModel):
     CAPABILITIES = {**VideoModel.CAPABILITIES, "upscale": False,
                     "video": {"t2v": True, "i2v": True, "flf2v": True,
                                   "ref2v": True}}
+
+    #: What the canvas means to a reference: an area to fit into, never a frame to crop
+    #: to. ``fit_guides`` restates the cap as the run's own canvas; this is the claim for
+    #: anywhere the rule is read on its own.
+    REFERENCE_SIZING = ReferenceSizing(
+        fit="area", cap=DEFAULT_PREFS["width"] * DEFAULT_PREFS["height"],
+        align=CANVAS_MULTIPLE, down_only=True)
     # Routing is measured good on a clip and bad on a still.
     ATTENTION_METHODS = (*VideoModel.ATTENTION_METHODS, "optimized")
 
@@ -220,8 +228,14 @@ class H3VideoModel(VideoModel):
         return [cover_crop(image, target[0], target[1]) for image in images]
 
     def fit_guides(self, images, target):
-        """The same crop, and no ceiling on the count."""
-        return [cover_crop(image, target[0], target[1]) for image in images]
+        """Resized, never cropped, and no ceiling on the count.
+
+        A reference is not a frame of the clip, so nothing has to line up with the
+        canvas: it keeps the shape it arrived in and packs on its own grid, with the
+        canvas only deciding how much area that grid may cover.
+        """
+        sizing = dataclasses.replace(self.REFERENCE_SIZING, cap=target[0] * target[1])
+        return [sizing.apply(image) for image in images]
 
     def encode_references(self, pixels, frames=1) -> List[torch.Tensor]:
         """One latent per keyframe, in the order the prompt labels them: one frame in is
