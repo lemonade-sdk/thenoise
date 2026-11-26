@@ -16,7 +16,8 @@ from types import SimpleNamespace
 
 from conftest import header_of, write_key_checkpoint
 from test_dit_h3_av import _av_params, av_state
-from test_vae_h3_audio import TINY as AUDIO_GEOMETRY, _fill as fill_audio
+from test_vae_h3_audio import (TINY as AUDIO_GEOMETRY, _fill as fill_audio,
+                              _tone)
 from test_vae_h3_video import _fill as fill_video
 from thenoise.dit.h3 import H3AVDiT
 from thenoise.models.video_base import Condition
@@ -26,6 +27,7 @@ from thenoise.models.h3_video import (
     TRAINING_AREA,
     H3VideoConditioning,
     H3VideoModel,
+    guide_clip,
 )
 from thenoise.samplers import create_sampler
 from thenoise.utils.attention import ATTENTION_METHODS
@@ -136,6 +138,31 @@ def test_a_canvas_bigger_than_the_trained_area_runs_with_a_warning(caplog):
 def _canvas():
     """Just enough adapter to call the two request hooks, which need no weights."""
     return object.__new__(H3VideoModel)
+
+
+@pytest.mark.parametrize(("frames", "clip"), [
+    (1, 1), (4, 1), (5, 5), (14, 5), (21, 5), (22, 22), (30, 22), (39, 39), (124, 124),
+])
+def test_a_reference_is_cropped_to_a_length_the_codec_runs(frames, clip):
+    """Down onto the ladder the decoder walks, and never up to it."""
+    assert guide_clip(frames) == clip
+
+
+def test_a_reference_clip_goes_through_the_codec_in_one_piece(model):
+    """One latent for the frames it was given, because the codec is causal."""
+    [latent] = model.encode_references([torch.zeros(3, 30, SIDE, SIDE)])
+    assert latent.shape[2] == TemporalPlan.of_frames(guide_clip(30)).latent_t
+
+
+def test_a_guide_shorter_than_a_clip_is_a_picture_to_the_codec_too(model):
+    """The one-frame path, whether the reference arrived as one frame or as three."""
+    [picture] = model.encode_references([torch.zeros(3, SIDE, SIDE)])
+    [short] = model.encode_references([torch.zeros(3, 4, SIDE, SIDE)])
+    assert short.shape == picture.shape
+
+
+def test_a_references_sound_becomes_a_latent_of_its_own(model):
+    assert tuple(model.encode_sound(_tone(4)).shape) == (1, 32, 2, 4)
 
 
 def test_the_lossy_offer_is_about_this_checkpoint_and_this_box(monkeypatch):

@@ -13,6 +13,15 @@ def content_digest(images: Iterable["Image.Image"]) -> Tuple[str, ...]:
     return tuple(hashlib.md5(image.tobytes()).hexdigest() for image in images)
 
 
+def file_digest(blobs: Iterable[bytes]) -> Tuple[str, ...]:
+    """Each file's own bytes, hashed: what a reference *is*, whatever kind of file it was.
+
+    A clip carries more than the frame a text encoder is shown, so a key built from that
+    poster alone would let two different clips share one latent.
+    """
+    return tuple(hashlib.md5(blob).hexdigest() for blob in blobs)
+
+
 class _CacheSlot:
     """Single-entry cache slot with explicit release on overwrite."""
 

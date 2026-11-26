@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from conftest import StubVideo, header_of, wan_adapter
-from test_media_read import _clip, _wav
+from test_media_read import RATE, _clip, _wav
 from thenoise.models.config import ModelConfig
 from thenoise.models.video_base import Segment, VideoModel
 from thenoise.models.wan_video import VARIANTS, Wan22Model
@@ -249,6 +249,65 @@ def test_a_reference_the_trunk_cannot_hold_is_refused_by_what_it_lacks(
     controller = VideoPipelineController(model)
     with pytest.raises(ValueError, match=what_is_missing):
         controller._encode_references([], controller._guides(spec), spec)
+
+
+def test_a_reference_clip_is_handed_to_the_codec_in_one_piece(tmp_path):
+    """Its frames go over as one tensor: what a causal codec takes together is one latent,
+    and a model that cannot take them says so rather than keeping the first."""
+    seen = []
+
+    class ClipVideo(StubVideo):
+        CAPABILITIES = {**StubVideo.CAPABILITIES,
+                        "video": {**StubVideo.CAPABILITIES["video"], "ref2v": True}}
+
+        def encode_references(self, pixels, frames=1):
+            seen.extend(one.shape for one in pixels)
+            return [torch.zeros(1, self.Z_DIM, 1, 1, 1)]
+
+    model = ClipVideo(config=_stub_config(tmp_path))
+    spec = model.resolve_video(VideoSpec(prompt="like this clip",
+                                         references=[Guide(media=_clip(sound=False))]))
+    controller = VideoPipelineController(model)
+    _, [condition] = controller._encode_references([], controller._guides(spec), spec)
+    assert len(seen) == 1 and seen[0][1] == 12
+    assert condition.audio is None
+
+
+def test_a_sound_reference_is_a_condition_with_a_sound_and_no_picture(tmp_path):
+    """The reader's rate travels with the samples: the codec's grid is in samples."""
+    seen = []
+
+    class SoundVideo(StubVideo):
+        CAPABILITIES = {**StubVideo.CAPABILITIES,
+                        "video": {**StubVideo.CAPABILITIES["video"], "ref2v": True}}
+
+        def encode_sound(self, pcm, sample_rate=None):
+            seen.append(sample_rate)
+            return torch.zeros(1, 2, 2, 4)
+
+    model = SoundVideo(config=_stub_config(tmp_path))
+    spec = model.resolve_video(VideoSpec(prompt="like this sound",
+                                         references=[Guide(media=_wav())]))
+    controller = VideoPipelineController(model)
+    _, [condition] = controller._encode_references([], controller._guides(spec), spec)
+    assert seen == [RATE]
+    assert condition.video is None and condition.audio is not None
+
+
+def test_two_clips_that_open_the_same_way_are_not_the_same_reference(tmp_path):
+    """The frame a language model is shown cannot stand in for a clip: the latent the
+    trunk reads is made of every frame of it."""
+    model = StubVideo(config=_stub_config(tmp_path))
+    controller = VideoPipelineController(model)
+
+    def key(media):
+        spec = model.resolve_video(VideoSpec(prompt="x", references=[Guide(media=media)]))
+        guides = controller._guides(spec)
+        assert [guide.frames[0].tobytes() for guide in guides] == \
+               [guides[0].frames[0].tobytes()]
+        return controller._cache_key_reference([guide.frames[0] for guide in guides], spec)
+
+    assert key(_clip(frames=6)) != key(_clip(frames=12))
 
 
 def _png_bytes() -> bytes:

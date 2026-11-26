@@ -29,7 +29,8 @@ from thenoise.stages import Stages
 from thenoise.utils.image_tensor import load_image, pil_to_pixels, pixels_to_pil
 from thenoise.utils.media import ReferenceMedia, read_reference
 from thenoise.utils.lora_roles import check_lora_roles
-from thenoise.utils.pipeline_cache import PipelineCache, content_digest
+from thenoise.utils.pipeline_cache import (PipelineCache, content_digest,
+                                       file_digest)
 from thenoise.video.container import encode_video
 from thenoise.video.spec import ResolvedVideo, VideoSpec
 
@@ -76,10 +77,12 @@ class VideoPipelineController:
         """Key for the encoded reference latents.
 
         The clip's length is in it because a codec that concatenates its reference
-        encodes it into a clip-long latent.
+        encodes it into a clip-long latent, and each reference file's own bytes because a
+        reference clip conditions with more than the frame the text encoder is shown.
         """
         return ("reference", self.model.REFERENCE_SIZING, (spec.width, spec.height),
-                spec.frame_count, content_digest(images))
+                spec.frame_count, content_digest(images),
+                file_digest([guide.media for guide in spec.references]))
 
     @staticmethod
     def _reference_images(spec: ResolvedVideo) -> list[Image.Image]:
@@ -142,8 +145,12 @@ class VideoPipelineController:
             # Stage 0: the conditions the run steps alongside — keyframes, then references.
             ref: tuple[list, list] = ([], [])
             if images or guides:
+                # The audio codec is only worth bringing in when a reference has a sound
+                # to put through it.
+                resident = ("vae", *(model.audio_components()
+                                     if any(m.pcm is not None for m in guides) else ()))
                 ref = stages.run(self._encode_references, images, guides, spec,
-                                 resident=("vae",), pixels=pixels,
+                                 resident=resident, pixels=pixels,
                                  cache="reference", key=ref_key)
                 token.check()
 
@@ -249,7 +256,9 @@ class VideoPipelineController:
         keeps the frame it was anchored at, or none at all.
 
         Each reference is fitted on its own: two of them need not share a shape, since
-        neither is cropped and each keeps a grid of its own in the trunk.
+        neither is cropped and each keeps a grid of its own in the trunk. Its frames are
+        fitted alike and handed over together, so a codec that runs a clip causally sees
+        the clip it is conditioning on.
         """
         model = self.model
 
@@ -260,16 +269,21 @@ class VideoPipelineController:
                 frames=spec.frame_count)
 
         conditions = []
-        for media, guide in zip(guides, spec.references):
-            if len(media.frames) > 1:
-                raise ValueError(
-                    f"a reference clip of {len(media.frames)} frames needs the codec to "
-                    "put a clip's frames into one latent, which it does not do yet")
-            if media.pcm is not None:
-                raise ValueError("a reference's sound needs condition rows in the "
-                                 "trunk's audio stream, which it does not pack yet")
-            conditions.append(Condition(video=encoded(media.frames, model.fit_guides)[0],
-                                        frame=guide.frame))
+        for index, (media, guide) in enumerate(zip(guides, spec.references), 1):
+            fitted = model.fit_guides(list(media.frames), (spec.width, spec.height))
+            picture = None
+            if fitted:
+                # One entry with its frames along one axis, because what a codec takes
+                # together comes back as one latent -- and one that cannot take them says
+                # so there rather than dropping every frame but the first.
+                pixels = [pil_to_pixels(image, model.pixel_channels) for image in fitted]
+                one = pixels[0] if len(pixels) == 1 else torch.stack(pixels, dim=1)
+                picture = model.encode_references([one], frames=spec.frame_count)[0]
+            sound = (model.encode_sound(media.pcm, media.sample_rate)
+                     if media.pcm is not None else None)
+            if picture is None and sound is None:
+                raise ValueError(f"reference {index} is neither a picture, a clip nor a sound")
+            conditions.append(Condition(video=picture, audio=sound, frame=guide.frame))
         return (encoded(images, model.fit_references) if images else [], conditions)
 
     def _denoise(self, x, segment, cond, params, token: Cancellation, progress,

@@ -41,7 +41,7 @@ from thenoise.utils.image_tensor import (
     ReferenceSizing, cover_crop, resize_to_short_edge)
 from thenoise.utils.safetensors import Header
 from thenoise.vae import load_h3_audio_vae, load_h3_video_vae
-from thenoise.vae.h3 import TemporalPlan, snap_frames
+from thenoise.vae.h3 import CLIP_LENGTH, TemporalPlan, snap_frames
 from thenoise.video.spec import ResolvedVideo, VideoSpec
 
 if TYPE_CHECKING:  # pragma: no cover - only for annotations
@@ -237,13 +237,28 @@ class H3VideoModel(VideoModel):
         sizing = dataclasses.replace(self.REFERENCE_SIZING, cap=target[0] * target[1])
         return [sizing.apply(image) for image in images]
 
-    def encode_references(self, pixels, frames=1) -> List[torch.Tensor]:
-        """One latent per keyframe, in the order the prompt labels them: one frame in is
-        the codec's posterior mean, the same answer every time.
+    def encode_sound(self, pcm, sample_rate=None) -> torch.Tensor:
+        """The codec's posterior mean for a reference's sound, in its own latent shape.
+
+        Mono becomes the two lanes the stream carries, and any rate is moved here: a
+        latent frame is a fixed number of samples at the codec's rate, so the sound has to
+        arrive on that grid to be a condition at all.
         """
         with torch.no_grad():
-            return [self.vae.encode_pixels_to_latents(image[None, :, None])
-                    for image in pixels]
+            return self.audio_vae.encode_to_latents(pcm, sample_rate)
+
+    def encode_references(self, pixels, frames=1) -> List[torch.Tensor]:
+        """One latent per condition, in the order the prompt labels them.
+
+        A condition carries its own frames and the codec is causal, so a reference clip
+        goes through in one piece and comes back one latent for all of them, cropped to the
+        ladder the decoder walks. One frame in is the codec's posterior mean, the same
+        answer every time.
+        """
+        with torch.no_grad():
+            return [self.vae.encode_pixels_to_latents(one[None, :, None] if one.ndim == 3
+                                                      else one[None, :, :guide_clip(one.shape[1])])
+                    for one in pixels]
 
     # ------------------------------------------------------------ conditioning
     def encode_prompt(self, args: EncodePromptArgs) -> H3VideoConditioning:
@@ -480,6 +495,22 @@ class H3VideoModel(VideoModel):
 
     def _clear_weights(self) -> None:
         self.dit = self.vae = self.audio_vae = self.text_encoder = None
+
+
+def guide_clip(frames: int) -> int:
+    """How many leading frames of a reference become one clip latent; 1 for a picture.
+
+    The codec runs the shortest clip it trained on and whole clips more, so a guide is
+    cropped down onto that ladder and never padded up to it: a clip that repeats its own
+    last frame to reach a length is saying something the file did not. Fewer frames than
+    the shortest clip is a picture, which is what a single frame is.
+    """
+    if frames < 2:
+        return 1
+    length = snap_frames(frames, upward=False)
+    if length > frames:
+        length -= CLIP_LENGTH
+    return max(length, 1)
 
 
 def _as_list(value) -> list:

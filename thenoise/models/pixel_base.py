@@ -85,20 +85,38 @@ class PixelModel(DiffusionModel):
         """
         return self.fit_references(images, target)
 
+    def encode_sound(self, pcm, sample_rate=None) -> torch.Tensor:
+        """A reference's sound as a latent.
+
+        A model with no audio codec has nothing to put one in, and a trunk that has the
+        codec but no condition rows for it says so when the packing is built.
+        """
+        raise ValueError(
+            f"{self.name} has no audio codec: a reference's sound needs condition rows "
+            "in the trunk's audio stream")
+
     def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
         """Encode input pixels (``[C,H,W]`` in [-1, 1]) into the canonical latent."""
         raise NotImplementedError(f"{self.name} does not support reference editing")
 
     def encode_references(self, pixels: list[torch.Tensor],
                           frames: int = 1) -> list[torch.Tensor]:
-        """The latents a run conditions on, from fitted images: one per image, unless
-        the model takes its reference some other way.
+        """The latents a run conditions on, one per condition, unless the model takes
+        its reference some other way.
 
-        `frames` is the temporal extent the run spans. A model whose reference is one
-        latent for a whole clip has to override this rather than be handed per-frame
-        latents, because the codec is causal: the later latent frames of a clip are not
-        the first one repeated.
+        An entry is a fitted picture ``[C,H,W]`` or the frames of a reference clip
+        ``[C,T,H,W]``. `frames` is the temporal extent the run spans. A model whose
+        reference is one latent for a whole clip has to override this rather than be
+        handed per-frame latents, because the codec is causal: the later latent frames of
+        a clip are not the first one repeated -- and one that cannot says so here, because
+        a reference clip arrives through the same field as a picture and has no other way
+        to be refused.
         """
+        for one in pixels:
+            if one.ndim != 3:
+                raise ValueError(
+                    f"{self.name} puts one picture in each latent: a reference clip "
+                    "needs a codec that takes a clip's frames into one latent")
         return [self.encode_reference(image) for image in pixels]
 
     def pack_reference_latent(
