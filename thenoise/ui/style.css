@@ -12,7 +12,6 @@
   --accent-soft: rgba(227, 179, 65, .14);
   --ok: #4ec9b0;
   --err: #f07178;
-  /* derived/layer colors (theme-aware) */
   --accent-hover: #d19c2a;
   --btn-text: #fff;
   --action-bg: rgba(11, 14, 20, .82);
@@ -25,7 +24,6 @@
   --lora-shadow: 0 6px 24px rgba(0, 0, 0, .45);
 }
 
-/* ---------- light theme (body.light, toggled from the UI) ---------- */
 body.light {
   color-scheme: light;
   --bg: #f5f6f8;
@@ -41,7 +39,6 @@ body.light {
   --accent-soft: rgba(184, 134, 11, .12);
   --ok: #1e9e8a;
   --err: #d64550;
-  /* derived/layer colors */
   --accent-hover: #a37410;
   --action-bg: rgba(255, 255, 255, .92);
   --overlay-bg: rgba(255, 255, 255, .55);
@@ -53,7 +50,6 @@ body.light {
   --lora-shadow: 0 6px 24px rgba(0, 0, 0, .12);
 }
 
-/* ---------- reset & base ---------- */
 *,
 *::before,
 *::after {
@@ -77,13 +73,11 @@ body {
   font-size: 14px;
 }
 
-/* ---------- custom scrollbar (slim, matches UI theme) ---------- */
 :root {
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
 }
 
-/* Chromium / WebKit */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
@@ -118,7 +112,6 @@ body {
   background: transparent;
 }
 
-/* ---------- generic utilities ---------- */
 .label {
   font-size: .78rem;
   color: var(--dim);
@@ -144,7 +137,6 @@ body {
   border-color: var(--faint);
 }
 
-/* ---------- tabs ---------- */
 .tabs {
   flex: none;
   display: flex;
@@ -186,7 +178,6 @@ body {
   border-bottom-color: var(--accent);
 }
 
-/* right-side preferences toolbar (theme + sidebar side) */
 .tabs-prefs {
   align-self: stretch;
   display: flex;
@@ -215,7 +206,6 @@ body {
   font-size: .95rem;
   line-height: 1;
 }
-/* ---------- no-model notice ---------- */
 .no-model {
   position: absolute;
   inset: 0;
@@ -252,7 +242,6 @@ body {
   font-family: monospace;
 }
 
-/* ---------- main layout ---------- */
 .views {
   flex: 1;
   min-height: 0;
@@ -278,7 +267,6 @@ body {
   gap: 1rem;
 }
 
-/* ---------- sidebar ---------- */
 .sidebar {
   width: 440px;
   min-width: 440px;
@@ -291,8 +279,6 @@ body {
   gap: 1.1rem;
 }
 
-/* ---------- sidebar on the right (body.sidebar-right) ---------- */
-/* Flip via flex ``order`` so the stacked mobile layout is unaffected. */
 body.sidebar-right .main {
   order: 1;
 }
@@ -312,49 +298,37 @@ body.sidebar-right .sidebar {
   color: var(--accent);
 }
 
-/* ---------- form fields ---------- */
 .field, .range {
   display: flex;
   flex-direction: column;
   gap: .4rem;
 }
 
-/* A run of controls the UI fills in from a server-side declaration. The group is a
-   single child of the sidebar, so it repeats the sidebar's own rhythm inside itself. */
 .group {
   display: flex;
   flex-direction: column;
   gap: 1.1rem;
 }
 
-/* ---------- collapsible sidebar section ---------- */
-
-/* No border and no padding of its own: a collapsed section is a sidebar row like any
-   other, so its header lines up with the labels around it and its controls fall into
-   the sidebar's own rhythm when it opens. */
 .collapse {
   display: flex;
   flex-direction: column;
   gap: 1.1rem;
 }
 
-/* The summary carries the sidebar's own .label class, so the header *is* a section
-   header rather than one that happens to match. */
 .collapse > summary {
   display: flex;
   align-items: baseline;
   gap: .5rem;
   cursor: pointer;
   user-select: none;
-  list-style: none;          /* the chevron below, not the marker */
+  list-style: none;
 }
 
 .collapse > summary::-webkit-details-marker {
   display: none;
 }
 
-/* The chevron trails the line rather than leading it: in front it would push the
-   header out of line with every other label in the sidebar. */
 .collapse > summary::after {
   content: '\25B8';
   color: var(--faint);
@@ -369,8 +343,6 @@ body.sidebar-right .sidebar {
   color: var(--text);
 }
 
-/* Which knobs are switched on: closing the section must not hide that. A sentence
-   inside an uppercase header, so it drops the header's dress. */
 .collapse-note {
   margin-left: auto;
   min-width: 0;
@@ -430,8 +402,6 @@ button.hint {
   outline: none;
 }
 
-/* A control for a capability the loaded model lacks (see ``applyModelState``): muted
-   and inert, but left in the form so switching models does not reflow the sidebar. */
 .sidebar select:disabled {
   opacity: .45;
   cursor: default;
@@ -456,7 +426,6 @@ button.hint {
   min-height: 70px;
 }
 
-/* ---------- range slider ---------- */
 .range-head {
   display: flex;
   justify-content: space-between;
@@ -480,7 +449,7 @@ input[type=range] {
   -webkit-appearance: none;
   appearance: none;
   width: 100%;
-  height: 15px;               /* roomier hit area for the thumb */
+  height: 15px;
   background: transparent;
   border: none;
   padding: 0;
@@ -488,9 +457,6 @@ input[type=range] {
   outline: none;
 }
 
-/* WebKit track — must be styled explicitly when appearance is none,
-   otherwise the track/thumb hit area can collapse and the slider becomes
-   un-draggable in some browsers. */
 input[type=range]::-webkit-slider-runnable-track {
   -webkit-appearance: none;
   appearance: none;
@@ -498,10 +464,9 @@ input[type=range]::-webkit-slider-runnable-track {
   border-radius: 4px;
   background: var(--input);
   border: none;
-  margin-top: 5px;            /* vertically center within the 15px input */
+  margin-top: 5px;
 }
 
-/* Firefox track */
 input[type=range]::-moz-range-track {
   height: 5px;
   border-radius: 4px;
@@ -527,14 +492,12 @@ input[type=range]::-moz-range-thumb {
   border: none;
 }
 
-/* webkit thumb: appearance none + negative margin centers it on the 5px track */
 input[type=range]::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
   margin-top: -5px;
 }
 
-/* ---------- checkbox ---------- */
 .check {
   display: flex;
   align-items: center;
@@ -552,7 +515,6 @@ input[type=range]::-webkit-slider-thumb {
   cursor: pointer;
 }
 
-/* ---------- primary button ---------- */
 .btn {
   background: var(--accent);
   color: var(--btn-text);
@@ -578,7 +540,6 @@ input[type=range]::-webkit-slider-thumb {
   cursor: default;
 }
 
-/* ---------- stage / image ---------- */
 .stage {
   flex: 1;
   min-width: 0;
@@ -607,8 +568,6 @@ input[type=range]::-webkit-slider-thumb {
   background: #000;
 }
 
-/* RGBA models (see /health's pixel_channels): checkerboard behind the output so
-   transparent pixels read as transparency instead of as the panel colour. */
 body.rgba_out .stage img {
   background-color: var(--checker-bg);
   background-image:
@@ -649,7 +608,6 @@ body.rgba_out .stage img {
   color: var(--dim);
 }
 
-/* ---------- shape viewer ---------- */
 .stage .stage-mesh {
   flex: 1;
   min-height: 0;
@@ -680,7 +638,6 @@ body.rgba_out .stage img {
   color: var(--accent);
 }
 
-/* ---------- stage action buttons (download / info) ---------- */
 .stage .actions {
   position: absolute;
   top: 12px;
@@ -725,7 +682,6 @@ body.rgba_out .stage img {
   outline: none;
 }
 
-/* ---------- overlay / spinner ---------- */
 .stage .overlay {
   position: absolute;
   inset: 0;
@@ -751,7 +707,6 @@ body.rgba_out .stage img {
   }
 }
 
-/* ---------- queued job progress ---------- */
 .job-progress {
   width: 100%;
   display: flex;
@@ -791,7 +746,6 @@ body.rgba_out .stage img {
   to { margin-left: 100%; }
 }
 
-/* ---------- timer ---------- */
 .timer {
   font-size: .8rem;
   color: var(--dim);
@@ -835,7 +789,6 @@ body.rgba_out .stage img {
   }
 }
 
-/* ---------- info popup ---------- */
 .modal {
   position: fixed;
   inset: 0;
@@ -921,7 +874,6 @@ body.rgba_out .stage img {
   color: var(--faint);
 }
 
-/* ---------- history ---------- */
 .history {
   width: 100%;
 }
@@ -990,7 +942,6 @@ body.rgba_out .stage img {
   border-color: var(--accent);
 }
 
-/* ---------- swap row ---------- */
 .swap-row {
   display: flex;
   gap: .6rem;
@@ -1016,7 +967,6 @@ body.rgba_out .stage img {
   border-color: var(--accent);
 }
 
-/* ---------- lora autocomplete ---------- */
 .lora-field {
   position: relative;
 }
@@ -1057,7 +1007,6 @@ body.rgba_out .stage img {
   font-size: .8rem;
 }
 
-/* ---------- upscale dropzone ---------- */
 .dropzone {
   border: 1.5px dashed var(--border);
   border-radius: 10px;
@@ -1095,7 +1044,6 @@ body.rgba_out .stage img {
   word-break: break-all;
 }
 
-/* ---------- edit reference thumbnails ---------- */
 .ref-thumbs {
   display: flex;
   flex-wrap: wrap;
@@ -1152,7 +1100,6 @@ body.rgba_out .stage img {
   border-radius: 0 6px 0 0;
 }
 
-/* ---------- initial / last frame pair ---------- */
 .frame-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1173,7 +1120,6 @@ body.rgba_out .stage img {
   display: none;
 }
 
-/* ---------- upscale single / result panels ---------- */
 .stage .single, .stage .result {
   position: relative;
   width: 100%;
@@ -1183,11 +1129,6 @@ body.rgba_out .stage img {
   justify-content: center;
 }
 
-/* ======================================================================
-   Responsive / mobile
-   ====================================================================== */
-
-/* Touch devices have no hover, so the action buttons must be always visible. */
 @media (hover: none), (pointer: coarse) {
   .stage .actions:has(.ctrl:not(:disabled)) {
     opacity: 1;
@@ -1195,7 +1136,6 @@ body.rgba_out .stage img {
   }
 }
 
-/* Small desktop / tablet: narrow the sidebar a little. */
 @media (max-width: 960px) {
   .sidebar {
     width: 360px;
@@ -1203,19 +1143,16 @@ body.rgba_out .stage img {
   }
 }
 
-/* Mobile: stack the sidebar and the stage vertically. */
 @media (max-width: 760px) {
   body {
     font-size: 16px;
   }
 
-  /* prevent double-tap zoom / highlight flash on taps */
   button, input, textarea, select, .dropzone, .hist-item {
     touch-action: manipulation;
     -webkit-tap-highlight-color: transparent;
   }
 
-  /* tabs */
   .tabs {
     gap: .5rem 1rem;
     padding: 0 1rem;
@@ -1231,7 +1168,6 @@ body.rgba_out .stage img {
     font-size: .95rem;
   }
 
-  /* layout: main/stage on top, controls (sidebar) full-width below */
   .views, .view {
     flex-direction: column;
   }
@@ -1262,7 +1198,6 @@ body.rgba_out .stage img {
     max-height: 70vh;
   }
 
-  /* full-width, thumb-friendly buttons */
   .btn {
     width: 100%;
     padding: .85rem 1rem;
@@ -1280,7 +1215,6 @@ body.rgba_out .stage img {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  /* larger range thumbs for fingers */
   input[type=range]::-webkit-slider-thumb,
   input[type=range]::-moz-range-thumb {
     width: 24px;
@@ -1290,14 +1224,12 @@ body.rgba_out .stage img {
     margin-top: -6px;
   }
 
-  /* roomier form controls */
   .sidebar input, .sidebar textarea, .sidebar select {
     padding: .65rem .7rem;
     font-size: 1rem;
   }
 }
 
-/* Small phones: tighten spacing. */
 @media (max-width: 420px) {
   .main {
     padding: .75rem .75rem 1.25rem;

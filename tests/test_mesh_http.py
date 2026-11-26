@@ -6,6 +6,7 @@ import torch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
+from conftest import cut_with_junk
 from test_mesh_controller import DEFAULTS, FakeShapeModel
 
 from thenoise.jobs import JobQueue
@@ -37,21 +38,7 @@ def test_the_shape_server_declares_its_finish_chain(tmp_path):
                                                                    "smooth": 1.0}
 
 
-def _cut_with_junk():
-    from thenoise.mesh.extract import Mesh, extract_surface
-    from thenoise.mesh.octree import sample_sdf
-
-    shape = extract_surface(sample_sdf(lambda points: points.norm(dim=-1) - 0.4, 32,
-                                       device="cpu", bounds=1.0, level=0.0, start=8))
-    corners = torch.tensor([[1, 1, 1], [-1, -1, 1], [-1, 1, -1], [1, -1, -1]],
-                           dtype=torch.float32) * 0.05
-    corners += torch.tensor([3.0, 3.0, 3.0], dtype=torch.float32)
-    piece = torch.tensor([[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]])
-    return Mesh(torch.cat((shape.vertices, corners)),
-                torch.cat((shape.faces, piece + len(shape.vertices))))
-
-
-_CUT = _cut_with_junk()
+_CUT = cut_with_junk()
 
 
 class _JunkFactory(FakeShapeModel):

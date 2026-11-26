@@ -6,6 +6,7 @@ import pytest
 import torch
 from PIL import Image
 
+from conftest import cut_with_junk
 from thenoise.jobs import Cancellation, JobCancelled
 from thenoise.mesh.controller import MeshPipelineController, _sampling_bytes
 from thenoise.mesh.memory import volume_bytes
@@ -263,18 +264,8 @@ class _TwoPieceModel(FakeShapeModel):
     """A codec whose cut has a piece of its own next to the shape."""
 
     def decode_mesh(self, latents, params):
-        from thenoise.mesh.extract import extract_surface
-        from thenoise.mesh.octree import sample_sdf
-
         self.events.append("decode")
-        shape = extract_surface(sample_sdf(lambda points: points.norm(dim=-1) - 0.4, 32,
-                                           device="cpu", bounds=1.0, level=0.0, start=8))
-        corners = torch.tensor([[1, 1, 1], [-1, -1, 1], [-1, 1, -1], [1, -1, -1]],
-                               dtype=torch.float32) * 0.05
-        corners += torch.tensor([3.0, 3.0, 3.0], dtype=torch.float32)
-        piece = torch.tensor([[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]])
-        self.cut = Mesh(torch.cat((shape.vertices, corners)),
-                        torch.cat((shape.faces, piece + len(shape.vertices))))
+        self.cut = cut_with_junk()
         return self.cut
 
 

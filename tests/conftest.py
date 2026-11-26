@@ -1352,3 +1352,55 @@ class TrackedModule(torch.nn.Module):
         self._at = torch.device(device)
         self.moves.append(self._at.type)
         return self
+
+
+# ------------------------------------------------------------------------ mesh helpers
+
+
+def volume_of(sdf, resolution: int = 64, bounds: float = 1.0, level: float = 0.0,
+              start: int = 8):
+    """The surface of ``sdf`` cut on the host, at a resolution a test can afford."""
+    from thenoise.mesh.extract import extract_surface
+    from thenoise.mesh.octree import sample_sdf
+
+    return extract_surface(sample_sdf(sdf, resolution, device="cpu", bounds=bounds,
+                                      level=level, start=start))
+
+
+def sphere_cut(resolution: int = 64, radius: float = 0.4):
+    """A real cut of a sphere, junk and all: what the finish chain and the writers are
+    tested against, since a hand-built mesh carries none of it.
+    """
+    return volume_of(lambda points: points.norm(dim=-1) - radius, resolution)
+
+
+def tetra(centre=(3.0, 3.0, 3.0), size: float = 0.05):
+    """A closed piece of its own, nowhere near the origin."""
+    from thenoise.mesh.extract import Mesh
+
+    corners = torch.tensor([[1, 1, 1], [-1, -1, 1], [-1, 1, -1], [1, -1, -1]],
+                           dtype=torch.float32) * size
+    corners += torch.tensor(centre, dtype=torch.float32)
+    faces = torch.tensor([[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]], dtype=torch.long)
+    return Mesh(corners, faces)
+
+
+def beside_the_shape(shape, piece):
+    """Two meshes joined without sharing a point, so they stay two pieces."""
+    from thenoise.mesh.extract import Mesh
+
+    return Mesh(torch.cat((shape.vertices, piece.vertices)),
+                torch.cat((shape.faces, piece.faces + len(shape.vertices))))
+
+
+def cut_with_junk(resolution: int = 32):
+    """A sphere with a small closed piece beside it: a cut with something to throw away."""
+    return beside_the_shape(sphere_cut(resolution), tetra())
+
+
+def edge_multiplicity(faces) -> torch.Tensor:
+    """How many faces share each edge: two everywhere but at a hole's rim."""
+    pairs = torch.cat([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    span = int(faces.max().item()) + 1
+    keys = pairs.min(dim=1).values * span + pairs.max(dim=1).values
+    return torch.unique(keys, return_counts=True)[1]

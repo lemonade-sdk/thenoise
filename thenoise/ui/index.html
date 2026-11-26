@@ -77,7 +77,7 @@
 
   <div class="field">
     <label class="label" for="sampler">Sampler</label>
-    <!-- Solver names come from /health. -->
+
     <select id="sampler">
       <option value="">auto</option>
     </select>
@@ -98,9 +98,6 @@
 
   <div class="divider"></div>
 
-  <!-- Post-decode controls, filled from the server's declaration (/postprocess).
-       Collapsed by default: it is finishing polish rather than the common path, and
-       the header names whatever is switched on, so nothing hides behind it. -->
   <details class="collapse" data-pref="thenoise-postprocess-open">
     <summary class="label">Post-processing <span class="collapse-note" id="postprocess_note"></span></summary>
     <div class="group" id="postprocess_controls"></div>
@@ -167,7 +164,7 @@
     <div class="history-items" id="history_items"></div>
   </div>
 </main>
-</div><!-- /view-generate -->
+</div>
 
 <div class="view hidden" id="view-edit">
 <div class="no-model hidden" id="edit_no_model">
@@ -265,7 +262,6 @@
 
   <div class="divider"></div>
 
-  <!-- Post-decode controls, filled from the server's declaration (/postprocess). -->
   <details class="collapse" data-pref="thenoise-postprocess-open">
     <summary class="label">Post-processing <span class="collapse-note" id="edit_postprocess_note"></span></summary>
     <div class="group" id="edit_postprocess_controls"></div>
@@ -330,7 +326,7 @@
     <div class="history-items" id="ehistory_items"></div>
   </div>
 </main>
-</div><!-- /view-edit -->
+</div>
 
 <div class="view hidden" id="view-video">
 <aside class="sidebar">
@@ -490,7 +486,7 @@
     <div class="history-items" id="vhistory_items"></div>
   </div>
 </main>
-</div><!-- /view-video -->
+</div>
 
 <div class="view hidden" id="view-mesh">
 <aside class="sidebar">
@@ -506,7 +502,6 @@
     <button class="hint hidden" id="mesh_shape_clear" type="button">start a new shape</button>
     <div class="hint hidden" id="mesh_shape_note"></div>
   </div>
-
 
   <div class="divider"></div>
 
@@ -638,7 +633,7 @@
     <div class="history-items" id="mesh_history_items"></div>
   </div>
 </main>
-</div><!-- /view-mesh -->
+</div>
 
 <div class="view hidden" id="view-upscale">
 <div class="no-model hidden" id="no_upscaler">
@@ -693,7 +688,7 @@
 
   <div class="timer" id="utimer"><span class="dot"></span><span id="utimer_text">idle</span></div>
 </main>
-</div><!-- /view-upscale -->
+</div>
 
 <div class="view hidden" id="view-controlmap">
 <aside class="sidebar">
@@ -718,7 +713,6 @@
 
   <div class="divider"></div>
 
-  <!-- Built at runtime from the chosen kind's field descriptions. -->
   <div class="opts" id="cm_options"></div>
 
   <button class="btn" id="cm_run" disabled>Extract</button>
@@ -742,8 +736,8 @@
 
   <div class="timer" id="cm_timer"><span class="dot"></span><span id="cm_timer_text">idle</span></div>
 </main>
-</div><!-- /view-controlmap -->
-</div><!-- /views -->
+</div>
+</div>
 
 <div class="modal hidden" id="info_modal">
   <div class="backdrop" id="info_backdrop"></div>

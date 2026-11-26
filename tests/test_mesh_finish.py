@@ -12,6 +12,8 @@ import sys
 import numpy as np
 import pytest
 import torch
+from conftest import (beside_the_shape, cut_with_junk, edge_multiplicity, sphere_cut,
+                      tetra)
 from test_mesh_controller import DEFAULTS
 
 from thenoise.mesh.extract import Mesh, extract_surface
@@ -27,33 +29,6 @@ from thenoise.mesh.octree import sample_sdf
 from thenoise.mesh.spec import MeshSpec
 from thenoise.postprocess.options import PostprocessOptions
 from thenoise.utils.options import options_schema
-
-
-def sphere(resolution=64, radius=0.4) -> Mesh:
-    return extract_surface(sample_sdf(lambda points: points.norm(dim=-1) - radius,
-                                      resolution, device="cpu", bounds=1.0, level=0.0,
-                                      start=8))
-
-
-def tetra(centre=(3.0, 3.0, 3.0), size=0.05) -> Mesh:
-    """A closed piece of its own, nowhere near the origin."""
-    corners = torch.tensor([[1, 1, 1], [-1, -1, 1], [-1, 1, -1], [1, -1, -1]],
-                           dtype=torch.float32) * size
-    corners += torch.tensor(centre, dtype=torch.float32)
-    faces = torch.tensor([[0, 1, 2], [0, 3, 1], [0, 2, 3], [1, 3, 2]], dtype=torch.long)
-    return Mesh(corners, faces)
-
-
-def beside_the_shape(shape: Mesh, piece: Mesh) -> Mesh:
-    return Mesh(torch.cat((shape.vertices, piece.vertices)),
-                torch.cat((shape.faces, piece.faces + len(shape.vertices))))
-
-
-def edge_multiplicity(faces) -> torch.Tensor:
-    pairs = torch.cat([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
-    span = int(faces.max().item()) + 1
-    keys = pairs.min(dim=1).values * span + pairs.max(dim=1).values
-    return torch.unique(keys, return_counts=True)[1]
 
 
 def pieces(mesh: Mesh) -> int:
@@ -77,6 +52,7 @@ def diagonal(mesh: Mesh) -> float:
 
 
 def area(mesh: Mesh) -> float:
+    """In numpy rather than through ``Mesh``, so no filter is measured with its own arithmetic."""
     corners = mesh.vertices.numpy()[mesh.faces.numpy()]
     return float(np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0],
                                          corners[:, 2] - corners[:, 0]), axis=1).sum()
@@ -149,7 +125,7 @@ def test_the_pane_is_told_the_words_the_bounds_and_the_defaults():
 
 
 def test_a_chain_nobody_asked_anything_of_hands_back_the_very_mesh():
-    cut, observer = sphere(32), _NothingAsked()
+    cut, observer = sphere_cut(32), _NothingAsked()
     assert finish_mesh(cut, MeshFinishOptions(), observer.check, observer.progress) is cut
     assert observer.stages == []
 
@@ -166,7 +142,7 @@ def test_every_filter_runs_and_the_declared_order_is_kept(monkeypatch):
 
     for name in FILTERS:
         monkeypatch.setitem(FILTERS, name, record(name))
-    cut = sphere(32)
+    cut = sphere_cut(32)
     finish_mesh(cut, MeshFinishOptions(floaters=0.01, triangles=0.5, smooth=0.4),
                 (observer := _NothingAsked()).check, observer.progress)
     assert seen == ["floaters", "simplify", "smooth"]
@@ -176,7 +152,7 @@ def test_every_filter_runs_and_the_declared_order_is_kept(monkeypatch):
 def test_a_chain_that_never_returns_still_names_the_filter_it_entered(caplog):
     """The one piece of evidence a hung job leaves is the last line it wrote, so each filter
     says what it was handed before it starts, not only what it gave back when it finishes."""
-    cut, keep = sphere(32), MeshFinishOptions(floaters=0.01, triangles=0.5)
+    cut, keep = sphere_cut(32), MeshFinishOptions(floaters=0.01, triangles=0.5)
     with caplog.at_level("INFO", logger="thenoise.mesh.finish.chain"):
         finish_mesh(cut, keep, (observer := _NothingAsked()).check, observer.progress)
     lines = [record.getMessage() for record in caplog.records]
@@ -195,7 +171,7 @@ def test_a_chain_that_never_returns_still_names_the_filter_it_entered(caplog):
 def test_a_piece_that_is_not_the_shape_is_cut_away():
     """Below a piece's own reach it stays, above it the piece is gone, and the shape is exactly
     what it was."""
-    shape, junk = sphere(48), tetra()
+    shape, junk = sphere_cut(48), tetra()
     with_piece = beside_the_shape(shape, junk)
     small = diagonal(junk) / diagonal(shape)
     assert pieces(with_piece) == 2
@@ -212,7 +188,7 @@ def test_a_piece_that_is_not_the_shape_is_cut_away():
 def test_a_thin_part_is_not_dust_how_little_area_it_holds():
     """The ruler is a diagonal because a piece can span the shape and hold almost no area: this
     sheet is 0.02% of it and reaches 58% as far, so an area share would have eaten it."""
-    shape = sphere(48)
+    shape = sphere_cut(48)
     corners = torch.tensor([[-0.4, 0.0, 0.0], [0.4, 0.0, 0.0], [0.0, 0.0, 0.001]],
                            dtype=torch.float32)
     sheet = Mesh(corners, torch.tensor([[0, 1, 2]]))
@@ -224,18 +200,18 @@ def test_a_thin_part_is_not_dust_how_little_area_it_holds():
 
 def test_two_shapes_reaching_the_same_far_are_both_kept():
     """Two spheres of one request reach equally far: neither is junk at any threshold."""
-    two = beside_the_shape(sphere(48), sphere(48))
+    two = beside_the_shape(sphere_cut(48), sphere_cut(48))
     assert len(drop_islands(two, 0.9).faces) == len(two.faces)
 
 
 def test_zero_keeps_every_piece_because_only_the_request_knows():
-    with_piece = beside_the_shape(sphere(32), tetra())
+    with_piece = beside_the_shape(sphere_cut(32), tetra())
     assert drop_islands(with_piece, 0.0) is with_piece
 
 
 def test_the_whole_ruler_keeps_the_widest_piece_and_only_that():
     """The top of the range is a setting, not an error: one piece always ties the widest."""
-    shape = sphere(32)
+    shape = sphere_cut(32)
     kept = drop_islands(beside_the_shape(shape, tetra()), 1.0)
     assert pieces(kept) == 1
     assert len(kept.faces) == len(shape.faces)
@@ -267,7 +243,7 @@ def test_a_strip_long_enough_to_crawl_is_still_one_piece(monkeypatch):
 def test_the_round_budget_costs_the_partition_nothing(monkeypatch):
     """The bound on the rounds is a promise about time, not about the answer: whatever the
     rounds left apart is merged exactly, so one round and thirty give the same pieces."""
-    shape, junk = sphere(48), tetra()
+    shape, junk = sphere_cut(48), tetra()
     with_piece = beside_the_shape(shape, junk)
     share = diagonal(junk) / diagonal(shape) * 2
     monkeypatch.setattr(cleanup, "ROUNDS", 1)
@@ -279,7 +255,7 @@ def test_the_round_budget_costs_the_partition_nothing(monkeypatch):
 
 
 def test_the_budget_is_met_and_the_surface_stays_closed():
-    cut, keep = sphere(64), 0.25
+    cut, keep = sphere_cut(64), 0.25
     reduced = reduce_to(cut, keep)
     assert len(reduced.faces) == max(4, round(len(cut.faces) * keep))
     assert torch.equal(edge_multiplicity(reduced.faces),
@@ -289,7 +265,7 @@ def test_the_budget_is_met_and_the_surface_stays_closed():
 
 def test_a_hundredth_of_the_triangles_still_holds_a_closed_shape():
     """The floor of the ladder: a million triangles to ten thousand still encloses."""
-    cut = sphere(128)
+    cut = sphere_cut(128)
     reduced = reduce_to(cut, 0.01)
     assert torch.equal(edge_multiplicity(reduced.faces),
                        torch.full_like(edge_multiplicity(reduced.faces), 2))
@@ -297,13 +273,13 @@ def test_a_hundredth_of_the_triangles_still_holds_a_closed_shape():
 
 
 def test_keeping_everything_hands_back_the_very_mesh():
-    cut = sphere(32)
+    cut = sphere_cut(32)
     assert reduce_to(cut, 1.0) is cut
 
 
 def test_the_mesh_comes_back_the_kind_the_cut_was():
     """The library works in float64 on the host; the writers see what they saw before."""
-    cut = sphere(32)
+    cut = sphere_cut(32)
     reduced = reduce_to(cut, 0.5)
     assert (reduced.vertices.dtype, reduced.faces.dtype) == (cut.vertices.dtype,
                                                             cut.faces.dtype)
@@ -401,14 +377,14 @@ def test_a_cube_relaxes_its_faces_and_keeps_its_corners():
 
 
 def test_the_surface_it_was_handed_is_left_as_it_was():
-    wobbling = roughen(sphere(32))
+    wobbling = roughen(sphere_cut(32))
     points = wobbling.vertices.clone()
     relax_surface(wobbling, 1.0, _nothing_asked)
     assert torch.equal(wobbling.vertices, points)
 
 
 def test_zero_asks_for_the_very_mesh():
-    cut = sphere(32)
+    cut = sphere_cut(32)
     assert relax_surface(cut, 0.0, _boom) is cut
 
 
@@ -417,7 +393,7 @@ def test_the_rounds_a_request_costs_are_its_own_and_bounded():
     for strength, wanted in ((0.01, 1), (0.4, math.ceil(0.4 * MAX_ROUNDS)),
                              (1.0, MAX_ROUNDS)):
         asked = []
-        relax_surface(sphere(32), strength, lambda: asked.append(1))
+        relax_surface(sphere_cut(32), strength, lambda: asked.append(1))
         assert len(asked) == wanted
 
 
@@ -436,14 +412,14 @@ def test_a_canceled_request_stops_at_the_next_round():
 
     ticker = Third()
     with pytest.raises(Stopped):
-        relax_surface(sphere(64), 1.0, ticker)
+        relax_surface(sphere_cut(64), 1.0, ticker)
     assert ticker.calls == 3
 
 
 def test_the_log_says_what_the_smoothing_actually_did(caplog):
     """Whether the knob did anything is invisible in a flat-shaded preview, so the line carries
     the roughness before and after, the work it was worth and what it refused to touch."""
-    wobbling = roughen(sphere(32))
+    wobbling = roughen(sphere_cut(32))
     with caplog.at_level("INFO", logger="thenoise.mesh.finish.smooth"):
         relax_surface(wobbling, 0.4, _nothing_asked)
     line = [one.getMessage() for one in caplog.records if one.getMessage().startswith("smooth:")][-1]
@@ -455,7 +431,7 @@ def test_the_log_says_what_the_smoothing_actually_did(caplog):
 
 
 def test_work_the_machine_could_not_take_is_refused_before_any_of_it_starts(monkeypatch):
-    cut = sphere(64)
+    cut = sphere_cut(64)
     monkeypatch.setattr(memory, "spare_bytes", lambda device: 1 << 20)
     with pytest.raises(ValueError, match="level of detail"):
         relax_surface(cut, 0.5, _nothing_asked)

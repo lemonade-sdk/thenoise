@@ -1,13 +1,13 @@
 
 const MESH_VIEWED_FORMATS = ['glb', 'obj', 'stl'];
 const MESH_FOV = 0.8;
-const MESH_REST = {yaw: 0.7, pitch: 0.28};   // a three-quarter view of whatever arrives
-const MESH_TILT = 1.45;                      // short of straight down, where up stops existing
+const MESH_REST = {yaw: 0.7, pitch: 0.28};
+const MESH_TILT = 1.45;
 
 const MESH_VIEW = {
   gl: null, program: null, uniform: {}, probe: undefined,
   surface: null, wire: null, vbo: null, holdings: [],
-  taken: null,                               // kept for the wireframe, which is built on demand
+  taken: null,
   triangles: 0, vertices: 0, indexed: false,
   center: [0, 0, 0], radius: 1, distance: 3,
   yaw: MESH_REST.yaw, pitch: MESH_REST.pitch,
@@ -39,8 +39,6 @@ void main() {
   float rim = pow(1.0 - facing, 3.0);
   colour = vec4(u_tint * (0.16 + 0.7 * key + 0.22 * fill + 0.22 * rim), 1.0);
 }`;
-
-/* ---------- the three files the writer makes ---------- */
 
 const GLB_MAGIC = 0x46546C67;
 const GLB_JSON_CHUNK = 0x4E4F534A;
@@ -167,7 +165,7 @@ function parseStl(buffer) {
   const head = new TextDecoder().decode(new Uint8Array(buffer, 0, Math.min(512, buffer.byteLength)));
   if (/^\s*solid/.test(head) && head.includes('facet')) {
     const lines = new TextDecoder().decode(buffer).split('\n');
-    const positions = new Float32Array(lines.length * 3);   // one vertex is a line's limit
+    const positions = new Float32Array(lines.length * 3);
     let at = 0;
     for (const line of lines) {
       const corner = line.indexOf('vertex ');
@@ -216,8 +214,6 @@ function parseMesh(buffer, format) {
   if (format === 'stl') return parseStl(buffer);
   throw new Error('nothing here views a .' + format + ' file');
 }
-
-/* ---------- gl ---------- */
 
 function meshViewerReady() {
   if (MESH_VIEW.probe === undefined) MESH_VIEW.probe = !!window.WebGL2RenderingContext;
@@ -406,8 +402,6 @@ function meshZoom(by) {
   MESH_VIEW.distance = Math.min(MESH_VIEW.radius * 40,
                                 Math.max(MESH_VIEW.radius * 0.2, MESH_VIEW.distance * by));
 }
-
-/* ---------- stage ---------- */
 
 async function showMeshBlob(blob, format) {
   const gl = meshGL();

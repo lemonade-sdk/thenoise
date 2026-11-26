@@ -308,6 +308,19 @@ def test_ui_offers_every_container_the_mesh_writer_has():
     assert offered == ["", *OUTPUT_FORMATS], block
 
 
+_PANE_OPEN = re.compile(r'^<div class="view[^>]*id="(view-[a-z]+)"', re.M)
+
+
+def _pane(page: str, view: str) -> str:
+    """One pane of the page: its markup runs to the next pane's opening div, since the panes
+    are siblings at the top of the body."""
+    marks = [(one.group(1), one.start()) for one in _PANE_OPEN.finditer(page)]
+    here = [at for name, at in marks if name == view]
+    assert here, f"the page has no pane {view!r}"
+    later = [at for _name, at in marks if at > here[0]]
+    return page[here[0]:later[0]] if later else page[here[0]:]
+
+
 def test_ui_divides_the_shape_pane_by_what_a_knob_changes():
     """The shape, the cut and the file are decided in three different places, and a knob
     sits under the heading of the one it moves: density cannot change a shape, and a
@@ -320,7 +333,7 @@ def test_ui_divides_the_shape_pane_by_what_a_knob_changes():
 
     with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
         page = f.read()
-    mesh = page[page.index('id="view-mesh"'):page.index("/view-mesh")]
+    mesh = _pane(page, "view-mesh")
     marks = [(one.group(1), one.start())
              for one in re.finditer(r'<div class="label">([A-Za-z ]+)</div>', mesh)]
     names = [name for name, _ in marks]
@@ -340,7 +353,7 @@ def test_ui_keeps_the_picture_the_only_mandatory_shape_input():
     """No prompt, no pixel size: a shape needs a picture alone. `mesh_scale` sizes a file."""
     with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
         page = f.read()
-    mesh = page[page.index('id="view-mesh"'):page.index("/view-mesh")]
+    mesh = _pane(page, "view-mesh")
     assert 'id="mesh_file"' in mesh
     for absent in ("mesh_prompt", "mesh_negative_prompt", "mesh_width", "mesh_height"):
         assert absent not in mesh, absent

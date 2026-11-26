@@ -36,6 +36,8 @@ def drop_islands(mesh: Mesh, size: float) -> Mesh:
     return mesh.select(wanted[where], wanted[piece])
 
 
+#: Propagation crosses one edge per round, so a shape with a long thin spike needs more than
+#: any cut has, and the hand merge below is the usual ending rather than the exception.
 ROUNDS = 32
 
 
@@ -60,8 +62,8 @@ def _settled_by_hand(label: torch.Tensor, faces: torch.Tensor) -> torch.Tensor:
     x, y, z = (label[joined[:, i]] for i in (0, 1, 2))
     pairs = torch.unique(torch.cat([torch.stack([x, y], 1), torch.stack([y, z], 1),
                                     torch.stack([z, x], 1)]), dim=0)
-    logger.warning("components: no fixpoint in %d rounds, merging %d label pairs by hand",
-                   ROUNDS, len(pairs))
+    logger.info("components: %d rounds did not settle it, %d label pairs merged by hand",
+                ROUNDS, len(pairs))
 
     roots = torch.unique(label)
     parent = {int(one): int(one) for one in roots}

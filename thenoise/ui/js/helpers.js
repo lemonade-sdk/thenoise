@@ -1,12 +1,8 @@
-/* helpers.js — shared UI utilities for TheNoise.
-   Plain global script, loaded BEFORE app.js (no modules). */
 
 const $ = id => document.getElementById(id);
 
-// Reads that owe an instant answer pass this; /upscale and /controlmap hold one open for a render.
 const PATIENCE = 10000;
 
-/* ---------- persisted preferences (light/dark, sidebar left/right) ---------- */
 function initToggle({ key, btnId, initial, current, apply, next }) {
   apply(initial());
   const btn = $(btnId);
@@ -17,9 +13,8 @@ function initToggle({ key, btnId, initial, current, apply, next }) {
   });
 }
 
-/* ---------- theme (light / dark) ---------- */
 const THEME_UI = {
-  light: { icon: '\u2600', label: 'Light' }, 
+  light: { icon: '\u2600', label: 'Light' },
   dark: { icon: '\u263E', label: 'Dark' },
 };
 
@@ -43,7 +38,6 @@ initToggle({
   apply: applyTheme, next: v => v === 'light' ? 'dark' : 'light',
 });
 
-/* ---------- sidebar side (left / right) ---------- */
 const SIDEBAR_UI = {
   left: { icon: '\u21E5' },
   right: { icon: '\u21E4' },
@@ -65,14 +59,6 @@ initToggle({
   apply: applySidebar, next: v => v === 'right' ? 'left' : 'right',
 });
 
-/* ---------- Knob sets: whatever a descriptor endpoint declares ----------
-
-A knob set is one `GET /<name>` descriptor built from an option class declared on the
-server, so a new knob appears in the form, the request body, the settings restore and the
-info panel without a line of UI code. Ids follow the panes' convention:
-``<prefix><knob>`` for a control, ``<prefix><set>_controls`` for its container and
-``<prefix><set>_note`` for the summary a collapsed section would otherwise hide.
-*/
 const knobSets = {};
 
 function registerKnobs(name, url) {
@@ -154,7 +140,6 @@ function buildKnobs(name, prefix) {
   box.hidden = !knobSets[name].options.length;
 }
 
-// "Saturation 0.30 · Film grain 0.50" — what a collapsed section would otherwise hide.
 function knobNote(name, prefix) {
   const active = [];
   for (const option of knobSets[name].options) {
@@ -172,7 +157,6 @@ function knobNote(name, prefix) {
   return active.join(' · ');
 }
 
-// Every pane carries its own copy of a set, so every header is kept truthful.
 function refreshKnobNotes() {
   for (const [name, set] of Object.entries(knobSets)) {
     for (const prefix of set.prefixes) {
@@ -201,7 +185,6 @@ function showRangeValue(prefix, name) {
   if (val && input) val.textContent = knobValue(input).toFixed(knobUnit(input).decimals);
 }
 
-// The knobs as the request body wants them.
 function collectKnobs(name, prefix) {
   const body = {};
   for (const option of knobSets[name].options) {
@@ -226,7 +209,6 @@ function restoreKnobs(name, prefix, meta) {
   refreshKnobNotes();
 }
 
-// One row per knob the work was actually made with; a default is not worth showing.
 function knobInfoRows(name, meta) {
   const rows = [];
   for (const option of knobSets[name].options) {
@@ -244,9 +226,8 @@ async function loadKnobs(name, prefixes) {
   refreshKnobNotes();
 }
 
-/* ---------- LoRA specs ---------- */
 let loras = [];
-let loraRoles = []; // the loaded model's LoRA-able component names
+let loraRoles = [];
 
 const LORA_PLACEHOLDER = 'one per line, e.g. style:0.8\ndit_low: style:0.8 (low expert)';
 
@@ -258,7 +239,6 @@ async function loadLoras() {
 
 const lorasLoaded = loadLoras();
 
-// A "role: spec" line targets that component; any other line is a spec for the default role.
 function parseLora(value) {
   const lines = value.trim() ? value.split('\n').map(l => l.trim()).filter(Boolean) : [];
   if (!lines.length) return null;
@@ -372,11 +352,6 @@ function initLora(prefix) {
   });
 }
 
-/* ---------- collapsible sidebar sections ----------
-
-Sections sharing a ``data-pref`` open and close together, and remember it: both
-panes carry the same controls, and a user who opened one means the other too.
-*/
 function collapsibles(pref) {
   return Array.from(document.querySelectorAll(`details.collapse[data-pref="${pref}"]`));
 }
@@ -422,7 +397,7 @@ function clampSlider(slider, max) {
   if (parseFloat(slider.value) > max) slider.value = max;
 }
 
-const LATENT_SCALE = 2; // latent refiner multiplier
+const LATENT_SCALE = 2;
 
 function renderRes(resEl, w, h, factor) {
   resEl.textContent = (w && h)
@@ -438,8 +413,8 @@ function setTimer(elId, textId, state, text) {
 function readPngText(bytes) {
   const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const texts = {};
-  if (dv.getUint32(0) !== 0x89504e47) return texts; // not a PNG
-  let off = 8; // skip signature
+  if (dv.getUint32(0) !== 0x89504e47) return texts;
+  let off = 8;
   while (off + 8 <= bytes.byteLength) {
     const len = dv.getUint32(off);
     const type = String.fromCharCode(
@@ -448,7 +423,6 @@ function readPngText(bytes) {
     );
     const start = off + 8;
     if (type === 'tEXt') {
-      // keyword: null-terminated Latin-1; text: rest of chunk
       const chunk = bytes.subarray(start, start + len);
       let sep = -1;
       for (let i = 0; i < chunk.length; i++) if (chunk[i] === 0) { sep = i; break; }
@@ -458,7 +432,7 @@ function readPngText(bytes) {
         texts[keyword] = value;
       }
     }
-    off = start + len + 4; // skip data + crc
+    off = start + len + 4;
   }
   return texts;
 }
@@ -530,7 +504,7 @@ function renderInfo(meta) {
 }
 
 function makeHistory({ containerId, rootId, alt, onSelect, video: isVideo = false }) {
-  const items = []; // newest first, capped at 10: {url, meta, time, thumb}
+  const items = [];
   function select(i) {
     const item = items[i];
     if (!item) return;
@@ -555,7 +529,6 @@ function makeHistory({ containerId, rootId, alt, onSelect, video: isVideo = fals
       const el = document.createElement(isVideo ? 'video' : 'img');
       el.className = 'thumb-img';
       if (isVideo) {
-        // A first frame is a thumbnail: metadata only, muted, never autoplaying.
         el.muted = true;
         el.playsInline = true;
         el.preload = 'metadata';
@@ -678,7 +651,6 @@ function addThumb(box, { src, alt, title, cls, label, onRemove }) {
   return div;
 }
 
-// Swap a split stage from its input preview to its result image.
 function showOutputPreview(singleId, resultId, placeholderId, resultImgId, url) {
   $(singleId).classList.add('hidden');
   $(resultId).classList.remove('hidden');
@@ -695,7 +667,6 @@ function fillSelect(sel, names, label) {
   for (const name of names) {
     const opt = document.createElement('option');
     opt.value = name;
-    // ``label`` turns a value into the words shown to the user (defaults to the value).
     opt.textContent = label ? label(name) : name;
     sel.appendChild(opt);
   }
@@ -705,11 +676,10 @@ async function fetchJSON(url) {
   try {
     const res = await fetchOrGone(url, undefined, PATIENCE);
     if (res.ok) return await res.json();
-  } catch (e) { /* fall through to null */ }
+  } catch (e) { }
   return null;
 }
 
-// A refusal's reason: `error` from the job routes, FastAPI's `detail`, plain text otherwise.
 async function errorMessage(res) {
   const text = await res.text().catch(() => '');
   if (!text) return res.statusText || `HTTP ${res.status}`;
@@ -721,12 +691,10 @@ async function errorMessage(res) {
   }
 }
 
-// Every pane's fetch: a connection the server refused means it is not running, not merely slow.
 async function fetchOrGone(url, init, patience = 0) {
   const ctl = patience ? new AbortController() : null;
   const deadline = ctl && setTimeout(() => ctl.abort(), patience);
   try {
-    // The wait for an answer only: a downloaded artifact may still take its time.
     return await fetch(url, { ...init, signal: ctl ? ctl.signal : undefined });
   } catch (e) {
     throw new Error('the server is not answering — is it still running?', { cause: e });
@@ -735,7 +703,6 @@ async function fetchOrGone(url, init, patience = 0) {
   }
 }
 
-// /health is answered even mid-render, so a failed read whose /health also fails is a gone server.
 async function serverGone() {
   try {
     await fetchOrGone('/health', undefined, PATIENCE);
@@ -765,7 +732,6 @@ async function postJSONData(url, body) {
   return await res.json();
 }
 
-/* ---------- queued jobs: submit, watch, fetch ---------- */
 const JOB_POLL_MS = 500;
 const JOB_POLL_RETRIES = 5;
 
@@ -778,7 +744,6 @@ const STAGE_WORDS = {
 
 const sleep = (ms) => new Promise(done => setTimeout(done, ms));
 
-// A hidden tab is watched by nobody, and browsers throttle its timers anyway.
 async function waitVisible() {
   while (document.hidden) {
     await new Promise(done =>
@@ -786,7 +751,6 @@ async function waitVisible() {
   }
 }
 
-// Null when the server no longer knows the id: a restarted server dropped its queue.
 async function fetchJob(id) {
   const res = await fetchOrGone('/jobs/' + id, undefined, PATIENCE);
   if (res.status === 404) return null;
@@ -794,7 +758,6 @@ async function fetchJob(id) {
   return await res.json();
 }
 
-// Forgives JOB_POLL_RETRIES consecutive failures while /health answers.
 async function pollJob(id, onProgress) {
   let misses = 0;
   for (;;) {
@@ -804,7 +767,6 @@ async function pollJob(id, onProgress) {
     try {
       status = await fetchJob(id);
     } catch (e) {
-      // One look at /health settles it: gone means there is nothing left to wait for.
       if (await serverGone()) throw e;
       if (++misses >= JOB_POLL_RETRIES) throw e;
       continue;
@@ -816,7 +778,6 @@ async function pollJob(id, onProgress) {
   }
 }
 
-// els: {root, label, bar} — the ids of one pane's progress block.
 function setProgress(els, p) {
   $(els.root).classList.remove('hidden');
   const stage = (els.labels || {})[p.stage] || STAGE_WORDS[p.stage] || p.stage || 'waiting';
@@ -857,7 +818,6 @@ async function withBusy({ btn, overlay, timerEl, timerTextEl }, work) {
   }
 }
 
-// `job` is the caller's box, so its Cancel button knows what to name.
 async function runQueuedJob({ job, submit, body, btn, cancelBtn, overlay,
                               timerEl, timerTextEl, progress, onArtifact }) {
   try {
@@ -868,7 +828,6 @@ async function runQueuedJob({ job, submit, body, btn, cancelBtn, overlay,
       const status = await pollJob(job.id, (p) => setProgress(progress, p));
       if (status.status === 'canceled') return { state: 'error', text: 'canceled' };
       if (status.status !== 'completed') throw new Error(status.error || status.status);
-      // Serving an artifact unlinks it: this read is the only one there will be.
       const res = await fetchOrGone('/jobs/' + job.id + '/content', undefined, PATIENCE);
       if (!res.ok) throw new Error('downloading the result failed: ' + await errorMessage(res));
       await onArtifact(await res.blob(), status);
@@ -881,13 +840,12 @@ async function runQueuedJob({ job, submit, body, btn, cancelBtn, overlay,
   }
 }
 
-// The poll reports the cancellation: the record stays running until a step boundary.
 async function cancelJob(job, btn) {
   if (!job.id) return;
   btn.disabled = true;
   try {
     await postJSONData('/jobs/' + job.id + '/cancel');
-  } catch (e) { /* it may have settled between the click and this request */ }
+  } catch (e) { }
 }
 
 async function runWithBusy({ btn, overlay, timerEl, timerTextEl, request, onSuccess }) {
@@ -900,7 +858,6 @@ async function runWithBusy({ btn, overlay, timerEl, timerTextEl, request, onSucc
 function validateDims(prefix) {
   for (const f of ['width', 'height']) {
     const v = $(prefix + f).value === '' ? null : parseInt($(prefix + f).value, 10);
-    // Empty means "auto" (the model default); 0 is just an invalid size.
     if (v !== null && !(v >= 1)) {
       alert(`error: ${f} must be at least 1 (got ${v}).`);
       return false;
@@ -909,7 +866,6 @@ function validateDims(prefix) {
   return true;
 }
 
-// An empty box is the model's default, so it leaves the body rather than going out as 0 or NaN.
 function addNumbers(body, prefix, ints, floats) {
   for (const f of ints) {
     const v = $(prefix + f).value;

@@ -1,15 +1,12 @@
-let vOutUrl = null;       
+let vOutUrl = null;
 
-const videoJob = { id: null }; // in flight, for the Cancel button to name
+const videoJob = { id: null };
 const VIDEO_PROGRESS = { root: 'v_progress', label: 'v_progress_label', bar: 'v_bar',
   labels: { conditioning: 'reading the prompt', sampling: 'rendering',
             decoding: 'building the frames', encoding: 'writing the video' } };
 const VIDEO_MODES = {t2v: 'text-to-video', i2v: 'image-to-video',
                      flf2v: 'first and last frame', ref2v: 'reference-to-video'};
 
-/* ---------- the frames a clip is pinned by ---------- */
-
-// One entry per request field: what is loaded is what gets sent.
 const vFrames = {
   image: {b64: null, dataUrl: null, name: null, box: 'video_refs',
           hint: 'video_dz_hint', label: 'video_dz_name', alt: 'initial frame',
@@ -41,7 +38,6 @@ async function loadVideoFrame(field, file) {
 }
 
 function removeVideoFrame(field) {
-  // A last frame with nothing to start from is not a request, so this takes it along.
   for (const key of field === 'image' ? ['image', 'end_image'] : [field]) {
     Object.assign(vFrames[key], {dataUrl: null, b64: null, name: null});
     renderVideoFrame(key);
@@ -50,7 +46,6 @@ function removeVideoFrame(field) {
 }
 
 function resetVideoResult() {
-  // Do NOT revoke vOutUrl: it may still be referenced by an entry in history.
   vOutMeta = null;
   setStageActions($('vdownload'), $('vinfo_btn'), false);
   hideResult('v_video', 'vplaceholder');
@@ -104,8 +99,6 @@ bindDropzone('video_end_dropzone', 'video_end_file',
 bindDropzone('video_ref_dropzone', 'video_ref_file', addVideoRefs);
 bindSwap('video_swap', 'video_width', 'video_height');
 
-/* ---------- request ---------- */
-
 initLora('video_');
 
 function collectVideoSettings() {
@@ -146,7 +139,6 @@ function validateVideoInputs() {
   };
   const whole = (n) => Number.isInteger(n);
   const real = (n) => Number.isFinite(n);
-  // An empty field is the model's default, not a value of zero.
   return check(['width', 'height', 'frames', 'fps', 'steps'], n => whole(n) && n >= 1,
                f => f + ' must be a positive whole number')
     && check(['seed'], n => whole(n) && n >= 0,
@@ -188,21 +180,16 @@ $('video_generate').addEventListener('click', () => {
 
 $('vcancel').addEventListener('click', () => cancelJob(videoJob, $('vcancel')));
 
-/* ---------- result ---------- */
-
 function showVideoResult(url) {
   showResult('v_video', 'vplaceholder', url);
   setStageActions($('vdownload'), $('vinfo_btn'), true);
-  $('v_video').play().catch(() => {}); // browsers block autoplay with sound; this is a nudge
+  $('v_video').play().catch(() => {});
 }
-
 $('vdownload').addEventListener('click', () => {
   const fmt = vOutMeta && vOutMeta.output_format === 'mp4' ? 'mp4' : 'webm';
   download(vOutUrl, `thenoise_video_${seedName(vOutMeta, 'x')}.${fmt}`);
 });
-
 $('vinfo_btn').addEventListener('click', () => openInfo('Video info', renderVideoInfo));
-
 function renderVideoInfo() {
   const m = vOutMeta || {};
   const rows = [];
@@ -224,11 +211,9 @@ function renderVideoInfo() {
   if (hasLora) rows.push(['LoRA', formatLora(lora), 'prompt']);
   renderInfoRows(rows);
 }
-
 const vHist = makeHistory({
   containerId: 'vhistory_items', rootId: 'vhistory', alt: 'video', video: true,
   onSelect: (item) => {
-    // The blob lives on in the history entry; the stage just points at it.
     vOutUrl = item.url;
     vOutMeta = item.meta;
     showVideoResult(item.url);

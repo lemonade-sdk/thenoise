@@ -60,7 +60,9 @@ def relax_surface(mesh: Mesh, strength: float, check: Callable[[], None]) -> Mes
     logger.info("smooth: %d of %d edges averaged, %d points held at a crease, %d rounds, "
                 "wobble %.2g -> %.2g (%s), %s",
                 near.crossed, near.crossed + near.creases, near.held, rounds, rough, smoother,
-                _cut(rough, smoother), _change(before, float(after.signed_volume())))
+                _delta(rough, smoother, when_nothing="flat", places=0),
+                _delta(before, float(after.signed_volume()), word="volume ",
+                       when_nothing="volume unchanged", places=1))
     return after
 
 
@@ -72,8 +74,10 @@ def _wobble(points: Tensor, near: _Neighbourhood) -> float:
     return float(away[near.moving].mean()) if bool(near.moving.any()) else 0.0
 
 
-def _cut(before: float, after: float) -> str:
-    return "flat" if not before else f"{100 * (after / before - 1):+.0f}%"
+def _delta(before: float, after: float, *, word: str = "", when_nothing: str,
+           places: int) -> str:
+    """How far one measure moved, in the words the log reads."""
+    return when_nothing if not before else f"{word}{100 * (after / before - 1):+.{places}f}%"
 
 
 def _neighbours(mesh: Mesh, crease: float) -> _Neighbourhood:
@@ -91,13 +95,12 @@ def _neighbours(mesh: Mesh, crease: float) -> _Neighbourhood:
     counts = torch.bincount(grouped, minlength=edges.shape[0])
     place = (torch.arange(grouped.shape[0], device=at.device)
              - (counts.cumsum(0) - counts)[grouped])
+    # An edge shared by more than two faces keeps the first two, which a cut does not produce.
     two = place < 2
     at_edge = torch.full((edges.shape[0], 2), -1, dtype=torch.long, device=at.device)
     at_edge[grouped[two], place[two]] = owner[order][two]
 
-    triad = points[faces]
-    normal = torch.linalg.cross(triad[:, 1] - triad[:, 0], triad[:, 2] - triad[:, 0])
-    unit = normal / normal.norm(dim=1, keepdim=True).clamp_min(1e-12)
+    unit = mesh.face_normals()
     both_sides = at_edge[:, 1] >= 0
     turn = torch.rad2deg(torch.acos((unit[at_edge[:, 0]] * unit[at_edge[:, 1]])
                                     .sum(dim=-1).clamp(-1.0, 1.0)))
@@ -121,11 +124,6 @@ def _neighbours(mesh: Mesh, crease: float) -> _Neighbourhood:
                           moving=free > 0.0,
                           crossed=int(worth.sum()), creases=int((~worth).sum()),
                           held=int(((sharp > 0.0) & (degree > 0.0)).sum()))
-
-
-def _change(before: float, after: float) -> str:
-    """How much of the shape the smoothing ate, which is what decides whether it needs more."""
-    return "volume unchanged" if not before else f"volume {100 * (after / before - 1):+.1f}%"
 
 
 __all__ = ["MAX_ROUNDS", "relax_surface"]

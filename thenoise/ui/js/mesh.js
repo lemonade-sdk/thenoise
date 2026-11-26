@@ -5,11 +5,11 @@ const MESH_GLYPH = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   + '<path d="M32 6 58 20v24L32 58 6 44V20z"/><path d="M6 20l26 14 26-14M32 34v24"/></g></svg>');
 
 let meshSource = null;
-let meshGone = null;        
+let meshGone = null;
 let meshKept = new Set();
 let meshOutUrl = null;
 let meshOutMeta = null;
-let meshShown = 0;   
+let meshShown = 0;
 
 const meshJob = { id: null };
 const MESH_PROGRESS = { root: 'mesh_progress', label: 'mesh_progress_label', bar: 'mesh_bar',
@@ -19,7 +19,7 @@ const MESH_MODES = {i2d: 'image-to-shape', mv2d: 'views-to-shape', t2d: 'text-to
 const MESH_SOLVED = ['latents', 'steps', 'seed', 'guidance_scale', 'sampler'];
 const MESH_FORMATS = { glb: 'model/gltf-binary', obj: 'text/plain', stl: 'model/stl' };
 const MESH_MAX_VIEWS = 4;
-const meshViews = [];   // {b64, dataUrl, name}, in view order
+const meshViews = [];
 
 function meshCeiling() {
   return $('mesh_file').multiple ? MESH_MAX_VIEWS : 1;
@@ -64,7 +64,7 @@ async function loadMeshPicture(file) {
   }
   const image = await readImageFile(file);
   if (!image) return;
-  meshSource = meshGone = null;   // an image is a shape being made, not one being cut again
+  meshSource = meshGone = null;
   meshViews.push({ dataUrl: image.dataUrl, b64: image.b64, name: file.name, file });
   renderMeshViews();
   resetMeshResult();
@@ -136,7 +136,7 @@ function describeMeshSource() {
 
 async function loadMeshShapes() {
   const listing = await fetchJSON('/shapes');
-  
+
   if (listing && Array.isArray(listing.shapes)) meshKept = new Set(listing.shapes);
 }
 
@@ -155,7 +155,7 @@ function collectMeshSettings() {
   if (lora_specs) body.lora_specs = lora_specs;
   if (meshSource) {
     body.from_shape = meshSource;
-    
+
     for (const key of MESH_SOLVED) delete body[key];
   } else {
     body.image = meshViews.length === 1 ? meshViews[0].b64
@@ -173,7 +173,7 @@ function validateMeshInputs() {
       ? 'a shape needs an image \u2014 or pick one from History to cut it again'
       : 'a shape needs an image');
   }
-  
+
   if (meshSource) return true;
   const check = (fields, ok, message) => {
     for (const f of fields) {
@@ -258,7 +258,7 @@ $('mesh_generate').addEventListener('click', () => {
         type: MESH_FORMATS[meshOutMeta.output_format] || 'application/octet-stream',
       }));
       meshOutUrl = url;
-      const meta = meshOutMeta;   // a newer shape may take the stage before this one is drawn
+      const meta = meshOutMeta;
       showMeshResult(blob).then((still) => {
         meshHist.add(url, meta, still || MESH_GLYPH);
         loadMeshShapes();
@@ -285,7 +285,7 @@ function renderMeshInfo() {
   const rows = [];
   if (m.model) rows.push(['Model', m.model, '']);
   if (m.mode) rows.push([FIELD_LABELS.mode, MESH_MODES[m.mode] || m.mode, '']);
-  
+
   const ignored = m.mode === 'shape' ? MESH_SOLVED : [];
   for (const key of ['latents', 'steps', 'guidance_scale', 'sampler', 'octree_resolution',
                      'bounds', 'mc_level', 'scale', 'seed', 'output_format']) {
