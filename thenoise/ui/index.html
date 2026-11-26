@@ -77,7 +77,7 @@
 
   <div class="field">
     <label class="label" for="sampler">Sampler</label>
-    <!-- Solver names come from /health. -->
+
     <select id="sampler">
       <option value="">auto</option>
     </select>
@@ -85,7 +85,7 @@
 
   <div class="field" id="attention_field">
     <label class="label" for="attention">Attention</label>
-    <!-- What the loaded model answers comes from /health. -->
+
     <select id="attention">
       <option value="">auto</option>
     </select>
@@ -98,9 +98,6 @@
 
   <div class="divider"></div>
 
-  <!-- Post-decode controls, filled from the server's declaration (/postprocess).
-       Collapsed by default: it is finishing polish rather than the common path, and
-       the header names whatever is switched on, so nothing hides behind it. -->
   <details class="collapse" data-pref="thenoise-postprocess-open">
     <summary class="label">Post-processing <span class="collapse-note" id="postprocess_note"></span></summary>
     <div class="group" id="postprocess_controls"></div>
@@ -167,7 +164,7 @@
     <div class="history-items" id="history_items"></div>
   </div>
 </main>
-</div><!-- /view-generate -->
+</div>
 
 <div class="view hidden" id="view-edit">
 <div class="no-model hidden" id="edit_no_model">
@@ -236,7 +233,7 @@
 
   <div class="field" id="edit_attention_field">
     <label class="label" for="edit_attention">Attention</label>
-    <!-- What the loaded model answers comes from /health. -->
+
     <select id="edit_attention">
       <option value="">auto</option>
     </select>
@@ -265,7 +262,6 @@
 
   <div class="divider"></div>
 
-  <!-- Post-decode controls, filled from the server's declaration (/postprocess). -->
   <details class="collapse" data-pref="thenoise-postprocess-open">
     <summary class="label">Post-processing <span class="collapse-note" id="edit_postprocess_note"></span></summary>
     <div class="group" id="edit_postprocess_controls"></div>
@@ -330,7 +326,7 @@
     <div class="history-items" id="ehistory_items"></div>
   </div>
 </main>
-</div><!-- /view-edit -->
+</div>
 
 <div class="view hidden" id="view-video">
 <aside class="sidebar">
@@ -490,59 +486,32 @@
     <div class="history-items" id="vhistory_items"></div>
   </div>
 </main>
-</div><!-- /view-video -->
+</div>
 
 <div class="view hidden" id="view-mesh">
 <aside class="sidebar">
   <div class="field">
-    <label class="label" for="mesh_file">Picture <span class="hint">required</span></label>
+    <label class="label" for="mesh_file">Reference image <span class="hint">required for a new shape</span></label>
     <div class="dropzone" id="mesh_dropzone">
       <input type="file" id="mesh_file" accept="image/*" hidden>
       <div class="dz-hint" id="mesh_dz_hint">Drag &amp; drop an image here or <span class="kbd">click to browse</span></div>
       <div class="dz-name" id="mesh_dz_name" style="display:none"></div>
     </div>
     <div class="ref-thumbs" id="mesh_refs"></div>
-    <div class="hint">A shape is conditioned on the picture alone; no prompt is read.</div>
-    <div class="hint hidden" id="mesh_views_hint">Several pictures are views of one
-      shape, in front, left, back, right order.</div>
+    <div class="hint hidden" id="mesh_views_hint">Views of one shape: front, left, back, right.</div>
   </div>
 
-  <div class="row">
-    <div class="field">
-      <label class="label" for="mesh_octree_resolution">Mesh density</label>
-      <select id="mesh_octree_resolution">
-        <option value="">auto</option>
-        <option value="96">small (96)</option>
-        <option value="192">medium (192)</option>
-        <option value="384">high (384)</option>
-        <option value="768">ultra high (768)</option>
-      </select>
-      <div class="hint">How finely the surface is cut; each step up costs about eight
-        times the memory of the one below it. Left on auto, the model answers for it.</div>
-    </div>
-    <div class="field">
-      <label class="label" for="mesh_seed">Seed</label>
-      <input type="number" id="mesh_seed" placeholder="random" min="0">
-    </div>
-  </div>
+  <div class="divider"></div>
 
-  <div class="field">
-    <label class="label" for="mesh_output_format">Output</label>
-    <select id="mesh_output_format">
-      <option value="">auto</option>
-      <option value="glb">glb</option>
-      <option value="obj">obj</option>
-      <option value="stl">stl</option>
-    </select>
-  </div>
-
-  <details class="collapse" data-pref="thenoise-mesh-tuning-open">
-    <summary class="label">Shape tuning</summary>
+  <div id="mesh_shape_knobs">
+    <div class="label">Shape</div>
     <div class="group">
       <div class="row">
         <div class="field">
-          <label class="label" for="mesh_latents">Tokens</label>
-          <input type="number" id="mesh_latents" placeholder="auto" min="1">
+          <label class="label" for="mesh_latents">Detail level</label>
+          <select id="mesh_latents">
+            <option value="">auto</option>
+          </select>
         </div>
         <div class="field">
           <label class="label" for="mesh_steps">Steps</label>
@@ -563,18 +532,63 @@
         </div>
       </div>
 
-      <div class="row">
-        <div class="field">
-          <label class="label" for="mesh_bounds">Bounds</label>
-          <input type="number" id="mesh_bounds" placeholder="auto" min="0" step="any">
-        </div>
-        <div class="field">
-          <label class="label" for="mesh_mc_level">Cut level</label>
-          <input type="number" id="mesh_mc_level" placeholder="auto" step="any">
-        </div>
+      <div class="field">
+        <label class="label" for="mesh_seed">Seed</label>
+        <input type="number" id="mesh_seed" placeholder="random" min="0">
+      </div>
+  </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="label">Surface</div>
+  <div class="group">
+    <div class="row">
+      <div class="field">
+        <label class="label" for="mesh_octree_resolution">Voxel resolution</label>
+        <select id="mesh_octree_resolution">
+          <option value="">auto</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="label" for="mesh_bounds">Bounding volume</label>
+        <select id="mesh_bounds">
+          <option value="">auto</option>
+        </select>
       </div>
     </div>
-  </details>
+
+    <div class="field">
+      <label class="label" for="mesh_mc_level">Surface offset</label>
+      <select id="mesh_mc_level">
+        <option value="">auto</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="label">Finish</div>
+  <div class="group" id="mesh_finish_controls"></div>
+
+  <div class="divider"></div>
+
+  <div class="label">File</div>
+  <div class="field">
+    <label class="label" for="mesh_scale">Export scale</label>
+    <select id="mesh_scale">
+      <option value="">auto</option>
+    </select>
+  </div>
+  <div class="field">
+    <label class="label" for="mesh_output_format">Output</label>
+    <select id="mesh_output_format">
+      <option value="">auto</option>
+      <option value="glb">glb</option>
+      <option value="obj">obj</option>
+      <option value="stl">stl</option>
+    </select>
+  </div>
 
   <div class="divider"></div>
 
@@ -589,7 +603,7 @@
 
 <main class="main">
   <div class="stage" id="mesh_stage">
-    <div class="placeholder" id="meshplaceholder">Drop a picture and click <span class="kbd">Generate shape</span></div>
+    <div class="placeholder" id="meshplaceholder">Drop an image and click <span class="kbd">Generate shape</span></div>
     <div class="stage-file stage-mesh" id="mesh_out">
       <canvas id="mesh_view" class="mesh-view" tabindex="0"
               aria-label="The shape. Drag or use the arrow keys to turn it, plus and minus to zoom, zero to frame it again."></canvas>
@@ -611,8 +625,13 @@
   </div>
 
   <div class="timer" id="mesh_timer"><span class="dot"></span><span id="mesh_timer_text">idle</span></div>
+
+  <div class="history hidden" id="mesh_history">
+    <div class="history-head label">History</div>
+    <div class="history-items" id="mesh_history_items"></div>
+  </div>
 </main>
-</div><!-- /view-mesh -->
+</div>
 
 <div class="view hidden" id="view-upscale">
 <div class="no-model hidden" id="no_upscaler">
@@ -667,7 +686,7 @@
 
   <div class="timer" id="utimer"><span class="dot"></span><span id="utimer_text">idle</span></div>
 </main>
-</div><!-- /view-upscale -->
+</div>
 
 <div class="view hidden" id="view-controlmap">
 <aside class="sidebar">
@@ -692,7 +711,6 @@
 
   <div class="divider"></div>
 
-  <!-- Built at runtime from the chosen kind's field descriptions. -->
   <div class="opts" id="cm_options"></div>
 
   <button class="btn" id="cm_run" disabled>Extract</button>
@@ -716,8 +734,8 @@
 
   <div class="timer" id="cm_timer"><span class="dot"></span><span id="cm_timer_text">idle</span></div>
 </main>
-</div><!-- /view-controlmap -->
-</div><!-- /views -->
+</div>
+</div>
 
 <div class="modal hidden" id="info_modal">
   <div class="backdrop" id="info_backdrop"></div>

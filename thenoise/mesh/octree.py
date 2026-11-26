@@ -7,14 +7,10 @@ from typing import Callable, Tuple
 import torch
 from torch import Tensor
 
-#: The eight corners of a cell, offsets from its index.
 CORNERS = torch.tensor(list(product((0, 1), repeat=3)), dtype=torch.long)
-
-#: Where the reference stops halving: a 384 ladder starts at 96, a 128 one at 64.
 MIN_LEVEL_RESOLUTION = 63
-
-#: Points per geometry-decoder call while sampling.
 CHUNK = 8192
+
 
 SdfFn = Callable[[Tensor], Tensor]
 
@@ -103,12 +99,7 @@ def _evaluate(sdf: SdfFn, points: Tensor, chunk: int) -> Tensor:
 def sample_sdf(sdf: SdfFn, resolution: int, *, device, bounds: float = 1.0,
                level: float = 0.0, chunk: int = CHUNK,
                start: int = MIN_LEVEL_RESOLUTION, band: float = 0.0) -> SdfVolume:
-    """Narrow-band octree sampling of ``sdf`` (``[M, 3] -> [M]``), costing surface area rather than volume.
-
-    ``band`` also refines a cell whose corners come within ``band`` of ``level``. A field
-    that saturates -- the shape codec's, at about ±1 -- can hide a surface in a coarse cell
-    none of whose corners straddles the level, and only magnitude gives it away.
-    """
+    """Narrow-band octree sampling of ``sdf`` (``[M, 3] -> [M]``), costing surface not volume."""
     if bounds <= 0:
         raise ValueError(f"bounds must be positive, got {bounds}")
     if chunk < 1:
@@ -135,7 +126,9 @@ def sample_sdf(sdf: SdfFn, resolution: int, *, device, bounds: float = 1.0,
         around = values[inverse.view(-1).view(cells.shape[0], 8)]
         lo, hi = around.amin(dim=1), around.amax(dim=1)
         crossing = (lo <= level) & (hi >= level)
-        held = crossing if band <= 0.0 else crossing | (around.abs().amin(dim=1) < band)
+        # ``band`` reads magnitude too: a saturated field hides a surface no corner straddles.
+        held = (crossing if band <= 0.0
+                else crossing | ((around - level).abs().amin(dim=1) < band))
         if size == levels[-1]:
             holding = cells[crossing]
             break

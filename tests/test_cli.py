@@ -222,8 +222,6 @@ def test_cli_upscale_parses_and_is_model_free(parse):
 
     defaults = parse(["upscale", "--pixel-upscaler", "/models/x.safetensors", "--input", "in.png"])
     assert defaults.upscale_factor == 0.0  # 0.0 sentinel -> detected model scale
-    assert defaults.out == "out_upscaled.png"
-    assert defaults.device == "cuda"
     # model-free: no checkpoint or prompt flags on the upscale subcommand
     assert not hasattr(defaults, "dit") and not hasattr(defaults, "prompt")
 

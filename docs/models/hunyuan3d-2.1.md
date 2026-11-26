@@ -8,9 +8,11 @@ a reference photo and writes it as `.glb`, `.obj` or `.stl`. A picture is the wh
 - **One checkpoint** does the whole job (`--dit`): transformer, image conditioner and shape
   codec in a single 6.9 GB file
 - Built-in defaults: **30 steps, guidance 5.0**, euler, a 384³ surface cut
-- One picture per shape; a second is refused rather than quietly ignored
-- Geometry only
+- One picture per shape
+- Geometry only - positions and shading directions, no texture, no UV layout, no material.
 - Meshes come back closed and facing outward, so a slicer can take them as they are
+- Meshes shading directions travel in the file, so a shape opens smooth rather than faceted
+- **Cleaned up after the cut** - clean the model, reduce triangles, smoothing.
 
 > Commands below assume a dev checkout (`./thenoise.sh`, `.venv/bin/python`).
 > On a [portable bundle](../setup.md) use `./bin/thenoise` and `./bin/python3` instead.
@@ -26,7 +28,8 @@ a reference photo and writes it as `.glb`, `.obj` or `.stl`. A picture is the wh
 | Sizes | the shape fills the volume it is sampled from; `--scale` sets the units |
 | Text encoder | — |
 | Editing | — |
-| Output | `.glb`, `.obj` or `.stl`, no material |
+| Output | `.glb`, `.obj` or `.stl`, shading directions included, no material |
+| Post-processing | clean-up, level of detail, smoothing — each off until asked for |
 | Default settings | 4096 tokens, 30 steps, guidance 5.0, euler, 384³ |
 
 ## Checkpoints
@@ -57,32 +60,28 @@ Serve over HTTP with the web UI (open <http://localhost:8000/>):
 ./thenoise.sh serve --dit ./models/hunyuan3d-2.1/hunyuan_3d_v2.1.safetensors
 ```
 
-In the web UI a shape is the Generate tab: a dropzone for the picture, the density and
-the seed. Over HTTP the picture travels base64-encoded in the `image`
-field — `POST /mesh` answers with the file itself, `POST /jobs/mesh` queues it and
-`GET /jobs/{id}/content` reads it back:
+## After the cut
+
+Nothing is trimmed on the way out: the default 384³ cut of one real subject left 4.3 million
+triangles and a 102 MB `.glb`. Three settings — clean-up, level of detail and smoothing — let
+you change that afterwards.
 
 ```bash
-curl -s -X POST localhost:8000/mesh \
-  -H 'Content-Type: application/json' \
-  -d "{\"image\": \"$(base64 -w0 chair.png)\", \"output_format\": \"stl\"}" \
-  --output chair.stl
+./thenoise.sh mesh \
+  --dit ./models/hunyuan3d-2.1/hunyuan_3d_v2.1.safetensors \
+  --image chair.png --out chair.glb --floaters 0.05 --triangles 0.25 --smooth 0.4
 ```
 
-## Density, bounds, units
+- `--floaters 0.05` throws away every piece spreading less than 5 % as wide as the biggest
+  one: the specks and shells a cut sometimes leaves hanging on. `0` — the default — keeps
+  everything, which is what you want while judging the shape itself.
+- `--triangles 0.25` keeps a quarter of the triangles, and roughly a quarter of the file: 25 MB
+  rather than 102. Enough for a preview, and usually enough for a print.
+- `--smooth 0.4` eases out the bumpiness a cut leaves. Corners are held, so a hard edge stays
+  hard instead of rounding off.
 
-- **`--octree-resolution` is what a shape costs.** 96, 192, 384, 768 — each step doubles
-  the grid, which is eight times the cells, a finer surface and a bigger file. 768 is the
-  ceiling, and it is the slowest thing here by a distance: start at 192.
-- **`--bounds`** is the half-width of the volume the surface is cut from, and the default
-  1.01 leaves a margin. An object that touches the edge gets clipped there, and nothing
-  downstream can tell you it happened.
-- **`--scale`** multiplies the coordinates on the way out, because no mesh format says what
-  a unit is: an unscaled shape is about two units wide, which is neither centimetres nor
-  inches until you decide.
-- **`--mc-level`** picks which surface of the field to cut. The default is the reference
-  pipeline's own cut and rarely wants touching.
-- `.stl` gives every triangle its own three corners and its own normal, which is exactly
-  what the cut produces; a slicer welds them to its tolerance. A few numerically flat
-  triangles are kept rather than dropped, because dropping one opens a hole where its
-  neighbour's edge used to be shared.
+A face too thin to be drawn is left out of the file rather than written invisible, so what a
+viewer shows is what a slicer gets.
+
+For every flag (views, grid, level, scale, clean-up, LoRAs, containers), see the
+[CLI reference](../cli.md) and the [HTTP API reference](../api.md).

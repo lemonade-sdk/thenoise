@@ -20,6 +20,7 @@ from thenoise.dit.hunyuan3d21 import (
 )
 from thenoise.mesh.extract import Mesh, extract_surface
 from thenoise.mesh.octree import sample_sdf
+from thenoise.mesh.spec import DEFAULT_MESH_SCALE
 from thenoise.models.base import (
     Conditioning,
     DiffusionModel,
@@ -63,6 +64,7 @@ class Hunyuan3D21ShapeModel(DiffusionModel):
         "octree_resolution": 384,
         "bounds": 1.01,
         "mc_level": 1 / 512,
+        "scale": DEFAULT_MESH_SCALE,
     }
 
     SIGNATURE = SHAPE_SIGNATURE

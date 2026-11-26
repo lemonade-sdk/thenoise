@@ -15,6 +15,7 @@ from thenoise.utils.image_tensor import load_image
 from thenoise.utils.lora_roles import check_lora_roles
 from thenoise.utils.pipeline_cache import PipelineCache, content_digest
 
+from .finish import finish_mesh
 from .spec import MeshSpec, ResolvedMesh
 from .write import write_mesh
 
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class MeshPipelineController:
-    """The shape pipeline: picture, denoise, volume, file. Nothing past sampling caches."""
+    """The shape pipeline: picture, denoise, volume, file, each stage behind the cache."""
 
     def __init__(self, model):
         self.model = model
@@ -37,7 +38,7 @@ class MeshPipelineController:
         capacity = model.capability("mesh").get(spec.mode)
         if not capacity:
             if spec.mode == "mv2d":
-                raise ValueError(f"{model.name} conditions on one picture: it has no "
+                raise ValueError(f"{model.name} conditions on one image: it has no "
                                  f"multi-view tower, and {len(spec.images)} were sent")
             raise ValueError(f"model '{model.name}' does not support {spec.mode}")
         if spec.mode == "mv2d" and len(spec.images) > capacity:
@@ -51,7 +52,6 @@ class MeshPipelineController:
 
     def render(self, spec: ResolvedMesh, token: Cancellation,
                progress: Callable[[str, int, int], None], output: Path) -> None:
-        """Condition -> denoise -> volume -> file, checking ``token`` throughout."""
         model = self.model
         images = [load_image(io.BytesIO(one)) for one in spec.images]
         with inference():
@@ -63,9 +63,10 @@ class MeshPipelineController:
                 attention=spec.attention, num_latents=spec.latents,
             )
             stages = Stages(model, self._cache)
-            # A shape has no pixel grid of its own: its token count sizes the reserve.
+            # A shape moves no pixel grid of its own: its token count sizes the claim.
             work = spec.latents
 
+            progress("conditioning")
             cond = stages.run(
                 model.encode_prompt,
                 EncodePromptArgs(prompt="", guidance_scale=spec.guidance_scale,
@@ -76,28 +77,51 @@ class MeshPipelineController:
             )
             token.check()
 
-            model.switch_loras(spec.lora_specs.get("sampling"), "dit", "sampling")
             latents = model.init_latents(params)
+
+            def wear_loras():
+                # Empty specs included: a LoRA the last shape wore must come off this one.
+                for role, component in model.lora_components().items():
+                    model.switch_loras(spec.lora_specs.get(role), component, role)
+
+            # A sampling hit implies a prompt hit: the sampling key carries it.
+            key = self._sampling_key(spec)
             x = stages.run(self._denoise, latents, model.fuse_text(cond), params, spec,
-                           token, progress, resident=("dit",), pixels=work)
+                           token, progress, resident=("dit",), pixels=work,
+                           prepare=wear_loras,
+                           cache="sampling", key=key)
             token.check()
 
+            progress("cutting")
+            # A cut hit implies a sampling hit: the cut key carries the sampling key.
             mesh = stages.run(
                 model.decode_mesh, x,
                 MeshDecodeParams(octree_resolution=spec.octree_resolution,
                                  bounds=spec.bounds, mc_level=spec.mc_level),
                 resident=("codec",), pixels=work,
+                cache="decode",
+                key=(*key, spec.octree_resolution, spec.bounds, spec.mc_level),
             )
-            write_mesh(mesh.scaled(spec.scale), output, spec.output_format)
-            logger.info("Mesh: %d vertices, %d triangles, resolution %d",
-                        mesh.vertices.shape[0], mesh.faces.shape[0], spec.octree_resolution)
+            cut = mesh.faces.shape[0]
+            mesh = finish_mesh(mesh.scaled(spec.scale), spec.finish, token.check,
+                               progress)
+            drawn = write_mesh(mesh, output, spec.output_format)
+            logger.info("shape: %d triangles cut, %d written (%s)",
+                        cut, drawn.faces.shape[0], spec.finish)
 
     @staticmethod
     def _cache_key(spec: ResolvedMesh) -> tuple:
-        """The pictures decide the conditioning, and the guidance decides whether the
-        unguided branch is built at all, so both belong in the key."""
+        """The pixels condition; the guidance decides whether an unguided branch exists."""
         return ("prompt", spec.guidance_scale,
                 content_digest(load_image(io.BytesIO(one)) for one in spec.images))
+
+    @classmethod
+    def _sampling_key(cls, spec: ResolvedMesh) -> tuple:
+        """Another seed, sampler, attention method, LoRA or token count is another shape."""
+        worn = tuple(sorted((role, tuple(files))
+                            for role, files in spec.lora_specs.items()))
+        return (*cls._cache_key(spec), spec.seed, spec.steps, spec.sampler,
+                spec.attention, spec.latents, worn)
 
     def _denoise(self, latents, cond, params, spec: ResolvedMesh, token: Cancellation,
                  progress):

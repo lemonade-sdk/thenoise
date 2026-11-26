@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -7,11 +8,17 @@ from torch import Tensor
 
 from .octree import CORNERS, SdfVolume
 
+NORMAL_CREASE_DEGREES = 40.0
+#: Thinnest face a writer draws; 1 is an equilateral and 0 a line, so this is a third of a degree.
+SLIVER_QUALITY = 0.01
+
+_CREASE_LIMIT = math.cos(math.radians(NORMAL_CREASE_DEGREES))
+
 #: The Kuhn split as CORNERS indices (4i + 2j + k); neighbouring cubes share every face diagonal.
 TETRAHEDRA = torch.tensor([[0, 4, 6, 7], [0, 4, 5, 7], [0, 2, 6, 7],
                            [0, 2, 3, 7], [0, 1, 5, 7], [0, 1, 3, 7]], dtype=torch.long)
 
-#: Triangles per tetrahedron vertex pattern, as tetrahedron edges, wound outward; complements reversed.
+#: Triangles per vertex pattern, as tetrahedron edges wound outward; complements reversed.
 _PATTERNS = {
     0b0001: (((0, 1), (0, 2), (0, 3)),),
     0b0010: (((0, 1), (1, 3), (1, 2)),),
@@ -41,7 +48,7 @@ def _corner_coordinates() -> Tensor:
 
 
 def _orientation() -> Tensor:
-    """+1 per tetrahedron keeping the cube's orientation, -1 per reversal, which the Kuhn split alternates."""
+    """+1 per tetrahedron keeping the cube's orientation, -1 per reversal."""
     corners = _corner_coordinates()[TETRAHEDRA]
     steps = torch.stack((corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0],
                          corners[:, 3] - corners[:, 0]), dim=1)
@@ -79,11 +86,79 @@ class Mesh:
             return self
         return Mesh(self.vertices * factor, self.faces)
 
+    def corners(self) -> Tensor:
+        """Every face as its three positions."""
+        return self.vertices[self.faces]
+
+    def face_spans(self) -> Tensor:
+        """The cross product of every face: its direction, with twice its area as length."""
+        corners = self.corners()
+        return torch.linalg.cross(corners[:, 1] - corners[:, 0],
+                                  corners[:, 2] - corners[:, 0])
+
+    def face_normals(self) -> Tensor:
+        """The unit normal of every face; a faceless one points nowhere."""
+        span = self.face_spans()
+        return span / span.norm(dim=-1, keepdim=True).clamp(min=1e-20)
+
+    def face_areas(self) -> Tensor:
+        """Area of every triangle, in the mesh's own units."""
+        return self.face_spans().norm(dim=-1) * 0.5
+
+    def face_quality(self) -> Tensor:
+        """One for an equilateral, zero for a line: a ratio of lengths, so size is never asked."""
+        corners = self.corners()
+        there = corners[:, 1] - corners[:, 0]
+        on = corners[:, 2] - corners[:, 1]
+        squares = (there.square().sum(dim=-1) + on.square().sum(dim=-1)
+                   + (there + on).square().sum(dim=-1))
+        twice_area = torch.linalg.cross(there, on).norm(dim=-1)
+        return 2 * math.sqrt(3.0) * twice_area / squares.clamp(min=1e-30)
+
+    def select(self, keep_vertices: Tensor, keep_faces: Tensor) -> "Mesh":
+        """The kept faces, renumbered into the kept positions."""
+        lookup = torch.full((self.vertices.shape[0],), -1, dtype=self.faces.dtype,
+                            device=self.faces.device)
+        lookup[keep_vertices] = torch.arange(int(keep_vertices.sum()),
+                                             device=self.faces.device)
+        return Mesh(self.vertices[keep_vertices], lookup[self.faces[keep_faces]])
+
     def signed_volume(self) -> Tensor:
         """The volume the faces enclose, positive when they face outward."""
-        triangles = self.vertices[self.faces]
+        triangles = self.corners()
         return (triangles[:, 0]
                 * torch.linalg.cross(triangles[:, 1], triangles[:, 2])).sum() / 6.0
+
+    def without_degenerate(self) -> "Mesh":
+        """The mesh without faces no reader can draw: the faceless and the needles, by shape."""
+        keep_faces = self.face_quality() > SLIVER_QUALITY
+        used = torch.zeros(self.vertices.shape[0], dtype=torch.bool,
+                           device=self.faces.device)
+        used[self.faces[keep_faces]] = True
+        if bool(keep_faces.all()):
+            return self
+        return self.select(used, keep_faces)
+
+    def smooth_normals(self) -> Tensor:
+        """The way every point faces: neighbours within NORMAL_CREASE_DEGREES of the widest."""
+        span = self.face_spans()
+        worth = span.norm(dim=-1)
+        unit = span / worth.clamp(min=1e-20).unsqueeze(-1)
+        corner = self.faces.reshape(-1)
+        # Ranks rise with area, so an amax over ranks leaves each point its widest face.
+        lightest_first = torch.argsort(worth.repeat_interleave(3))
+        widest = torch.full((self.vertices.shape[0],), -1, dtype=torch.long,
+                            device=self.faces.device)
+        widest.scatter_reduce_(0, corner[lightest_first],
+                               torch.arange(lightest_first.shape[0], device=corner.device),
+                               reduce="amax", include_self=False)
+        seed = unit[lightest_first[widest.clamp(min=0)] // 3]
+        inside = (unit.unsqueeze(1) * seed[self.faces]).sum(dim=-1) >= _CREASE_LIMIT
+        weight = (worth.unsqueeze(1) * inside.to(worth.dtype)).unsqueeze(-1)
+        faced = torch.zeros_like(self.vertices)
+        faced.index_add_(0, corner, (unit.unsqueeze(1) * weight).reshape(-1, 3))
+        faced = torch.where(faced.square().sum(dim=-1, keepdim=True) > 0.0, faced, seed)
+        return faced / faced.norm(dim=-1, keepdim=True).clamp(min=1e-20)
 
 
 def empty_mesh(device=None) -> Mesh:
@@ -97,7 +172,7 @@ def _unravel(ids: Tensor, stride: int) -> Tensor:
 
 
 def _edge_points(volume: SdfVolume, keys: Tensor, plane: int) -> Tensor:
-    """One point per packed corner pair, interpolated, always low grid id first so both cells sharing an edge agree bit for bit."""
+    """One point per packed corner pair, low grid id first, so both cells sharing an edge agree."""
     stride = volume.resolution + 1
     flat = volume.values.reshape(-1)
     lo, hi = keys // plane, keys % plane

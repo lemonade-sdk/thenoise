@@ -40,6 +40,8 @@ TheNoise ships:
 - pixel-space upscalers (Real-ESRGAN) up to 4× - standard ESRGAN-based models,
 - post-processing in the decode tail - colour grading (saturation, vibrance and a
   white-balance pair), RCAS sharpening and film grain,
+- shape clean-up after the surface cut - detached specks and shells thrown away, level of
+  detail, and smoothing that holds a crease,
 - control-map extraction for conditioning workflows - canny edges, line-art and soft-edge maps, depth maps and openpose-style pose skeletons,
 - LoRA support - one or more LoRAs per image, each with its own weight.
 

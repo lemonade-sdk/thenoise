@@ -6,9 +6,11 @@ import pytest
 import torch
 from PIL import Image
 
+from conftest import cut_with_junk
 from thenoise.jobs import Cancellation, JobCancelled
 from thenoise.mesh.controller import MeshPipelineController
 from thenoise.mesh.extract import Mesh
+from thenoise.mesh.finish.chain import finish_mesh
 from thenoise.mesh.spec import MeshSpec
 from thenoise.models.base import Conditioning, DiffusionModel
 from thenoise.utils.attention import ATTENTION_METHODS
@@ -45,16 +47,23 @@ def triangle_mesh() -> Mesh:
 
 
 class FakeMemory:
-    """The one thing a controller asks of residency: which weights a stage held."""
+    """Which weights a stage held, and when: a step outside its stage is on evicted memory."""
 
-    def __init__(self):
+    def __init__(self, events=None):
         self.held: list[tuple[str, ...]] = []
+        self.sized: list[tuple[tuple[str, ...], int]] = []
+        self.events = events if events is not None else []
 
     @contextmanager
     def stage(self, *names, pixels):
         assert pixels > 0
+        self.sized.append((names, pixels))
         self.held.append(names)
-        yield type("S", (), {"run": staticmethod(lambda work, *a, **k: work(*a, **k))})
+        self.events.append("hold:" + "+".join(names))
+        try:
+            yield type("S", (), {"run": staticmethod(lambda work, *a, **k: work(*a, **k))})
+        finally:
+            self.events.append("release:" + "+".join(names))
 
 
 class FakeShapeModel:
@@ -69,8 +78,10 @@ class FakeShapeModel:
     device = "cpu"
 
     def __init__(self, cancel_during=None, caps=None):
-        self.memory = FakeMemory()
         self.events: list[str] = []
+        self.memory = FakeMemory(self.events)
+        self.dit = object()
+        self.lora_calls: list[tuple] = []
         self.seen_args = []
         self.decode_params = []
         self.cancel_during = cancel_during
@@ -82,13 +93,14 @@ class FakeShapeModel:
         return dict(self.caps)
 
     def lora_components(self):
-        return ("dit",)
+        return {"dit": self.dit}
 
     def list_loras(self):
         return []
 
-    def switch_loras(self, specs, component, stage):
-        self.events.append(f"loras:{stage}")
+    def switch_loras(self, specs, component, role):
+        self.events.append(f"loras:{role}")
+        self.lora_calls.append((role, component, tuple(specs or ())))
 
     def encode_prompt(self, args):
         self.events.append("encode")
@@ -121,14 +133,24 @@ class FakeShapeModel:
         return triangle_mesh()
 
 
-def render(model, **overrides):
+def render(model, progress=lambda *a: None, **overrides):
     controller = MeshPipelineController(model)
     resolved = controller.resolve(MeshSpec(**{**picture(), **overrides}))
     out = Path(f"/tmp/thenoise-mesh-{len(model.events)}.{resolved.output_format}")
     out.unlink(missing_ok=True)
     model.token = Cancellation()
-    controller.render(resolved, model.token, lambda *a: None, out)
+    controller.render(resolved, model.token, progress, out)
     return out
+
+
+def test_a_shape_reports_the_parts_of_itself_that_would_otherwise_be_silent(tmp_path):
+    """A job that says nothing while it cuts the volume is a hang to whoever watches it."""
+    seen = []
+    model = FakeShapeModel()
+    render(model, progress=lambda stage, *_: seen.append(stage))
+    assert seen[0] == "conditioning"
+    assert seen[-1] == "cutting", "the volume must not be reported as the solver's last step"
+    assert "sampling" in seen[1:-1]
 
 
 
@@ -136,7 +158,9 @@ def test_the_three_components_are_brought_in_the_order_the_pipeline_needs_them()
     model = FakeShapeModel()
     render(model)
     assert model.memory.held == [("conditioner",), ("dit",), ("codec",)]
-    assert model.events == ["encode", "loras:sampling", "init", "step", "decode"]
+    assert model.events == ["hold:conditioner", "encode", "release:conditioner",
+                            "init", "hold:dit", "loras:dit", "step", "release:dit",
+                            "hold:codec", "decode", "release:codec"]
 
 
 def test_a_resolved_request_reaches_the_volume_knobs():
@@ -169,8 +193,7 @@ def test_more_views_than_the_model_numbers_are_refused():
 
 
 def test_a_model_with_no_multi_view_tower_refuses_the_second_picture():
-    """Refused, not ignored: a tower never marked with a view cannot read the marking, and
-    a quietly dropped picture is a shape nobody asked for."""
+    """A quietly dropped image is a shape nobody asked for: refused, not ignored."""
     one_picture = FakeShapeModel(caps={"i2d": True, "t2d": False})
     with pytest.raises(ValueError, match="no multi-view tower"):
         MeshPipelineController(one_picture).resolve(MeshSpec(image=[PNG, OTHER]))
@@ -225,6 +248,62 @@ def test_the_requests_own_checks_run_before_anything_is_loaded():
                                     **picture()))
 
 
+class _TwoPieceModel(FakeShapeModel):
+    """A codec whose cut has a piece of its own next to the shape."""
+
+    def decode_mesh(self, latents, params):
+        self.events.append("decode")
+        self.cut = cut_with_junk()
+        return self.cut
+
+
+def _obj_counts(path: Path) -> tuple[int, int]:
+    lines = path.read_text().splitlines()
+    return (sum(1 for line in lines if line.startswith("v ")),
+            sum(1 for line in lines if line.startswith("f ")))
+
+
+def test_the_file_carries_the_finished_mesh_not_the_cut(tmp_path):
+    """The junk goes before the budget is taken, and the file is what is left."""
+    model = _TwoPieceModel()
+    controller = MeshPipelineController(model)
+    resolved = controller.resolve(MeshSpec(floaters=0.15, triangles=0.5,
+                                           output_format="obj", **picture()))
+    out = tmp_path / "shape.obj"
+    seen: list[str] = []
+    controller.render(resolved, Cancellation(), lambda stage, *rest: seen.append(stage), out)
+
+    shape_faces = len(model.cut.faces) - 4
+    finished = finish_mesh(model.cut, resolved.finish, (lambda: None), (lambda _stage: None))
+    assert finished.faces.shape[0] == max(4, round(shape_faces * 0.5))
+    written_vertices, written_faces = _obj_counts(out)
+    assert written_faces == finished.without_degenerate().faces.shape[0]
+    assert written_vertices < len(model.cut.vertices)
+    assert [one for one in seen if one == "finish"] == ["finish", "finish"]
+
+
+def test_a_named_shape_lora_reaches_the_transformer_that_can_wear_it():
+    """`lora_specs` are keyed by role, so a lookup by another name loads nothing."""
+    model = FakeShapeModel()
+    render(model, lora_specs=["x.safetensors"])
+    assert model.lora_calls == [("dit", model.dit, ("x.safetensors",))]
+
+
+def test_a_lora_is_switched_while_the_transformer_is_held():
+    """Switching bakes weights in and may requantize, so the stage must be holding them."""
+    model = FakeShapeModel()
+    render(model, lora_specs=["x.safetensors"])
+    events = model.events
+    assert events.index("hold:dit") < events.index("loras:dit") < events.index("step")
+
+
+def test_a_shape_with_no_lora_clears_the_previous_shapes():
+    """A model instance is reused between jobs, so empty roles are offered none."""
+    model = FakeShapeModel()
+    render(model)
+    assert model.lora_calls == [("dit", model.dit, ())]
+
+
 def test_loras_without_a_directory_to_read_them_from_are_refused():
     model = FakeShapeModel()
     model.lora_dir = None
@@ -234,3 +313,56 @@ def test_loras_without_a_directory_to_read_them_from_are_refused():
     with pytest.raises(ValueError, match="--lora-dir"):
         controller.render(resolved, Cancellation(), lambda *a: None,
                           Path("/tmp/mesh-lora.glb"))
+
+
+def renders(model, *requests):
+    """One controller over several requests, which is the only way a cache shows at all.
+
+    A request without a seed draws one before the key is built, so none would ever hit.
+    """
+    controller = MeshPipelineController(model)
+    for count, one in enumerate(requests):
+        resolved = controller.resolve(MeshSpec(**{**picture(), "seed": 1, **one}))
+        controller.render(resolved, Cancellation(), lambda *a: None,
+                          Path(f"/tmp/thenoise-mesh-cache-{count}"
+                               f".{resolved.output_format}"))
+    return model.events
+
+
+def test_a_shape_asked_for_twice_is_neither_conditional_nor_cut_again():
+    model = FakeShapeModel()
+    events = renders(model, {}, {})
+    assert events.count("encode") == events.count("step") == events.count("decode") == 1
+
+
+def test_a_finer_grid_cuts_again_from_the_latents_it_already_has():
+    model = FakeShapeModel()
+    events = renders(model, {}, {"octree_resolution": 32})
+    assert events.count("step") == 1, "the solver's work does not depend on the grid"
+    assert [one.octree_resolution for one in model.decode_params] == [16, 32]
+
+
+@pytest.mark.parametrize("knob", [{"bounds": 0.5}, {"mc_level": 0.1}])
+def test_another_volume_or_isovalue_is_another_cut(knob):
+    """Both change which points the codec queries: the band is searched around the level."""
+    model = FakeShapeModel()
+    events = renders(model, {}, knob)
+    assert events.count("decode") == 2
+    assert events.count("step") == 1
+
+
+def test_the_scale_the_finish_and_the_format_leave_the_cut_alone():
+    """Nothing downstream of the surface reaches back into it."""
+    model = FakeShapeModel()
+    events = renders(model, {}, {"scale": 2.0}, {"triangles": 0.5},
+                     {"floaters": 0.05}, {"output_format": "obj"})
+    assert events.count("decode") == 1
+    assert events.count("step") == 1
+
+
+def test_a_request_naming_another_attention_method_inherits_no_latents():
+    """A routed attention is a different function over the same rows, so it is keyed."""
+    model = FakeShapeModel()
+    events = renders(model, {}, {"attention": "full"})
+    assert events.count("step") == 2
+    assert events.count("decode") == 2

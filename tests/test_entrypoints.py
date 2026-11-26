@@ -494,6 +494,28 @@ def test_mesh_wires_the_picture_the_tokens_and_the_volume(mesh_runtime, tmp_path
     assert rendered["output"].read_bytes() == b"glTF"
 
 
+def test_the_finish_knobs_reach_the_request_flat(mesh_runtime, tmp_path):
+    picture = tmp_path / "chair.png"
+    picture.write_bytes(b"png bytes")
+    run_mesh(_parse([
+        "mesh", *MESH_PATHS, "--image", str(picture), "--floaters", "0.01",
+        "--triangles", "0.25", "--out", str(tmp_path / "chair"),
+    ]))
+    finish = mesh_runtime[0].pipeline.rendered["spec"].finish
+    assert (finish.floaters, finish.triangles) == (0.01, 0.25)
+
+
+def test_a_finish_number_out_of_its_range_is_named_and_refused(mesh_runtime, tmp_path,
+                                                               capsys):
+    picture = tmp_path / "chair.png"
+    picture.write_bytes(b"png bytes")
+    with pytest.raises(SystemExit):
+        run_mesh(_parse(["mesh", *MESH_PATHS, "--image", str(picture),
+                         "--triangles", "3", "--out", str(tmp_path / "chair")]))
+    assert "triangles must be in [0.001, 1.0], got 3.0" in capsys.readouterr().err
+    assert mesh_runtime == []
+
+
 def test_repeated_images_are_the_views_of_one_shape(mesh_runtime, tmp_path):
     front, left = tmp_path / "front.png", tmp_path / "left.png"
     front.write_bytes(b"front")

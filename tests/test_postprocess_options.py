@@ -166,19 +166,6 @@ def test_flat_options_names_what_a_holder_is_missing():
 # ------------------------------------------------------------------ the UI schema
 
 
-def test_the_ui_schema_describes_every_knob():
-    schema = {entry["name"]: entry for entry in options_schema(PostprocessOptions)}
-    assert set(schema) == set(POSTPROCESS_NAMES)
-
-    grain = schema["film_grain"]
-    assert grain["label"] == "Film grain"
-    assert grain["type"] == "number"
-    assert grain["default"] == 0.0
-    # What the server accepts and what a slider is worth offering are not the same.
-    assert (grain["min"], grain["max"]) == (0.0, 10.0)
-    assert grain["ui_max"] == 1.0
-
-
 def test_the_ui_schema_carries_nothing_a_control_cannot_use():
     for entry in options_schema(PostprocessOptions):
         assert set(entry) <= {

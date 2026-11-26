@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Callable, Dict
 
+from thenoise.utils.options import apply_chain
+
 from .options import DEFAULTS, FINAL, filter_specs
 
 # An adapter takes the knobs its filter declared, by name, and returns pixels. The
@@ -58,18 +60,8 @@ FILTERS: Dict[str, Callable] = {
 
 
 def apply_stage(pixels, options, stage: str = FINAL):
-    """Run one stage of the chain over ``[C, H, W]`` fp32 pixels in ``[-1, 1]``.
-
-    A filter whose knobs all still hold their default is skipped, so a request that
-    asks for nothing returns the very tensor it was handed — the chain costs nothing
-    when it is not asked for anything.
-    """
-    for spec in filter_specs(stage):
-        values = {name: getattr(options, name) for name in spec.options}
-        if all(values[name] == DEFAULTS[name] for name in values):
-            continue
-        pixels = FILTERS[spec.name](pixels, **values)
-    return pixels
+    """Run one stage of the chain over ``[C, H, W]`` fp32 pixels in ``[-1, 1]``."""
+    return apply_chain(pixels, options, filter_specs(stage), FILTERS, DEFAULTS)
 
 
 __all__ = ["FILTERS", "apply_stage"]

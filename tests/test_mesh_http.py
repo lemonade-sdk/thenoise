@@ -4,14 +4,60 @@ import io
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
+from conftest import cut_with_junk
 from test_mesh_controller import DEFAULTS, FakeShapeModel
 
 from thenoise.jobs import JobQueue
 from thenoise.mesh.controller import MeshPipelineController
+from thenoise.mesh.finish.chain import finish_mesh
+from thenoise.mesh.finish.options import MeshFinishOptions
 from thenoise.mesh.http import install_mesh_routes
 from thenoise.mesh.service import mesh_planner
 
 MODEL = "hunyuan3d21"
+
+
+_CUT = cut_with_junk()
+
+
+class _JunkFactory(FakeShapeModel):
+    """The defaults and the latents of the fake model, with a cut that has junk beside it."""
+
+    def decode_mesh(self, latents, params):
+        return _CUT
+
+
+def test_the_finish_knobs_a_pane_sends_reach_the_written_file(tmp_path):
+    """One HTTP body to the bytes on disk: the wire field, the resolved spec, the chain."""
+    queue = JobQueue(tmp_path)
+    try:
+        with _client(MeshPipelineController(_JunkFactory()), queue) as client:
+            answer = client.post("/jobs/mesh", json={"image": _b64(), "output_format": "obj",
+                                                     "floaters": 0.15, "triangles": 0.5})
+            assert answer.status_code == 202
+            ident = answer.json()["id"]
+            until(lambda: client.get(f"/jobs/{ident}").json()["status"] == "completed")
+            written = client.get(f"/jobs/{ident}/content").text.count("f ")
+    finally:
+        queue.close()
+    finished = finish_mesh(_CUT, MeshFinishOptions(floaters=0.15, triangles=0.5),
+                           (lambda: None), (lambda _stage: None))
+    assert finished.faces.shape[0] == max(4, round((len(_CUT.faces) - 4) * 0.5))
+    assert written == finished.without_degenerate().faces.shape[0]
+
+
+def test_the_wire_knows_the_finish_knobs_it_offers(tmp_path):
+    """A knob the server advertises is a field the request accepts, or a slider returns 422."""
+    queue = JobQueue(tmp_path)
+    try:
+        with _client(_controller(), queue) as client:
+            for body in ({"floaters": 0.01}, {"triangles": 0.25}):
+                answer = client.post("/jobs/mesh", json={"image": _b64(), **body})
+                assert answer.status_code == 202
+                ident = answer.json()["id"]
+                until(lambda: client.get(f"/jobs/{ident}").json()["status"] == "completed")
+    finally:
+        queue.close()
 
 
 def _b64(color="red") -> str:
@@ -213,5 +259,18 @@ def test_views_past_the_ones_the_model_numbers_are_refused_before_the_job(tmp_pa
                                  json={"model": MODEL, "image": [_b64()] * 5})
             assert answer.status_code == 400
             assert "at most 4 views" in answer.text
+    finally:
+        queue.close()
+
+
+def test_a_knob_no_shape_can_use_is_refused_before_the_job(tmp_path):
+    """An unreachable knob is refused before the job, not after 80 GB of octree."""
+    queue = JobQueue(tmp_path)
+    try:
+        with _client(_controller(), queue) as client:
+            for knob, value in [("bounds", 700.0), ("mc_level", 3.0), ("latents", 100_000)]:
+                answer = client.post("/jobs/mesh", json={"image": _b64(), knob: value})
+                assert answer.status_code == 400, (knob, answer.text)
+                assert knob in answer.text, (knob, answer.text)
     finally:
         queue.close()

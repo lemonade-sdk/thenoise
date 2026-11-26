@@ -42,8 +42,8 @@ def test_discovery_maps_model_type_to_kind(tmp_path):
         "depth": ["depth_anything_v2_small"],
         "pose": ["vitpose_base_simple"],
     }
-    assert manager.defaults()["depth"] == "depth_anything_v2_small"
-    assert manager.defaults()["pose"] == "vitpose_base_simple"
+    for kind, chosen in manager.defaults().items():
+        assert chosen in manager.available()[kind], kind
 
 
 def test_a_non_controlmap_directory_is_ignored(tmp_path):

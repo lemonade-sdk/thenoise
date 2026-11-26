@@ -12,10 +12,7 @@ from .spec import MeshSpec
 
 
 class MeshRequest(MediaRequest, MeshSpec):
-    """The mesh spec, plus what only the wire carries: a model name, base64 media.
-
-    ``image`` takes one base64 picture or several, and several are views of one object.
-    """
+    """The mesh spec plus what only the wire carries: base64, and several images are views."""
 
     SPEC: ClassVar[type] = MeshSpec
     MEDIA_FIELDS: ClassVar[tuple[str, ...]] = ("image",)

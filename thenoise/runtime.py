@@ -227,3 +227,21 @@ class Runtime:
         if self._model is None:
             return 3
         return getattr(self._model, "pixel_channels", 3)
+
+    def model_knobs(self) -> dict:
+        """The loaded model's knob menus; empty with no model, or a medium of free numbers."""
+        if self._model is None:
+            return {}
+        from .mediums import knobs_for
+
+        return knobs_for(self.medium, self._model)
+
+    def postprocess_options(self) -> type:
+        """The options class behind ``GET /postprocess``: a shape's finish filters, or the
+        pixel filters every other medium decodes into."""
+        if self._model is None:
+            from .postprocess.options import PostprocessOptions
+            return PostprocessOptions
+        from .mediums import tail_options
+
+        return tail_options(self.medium)

@@ -26,8 +26,8 @@ forget to say what it accepts.
 from __future__ import annotations
 
 import argparse
-from dataclasses import field, fields
-from typing import Any, Dict, Optional, Sequence, get_type_hints
+from dataclasses import dataclass, field, fields
+from typing import Any, Dict, Optional, Sequence, Tuple, get_type_hints
 
 #: The JSON type the web UI builds each knob's control from.
 _JSON_TYPE = {bool: "boolean", int: "integer", float: "number", str: "string"}
@@ -152,6 +152,78 @@ def wire_fields(source: type) -> Dict[str, Any]:
     return specs
 
 
+@dataclass(frozen=True)
+class FilterSpec:
+    """One filter in a declared chain: the knobs it reads, and the stage it runs in."""
+
+    name: str
+    options: Tuple[str, ...]
+    stage: str
+
+
+def defaults_of(cls: type) -> Dict[str, Any]:
+    """Every knob's default: the value that asks for nothing."""
+    return {entry.name: entry.default for entry in fields(cls)}
+
+
+def chain_in_stage(chain: Tuple[FilterSpec, ...],
+                   stage: str) -> Tuple[FilterSpec, ...]:
+    """The filters of one stage, in chain order."""
+    return tuple(spec for spec in chain if spec.stage == stage)
+
+
+def apply_chain(carrier, options, specs: Tuple[FilterSpec, ...], filters: Dict,
+                defaults: Dict[str, Any], check=None, on_filter=None):
+    """Every filter ``specs`` names, in order, over ``carrier``.
+
+    A filter whose knobs all still hold their default is skipped, so a request that asks
+    for nothing returns the very object it was handed: a declared chain costs nothing
+    when nobody asks anything of it.
+    """
+    for spec in specs:
+        values = {name: getattr(options, name) for name in spec.options}
+        if all(values[name] == defaults[name] for name in values):
+            continue
+        if on_filter is not None:
+            on_filter(spec)
+        carrier = filters[spec.name](carrier, **values)
+        if check is not None:
+            check()
+    return carrier
+
+
+def declared_chain(cls: type) -> Tuple[FilterSpec, ...]:
+    """The filters of a declared surface, in field order, which is chain order."""
+    chain, declared = [], set()
+    for entry in fields(cls):
+        meta = entry.metadata
+        for key in ("filter", "stage"):
+            if key not in meta:
+                raise ValueError(f"{entry.name} declares no {key}")
+        name, stage = meta["filter"], meta["stage"]
+        if name in declared and chain[-1][0] != name:
+            # a filter is handed all its knobs at once, so they cannot be split
+            raise ValueError(
+                f"{name} knobs must be declared together: {entry.name} splits them"
+            )
+        declared.add(name)
+        if chain and chain[-1][0] == name:
+            chain[-1] = (name, chain[-1][1] + (entry.name,), stage)
+        else:
+            chain.append((name, (entry.name,), stage))
+    return tuple(FilterSpec(name, options, stage) for name, options, stage in chain)
+
+
+def flat_values(source: type, holder: Any, noun: str = "knob") -> Dict[str, Any]:
+    """The knobs of ``source`` read off anything that carries them flat — a request, an
+    argparse namespace, a wire model — naming what a holder is missing."""
+    missing = [entry.name for entry in fields(source) if not hasattr(holder, entry.name)]
+    if missing:
+        raise ValueError(f"{type(holder).__name__} carries no {noun} field "
+                         f"{', '.join(missing)}")
+    return {entry.name: getattr(holder, entry.name) for entry in fields(source)}
+
+
 def validate(options) -> None:
     """Reject a value outside ``ge``/``le``, or a choice that is not offered."""
     kind = getattr(options, "kind", "")
@@ -256,8 +328,14 @@ def add_flags(
 
 
 __all__ = [
+    "FilterSpec",
     "add_flags",
+    "apply_chain",
+    "chain_in_stage",
+    "declared_chain",
+    "defaults_of",
     "declared_knobs",
+    "flat_values",
     "option",
     "option_meta",
     "option_names",

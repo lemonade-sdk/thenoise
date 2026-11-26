@@ -3,16 +3,12 @@ import math
 import pytest
 import torch
 
-from thenoise.mesh.extract import ORIENTATION, TETRAHEDRA, Mesh, empty_mesh, extract_surface
-
+from conftest import edge_multiplicity, volume_of
+from thenoise.mesh.extract import (ORIENTATION, TETRAHEDRA, Mesh, SLIVER_QUALITY, empty_mesh,
+                                   extract_surface)
 from thenoise.mesh.octree import sample_sdf
 
 _CUBE_CORNERS = torch.tensor([[(c >> 2) & 1, (c >> 1) & 1, c & 1] for c in range(8)], dtype=torch.float32)
-
-
-def volume_of(sdf, resolution=64, bounds=1.0, level=0.0, start=8):
-    return extract_surface(sample_sdf(sdf, resolution, device="cpu", bounds=bounds,
-                                      level=level, start=start))
 
 
 def sphere(radius=0.4):
@@ -21,13 +17,6 @@ def sphere(radius=0.4):
 
 def box(side=0.6):
     return lambda points: points.abs().amax(dim=-1) - side / 2
-
-
-def edge_multiplicity(faces):
-    pairs = torch.cat([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
-    span = int(faces.max().item()) + 1
-    keys = pairs.min(dim=1).values * span + pairs.max(dim=1).values
-    return torch.unique(keys, return_counts=True)[1]
 
 
 def test_the_tetrahedra_tile_the_cube_without_gaps():
@@ -130,3 +119,22 @@ def test_scaling_a_shape_is_the_same_shape_about_the_origin():
     assert twice.vertices == pytest.approx(shape.vertices * 2)
     assert torch.equal(twice.faces, shape.faces)
     assert twice.signed_volume() == pytest.approx(shape.signed_volume() * 8)
+
+
+def test_the_face_score_is_one_for_an_equilateral_and_zero_for_a_line():
+    """Every refusal is decided against this scale, so the scale is what is worth pinning."""
+    for side in (0.001, 1.0, 750.0):
+        fat = Mesh(vertices=torch.tensor([[0.0, 0.0, 0.0], [side, 0.0, 0.0],
+                                          [side / 2, side * math.sqrt(3) / 2, 0.0]]),
+                   faces=torch.tensor([[0, 1, 2]]))
+        assert float(fat.face_quality()) == pytest.approx(1.0, abs=1e-6)
+        assert float(fat.face_areas()) == pytest.approx(math.sqrt(3) / 4 * side * side,
+                                                        rel=1e-5)
+    half_square = Mesh(vertices=torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0],
+                                              [0.0, 1.0, 0.0]]),
+                       faces=torch.tensor([[0, 1, 2]]))
+    assert float(half_square.face_quality()) == pytest.approx(math.sqrt(3) / 2)
+    needle = Mesh(vertices=torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.5, 1e-4, 0.0]]),
+                  faces=torch.tensor([[0, 1, 2]]))
+    assert float(needle.face_quality()) < SLIVER_QUALITY
+    assert needle.without_degenerate().is_empty

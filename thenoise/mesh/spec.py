@@ -3,20 +3,69 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, create_model
 
+from thenoise.mesh.finish.options import MeshFinishOptions, options_from
 from thenoise.utils.lora_roles import LoraSpecs, lora_specs_by_role
+from thenoise.utils.options import wire_fields
 
 from thenoise.utils.spec import (Picture, Positive, PositiveFinite, Seed, prefer,
                                 resolve_seed)
 
 OUTPUT_FORMATS = ("glb", "obj", "stl")
-DENSITY_PRESETS = (96, 192, 384, 768)
-MAX_OCTREE_RESOLUTION = 768
 DEFAULT_MESH_SCALE = 1.0
+
+_LIMITS = {
+    "latents": (1, 16384, "the attention inside them is quadratic"),
+    "octree_resolution": (8, 768, "each step is eight times the memory of the one below"),
+    "bounds": (0.05, 8.0, "a shape fills about ±1 of the volume"),
+    "mc_level": (-0.5, 0.5, "the codec's field crosses near zero"),
+    "scale": (0.001, 1000.0, "a mesh is read at about ±1, so past this someone is "
+                             "reading a unit, not sizing a shape"),
+}
+
+KNOB_STEPS = {
+    "octree_resolution": (("draft", 0.25), ("coarse", 0.5), ("standard", 1), ("ultra", 2)),
+    "latents": (("lean", 0.5), ("standard", 1), ("detailed", 2)),
+    "bounds": (("tight", 0.9), ("standard", 1), ("roomy", 1.2), ("wide", 1.5)),
+    "mc_level": (("sharp", 0.5), ("standard", 1), ("fatten", 2), ("extra fatten", 4)),
+    "scale": (("×0.5", 0.5), ("×1", 1), ("×2", 2), ("×4", 4)),
+}
+
+KNOB_PREFS = {"latents": "num_latents"}
+
+_WHOLE_KNOBS = ("latents", "octree_resolution")
+
+
+def limits(knob: str) -> tuple[float, float, str]:
+    """``knob``'s edges and the reason for them: the check, the refusal and the menu."""
+    try:
+        return _LIMITS[knob]
+    except KeyError:
+        raise KeyError(f"no limit is declared for {knob!r}; known: "
+                       f"{', '.join(sorted(_LIMITS))}") from None
+
+
+def knob_menu(defaults: Mapping[str, Any]) -> dict[str, list[dict]]:
+    """Each step's word with the model's own value scaled by its ratio, a step whose number
+    a request would be refused for left out whole."""
+    menu = {}
+    for knob, steps in KNOB_STEPS.items():
+        own = defaults.get(KNOB_PREFS.get(knob, knob))
+        if own is None:
+            continue
+        low, high, _ = limits(knob)
+        offered = []
+        for name, ratio in steps:
+            value = (round(own * ratio) if knob in _WHOLE_KNOBS
+                     else round(own * ratio, 10))
+            if low <= value <= high and value not in [one["value"] for one in offered]:
+                offered.append({"value": value, "name": name})
+        menu[knob] = offered
+    return menu
 
 
 def mode_of(images: tuple[bytes, ...]) -> str:
@@ -41,6 +90,7 @@ class ResolvedMesh:
     mc_level: float
     scale: float
     lora_specs: dict[str, list[str]]
+    finish: MeshFinishOptions
 
     @property
     def mode(self) -> str:
@@ -48,18 +98,19 @@ class ResolvedMesh:
 
     def public(self) -> dict:
         return {
-            "mode": self.mode, "latents": self.latents, "steps": self.steps,
+            "mode": self.mode,
+            "latents": self.latents, "steps": self.steps,
             "guidance_scale": self.guidance_scale, "sampler": self.sampler,
             "attention": self.attention,
             "seed": self.seed, "output_format": self.output_format,
             "octree_resolution": self.octree_resolution, "bounds": self.bounds,
             "mc_level": self.mc_level, "scale": self.scale,
-            "lora_specs": self.lora_specs,
+            "lora_specs": self.lora_specs, "finish": asdict(self.finish),
         }
 
 
-class MeshSpec(BaseModel):
-    """What a mesh request asks for; a field left ``None`` takes the model's preference."""
+class _MeshBody(BaseModel):
+    """The shape knobs; one left ``None`` takes the model's preference."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -89,6 +140,7 @@ class MeshSpec(BaseModel):
     def mode(self) -> str:
         return mode_of(self.images)
 
+
     def resolve(self, defaults: Mapping[str, Any]) -> ResolvedMesh:
         """Fill what the request left unset from the model's defaults, then check."""
         pref = prefer(self, defaults)
@@ -102,34 +154,36 @@ class MeshSpec(BaseModel):
         scale = self.scale
         if scale is None:
             scale = defaults.get("scale", DEFAULT_MESH_SCALE)
-        if latents < 1 or steps < 1:
-            raise ValueError("latents and steps must be positive")
+        if steps < 1:
+            raise ValueError("steps must be positive")
+        for knob, value in (("latents", latents), ("bounds", bounds),
+                            ("mc_level", mc_level), ("scale", scale),
+                            ("octree_resolution", octree_resolution)):
+            low, high, why = limits(knob)
+            if not low <= value <= high:
+                raise ValueError(f"{knob} must be between {low} and {high}, "
+                                 f"got {value}: {why}")
         if not math.isfinite(guidance_scale) or guidance_scale < 0:
             raise ValueError("guidance_scale must be finite and nonnegative")
         if not sampler:
             raise ValueError("sampler must not be empty")
         if output_format not in OUTPUT_FORMATS:
             raise ValueError(f"output_format must be one of {', '.join(OUTPUT_FORMATS)}")
-        if octree_resolution < 8:
-            raise ValueError("octree_resolution must be at least 8")
-        if bounds <= 0 or not math.isfinite(bounds):
-            raise ValueError("bounds must be finite and positive")
-        if not math.isfinite(mc_level):
-            raise ValueError("mc_level must be finite")
-        if octree_resolution > MAX_OCTREE_RESOLUTION:
-            raise ValueError(f"octree_resolution must be at most {MAX_OCTREE_RESOLUTION}, "
-                             f"whose grid is {(MAX_OCTREE_RESOLUTION + 1) ** 3} samples")
-        if not math.isfinite(scale) or scale <= 0:
-            raise ValueError("scale must be finite and positive")
         return ResolvedMesh(
-            images=self.images, latents=latents, steps=steps,
+            images=self.images,
+            latents=latents, steps=steps,
             guidance_scale=guidance_scale, sampler=sampler, attention=attention,
             seed=resolve_seed(self.seed),
             output_format=output_format, octree_resolution=octree_resolution,
             bounds=bounds, mc_level=mc_level, scale=scale,
             lora_specs=lora_specs_by_role(self.lora_specs),
+            finish=options_from(self),
         )
 
 
-__all__ = ["DEFAULT_MESH_SCALE", "DENSITY_PRESETS", "MAX_OCTREE_RESOLUTION",
-           "OUTPUT_FORMATS", "MeshSpec", "ResolvedMesh", "mode_of"]
+MeshSpec = create_model("MeshSpec", __base__=_MeshBody, **wire_fields(MeshFinishOptions))
+MeshSpec.__doc__ = "What a mesh request asks for, from cutting the surface to writing it."
+
+
+__all__ = ["DEFAULT_MESH_SCALE", "KNOB_STEPS", "OUTPUT_FORMATS", "MeshSpec",
+           "ResolvedMesh", "knob_menu", "limits", "mode_of"]

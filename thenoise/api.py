@@ -312,6 +312,7 @@ def create_app(runtime, *, jobs: Optional[JobQueue] = None) -> FastAPI:
             "medium": runtime.medium,
             "capabilities": runtime.model_capabilities(),
             "samplers": sorted(SAMPLERS),
+            "knobs": runtime.model_knobs(),
             "pixel_channels": runtime.model_pixel_channels(),
         }
 
@@ -343,8 +344,8 @@ def create_app(runtime, *, jobs: Optional[JobQueue] = None) -> FastAPI:
 
     @app.get("/postprocess")
     def postprocess():
-        """The post-decode knobs, described for the web UI to build its controls from."""
-        return {"options": options_schema(PostprocessOptions)}
+        """The loaded medium's post-processing tail, described for a pane to build from."""
+        return {"options": options_schema(runtime.postprocess_options())}
 
     @app.get("/controlmaps")
     def controlmaps():

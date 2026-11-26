@@ -1,9 +1,4 @@
-"""Weight-free job regression tests: the actual cancellation contract.
-
-The queue knows nothing about mediums, so these run on a stand-in payload and renderer;
-what a medium does with the same queue is the business of `test_video_http` and
-`test_jobs_image`.
-"""
+"""Weight-free job tests: the queue knows nothing about mediums, so these run on a stand-in."""
 from __future__ import annotations
 
 import threading

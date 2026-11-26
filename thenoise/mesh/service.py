@@ -8,7 +8,7 @@ from .spec import MeshSpec
 
 
 def mesh_planner(runtime) -> Callable[[MeshSpec], JobPlan]:
-    """Plan mesh jobs against the runtime, which a reload can swap under a running server."""
+    """Nothing of the runtime is held: a reload can swap it under a running planner."""
     def render(spec, token, progress, output):
         runtime.run(lambda controller: controller.render(spec, token, progress, output))
 

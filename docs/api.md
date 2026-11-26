@@ -21,7 +21,7 @@ Start the server with [`serve`](cli.md#serve-a-model-over-http) and TheNoise exp
 | `GET` | `/health` | Server status, what the loaded model produces and its capabilities (see below) |
 | `GET` | `/lora` | List available LoRA names, and the roles they can be given to |
 | `GET` | `/upscalers` | List available pixel upscaler names (works even with no model loaded) |
-| `GET` | `/postprocess` | Describe the post-decode knobs, in the order their filters run (works even with no model loaded) |
+| `GET` | `/postprocess` | Describe the loaded medium's post-processing knobs, in the order their filters run: colour, sharpening and grain, or a shape's finish (works even with no model loaded) |
 | `POST` | `/upscale` | Pixel-upscale an input image (works even with no model loaded) |
 | `GET` | `/controlmaps` | List the extractable control-map types (works even with no model loaded) |
 | `POST` | `/controlmap` | Extract a control map from an input image (works even with no model loaded) |
@@ -200,8 +200,15 @@ one refuses the second picture.
 | `bounds` | number | Half-width of the sampled volume, in latent units |
 | `mc_level` | number | The field value the surface is cut at |
 | `scale` | number | Multiply the written coordinates; no mesh format carries a unit |
+| `floaters` | number | Drop pieces spreading less than this fraction of the widest piece; `0` keeps everything |
+| `triangles` | number | Keep this fraction of the surface detail |
+| `smooth` | number | Ease out the roughness the cut leaves, holding creases |
 | `lora_specs` | string[] \| object | Optional LoRAs, as `name:weight`, looked up in `--lora-dir` |
 | `output_format` | string | `glb`, `obj` or `stl` (model default when omitted) |
+
+`floaters`, `triangles` and `smooth` are described with their labels, defaults and bounds
+by `GET /postprocess`, which describes a shape's finish chain while a shape model is
+loaded.
 
 For a synchronous glb response:
 
@@ -449,6 +456,27 @@ curl -s localhost:8000/upscale \
 }
 ```
 
+What it describes is the tail of the medium that is loaded, since that is what a pane
+has to build: the pixel filters an image or clip decodes into, or the filters a shape
+is cleaned with. With nothing loaded it describes the pixel filters. For a shape model:
+
+```json
+{
+  "options": [
+    {"name": "floaters", "label": "Clean up junk", "type": "number",
+     "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05},
+    {"name": "triangles", "label": "Level of detail", "type": "number",
+     "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05},
+    {"name": "smooth", "label": "Smooth the surface", "type": "number",
+     "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05}
+  ]
+}
+```
+
+The three are described as one dial each: they run in list order, so a request cannot
+say how much to smooth before saying how many triangles to keep, and the pane reads
+the order off this payload rather than repeating it.
+
 ## `GET /controlmaps`
 
 ```json
@@ -558,16 +586,10 @@ with urllib.request.urlopen(req) as r:
 ## Caching
 
 Pipeline stages cache their output, keyed by the request fields that affect them,
-so a request repeated verbatim — same prompt, guidance, size, steps, seed and
-sampler — is served from the cache: identical bytes, a fraction of the time, no
-resampling. A request that omits `seed` (or passes `-1`) draws a fresh seed
-before the key is built and so never hits it; when timing repeated requests, vary
-the seed or prompt.
-
-A video run caches its two encode stages and not the clip: repeating a request
-over the same reference image skips the codec, and one that changes only the
-prompt skips the text encoder as well. A changed image costs the text encoder
-too.
+so a request repeated verbatim is served from the cache: identical bytes, a fraction 
+of the time, no resampling. A request that omits `seed` (or passes `-1`) draws a
+fresh seed before the key is built and so never hits it; when timing repeated 
+requests, vary the seed or prompt.
 
 ## Error semantics
 

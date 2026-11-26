@@ -1,7 +1,8 @@
 import pytest
 import torch
 
-from thenoise.mesh.octree import CORNERS, MIN_LEVEL_RESOLUTION, octree_levels, sample_sdf
+from thenoise.mesh.octree import (CORNERS, MIN_LEVEL_RESOLUTION, octree_levels,
+                           sample_sdf)
 
 
 def sphere(radius=0.5):
@@ -101,6 +102,23 @@ def test_a_field_that_never_reaches_the_level_says_so():
                         device="cpu", start=8)
     assert not volume.cells.any()
     assert volume.span() == "-3.0000..-3.0000"
+
+
+def test_a_band_chases_the_level_and_not_zero():
+    """A cut the field never reaches must end the ladder, not refine every cell: the band
+    is a distance to ``level``, so a level far outside the field's span has nothing near it
+    and the request comes back as "no corner changed sign" instead of a dense sweep."""
+
+    def soft(points):
+        return torch.tanh(2.0 * (points.norm(dim=-1) - 0.4))
+
+    def taken(level):
+        return sample_sdf(soft, 192, device="cpu", bounds=1.01, level=level, band=0.95)
+
+    unreachable = taken(3.0)
+    assert not unreachable.cells.any()
+    assert unreachable.queries == 97 ** 3, "the ladder refined past the level it cannot meet"
+    assert taken(0.0).queries > unreachable.queries, "the band never chased the surface"
 
 
 def test_the_level_selects_which_surface_is_extracted():

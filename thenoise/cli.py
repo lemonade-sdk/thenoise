@@ -6,8 +6,9 @@ from __future__ import annotations
 import argparse
 
 from thenoise.controlmap.options import OPTIONS_BY_KIND, add_option_args
-from thenoise.utils.attention import ATTENTION_CHOICES, ATTENTION_HELP
+from thenoise.mesh.finish.options import MeshFinishOptions
 from thenoise.postprocess.options import PostprocessOptions
+from thenoise.utils.attention import ATTENTION_CHOICES, ATTENTION_HELP
 from thenoise.utils.options import add_flags
 
 
@@ -216,6 +217,7 @@ def _add_mesh_args(p: argparse.ArgumentParser) -> None:
                    help="multiply the written coordinates; a container such as stl "
                         "carries no unit, so a print sizes itself here "
                         "(default: 1.0, the sampled volume itself)")
+    add_flags(p, MeshFinishOptions, bounds=True)
     p.add_argument("--output-format", choices=["glb", "obj", "stl"],
                    help="container; --out's extension is taken when this is left out")
     p.add_argument("--lora", action="append", default=[], metavar="FILE[:WEIGHT]",

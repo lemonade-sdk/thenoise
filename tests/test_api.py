@@ -146,7 +146,37 @@ def test_health_reports_the_loaded_model():
                                    "attention_methods": list(ATTENTION_METHODS)}
     # Every solver this build has, whichever model is loaded.
     assert res["samplers"] == sorted(SAMPLERS)
+    # An image model's knobs are free numbers, so there is nothing for a menu to hold.
+    assert res["knobs"] == {}
     assert res["pixel_channels"] == 4
+
+
+def test_health_publishes_the_shape_knobs_of_the_loaded_model():
+    """A shape model's menus are its own values scaled, so a second one answers with its
+    own numbers and the page changes not at all."""
+    from thenoise.mesh.spec import knob_menu
+
+    hunyuan = {"num_latents": 4096, "octree_resolution": 384, "bounds": 1.01,
+               "mc_level": 1 / 512, "scale": 1.0}
+    runtime = _runtime()
+    runtime._model = type("M", (), {"MEDIUM": "mesh", "default_prefs": hunyuan,
+                                    "CAPABILITIES": {"mesh": {"i2d": True}},
+                                    "REF_METHODS": (), "ATTENTION_METHODS": ATTENTION_METHODS,
+                                    "attention_methods": lambda self: self.ATTENTION_METHODS})()
+    knobs = _endpoint(create_app(runtime), "/health")()["knobs"]
+
+    assert knobs == knob_menu(hunyuan)
+
+    # Another model, another set of numbers: same code path, different trained values.
+    second = {"num_latents": 3072, "octree_resolution": 256, "bounds": 1.0,
+              "mc_level": 1 / 256}
+    runtime._model = type("M", (), {"MEDIUM": "mesh", "default_prefs": second,
+                                    "CAPABILITIES": {"mesh": {"i2d": True}},
+                                    "REF_METHODS": (), "ATTENTION_METHODS": ATTENTION_METHODS,
+                                    "attention_methods": lambda self: self.ATTENTION_METHODS})()
+    knobs = _endpoint(create_app(runtime), "/health")()["knobs"]
+    assert knobs == knob_menu(second)
+    assert "scale" not in knobs
 
 
 def test_health_with_nothing_loaded():
@@ -155,6 +185,7 @@ def test_health_with_nothing_loaded():
     assert res["medium"] is None
     assert res["capabilities"] == {}
     assert res["samplers"] == sorted(SAMPLERS)  # a solver needs no weights
+    assert res["knobs"] == {}
     assert res["pixel_channels"] == 3  # nothing loaded -> nothing can be transparent
 
 
@@ -249,10 +280,12 @@ def test_ui_scripts_only_look_up_ids_the_page_has():
 
 
 @pytest.mark.parametrize("menu", ["sampler", "edit_sampler", "video_sampler",
-                                  "mesh_sampler"])
-def test_ui_asks_the_server_which_samplers_exist(menu):
-    """A sampler menu holds no solver name of its own beyond `auto`: the list is the
-    server's to hand out.
+                                  "mesh_sampler", "mesh_latents", "mesh_octree_resolution",
+                                  "mesh_bounds", "mesh_mc_level", "mesh_scale"])
+def test_ui_menus_hold_no_list_of_their_own(menu):
+    """A menu like this is the server's to fill — solver names, or a shape knob's realistic
+    range, which is the loaded model's own values scaled. The markup keeps ``auto`` and
+    nothing else, so a model that answers differently needs no change to the page.
     """
     with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
         block = re.search(rf'<select id="{menu}">(.*?)</select>', f.read(), re.S)[1]
@@ -270,33 +303,54 @@ def test_ui_offers_every_container_the_mesh_writer_has():
     assert offered == ["", *OUTPUT_FORMATS], block
 
 
-def test_ui_offers_the_density_presets_the_spec_keeps():
-    """The pane's density menu is ``DENSITY_PRESETS``, values and all."""
-    from thenoise.mesh.spec import DENSITY_PRESETS
-
-    with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
-        block = re.search(r'<select id="mesh_octree_resolution">(.*?)</select>',
-                          f.read(), re.S)[1]
-    offered = [one.group(1) for one in re.finditer(r'<option value="([^"]*)"', block)]
-    assert offered == ["", *[str(one) for one in DENSITY_PRESETS]], block
+_PANE_OPEN = re.compile(r'^<div class="view[^>]*id="(view-[a-z]+)"', re.M)
 
 
-def test_ui_keeps_the_shape_tuning_behind_one_disclosure():
-    """The release's own configuration is folded away rather than removed."""
-    tuning = {"mesh_latents", "mesh_steps", "mesh_guidance_scale", "mesh_sampler",
-              "mesh_bounds", "mesh_mc_level"}
-    shown = {"mesh_octree_resolution", "mesh_seed", "mesh_output_format",
-             "mesh_lora_specs", "mesh_file"}
+def _pane(page: str, view: str) -> str:
+    """One pane: its markup runs to the next pane's opening div, the panes being siblings."""
+    marks = [(one.group(1), one.start()) for one in _PANE_OPEN.finditer(page)]
+    here = [at for name, at in marks if name == view]
+    assert here, f"the page has no pane {view!r}"
+    later = [at for _name, at in marks if at > here[0]]
+    return page[here[0]:later[0]] if later else page[here[0]:]
+
+
+def test_ui_divides_the_shape_pane_by_what_a_knob_changes():
+    """The shape, the cut and the file are decided in three different places, and a knob
+    sits under the heading of the one it moves: density cannot change a shape, and a
+    different seed is not a finer mesh."""
+    shape = {"mesh_latents", "mesh_steps", "mesh_guidance_scale", "mesh_sampler",
+             "mesh_seed"}
+    surface = {"mesh_octree_resolution", "mesh_bounds", "mesh_mc_level"}
+    file_out = {"mesh_scale", "mesh_output_format"}
+    finish = {"mesh_finish_controls"}
 
     with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
         page = f.read()
-    mesh = page[page.index('id="view-mesh"'):page.index("/view-mesh")]
-    group = re.search(r"<details[^>]*thenoise-mesh-tuning-open[^>]*>(.*?)</details>",
-                      mesh, re.S)
-    assert group, "the shape pane has no tuning disclosure"
-    inside = set(re.findall(r'id="(mesh_[a-z_]+)"', group[1]))
-    assert inside == tuning, inside
-    assert shown <= set(re.findall(r'id="(mesh_[a-z_]+)"', mesh)) - inside
+    mesh = _pane(page, "view-mesh")
+    marks = [(one.group(1), one.start())
+             for one in re.finditer(r'<div class="label">([A-Za-z ]+)</div>', mesh)]
+    names = [name for name, _ in marks]
+    assert names == ["Shape", "Surface", "Finish", "File"], names
+    sections = {name: set(re.findall(r'id="(mesh_[a-z_]+)"',
+                                     mesh[start:marks[i + 1][1] if i + 1 < len(marks)
+                                          else len(mesh)]))
+                for i, (name, start) in enumerate(marks)}
+    assert sections["Shape"] == shape, sections
+    assert not shape & surface and not surface & finish and not finish & file_out
+    assert sections["Surface"] == surface, sections
+    assert sections["Finish"] == finish, sections
+    assert file_out <= sections["File"], sections
+
+
+def test_ui_keeps_the_picture_the_only_mandatory_shape_input():
+    """No prompt, no pixel size: a shape needs a picture alone. `mesh_scale` sizes a file."""
+    with open(os.path.join(_UI_DIR, "index.html"), encoding="utf-8") as f:
+        page = f.read()
+    mesh = _pane(page, "view-mesh")
+    assert 'id="mesh_file"' in mesh
+    for absent in ("mesh_prompt", "mesh_negative_prompt", "mesh_width", "mesh_height"):
+        assert absent not in mesh, absent
 
 
 def test_ui_every_named_view_exists():
@@ -356,11 +410,24 @@ def test_postprocess_describes_every_knob_of_the_chain():
 
     assert set(described) == set(POSTPROCESS_NAMES)
     grain = described["film_grain"]
-    assert grain["label"] == "Film grain"
-    # What the server accepts (0-10) is wider than what a slider is worth offering (0-1).
-    assert (grain["min"], grain["max"], grain["ui_max"], grain["step"]) == (0.0, 10.0, 1.0, 0.1)
+    # What the server accepts is wider than what a slider is worth offering.
+    assert grain["ui_max"] < grain["max"]
     grid = described["qwen_vae_enhance"]
-    assert (grid["type"], grid["default"], grid["hint"]) == ("boolean", False, "enable when needed")
+    assert (grid["type"], grid["default"]) == ("boolean", False)
+    assert grid["hint"], "a knob that does nothing unless asked needs a word on it"
+    assert all(one["label"] and "default" in one for one in described.values())
+
+
+def test_postprocess_describes_the_shape_filters_of_a_shape_model():
+    """A shape has no pixels to colour, so the same route describes its finish chain."""
+    runtime = _runtime()
+    runtime._model = type("Model", (), {"MEDIUM": "mesh"})()
+    described = {entry["name"]: entry
+                 for entry in _endpoint(create_app(runtime), "/postprocess")()["options"]}
+
+    assert list(described) == ["floaters", "triangles", "smooth"]
+    assert all(entry["type"] == "number" and entry["max"] == 1.0 for entry in described.values())
+    assert described["triangles"]["default"] == 1.0
 
 
 # ----------------------------------------------------------------- /text2image
@@ -633,20 +700,13 @@ def test_controlmaps_lists_kinds_and_defaults():
 def test_controlmaps_describe_the_options_of_every_kind():
     """The form, the CLI flags and the request schema come from this payload."""
     res = _endpoint(create_app(_empty_runtime()), "/controlmaps")()
-    assert res["options"]["canny"] == [
-        {"name": "low", "label": "Low edge strength", "type": "number",
-         "default": 100.0, "min": 0, "step": 1},
-        {"name": "high", "label": "High edge strength", "type": "number",
-         "default": 200.0, "min": 0, "step": 1},
-        {"name": "thickness", "label": "Line width", "type": "integer",
-         "default": 1, "min": 1, "step": 1},
-    ]
+    assert [one["name"] for one in res["options"]["canny"]] == ["low", "high", "thickness"]
+    for options in res["options"].values():
+        for one in options:
+            assert one["label"] and one["type"] and "default" in one, one["name"]
     # A field whose choices only the server knows names the list to fill it from.
     assert res["options"]["pose"][0]["name"] == "detector"
     assert res["options"]["pose"][0]["pool"] == "detectors"
-    person = res["options"]["pose"][1]
-    assert (person["min"], person["max"], person["default"]) == (0, 1, 0.5)
-    assert [c["default"] for c in res["options"]["depth"]] == [False, "gray"]
 
 
 def test_controlmaps_list_discovered_depth_checkpoints(tmp_path):

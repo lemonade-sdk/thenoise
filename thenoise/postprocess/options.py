@@ -13,10 +13,12 @@ that wants nothing gets the very tensor it was handed back.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 
-from thenoise.utils.options import option, option_names, validate
+from thenoise.utils.options import (FilterSpec, chain_in_stage, declared_chain,
+                                   defaults_of, flat_values, option,
+                                   option_names, validate)
 
 #: Right after the VAE decode, at the native decoded resolution.
 DECODE = "decode"
@@ -73,60 +75,22 @@ class PostprocessOptions:
 POSTPROCESS_NAMES = option_names(PostprocessOptions)
 
 #: The default of every knob, which is by definition its "off" value.
-DEFAULTS: Dict[str, Any] = {
-    name: getattr(PostprocessOptions, name) for name in POSTPROCESS_NAMES
-}
+DEFAULTS: Dict[str, Any] = defaults_of(PostprocessOptions)
 
 
-@dataclass(frozen=True)
-class FilterSpec:
-    """One filter in the chain: the knobs it reads, and the stage it runs in."""
-
-    name: str
-    options: Tuple[str, ...]
-    stage: str
-
-
-def _declared_chain() -> Tuple[FilterSpec, ...]:
-    """The filters in chain order, taking each one's knobs from the declaration."""
-    chain, declared = [], set()
-    for entry in fields(PostprocessOptions):
-        meta = entry.metadata
-        for key in ("filter", "stage"):
-            if key not in meta:
-                raise ValueError(f"{entry.name} declares no {key}")
-        name, stage = meta["filter"], meta["stage"]
-        if name in declared and chain[-1][0] != name:
-            # A filter takes all its knobs at once, so splitting them across another
-            # filter's would ask it for the half it is not handed.
-            raise ValueError(
-                f"{name} knobs must be declared together: {entry.name} splits them"
-            )
-        declared.add(name)
-        if chain and chain[-1][0] == name:
-            chain[-1] = (name, chain[-1][1] + (entry.name,), stage)
-        else:
-            chain.append((name, (entry.name,), stage))
-    return tuple(FilterSpec(name, options, stage) for name, options, stage in chain)
-
-
-CHAIN = _declared_chain()
+CHAIN = declared_chain(PostprocessOptions)
 
 
 def filter_specs(stage: str) -> Tuple[FilterSpec, ...]:
     """The filters of one stage, in chain order."""
-    return tuple(spec for spec in CHAIN if spec.stage == stage)
+    return chain_in_stage(CHAIN, stage)
 
 
 def flat_options(holder: Any) -> Dict[str, Any]:
     """The knobs read off anything that carries them flat — a request, an argparse
     namespace, a wire model — as ``GenerateRequest`` keyword arguments.
     """
-    missing = [name for name in POSTPROCESS_NAMES if not hasattr(holder, name)]
-    if missing:
-        raise ValueError(f"{type(holder).__name__} carries no post-process field "
-                         f"{', '.join(missing)}")
-    return {name: getattr(holder, name) for name in POSTPROCESS_NAMES}
+    return flat_values(PostprocessOptions, holder, noun="post-process")
 
 
 def options_from(holder: Any) -> PostprocessOptions:
