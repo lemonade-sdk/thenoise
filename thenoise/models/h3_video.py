@@ -1,20 +1,9 @@
 """H3 video adapter — one packed sequence carrying a clip and its sound.
 
-Two streams, one solver. The picture runs the shifted-flow ladder its release was sampled
-on (shift 12.0) and the sound runs its own (3.0), so a step of the video schedule is a
-different amount of progress for each of them: the solver holds the audio as a *carry* —
-:mod:`thenoise.dit.h3.sampling` states the affine map — and the two conversions live here,
-at the edge where the stream enters and leaves the loop. Nothing about the solver knows
-there are two modalities, which is what lets previews, stages and memory sizing stay as
-they are for a silent model.
-
-A keyframe is not written into the clip. It joins the sequence as extra conditioned rows
-— the same spatial grid, one latent frame, read at the conditioned timestep — so a clip can
-start and end on a picture without either frame being denoised or re-injected mid-run.
-
-The two codecs keep their own clocks and the frame rate reconciles them: the picture's
-length is whatever the video codec decodes back from its latent frames, and the sound's is
-forty latent frames to the second, so a request's frame count and fps decide both shapes.
+Two streams, one solver, so the audio travels in a *carry* whose affine map lives in
+:mod:`thenoise.dit.h3.sampling` and the two conversions in and out of it live here. The
+codecs keep their own clocks: the picture's length is what the video codec decodes back from
+its latent frames, the sound's forty latent frames to the second.
 """
 from __future__ import annotations
 
@@ -70,10 +59,8 @@ TRAINING_AREA = 768 * 1344
 
 @dataclass
 class H3VideoConditioning(Conditioning):
-    """``Conditioning`` plus the per-branch modality tags the DiT modulates by.
-
-    Per-branch because the two prompts carry the keyframes at different offsets whenever
-    the negative prompt is not empty.
+    """``Conditioning`` plus the modality tags the DiT modulates by, per branch: an
+    non-empty negative prompt puts the keyframes at a different offset in each.
     """
 
     tags: Optional[torch.Tensor] = None
@@ -84,9 +71,7 @@ class H3VideoConditioning(Conditioning):
 class _Streams:
     """The run's two latents, and the one flat tensor the solver steps between them.
 
-    One solver means one tensor, and the streams cannot share an axis: a video latent is a
-    spatio-temporal lattice and an audio latent is a stereo pair of feature tracks. So the
-    pack is flat and the split is a count, held here rather than repeated at each end.
+    The streams cannot share an axis, so the pack is flat and the split is a count.
     """
 
     video: Tuple[int, int, int, int]
@@ -115,7 +100,7 @@ class _Streams:
 
 
 class H3VideoModel(VideoModel):
-    """MiniMax H3 ``fl2va``: text-to-video with audio, optionally keyed on two frames."""
+    """MiniMax H3: video with audio, keyed on frames or conditioned on references."""
 
     name = "h3_video"
 
@@ -132,14 +117,11 @@ class H3VideoModel(VideoModel):
     CAPABILITIES = {**VideoModel.CAPABILITIES, "upscale": False,
                     "video": {"t2v": True, "i2v": True, "flf2v": True,
                                   "ref2v": True}}
-    # Routing applies to a clip. A still is held dense by measurement, so the image half
-    # of this family does not offer the word at all.
+    # Routing is measured good on a clip and bad on a still.
     ATTENTION_METHODS = (*VideoModel.ATTENTION_METHODS, "optimized")
 
     #: A keyframe enters at a fixed timestep and is never denoised, which is what
-    #: ``index_timestep_zero`` means here; that it arrives as extra rows rather than as an
-    #: overwritten latent frame is the model's business, and ``prepare_latent`` is where it
-    #: says so.
+    #: ``index_timestep_zero`` means here.
     REF_METHODS = ("index_timestep_zero",)
 
     SIGNATURE = H3_AV_SIGNATURE
@@ -234,16 +216,12 @@ class H3VideoModel(VideoModel):
         return [cover_crop(image, target[0], target[1]) for image in images]
 
     def fit_guides(self, images, target):
-        """The same crop, and no ceiling on how many: the timeline runs out of frames to
-        key, not of things the clip may be asked to resemble."""
+        """The same crop, and no ceiling on the count."""
         return [cover_crop(image, target[0], target[1]) for image in images]
 
     def encode_references(self, pixels, frames=1) -> List[torch.Tensor]:
-        """One latent per keyframe, in the order the prompt labels them.
-
-        A keyframe is a single frame, which is what the codec's encoder answers for one
-        frame: its posterior mean, the same answer every time. It is the *layout* that
-        decides where in the clip's timeline the frame sits, not this call.
+        """One latent per keyframe, in the order the prompt labels them: one frame in is
+        the codec's posterior mean, the same answer every time.
         """
         with torch.no_grad():
             return [self.vae.encode_pixels_to_latents(image[None, :, None])
@@ -251,10 +229,10 @@ class H3VideoModel(VideoModel):
 
     # ------------------------------------------------------------ conditioning
     def encode_prompt(self, args: EncodePromptArgs) -> H3VideoConditioning:
-        """Prompt and keyframes through the language model, as raw conditioning.
+        """Prompt and pictures through the language model, as raw conditioning.
 
-        The negative branch sees the same pictures: a keyframe is what the clip is asked to
-        start and end on, not something to steer away from.
+        The negative branch sees the same pictures: a keyframe is not something to steer
+        away from.
         """
         images = [resize_to_short_edge(img, VISION_SHORT_EDGE, align=CANVAS_MULTIPLE)
                   for img in _as_list(args.image)]
@@ -292,10 +270,8 @@ class H3VideoModel(VideoModel):
                         audio=(self.audio_vae.z_dim, 2, audio_t))
 
     def init_latents(self, params: VideoSamplingParams) -> torch.Tensor:
-        """Noise for both streams, as one flat row the solver steps as a unit.
-
-        Neither stream needs pre-scaling to travel together: the carry is 1 at pure noise,
-        which is all either of them is here.
+        """Noise for both streams as one flat row: the carry is 1 at pure noise, so neither
+        stream needs pre-scaling to travel together.
         """
         dev = torch.device(self.device)
         streams = self._streams(params)
@@ -315,9 +291,8 @@ class H3VideoModel(VideoModel):
     ) -> torch.Tensor:
         """Build the packing this run steps through; the latent itself is untouched.
 
-        ``conditions`` are what the request asked the clip to resemble, already through the
-        codec: anchored at one of its frames, or -- with no frame -- packed ahead of the
-        clip's timeline on the grid they arrived with.
+        ``conditions`` have been through the codec already, each with the frame it is
+        anchored at or with none.
         """
         keyframes = _as_list(ref)
         if (keyframes or conditions) and ref_method != "index_timestep_zero":
@@ -393,11 +368,9 @@ class H3VideoModel(VideoModel):
         guidance_scale: float,
         i: int,
     ) -> torch.Tensor:
-        """One packed forward over both streams, answering one velocity for the pack.
-
-        ``t`` is the video sigma; the audio's is where the audio schedule puts it at that
-        same progress. Both streams are read at their own sigmas and returned in the
-        carried variable, which is the one the solver steps.
+        """One packed forward over both streams. ``t`` is the video sigma; the audio's is
+        where its own schedule puts the same progress. The answer comes back in the carried
+        variable, which is the one the solver steps.
         """
         sigma = float(t)
         velocity = self._velocity(latents, sigma, cond.cond, self._layout,
@@ -435,10 +408,9 @@ class H3VideoModel(VideoModel):
     def decoded_pixels(self, spec: ResolvedVideo) -> int:
         """One clip walk's worth of pixels, which is not one frame's.
 
-        The decoder re-reads each clip's overlap and composites every frame of the clip it
-        is walking before it hands one back, so the canvas is live times the frames of that
-        clip however finely it is tiled in space — a stage sized by a single frame of the
-        clip survives only by being retried.
+        The decoder re-reads each clip's overlap and composites the whole clip before it
+        hands a frame back, so the canvas is live times that clip's frames however finely
+        it is tiled in space.
         """
         plan = TemporalPlan.of(1)
         return spec.width * spec.height * (plan.chunk_tokens
@@ -457,8 +429,8 @@ class H3VideoModel(VideoModel):
                      params: VideoSamplingParams) -> Optional[Waveform]:
         """The pack's audio slice, un-carried, then through the vocoder.
 
-        The carry ends at ``S``, the ratio of the two shifts, so the finished slice is
-        ``S`` times the latent the codec was trained on — whatever the path there was.
+        The carry ends at ``S``, the ratio of the two shifts, so what reaches the vocoder is
+        ``S`` times the latent it was trained on.
         """
         _, carried = self._streams(params).split(latents)
         own = h3_sampling.carry(carried, 0.0, shift=params.flow_shift)
@@ -467,10 +439,8 @@ class H3VideoModel(VideoModel):
 
     def decode_frames(self, latents: torch.Tensor,
                       params: VideoSamplingParams) -> Iterator[torch.Tensor]:
-        """The pack's video slice, decoded a clip at a time and handed out a frame at a time.
-
-        The codec yields whole runs of frames and the container wants one at a time, and it
-        has already clamped to the range the pipeline works in.
+        """The pack's video slice, decoded a clip at a time and yielded a frame at a time,
+        already clamped to the range the pipeline works in.
         """
         video, _ = self._streams(params).split(latents)
         for run in self.vae.decode_to_pixel_frames(video.to(self.device)):

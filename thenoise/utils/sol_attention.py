@@ -1,16 +1,10 @@
-"""The generic half of block-sparse attention: the kernel's own rules, and a readout of
-what it decided.
+"""Block-sparse attention's kernel-side rules, and a readout of what they decided: what
+the kernel accepts, the operand order it reads, its arguments, and how many key blocks a
+threshold actually kept.
 
-Everything here is model-agnostic: what the kernel accepts, the order it reads operands
-in, the arguments it takes, and how many key blocks a given threshold actually kept. A
-model contributes the two things only it can know — which rows are conditioning, and
-whether its family routes at all — and the engine asks it for a plan.
-
-The kept-fraction readout exists because ``tau`` is a significance level on a proxy row
-rather than a budget: the same value keeps a different fraction of the sequence depending
-on how the scores happen to be distributed, so a run tuned without that number visible is
-tuned blind. It is a measurement rather than a record of a rule, and it runs only under
-debug logging: once per threshold and sequence length, on the operands of a real call.
+``tau`` is a significance level on a proxy row, not a budget, so the kept fraction moves
+with the score distribution and a run tuned without seeing it is tuned blind. That
+readout is a measurement, so it costs work: debug level, once per threshold and length.
 """
 
 from __future__ import annotations
@@ -28,20 +22,17 @@ logger = logging.getLogger(__name__)
 #: The kernel's query and key block, in tokens. Sink ranges and the kept-fraction readout
 #: are counted in these.
 BLOCK = 64
-#: The head width the fused backends are built for. Every codec and decoder width in this
-#: catalog is 64 and therefore never qualifies; trunk widths do.
+#: The head width the fused backends are built for.
 HEAD_DIM = 128
-#: What the fused backends read. Every weight mode this engine runs computes in one of
-#: them, so this asks about activations and never about how a checkpoint stores weights.
+#: What the fused backends read: activations, not however a checkpoint stores weights.
 DTYPES = (torch.bfloat16, torch.float16)
 
 #: One token per query block routes individually; 256 is the kernel's maximum.
 TOKEN_AUG_MAX = 256
 
-#: Below this many tokens a call is not worth routing: dense is faster. The crossover moves
-#: with head width — which every 128-wide trunk in this catalog shares — rather than with what
-#: a model generates, so they share this number until one measures a different one. A request
-#: for ``optimized`` attention is not held by it.
+#: Below this many tokens a call is not worth routing: dense is faster. It is a crossover
+#: measurement, and it moves with head width rather than with content, so a request for
+#: ``optimized`` attention is not held by it.
 MIN_TOKENS = 12288
 
 
@@ -84,9 +75,8 @@ _LOG_LIMIT = 32
 def claim(key) -> bool:
     """Whether this key is new, claiming it if so.
 
-    Separate from :func:`log_once` because the kept-fraction readout is a pass over the
-    operands rather than a string, and work whose only consumer is a log line should be
-    skipped by the same test that skips the line.
+    Separate from :func:`log_once` because some guarded work is a pass over the operands,
+    and work whose only point is a log line is skipped by the same test as the line.
     """
     if key in _LOGGED or len(_LOGGED) >= _LOG_LIMIT:
         return False
@@ -95,10 +85,8 @@ def claim(key) -> bool:
 
 
 def log_once(key, level: int, message: str, *args) -> None:
-    """One line per distinct key per process, so a run says anything once and not 1000x.
-
-    A run that flips between dense and sparse produces a bounded number of keys either way
-    (reason, token count); the cap is only so a pathological loop cannot grow it.
+    """One line per distinct key per process. The cap only stops a pathological loop from
+    growing the record.
     """
     if claim(key):
         logger.log(level, message, *args)
@@ -114,13 +102,12 @@ def dense_reason(*, tokens: int, dtype: torch.dtype, head_dim: int, device,
                  cached: bool = False) -> Optional[str]:
     """Why this call cannot be routed, or ``None`` when it can be.
 
-    The kernel's limits — width, dtype, device, and a length below which dense wins — plus
-    one that is not the kernel's but is never worth trying: a call whose keys live in a
-    cache buffer has no honest sink range to hand over, and the sinks are why a routed run of
-    a conditioned model can be trusted at all.
+    Width, dtype, device and a length below which dense wins are the kernel's own limits.
+    The cache one is not: a call whose keys live in a cache buffer has no honest sink range,
+    and the sinks are what makes a routed run of a conditioned model trustworthy.
 
-    ``min_tokens`` defaults to :data:`MIN_TOKENS` read at call time, not bound as a default,
-    so a trunk can lower it for a test without restating the rest of the gates.
+    ``min_tokens`` is read at call time rather than bound as a default, so it can be lowered
+    without restating the other gates.
     """
     floor = MIN_TOKENS if min_tokens is None else min_tokens
     if tokens < floor:
@@ -139,16 +126,13 @@ def dense_reason(*, tokens: int, dtype: torch.dtype, head_dim: int, device,
 def routing_stats(q: torch.Tensor, k: torch.Tensor, tau: float,
                   sink_blocks: Tuple[int, int] = (0, 0),
                   sink_q: Tuple[int, int] = (0, 0)) -> RoutingStats:
-    """The kernel's own routing test, counted instead of applied.
+    """The kernel's own routing test, counted instead of applied: a proxy row per query
+    block, its centroid against every centred key-block centroid, and ``tau`` sigmas of that
+    row under an independence null. Costs GFLOPs, so once per shape rather than per block.
 
-    A proxy row per query block — its centroid against every centred key-block centroid —
-    and a threshold of ``tau`` sigmas of that row under an independence null, which is the
-    test the fused kernels run inside their online softmax. Costs a few GFLOP at 38 k
-    tokens, so: once per shape, not once per block.
-
-    The always-exact parts are added the way the kernel adds them — a key block either side
-    of the query block, the sink key range, and every key for a sink query row — because
-    what matters for tuning is the total budget, not the share the threshold chose.
+    The always-exact parts are counted as the kernel adds them — the neighbouring key block,
+    the sink range, every key for a sink query row — because tuning wants the total budget,
+    not the share the threshold chose.
     """
     batch, tokens, heads, head_dim = q.shape
     n = -(-tokens // BLOCK)

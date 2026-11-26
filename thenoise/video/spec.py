@@ -49,11 +49,10 @@ def mode_of(image: bytes | None, end_image: bytes | None,
 
 @dataclass(frozen=True)
 class Guide:
-    """One condition the clip is asked to resemble, and where it belongs.
+    """One condition the clip is asked to resemble.
 
-    No ``frame`` means a reference: the clip should look like it, without it being any
-    frame of the clip. A ``frame`` -- negative counted from the end, which is how a request
-    names the last one without knowing the frame count yet -- anchors it there instead.
+    ``frame``, negative counted from the end, anchors it there; without one it is a
+    resemblance and no frame of the clip.
     """
 
     pixels: bytes
@@ -128,8 +127,7 @@ class VideoSpec(BaseModel):
     image: Annotated[bytes, Field(min_length=1)] | None = None
     end_image: Annotated[bytes, Field(min_length=1)] | None = None
     references: list[Guide] = []
-    #: ``auto``, ``full`` or ``optimized``; what this model answers is its own
-    #: ``ATTENTION_METHODS``, and a request outside them is refused at resolve.
+    #: ``auto``, ``full`` or ``optimized``.
     attention: str | None = None
     sampler: Annotated[str, Field(min_length=1)] | None = None
     lora_specs: LoraSpecs = None

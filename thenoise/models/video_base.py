@@ -34,9 +34,8 @@ class Segment:
     module: torch.nn.Module
     steps: tuple[Step, ...]
     guidance_scale: float
-    #: What the request asked for. ``steps`` says where this span sits in the schedule;
-    #: this says what the latents it walks are a picture of, which a flat latent cannot
-    #: tell a codec whose stream carries more than one modality.
+    #: What the latents this span walks are a picture of: a flat latent cannot tell a
+    #: codec whose stream carries more than one modality.
     params: VideoSamplingParams
 
 
@@ -56,10 +55,8 @@ class Waveform:
 class Condition:
     """A condition a clip run reads alongside its own frames, already through a codec.
 
-    ``frame`` pins it to a pixel frame of the clip, negative counted from the end. Without
-    one it is something the clip is only asked to resemble: it keeps the grid it arrived
-    with instead of the clip's, and takes time ahead of the clip's timeline rather than a
-    place within it.
+    ``frame``, negative counted from the end, pins it there; without one it keeps the grid
+    it arrived with and takes time ahead of the clip's timeline.
     """
 
     video: Optional[torch.Tensor] = None
@@ -74,14 +71,11 @@ class VideoModel(PixelModel):
                     "video": {"t2v": False, "i2v": False, "flf2v": False,
                                   "ref2v": False}}
 
-    #: Whether the architecture takes reference *conditions* at all -- pictures, clips
-    #: or audio anchored at a frame index, which is a different thing from a keyframe:
-    #: a keyframe is the clip's first or last frame, a reference is something the clip
-    #: is asked to look like. A request carrying references is refused when this is
-    #: False, because the packing has nowhere to put them. Nothing in a checkpoint says
-    #: which release it is, so the architecture answers, not the filename.
+    #: Whether the architecture has anywhere in its packing for reference conditions,
+    #: which are not the frames a clip starts or ends on. Nothing in a checkpoint says
+    #: which release it is, so this is answered by the architecture, not by a filename.
 
-    #: Shared video prefs; ``test_video_shared.py`` checks each variant covers them all.
+    #: The prefs every video variant must answer, whatever its own defaults are.
     DEFAULT_PREFS = {**PixelModel.DEFAULT_PREFS, "attention": DEFAULT_ATTENTION,
                      "negative_prompt": "", "output_format": "webm"}
 
@@ -115,11 +109,8 @@ class VideoModel(PixelModel):
     # ------------------------------------------------------------ schedule
     def transition_segment(self, latents: torch.Tensor, previous: Segment,
                            next_segment: Segment, params, token) -> torch.Tensor:
-        """Optional model-specific latent transition between complete segments.
-
-        Called after the previous stage releases its weights and before the next
-        stage is held. Wan's high/low experts share latents unchanged. AV models
-        may use a separate staged spatial upscaler here.
+        """Optional latent transition between complete segments, run after the previous
+        stage releases its weights and before the next is held.
         """
         return latents
 
@@ -128,16 +119,13 @@ class VideoModel(PixelModel):
 
     def segments(self, params, schedule: Sequence[Step],
                  guidance_scale: float) -> list[Segment]:
-        """The schedule split by the component that answers each span.
-
-        The controller stages each segment, switches LoRAs on its module and runs the
-        solver over its steps, so a model with more than one transformer says only where
-        the spans are.
+        """The schedule split by the component that answers each span: a model with more
+        than one transformer says only where the spans are.
         """
         return [Segment("dit", self.dit, tuple(schedule), guidance_scale, params)]
 
     def begin_segment(self, segment: Segment) -> None:
-        """Tell ``denoise_step`` which segment it is inside; called before each one."""
+        """Called before each segment with the one the run is now inside."""
         self._segment = segment
         self._attention = segment.params.attention
 

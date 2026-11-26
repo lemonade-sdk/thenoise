@@ -1,15 +1,11 @@
 """The packed token sequence one H3 run reads over.
 
-The prompt, the conditioned pictures and the target lattices share one row sequence, every
-row carrying a ``(t, h, w)`` rope coordinate. Spatial coordinates are area-normalised —
-the model was trained at any size, not at a fixed grid — in units of 1/32 of the lattice's
-side, and one row is a 2x2 block of latent cells rather than a cell.
+Prompt, conditioned pictures and target lattices share one row sequence, every row carrying
+a ``(t, h, w)`` rope coordinate in units of 1/32 of the lattice's side, one row per 2x2 block
+of latent cells. Spatial coordinates are area-normalised: the model was trained at any size.
 
-Attention over the sequence is unmasked, so the packing order is free and only two things
-decide what a row does: where it sits on the time axis, and which modulation row it reads.
-That makes the order a policy, one per variant — :meth:`Layout.image` puts the references
-last so a run's K/V cache can freeze them as a suffix (:mod:`thenoise.dit.kvcache`), while
-:meth:`Layout.av` keeps the released order, conditions first.
+Attention is unmasked, so only two things decide what a row does — where it sits on the time
+axis, and which modulation row it reads — and the packing order is a policy per variant.
 """
 from __future__ import annotations
 
@@ -18,14 +14,12 @@ from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 import torch
 
-#: One reference picture's latent shape, the only kind the image model accepts.
+#: One reference picture's latent shape.
 RefShape = Tuple[int, int]
 
 class Keyframe(NamedTuple):
-    """A condition pinned to a pixel frame of the clip, on the target's own grid.
-
-    ``latent_t`` latent frames, read at that pixel frame's time coordinate: one for a
-    keyframe, several for a guide clip.
+    """A condition pinned to a pixel frame of the clip, on the target's own grid: so many
+    latent frames, all read at that frame's time coordinate.
     """
 
     frame: int
@@ -35,10 +29,8 @@ class Keyframe(NamedTuple):
 class Reference(NamedTuple):
     """A condition the clip is asked to resemble, which is not a frame of the clip.
 
-    A reference is packed ahead of the target timeline and keeps its own spatial grid --
-    the released pipeline sizes it to the generation's area or to a 2048px short edge, not
-    to the canvas -- so it occupies rope time units of its own and moves the whole target
-    ahead of them.
+    Packed ahead of the target timeline on the grid it arrived with, so it takes rope time
+    units of its own and moves the whole target ahead of them.
     """
 
     kind: str
@@ -54,9 +46,9 @@ def ref_span(ref: Reference) -> float:
 #: Latent cells per DiT token: one frame, a 2x2 spatial block.
 PATCH_SIZE = (1, 2, 2)
 
-#: The codec's decode plan: five latent frames cover seventeen pixel frames. The video VAE
-#: derives the same schedule from its own geometry and a test ties the two, since sharing one
-#: constant would mean the DiT importing the module that carries the codec.
+#: The codec's decode plan: five latent frames cover seventeen pixel frames. The codec
+#: derives the same schedule from its own geometry; sharing a constant would mean importing
+#: the codec.
 FRAME_PER_TOKEN = (1, 4, 4, 4, 4)
 
 #: Rope time units per pixel frame. The time axis runs in audio latent frames — forty a
@@ -67,7 +59,7 @@ FRAME_RESCALE = 5.0 / 3.0
 #: read at it instead of the step's, so it is never treated as something to denoise.
 COND_TIMESTEP = 0.999
 
-#: The audio stream's own label. Nothing conditions on audio yet, so no row takes it.
+#: The audio stream's own label.
 AUDIO_COND_TIMESTEP = 1.0
 
 #: The adaLN modality tag of each segment kind: 0 for anything that came out of a codec
@@ -79,8 +71,7 @@ SEG_TAG = {"text": 1, "video": 0, "audio": 2, "cond": 0, "ref_img": 0,
 SEG_EMBED = {"text": None, "video": "video", "cond": "video", "ref_img": "video",
              "audio": "audio", "cond_audio": "audio", "ref_audio": "audio"}
 
-#: Rows of the modulation table one timestep owns. The tag space is the audiovisual
-#: model's; the image model writes 0 and 1.
+#: Rows of the modulation table one timestep owns.
 MODALITIES = 3
 
 
@@ -97,9 +88,8 @@ def _axis(dim: int, patch: int, sqrt_area: float) -> torch.Tensor:
 
 
 def frame_grid(latent_h: int, latent_w: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    """The ``(h, w)`` coordinates of one frame's patch rows, and the width axis.
-
-    Row-major, matching the order :meth:`thenoise.dit.h3.trunk.H3DiT.patchify` gives.
+    """The ``(h, w)`` coordinates of one frame's patch rows, row-major as ``patchify``
+    produces them, and the width axis.
     """
     area = math.sqrt(latent_h * latent_w)
     h_axis = _axis(latent_h, PATCH_SIZE[1], area)
@@ -138,11 +128,9 @@ def _video_grid(latent_t: int, frame: torch.Tensor, origin: float) -> torch.Tens
 
 
 def _audio_grid(latent_t: int, origin: float, w_low: float, w_high: float) -> torch.Tensor:
-    """The audio stream's rows: channel-major, so the whole of one channel then the other.
-
-    ``t`` advances once per audio latent frame — one rope unit is one of them — and the
-    two stereo channels are pinned to the extremes of the target's width axis rather than
-    to positions of their own, because the stream has no spatial extent.
+    """The audio stream's rows: channel-major, one rope unit per audio latent frame, and
+    the two channels pinned to the extremes of the target's width axis because the stream
+    has no spatial extent of its own.
     """
     grid = torch.zeros(latent_t * 2, 3, dtype=torch.float64)
     grid[:, 0] = (origin + torch.arange(latent_t, dtype=torch.float64)).repeat(2)
@@ -154,10 +142,9 @@ def _audio_grid(latent_t: int, origin: float, w_low: float, w_high: float) -> to
 class Timesteps(NamedTuple):
     """The run's distinct timesteps, and the modulation row each segment kind reads.
 
-    The table is indexed ``row * MODALITIES + tag``, so a run's rows are the sorted set of
-    the timesteps its segments actually carry: prompt and targets follow the step, a
-    conditioned row keeps its pinned label even at the last step, where the two coincide
-    and the set collapses to one row.
+    The table is indexed ``row * MODALITIES + tag``, and a run's rows are the sorted set of
+    the timesteps its segments actually carry — which collapses to one row when a pinned
+    timestep and the step's coincide.
     """
 
     values: Tuple[float, ...]
@@ -201,10 +188,9 @@ class _Packing:
 class Layout:
     """Segment spans, rope coordinates and modulation rows for one shape.
 
-    ``latents`` is the *patch-padded* ``(t, h, w)`` a forward has to present; building the
-    layout for one shape and feeding it another is the one mistake a packed run can make
-    silently, so a forward checks it. Each variant builds one through its own classmethod:
-    what differs is which segments exist and how they are ordered, not how a row is placed.
+    ``latents`` is the *patch-padded* ``(t, h, w)`` a forward must present: building one for
+    a shape and feeding it another is the mistake a packed run makes silently, so a forward
+    checks it.
     """
 
     def __init__(self, text_len: int, latents: Tuple[int, int, int],
@@ -215,7 +201,7 @@ class Layout:
         self.position_ids = torch.cat(packing.positions)
         self.seq_len = packing.offset
         self.kinds = frozenset(kind for _, _, kind in packing.segments)
-        #: The streams' own spans: the only two the output heads read.
+        #: The streams' own spans.
         self.video_span = _span_of(packing.segments, "video")
         self.audio_span = _span_of(packing.segments, "audio")
         #: Rows each embedding consumes, in packing order.
@@ -227,10 +213,10 @@ class Layout:
     @classmethod
     def image(cls, text_len: int, latent_h: int, latent_w: int,
               refs: Sequence[RefShape] = ()) -> "Layout":
-        """``[text | target | references]`` — one frame, with the references as a suffix.
+        """``[text | target | references]`` — one frame, references as a suffix.
 
-        A reference takes one unit of the time axis, so the target's frame sits behind all
-        of them in the coordinates while being packed ahead of them in the rows.
+        Each reference takes one unit of the time axis, so the target sits behind them in
+        the coordinates while being packed ahead of them in the rows.
         """
         frame, _ = frame_grid(latent_h, latent_w)
         packing = _Packing(text_len)
@@ -247,24 +233,16 @@ class Layout:
            refs: Sequence[Reference] = ()) -> "Layout":
         """``[text | conditions | references | audio | video]`` — the released packing.
 
-        A keyframe given as a bare integer is one frame of the target's grid; a
-        :class:`Keyframe` adds the frames of a guide clip and the audio of an audio guide.
-        A reference given as a :class:`Reference` keeps its own grid.
-
-        A keyframe is anchored *inside* the clip's timeline, at a pixel frame of it; a
-        reference is packed *ahead* of that timeline, so the clip and everything anchored
-        in it start after the references' spans. Both conditions and references are read at
-        the conditioned timestep and never denoised.
-
-        Conditions come first in the rows, then references, which is the order the trunk
-        takes their latents in.
+        A keyframe is anchored *inside* the clip's timeline; a reference is packed *ahead*
+        of it, so the clip and everything anchored in it start after the references' spans.
+        Conditions take the target's grid, references their own. Both are read at the
+        conditioned timestep, never denoised, and the latents come back in row order:
+        conditions, then references.
         """
         frame, w_axis = frame_grid(latent_h, latent_w)
         w_low, w_high = float(w_axis[0]), float(w_axis[-1])
-        # A bare pixel-frame index is the common case: one frame, no audio.
         keyframes = [k if isinstance(k, Keyframe) else Keyframe(k) for k in keyframes]
-        # The target timeline's origin, and every anchor within it, sits behind the
-        # references: they are not frames of this clip and take time units of their own.
+        # The target's origin is behind the references, and so is every anchor within it.
         origin = float(text_len) + sum(ref_span(ref) for ref in refs)
         packing = _Packing(text_len)
 
@@ -296,11 +274,10 @@ class Layout:
                         tags: Optional[torch.Tensor] = None) -> List[Tuple[int, int, int]]:
         """``(start, stop, modulation_row)`` covering the sequence, contiguous.
 
-        A segment's row is its timestep's, offset by its modality tag: reading the wrong
-        one conditions a picture as something to denoise, or denoises a target as if it
-        were held. ``tags`` is the text encoder's per-token tag vector — the prompt is the
-        one segment that mixes tags, because the vision placeholders inside it carry the
-        visual tag — or ``None`` for a text-only prompt.
+        A segment's row is its timestep's, offset by its modality tag: read the wrong one
+        and a picture is denoised or a target is held. ``tags`` is the conditioner's
+        per-token tag vector, or ``None`` for a text-only prompt; the prompt is the one
+        segment that mixes tags, its vision placeholders carrying the visual one.
         """
         segments = []
         for start, stop, kind in self.segments:
@@ -335,10 +312,8 @@ def _tag_runs(start: int, stop: int, row_base: int, tags: torch.Tensor
 
 def pad_to_patch(latent: torch.Tensor, patch_size: Tuple[int, ...]
                  ) -> Tuple[torch.Tensor, Tuple[int, ...]]:
-    """Repeat-pad a latent onto a whole ``patch_size`` tile, over every axis it has.
-
-    The tile is matched to the latent from the right, so a still is padded by the spatial
-    part of a clip's tile. Returns the padded latent and the original trailing dimensions
+    """Repeat-pad a latent onto a whole ``patch_size`` tile, matched from the right, so a
+    still takes the spatial part of a clip's tile. Returns it with the trailing dimensions
     the output is cut back to.
     """
     trailing = latent.shape[2:]
