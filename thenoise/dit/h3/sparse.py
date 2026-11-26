@@ -1,39 +1,25 @@
-"""Sol attention on the MiniMax-H3 trunk: which runs route, and with what numbers.
+"""Sol attention on the MiniMax-H3 trunk: which rows a routed step keeps exact.
 
-The generic half — the kernel's rules, its operand order, what a threshold kept — is in
+The kernel's rules and the gates every run passes are in
 :mod:`thenoise.utils.sol_attention`. What is H3's own is short: the sinks, because only a
-packing can say which rows are conditioning, and the family rules, because only this model
-knows what routing did to its own output.
+packing can say which rows are conditioning, and the window, because a percent of the
+schedule means something else on a schedule shifted by 12.
 
-A request can ask for this and be refused by the rules below; which route a call took is debug
-traffic, and what a run measured -- the fraction of key blocks the kernel kept -- is the one
-thing reported, by :mod:`thenoise.utils.sol_attention`.
+Stills do not route at all: routed, H3-Image degrades visibly, and the mechanism fits — the
+threshold is fitted to proxy rows that look near-Gaussian, which a smooth spatial field does
+not, so routing keeps only the always-exact diagonal and stops responding to tau. That is
+why the image model does not list ``optimized`` and never builds a plan, rather than vetoing
+one here.
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Optional, Tuple
 
 import torch
 
 from thenoise.utils.attention import DEFAULT_ATTENTION
-from thenoise.utils.sol_attention import (BLOCK, TOKEN_AUG_MAX, SolAttention, available,
-                                          dense_reason, log_once, reset_log)
-
-#: Routing threshold in sigmas of the proxy row: how far a key block's mean score has to
-#: stand above an independence null to be attended exactly rather than pooled. It is a
-#: significance level, not a budget, so the fraction it keeps moves with the content —
-#: see :func:`thenoise.utils.sol_attention.routing_stats`.
-TAU = 1.3
-#: Percents of the schedule inside which routing is used; the earliest steps stay dense,
-#: where the run decides its structure.
-WINDOW = (0.2, 1.0)
-#: Stills do not route: routed, H3-Image degrades visibly. The threshold is fitted to proxy
-#: rows that look near-Gaussian, which a smooth spatial field does not — on smooth operands
-#: routing keeps only the always-exact diagonal and stops responding to tau, so no tau fixes
-#: it. It wants a kept-fraction readout from a real image run first.
-STILL_HELD_DENSE = "a still: routing degrades it"
+from thenoise.utils.sol_attention import BLOCK, WINDOW, SolAttention, route
 
 
 def sol_sinks(layout, *, audio_rows_dense: bool = True
@@ -75,46 +61,20 @@ def window_sigmas(sample_sigmas: torch.Tensor,
 
 
 def sol_plan(*, layout, tokens: int, dtype: torch.dtype, head_dim: int, device,
-             sigma: float, sample_sigmas: Optional[torch.Tensor], cached: bool,
-             held_dense: Optional[str] = None,
+             sigma: float, sample_sigmas: Optional[torch.Tensor],
              method: str = DEFAULT_ATTENTION) -> Optional[SolAttention]:
     """This run's kernel arguments, or ``None`` to keep the step dense.
 
     The whole step takes one answer, decided outside the compiled blocks: a per-step sigma
     read inside them is a dynamo guard, and every block recompiles every step.
-    ``held_dense`` is a family's own veto, worded as the reason a log should give.
     """
-    def dense(reason: str) -> None:
-        log_once(reason, logging.DEBUG, "sol dense at %d tokens: %s", tokens, reason)
-
-    if held_dense is not None:
-        dense(held_dense)
-        return None
-    if method == "full":
-        dense("the request asked for full attention")
-        return None
-    # The crossover is an economy, so an explicit request walks past it.
-    reason = dense_reason(tokens=tokens, dtype=dtype, head_dim=head_dim, device=device,
-                          cached=cached, min_tokens=0 if method == "optimized" else None)
-    if reason is not None:
-        dense(reason)
+    if sample_sigmas is None:
         return None
     if layout.seq_len != tokens:
-        # Sinks are the whole reason a sparse run of this model is trustworthy, and a
-        # layout that does not describe the call cannot say where they are.
-        dense(f"layout describes {layout.seq_len} rows, the call has {tokens}")
-        return None
-    if sample_sigmas is None:
-        dense("no schedule to place the window on")
-        return None
-    high, low = window_sigmas(sample_sigmas)
-    if sigma > high or sigma < low:
-        dense(f"sigma {sigma:.3g} outside the {WINDOW[0]}-{WINDOW[1]} window")
-        return None
-    if not available(device):
-        dense("no compiled sol_attn kernel for this GPU")
+        # The sinks come from the packing, and one that does not describe this call cannot
+        # say where they are. A pooled prompt row is what this feature must never do.
         return None
     sinks, rows = sol_sinks(layout)
-    log_once("sparse", logging.DEBUG, "sol attention: %d tokens, tau %g, sinks %s/%s",
-             tokens, TAU, sinks, rows)
-    return SolAttention(TAU, TOKEN_AUG_MAX, sinks, rows)
+    return route(tokens=tokens, sigma=sigma, method=method, sinks=sinks, dense_rows=rows,
+                 device=device, dtype=dtype, head_dim=head_dim,
+                 window=window_sigmas(sample_sigmas))

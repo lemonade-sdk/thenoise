@@ -11,7 +11,7 @@ from typing import Optional, Sequence
 import torch
 
 from thenoise.dit.h3.layout import COND_TIMESTEP, Layout, pad_to_patch
-from thenoise.dit.h3.sparse import STILL_HELD_DENSE, sol_plan
+
 from thenoise.dit.h3.trunk import FinalLayer, H3DiT, H3Params, _spans
 from thenoise.dit.kvcache import KVCache, cache_mode
 from thenoise.utils.dynamo import mark_token_axis
@@ -105,13 +105,9 @@ class H3ImageDiT(H3DiT):
         kv_shape = (1, self.params.num_heads, layout.seq_len, self.params.head_dim)
         mark_token_axis(h, dim=1)
         mark_token_axis(cos, sin, dim=-2)
-        # One answer for the whole step, read outside the compiled blocks: a sigma read
-        # inside them would be a guard, and every block would recompile every step. A
-        # cached run's keys are the buffers, which no layout describes, so it stays dense.
-        sol = sol_plan(layout=layout, tokens=h.shape[1], dtype=h.dtype, device=device,
-                       head_dim=self.params.head_dim, sigma=sigma,
-                       sample_sigmas=sample_sigmas, cached=mode != "off",
-                       held_dense=STILL_HELD_DENSE)
+        # Pooled key blocks are what a smooth spatial field cannot survive, so this model
+        # has no routed path and no block is offered a plan.
+        sol = None
         for i, block in enumerate(self.blocks):
             # Buffers take the stream's dtype: ``attend`` copies k/v into them, and a
             # narrower buffer would hand attention a key narrower than the query.

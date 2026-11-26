@@ -1,30 +1,19 @@
-"""Sol attention on the Wan trunk: which steps route, and what a routed step keeps exact.
+"""Sol attention on the Wan trunk: which rows a routed step keeps exact.
 
-The generic half — what the kernel accepts, the operand order it reads, what a threshold
-kept — is in :mod:`thenoise.utils.sol_attention`. What is Wan's own is a sink range and a
-window. What Wan does not need is telling, too: its self-attention carries no mask, and the
-prompt reaches the trunk through cross-attention, which is three orders of magnitude too
-short to route and is never offered a plan.
+The kernel's rules and the gates every run passes are in
+:mod:`thenoise.utils.sol_attention`. What is Wan's own is a sink range and where the window
+comes from: its self-attention carries no mask, and the prompt reaches the trunk through
+cross-attention, which is far too short to route and is never offered a plan.
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Callable, Tuple
 
 import torch
 
 from thenoise.utils.attention import DEFAULT_ATTENTION
-from thenoise.utils.sol_attention import (BLOCK, TOKEN_AUG_MAX, SolAttention, available,
-                                          dense_reason, log_once)
-
-#: Routing threshold in sigmas of the proxy row: a significance level rather than a budget,
-#: so what it keeps is a property of the clip. See
-#: :func:`thenoise.utils.sol_attention.routing_stats` for the readout of that.
-TAU = 1.3
-#: Percents of the schedule inside which routing is used; the steps before it stay dense,
-#: being where a clip decides its structure.
-WINDOW = (0.2, 1.0)
+from thenoise.utils.sol_attention import BLOCK, WINDOW, SolAttention, route
 
 
 def wan_sinks(tokens_per_frame: int) -> Tuple[int, int]:
@@ -58,22 +47,6 @@ def wan_plan(*, tokens: int, tokens_per_frame: int, dtype: torch.dtype, head_dim
     would be a dynamo guard on a value that changes every step. ``window`` is in sigmas, high
     first, because that is what a flow schedule with a shift can answer in.
     """
-    def dense(reason: str) -> None:
-        log_once(reason, logging.DEBUG, "sol dense at %d tokens: %s", tokens, reason)
-
-    if method == "full":
-        dense("the request asked for full attention")
-        return None
-    reason = dense_reason(tokens=tokens, dtype=dtype, head_dim=head_dim, device=device,
-                          min_tokens=0 if method == "optimized" else None)
-    if reason is None and not window[1] <= sigma <= window[0]:
-        reason = f"sigma {sigma:.3g} outside the {WINDOW[0]}-{WINDOW[1]} window"
-    if reason is None and not available(device):
-        reason = "no compiled sol_attn kernel for this GPU"
-    if reason is not None:
-        dense(reason)
-        return None
-    sinks = wan_sinks(tokens_per_frame)
-    log_once("sparse", logging.DEBUG, "sol attention: %d tokens, tau %g, sinks %s",
-             tokens, TAU, sinks)
-    return SolAttention(TAU, TOKEN_AUG_MAX, sinks)
+    return route(tokens=tokens, sigma=sigma, method=method,
+                 sinks=wan_sinks(tokens_per_frame), device=device, dtype=dtype,
+                 head_dim=head_dim, window=window)

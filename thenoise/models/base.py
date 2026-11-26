@@ -340,6 +340,26 @@ class DiffusionModel(LoRASupport, ABC):
         self._kv_caches = None
 
     # ------------------------------------------------------- LoRA-able components
+    def attention_methods(self) -> Tuple[str, ...]:
+        """The ``attention`` words this model answers on the hardware it is loaded onto.
+
+        :attr:`ATTENTION_METHODS` is the architecture's vocabulary; a lossy path is only
+        worth offering a client when this box can run it.
+        """
+        if "optimized" not in self.ATTENTION_METHODS:
+            return self.ATTENTION_METHODS
+        blocked = self.attention_routing_blocked()
+        return self.ATTENTION_METHODS if blocked is None else tuple(
+            w for w in self.ATTENTION_METHODS if w != "optimized")
+
+    def attention_routing_blocked(self) -> Optional[str]:
+        """Why this box cannot run the model's lossy attention path, ``None`` when it can.
+
+        A model that offers ``optimized`` answers this from its own trunk width, which is a
+        checkpoint fact rather than a class one.
+        """
+        return None
+
     def lora_components(self) -> dict[str, torch.nn.Module]:
         """This model's LoRA-able components, by the role a request names them with.
 

@@ -28,7 +28,7 @@ from thenoise.utils.attention import DEFAULT_ATTENTION
 from thenoise.text_encoders.wan_video import load_wan_text_encoder
 from thenoise.utils.image_tensor import cover_crop
 from thenoise.utils.safetensors import Header
-from thenoise.utils.sol_attention import SolAttention
+from thenoise.utils.sol_attention import SolAttention, routing_unavailable
 from thenoise.utils.wan_weights import wan_dit_key
 from thenoise.vae.wan_video import detect_latent_width, load_wan_video_vae, TEMPORAL_COMPRESSION
 from thenoise.video.spec import ResolvedVideo, VideoSpec, frame_grid
@@ -152,6 +152,9 @@ class Wan22Model(VideoModel):
     # `index_timestep_zero`.
     DEFAULT_PREFS = {**VideoModel.DEFAULT_PREFS, "ref_method": "index_timestep_zero"}
     ATTENTION_METHODS = (*VideoModel.ATTENTION_METHODS, "optimized")
+
+    def attention_routing_blocked(self):
+        return routing_unavailable(self.device, self.dtype, self.params.head_dim)
 
     def pref(self, name: str, request_value=None):
         """Which transformer this is decides how a reference enters, so that one

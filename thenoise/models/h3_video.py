@@ -36,6 +36,7 @@ from thenoise.models.config import (
 )
 from thenoise.models.video_base import Condition, VideoModel, Waveform
 from thenoise.samplers import Step
+from thenoise.utils.sol_attention import routing_unavailable
 from thenoise.utils.image_tensor import cover_crop, resize_to_short_edge
 from thenoise.utils.safetensors import Header
 from thenoise.vae import load_h3_audio_vae, load_h3_video_vae
@@ -119,6 +120,9 @@ class H3VideoModel(VideoModel):
                                   "ref2v": True}}
     # Routing is measured good on a clip and bad on a still.
     ATTENTION_METHODS = (*VideoModel.ATTENTION_METHODS, "optimized")
+
+    def attention_routing_blocked(self):
+        return routing_unavailable(self.device, self.dtype, self.params.head_dim)
 
     #: A keyframe enters at a fixed timestep and is never denoised, which is what
     #: ``index_timestep_zero`` means here.

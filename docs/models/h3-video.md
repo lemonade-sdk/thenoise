@@ -145,11 +145,7 @@ matter exactly and pools the rest, with every prompt, conditioned picture and au
 every query because pooling those is how a run loses them. At the release's own shape that
 measured 4.6x on the attention call (gfx1151, bf16, tau 1.3).
 
-`--attention` decides when it runs, and a run says which it got once in the log: the token
-count and the sink ranges when it routed, the reason when it did not. `auto`, the default,
-routes a clip long enough for routing to be the faster of the two and stays exact on a short
-one. `full` never routes. `optimized` routes whatever the clip's length, which is how you
-measure the difference yourself on a clip the engine would have left alone.
+`--attention` decides when it runs. `auto`, the default, routes a clip long enough for routing to be the faster of the two and stays exact on a short one. `full` never routes. `optimized` routes whatever the clip's length, which is how you measure the difference yourself on a clip the engine would have left alone — and if the loaded model does not answer `optimized` at all, this box has no kernel for it.
 
 Two more releases exist upstream and are refused rather than half-supported: the unpruned
 checkpoints, which condition each block from a 2688-wide timestep embedding (24 GB of the

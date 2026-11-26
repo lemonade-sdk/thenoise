@@ -101,6 +101,13 @@ class VideoModel(PixelModel):
             raise ValueError(
                 f"{self.name} does not answer {resolved.attention!r} attention; it answers "
                 f"{', '.join(self.ATTENTION_METHODS)}")
+        # The words are the architecture's; whether this box runs the lossy one is only
+        # worth asking when the request asked for it.
+        blocked = (self.attention_routing_blocked()
+                   if resolved.attention == "optimized" else None)
+        if blocked is not None:
+            raise ValueError(
+                f"{self.name} cannot run optimized attention here: {blocked}")
         width, height = self.resolve_size(resolved.width, resolved.height)
         if (width, height) != (resolved.width, resolved.height):
             resolved = dataclasses.replace(resolved, width=width, height=height)

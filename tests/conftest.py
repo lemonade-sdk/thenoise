@@ -1288,6 +1288,7 @@ def fake_model_cls():
             "CAPABILITIES": {},
             "REF_METHODS": (),
             "ATTENTION_METHODS": ATTENTION_METHODS,
+            "attention_methods": lambda self: self.ATTENTION_METHODS,
             **attrs,
         }
         return type("FakeModel", (), namespace)

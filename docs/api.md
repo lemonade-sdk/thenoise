@@ -258,7 +258,8 @@ asked to resemble — as opposed to the frames it starts or ends on, which are `
 One mesh mode is not a boolean: `mv2d` is how many views of one object the model's tower
 numbers, and its absence is the refusal — which is every mesh model served today.
 
-`attention_methods` lists what the loaded model accepts for `attention`, which a clip
+`attention_methods` lists what the loaded model accepts for `attention` on the box
+it is running on, which a clip
 request sends (see [`/jobs/video`](#post-jobsvideo)):
 
 - `auto` — the engine chooses at every step. Block-sparse attention runs on a clip long

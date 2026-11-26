@@ -14,17 +14,18 @@ import pytest
 import torch
 
 import thenoise.dit.wan_video.model as wan_model
-import thenoise.dit.wan_video.sparse as wan_sparse
+import thenoise.utils.sol_attention as sol
 import thenoise.models.wan_video as wan_adapter_module
 from thenoise.dit.wan_video.model import (Wan22Params, WanNativeAttention, WanNativeBlock,
                                           WanNativeDiT)
-from thenoise.dit.wan_video.sparse import (TAU, WINDOW, wan_plan, wan_sinks,
-                                          window_sigmas)
-from thenoise.utils.sol_attention import (MIN_TOKENS, TOKEN_AUG_MAX, SolAttention,
-                                          reset_log)
+from thenoise.dit.wan_video.sparse import wan_plan, wan_sinks, window_sigmas
+from thenoise.utils.sol_attention import (MIN_TOKENS, TAU, TOKEN_AUG_MAX, WINDOW,
+                                          SolAttention, routing_unavailable)
 
-CUDA = SimpleNamespace(type="cuda")
-CPU = SimpleNamespace(type="cpu")
+#: A box's verdict is memoized on the device, so these are hashable; nothing here needs a
+#: CUDA build, which is why they are not torch devices.
+CUDA = "cuda"
+CPU = "cpu"
 HEADS = 2
 DIM = HEADS * 128
 #: Sigmas routing is confined to, high first: what ``window_sigmas`` answers for a shift.
@@ -32,8 +33,9 @@ SIGMA_WINDOW = (0.6, 0.0)
 
 
 @pytest.fixture(autouse=True)
-def _fresh_log():
-    reset_log()
+def _no_stale_hw_verdict():
+    """The hardware verdict is memoized, so a patched kernel must not inherit an answer."""
+    routing_unavailable.cache_clear()
 
 
 def _plan(**over):
@@ -47,21 +49,21 @@ def _plan(**over):
 
 
 def test_a_request_for_full_attention_is_honoured(monkeypatch):
-    monkeypatch.setattr(wan_sparse, "available", lambda device: True)
+    monkeypatch.setattr(sol, "available", lambda device: True)
     assert _plan() is not None
     assert _plan(method="full") is None
 
 
 def test_a_request_for_optimized_attention_asks_past_the_crossover(monkeypatch):
     """The crossover is an economy, so a request may overrule it -- the gates may not be."""
-    monkeypatch.setattr(wan_sparse, "available", lambda device: True)
+    monkeypatch.setattr(sol, "available", lambda device: True)
     assert _plan(tokens=MIN_TOKENS - 1) is None
     assert _plan(tokens=MIN_TOKENS - 1, method="optimized") is not None
     assert _plan(tokens=MIN_TOKENS - 1, method="optimized", head_dim=64) is None
 
 
 def test_a_long_bf16_clip_on_a_gpu_with_the_kernel_routes(monkeypatch):
-    monkeypatch.setattr(wan_sparse, "available", lambda device: True)
+    monkeypatch.setattr(sol, "available", lambda device: True)
     assert _plan() == SolAttention(TAU, TOKEN_AUG_MAX, (0, 25))
 
 
@@ -72,18 +74,18 @@ def test_a_long_bf16_clip_on_a_gpu_with_the_kernel_routes(monkeypatch):
     (dict(device=CPU), "no kernel off CUDA"),
 ])
 def test_a_clip_that_cannot_route_is_refused(change, why, monkeypatch):
-    monkeypatch.setattr(wan_sparse, "available", lambda device: True)
+    monkeypatch.setattr(sol, "available", lambda device: True)
     assert _plan(**change) is None, why
 
 
 def test_no_compiled_kernel_means_dense(monkeypatch):
-    monkeypatch.setattr(wan_sparse, "available", lambda device: False)
+    monkeypatch.setattr(sol, "available", lambda device: False)
     assert _plan() is None
 
 
 def test_the_earliest_steps_stay_dense(monkeypatch):
     """The window is read in sigmas here, because a shifted flow schedule is what Wan has."""
-    monkeypatch.setattr(wan_sparse, "available", lambda device: True)
+    monkeypatch.setattr(sol, "available", lambda device: True)
     assert _plan(sigma=SIGMA_WINDOW[0]) is not None
     assert _plan(sigma=SIGMA_WINDOW[1]) is not None
     assert _plan(sigma=SIGMA_WINDOW[0] + 1e-6) is None

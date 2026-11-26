@@ -129,6 +129,7 @@ def test_health_reports_the_loaded_model():
                          "upscale": True, "video": None},
         "REF_METHODS": ("index", "index_timestep_zero", "vision"),
         "ATTENTION_METHODS": ATTENTION_METHODS,
+        "attention_methods": lambda self: self.ATTENTION_METHODS,
         "pixel_channels": 4,
     })()
     res = _endpoint(create_app(runtime), "/health")()

@@ -118,7 +118,7 @@ class H3AVDiT(H3DiT):
         # inside them would be a guard, and every block would recompile every step.
         sol = sol_plan(layout=layout, tokens=h.shape[1], dtype=h.dtype, device=device,
                        head_dim=self.params.head_dim, sigma=sigma,
-                       sample_sigmas=sample_sigmas, cached=False, method=attention)
+                       sample_sigmas=sample_sigmas, method=attention)
         for block in self.blocks:
             h = block(h, _spans(rows, block.adaln_proj(t_emb)), (cos, sin), None, sol)
 

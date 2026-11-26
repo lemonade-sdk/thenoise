@@ -15,20 +15,19 @@ import pytest
 import torch
 
 import thenoise.dit.h3.av as av
-import thenoise.dit.h3.image as image_mod
-import thenoise.dit.h3.sparse as sparse
 import thenoise.dit.h3.trunk as trunk
 import thenoise.utils.sol_attention as sol
 from test_dit_h3_av import _av_dit, _av_layout, _run
 from test_dit_h3_image import TINY_SIGMAS, _forward, _tiny_dit
 from thenoise.dit.h3.layout import Layout
-from thenoise.dit.h3.sparse import (STILL_HELD_DENSE, TAU, WINDOW, SolAttention,
-                                    sol_plan, sol_sinks, window_sigmas)
-from thenoise.utils.sol_attention import (BLOCK, DTYPES, HEAD_DIM, MIN_TOKENS, TOKEN_AUG_MAX,
-                                          routing_stats)
+from thenoise.dit.h3.sparse import SolAttention, sol_plan, sol_sinks, window_sigmas
+from thenoise.utils.sol_attention import (BLOCK, DTYPES, HEAD_DIM, MIN_TOKENS, TAU,
+                                          TOKEN_AUG_MAX, WINDOW, routing_unavailable)
 
-CUDA = SimpleNamespace(type="cuda")
-CPU = SimpleNamespace(type="cpu")
+#: A box's verdict is memoized on the device, so these are hashable; nothing here needs a
+#: CUDA build, which is why they are not torch devices.
+CUDA = "cuda"
+CPU = "cpu"
 #: A schedule 20 steps deep, descending, which is what the window percents are read on.
 SCHEDULE = torch.linspace(1.0, 0.0, 20)
 
@@ -51,21 +50,21 @@ def _gate_small_enough(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _fresh_log():
-    sparse.reset_log()
+def _no_stale_hw_verdict():
+    """The hardware verdict is memoized, so a patched kernel must not inherit an answer."""
+    routing_unavailable.cache_clear()
 
 
 @pytest.fixture
 def kernel_present(monkeypatch):
-    monkeypatch.setattr(sparse, "available", lambda device: True)
+    monkeypatch.setattr(sol, "available", lambda device: True)
 
 
 def _plan(**over) -> Optional[SolAttention]:
     """The plan for a run that passes every gate, with these few details changed."""
     lay = over.pop("layout", _lay())
     args = dict(layout=lay, tokens=lay.seq_len, dtype=torch.bfloat16, device=CUDA,
-                head_dim=HEAD_DIM, sigma=float(SCHEDULE[5]), sample_sigmas=SCHEDULE,
-                cached=False)
+                head_dim=HEAD_DIM, sigma=float(SCHEDULE[5]), sample_sigmas=SCHEDULE)
     return sol_plan(**{**args, **over})
 
 
@@ -141,7 +140,6 @@ def test_fp16_operands_go_sparse_too(kernel_present):
     (dict(head_dim=64), "the clip decoder's head width"),
     (dict(dtype=torch.float32), "not a dtype the fused backends read"),
     (dict(device=CPU), "no kernel off CUDA"),
-    (dict(cached=True), "the K/V cache holds the keys"),
     (dict(sample_sigmas=None), "no schedule to place the window on"),
     (dict(sigma=float(window_sigmas(SCHEDULE)[0]) + 0.05), "before the window"),
     (dict(sigma=float(window_sigmas(SCHEDULE)[1]) - 0.05), "after the window"),
@@ -158,15 +156,13 @@ def test_a_layout_that_does_not_describe_the_call_keeps_it_dense(kernel_present)
 
 
 def test_no_compiled_kernel_means_dense(monkeypatch):
-    monkeypatch.setattr(sparse, "available", lambda device: False)
+    monkeypatch.setattr(sol, "available", lambda device: False)
     assert _plan() is None
 
 
-def test_a_request_for_full_attention_is_honoured(kernel_present, caplog):
-    caplog.set_level("DEBUG")
+def test_a_request_for_full_attention_is_honoured(kernel_present):
     assert _plan() is not None
     assert _plan(method="full") is None
-    assert any("full attention" in r.getMessage() for r in caplog.records)
 
 
 def test_a_request_for_optimized_attention_asks_past_the_crossover(kernel_present):
@@ -175,52 +171,6 @@ def test_a_request_for_optimized_attention_asks_past_the_crossover(kernel_presen
     assert tiny.seq_len < sol.MIN_TOKENS
     assert _plan(layout=tiny) is None
     assert _plan(layout=tiny, method="optimized") is not None
-    assert _plan(layout=tiny, method="optimized", cached=True) is None
-
-
-def test_a_still_is_held_dense_on_every_other_qualifying_detail(kernel_present, caplog):
-    """The same run, one argument different: the family says no.
-
-    Not the token gate in disguise — a 4096x4096 canvas clears the crossover with room to
-    spare, which is how it came to be routed and measured degrading.
-    """
-    caplog.set_level("DEBUG")
-    assert _plan() is not None
-    assert _plan(held_dense=STILL_HELD_DENSE) is None
-    assert any("a still" in r.getMessage() for r in caplog.records)
-
-
-def test_which_route_a_call_took_says_nothing_at_info(kernel_present, caplog):
-    """The user cannot act on a rule evaluation, and the rule is readable in the constants.
-
-    What survives at info is the measured kept fraction, in utils.sol_attention.
-    """
-    caplog.set_level("INFO")
-    assert _plan() is not None
-    _plan(tokens=16)
-    _plan(dtype=torch.float32)
-    _plan(head_dim=64)
-    _plan(cached=True)
-    assert not [r for r in caplog.records if "sol" in r.getMessage()]
-
-
-def test_the_image_trunk_asks_to_be_held_dense(monkeypatch):
-    dit = _tiny_dit()
-    seen = {}
-    monkeypatch.setattr(image_mod, "sol_plan", lambda **kw: seen.update(kw) or None)
-    latent = torch.randn(1, dit.params.latents_dim, 6, 6)
-    _forward(dit, latent, 0.75, torch.randn(1, 5, dit.params.hidden_size),
-             Layout.image(5, 6, 6), sample_sigmas=torch.tensor(TINY_SIGMAS))
-    assert seen["held_dense"] == STILL_HELD_DENSE
-
-
-def test_the_av_trunk_leaves_that_veto_alone(monkeypatch):
-    """The reason is about stills; a clip must not inherit it."""
-    dit, lay = _av_dit(), _av_layout()
-    seen = {}
-    monkeypatch.setattr(av, "sol_plan", lambda **kw: seen.update(kw) or None)
-    _run(dit, lay)
-    assert "held_dense" not in seen
 
 
 def test_the_defaults_are_the_releases():
@@ -228,72 +178,6 @@ def test_the_defaults_are_the_releases():
     assert (TAU, MIN_TOKENS, WINDOW) == (1.3, 12288, (0.2, 1.0))
     assert (HEAD_DIM, BLOCK, TOKEN_AUG_MAX) == (128, 64, 256)
     assert DTYPES == (torch.bfloat16, torch.float16)
-
-
-def test_the_kept_fraction_moves_with_tau_and_stops_at_the_forced_neighbourhood():
-    """The readout counts the kernel's own test, so a profile can be argued about."""
-    torch.manual_seed(0)
-    q, k = torch.randn(1, 512, 4, 128), torch.randn(1, 512, 4, 128)
-    low, high = routing_stats(q, k, 0.5), routing_stats(q, k, 4.0)
-    assert low.blocks == 8
-    assert low.routed > high.routed
-    assert high.routed == 0.0
-    # What the threshold keeps nothing of is still attended: one key block either side.
-    assert high.kept == pytest.approx((3 * high.blocks - 2) / high.blocks ** 2)
-    assert low.kept > high.kept
-
-
-def test_the_sink_ranges_are_part_of_the_kept_budget():
-    torch.manual_seed(0)
-    q, k = torch.randn(1, 512, 4, 128), torch.randn(1, 512, 4, 128)
-    assert routing_stats(q, k, 9.0, sink_blocks=(0, 8)).kept == 1.0
-    some = routing_stats(q, k, 9.0, sink_blocks=(0, 2)).kept
-    assert routing_stats(q, k, 9.0).kept < some < 1.0
-
-
-def test_the_kept_fraction_is_measured_once_and_only_while_debugging(monkeypatch, caplog):
-    """A millisecond per threshold and length, which a run at info does not pay.
-
-    Both halves matter: the number is the only forensics a default-on feature has, and it
-    costs a pass over the operands that nothing reads unless somebody asked.
-    """
-    calls = []
-    monkeypatch.setattr(sol, "sol_attn",
-                        lambda q, k, v, **kw: calls.append(k.shape[1]) or torch.zeros_like(q))
-    measured = []
-    monkeypatch.setattr(sol, "routing_stats",
-                        lambda q, k, tau, *rest: measured.append((tau, k.shape[1]))
-                        or sol.RoutingStats(k.shape[1], 4, tau, 0.2, 0.3))
-    plan = SolAttention(TAU, TOKEN_AUG_MAX, (0, 2), (2, 4))
-
-    caplog.set_level("INFO")
-    for _ in range(4):
-        sol.sol_attention(*(torch.randn(1, 256, 2, 128, dtype=torch.bfloat16)
-                            for _ in range(3)), plan)
-    assert len(calls) == 4
-    assert not measured
-    assert not [r for r in caplog.records if "kept" in r.getMessage()]
-
-    caplog.set_level("DEBUG", logger="thenoise.utils.sol_attention")
-    short = torch.randn(1, 128, 2, 128, dtype=torch.bfloat16)
-    for _ in range(3):
-        sol.sol_attention(*(torch.randn(1, 256, 2, 128, dtype=torch.bfloat16)
-                            for _ in range(3)), plan)
-    sol.sol_attention(short, short, short, plan)
-    assert measured == [(TAU, 256), (TAU, 128)]
-    assert len([r for r in caplog.records if "sol routing kept" in r.getMessage()]) == 2
-
-
-def test_a_run_says_why_once(kernel_present, caplog):
-    caplog.set_level("DEBUG")
-    for _ in range(40):
-        assert _plan(tokens=MIN_TOKENS - 1) is None
-    assert len([r for r in caplog.records if "dense at" in r.getMessage()]) == 1
-    sparse.reset_log()
-    for _ in range(40):
-        _plan()
-    assert len([r for r in caplog.records if "sol attention" in r.getMessage()]) == 1
-    sparse.reset_log()
 
 
 # ---------------------------------------------------------------- the plumbing
