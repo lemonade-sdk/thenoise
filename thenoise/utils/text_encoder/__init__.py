@@ -388,7 +388,7 @@ def load_qwen35_processor(tokenizer, *, image_processor=None):
         if image_processor is not None
         else Qwen2VLImageProcessor.from_dict(dict(QWEN3_VL_PREPROCESSOR_CONFIG)),
         tokenizer=tokenizer,
-        video_processor=Qwen3VLVideoProcessor(),
+        video_processor=Qwen3VLVideoProcessor(cap_pixels_per_frame=True),
     )
 
 
