@@ -65,11 +65,12 @@ def get_free_memory(device: Optional[Union[str, torch.device]]) -> Optional[int]
 
 
 def spare_bytes(device: Optional[Union[str, torch.device]]) -> Optional[int]:
-    """Bytes ``device`` could still hand out: the driver's free figure plus what the
-    caching allocator holds and has not been asked for."""
+    """What ``device`` could still hand out, counting bytes its allocator holds unused."""
     free = get_free_memory(device)
     if free is None:
         return None
+    if device is not None and torch.device(device).type != "cuda":
+        return free
     try:
         kept = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
     except (RuntimeError, AttributeError):

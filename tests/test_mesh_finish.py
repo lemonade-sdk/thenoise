@@ -5,6 +5,7 @@ extractor, so a filter that quietly opened the surface or ate the shape shows up
 rather than in a file somebody tries to print.
 """
 import math
+import re
 import subprocess
 import sys
 
@@ -170,6 +171,20 @@ def test_every_filter_runs_and_the_declared_order_is_kept(monkeypatch):
                 (observer := _NothingAsked()).check, observer.progress)
     assert seen == ["floaters", "simplify", "smooth"]
     assert observer.stages == ["finish"] * 3
+
+
+def test_the_painting_reaches_the_filter_it_was_painted_for(monkeypatch):
+    asked = {}
+
+    def spy(mesh, hand, **knobs):
+        asked.update(spots=hand.spots, smooth=knobs["smooth"])
+        return mesh
+
+    monkeypatch.setitem(FILTERS, "smooth", spy)
+    cut = sphere(32)
+    finish_mesh(cut, MeshFinishOptions(smooth=0.5), (observer := _NothingAsked()).check,
+                observer.progress, ((0.1, 0.2, 0.3, 0.05),))
+    assert asked == {"smooth": 0.5, "spots": ((0.1, 0.2, 0.3, 0.05),)}
 
 
 def test_a_chain_that_never_returns_still_names_the_filter_it_entered(caplog):
@@ -338,11 +353,16 @@ def fold(lying: Mesh, cells: int, height=0.01) -> Mesh:
     return Mesh(points, lying.faces)
 
 
+def _interior(lying: Mesh):
+    """The sheet's points that are not its rim: the rim has no cross edges, so it is held."""
+    flat = lying.vertices[:, (0, 2)]
+    reach = lying.vertices.amax(dim=0)
+    return (flat > 0).all(dim=1) & (flat < reach[[0, 2]]).all(dim=1)
+
+
 def heave(waving: Mesh) -> float:
     """How far the middle of a folded sheet stands out of its plane; the held rim says nothing."""
-    flat = waving.vertices[:, (0, 2)]
-    inside = (flat > 0).all(dim=1) & (flat < flat.max(dim=0).values).all(dim=1)
-    return waving.vertices[inside, 1].abs().mean().item()
+    return waving.vertices[_interior(waving), 1].abs().mean().item()
 
 
 def cube(size=0.3, resolution=64) -> Mesh:
@@ -434,6 +454,76 @@ def test_a_canceled_request_stops_at_the_next_round():
     with pytest.raises(Stopped):
         relax_surface(sphere(64), 1.0, ticker)
     assert ticker.calls == 3
+
+
+PAINTED = (0.4, 0.0, 0.4)
+
+
+def _centre(lying: Mesh) -> list:
+    """The middle of the sheet in the units the sheet is cut in."""
+    return [one / 2 for one in lying.vertices.amax(dim=0).tolist()]
+
+
+def _away_from(points: Mesh):
+    return (points.vertices - torch.tensor(_centre(points))).norm(dim=-1)
+
+
+def _crest(waving: Mesh) -> list:
+    """An interior point on a wave crest: where a round has the most to do and nothing is held."""
+    heights = waving.vertices[:, 1].abs().masked_fill(~_interior(waving), 0.0)
+    return waving.vertices[heights.argmax()].tolist()
+
+
+def test_only_where_it_was_painted_moves():
+    """Everywhere outside a spot keeps the exact place it was cut in, not nearly the same place."""
+    waving = fold(sheet(), cells=2)
+    tip = torch.tensor(_crest(waving))
+    eased = relax_surface(waving, 1.0, _nothing_asked, spots=[[*tip.tolist(), 0.1]])
+    moved = (eased.vertices - waving.vertices).norm(dim=-1)
+    distance = (waving.vertices - tip).norm(dim=-1)
+    assert moved[distance < 1e-6].item() > 1e-4
+    assert torch.equal(moved[distance > 0.2], torch.zeros_like(moved[distance > 0.2]))
+
+
+def test_the_edge_of_a_spot_eases_less_than_its_middle():
+    """A brush with a hard edge would leave a step in the surface, which is worse roughness."""
+    wobbling = roughen(sphere(32))
+    tip = torch.tensor([0.4, 0.0, 0.0])
+    eased = relax_surface(wobbling, 1.0, _nothing_asked, spots=[[*tip.tolist(), 0.35]])
+    moved = (eased.vertices - wobbling.vertices).norm(dim=-1)
+    distance = (wobbling.vertices - tip).norm(dim=-1)
+    assert moved[distance < 0.08].mean() > moved[(distance > 0.28) & (distance < 0.35)].mean() * 3
+
+
+def test_a_spot_wide_as_the_shape_reaches_the_whole_of_it():
+    waving = fold(sheet(), cells=2)
+    eased = relax_surface(waving, 1.0, _nothing_asked, spots=[[*_centre(waving), 2.0]])
+    moved = (eased.vertices - waving.vertices).norm(dim=-1)
+    assert int((moved > 1e-5).sum()) > waving.vertices.shape[0] // 2
+
+
+def test_the_log_says_what_the_smoothing_actually_did(caplog):
+    """Whether the knob did anything is invisible in a flat-shaded preview, so the line carries
+    the roughness before and after, the work it was worth and what it refused to touch."""
+    wobbling = roughen(sphere(32))
+    with caplog.at_level("INFO", logger="thenoise.mesh.finish.smooth"):
+        relax_surface(wobbling, 0.4, _nothing_asked)
+    line = [one.getMessage() for one in caplog.records if one.getMessage().startswith("smooth:")][-1]
+    rough, smoother = (float(one) for one in
+                       re.search(r"wobble (\S+) -> (\S+)", line).groups())
+    assert smoother < rough
+    assert f"{math.ceil(0.4 * MAX_ROUNDS)} rounds" in line
+    assert "volume " in line
+    assert "painted" not in line
+
+
+def test_a_painted_request_says_how_much_of_the_surface_it_covered(caplog):
+    wobbling = roughen(sphere(32))
+    with caplog.at_level("INFO", logger="thenoise.mesh.finish.smooth"):
+        relax_surface(wobbling, 0.4, _nothing_asked, spots=[[0.4, 0.0, 0.0, 0.15]])
+    line = [one.getMessage() for one in caplog.records if one.getMessage().startswith("smooth:")][-1]
+    covered = int(re.search(r"painting reached (\d+) of", line).group(1))
+    assert 0 < covered < wobbling.vertices.shape[0]
 
 
 def test_work_the_machine_could_not_take_is_refused_before_any_of_it_starts(monkeypatch):

@@ -15,6 +15,7 @@ from thenoise.utils import device as device_mod
 from thenoise.utils.device import (
     clean_memory_on_device,
     get_device_memory,
+    spare_bytes,
     synchronize_device,
 )
 
@@ -67,6 +68,50 @@ def test_release_device_memory_collects_before_emptying(monkeypatch):
     )
     device_mod.release_device_memory("cuda")
     assert order == ["collect", ("empty", "cuda")]
+
+
+def test_measuring_the_host_never_asks_the_cuda_allocator(monkeypatch):
+    """A mesh finish works on the host, and its memory guard ran into exactly this."""
+    def not_for_the_host(*_args, **_kwargs):
+        raise AssertionError("the host is not a cuda device")
+
+    monkeypatch.setattr(torch.cuda, "memory_reserved", not_for_the_host)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", not_for_the_host)
+    monkeypatch.setattr(device_mod, "get_free_memory", lambda _device: 4 << 30)
+    assert spare_bytes("cpu") == 4 << 30
+    assert spare_bytes(torch.device("cpu")) == 4 << 30
+
+
+def test_the_allocators_held_bytes_count_as_free(monkeypatch):
+    monkeypatch.setattr(device_mod, "get_free_memory", lambda _device: 4 << 30)
+    monkeypatch.setattr(torch.cuda, "memory_reserved", lambda _device: 10 << 30)
+    monkeypatch.setattr(torch.cuda, "memory_allocated", lambda _device: 6 << 30)
+    assert spare_bytes("cuda:0") == 8 << 30
+
+
+def test_the_hosts_frees_figure_is_the_kernels_own(monkeypatch):
+    import builtins
+    import io
+
+    class Meminfo:
+        def __enter__(self):
+            return io.StringIO("MemTotal: 131072 kB\nMemAvailable: 250 kB\n")
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(builtins, "open", lambda *_args, **_kwargs: Meminfo())
+    assert device_mod._host_free() == 250 * 1024
+
+
+def test_a_host_that_says_nothing_about_itself_is_not_guessed(monkeypatch):
+    import builtins
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("no procfs here")
+
+    monkeypatch.setattr(builtins, "open", refuse)
+    assert device_mod._host_free() is None
 
 
 def test_get_device_memory_only_knows_about_cuda(monkeypatch):

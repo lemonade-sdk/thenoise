@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from math import ceil
 from typing import Callable
@@ -17,6 +19,9 @@ CREASE_DEGREES = 50.0
 STEP = 0.5
 MAX_ROUNDS = 16
 SMOOTH_BYTES_PER_TRIANGLE = 420
+SPOT_LIMIT = 512
+SPOT_RADIUS_LIMIT = 8.0
+_CELLS = 16_000_000
 
 
 @dataclass(frozen=True)
@@ -27,13 +32,21 @@ class _Neighbourhood:
     dst: Tensor
     mix: Tensor
     still: Tensor
+    degree: Tensor
+    moving: Tensor
     crossed: int
     creases: int
     held: int
+    painted: int
 
 
-def relax_surface(mesh: Mesh, strength: float, check: Callable[[], None]) -> Mesh:
-    """``mesh`` eased toward its crease-free neighbourhood, ``strength`` many rounds."""
+def relax_surface(mesh: Mesh, strength: float, check: Callable[[], None],
+                  spots: Sequence[Sequence[float]] = ()) -> Mesh:
+    """``mesh`` eased toward its crease-free neighbourhood, ``strength`` many rounds.
+
+    ``spots`` are ``x, y, z, radius`` in the mesh's own units: a point outside every radius
+    keeps the place it was cut in.
+    """
     if strength <= 0.0 or mesh.is_empty:
         return mesh
 
@@ -41,8 +54,9 @@ def relax_surface(mesh: Mesh, strength: float, check: Callable[[], None]) -> Mes
     room(mesh.vertices.device, triangles * SMOOTH_BYTES_PER_TRIANGLE,
          f"smoothing {triangles} triangles", "lower the level of detail")
     rounds = min(MAX_ROUNDS, max(1, ceil(strength * MAX_ROUNDS)))
-    near = _neighbours(mesh, CREASE_DEGREES)
+    near = _neighbours(mesh, CREASE_DEGREES, _coverage(mesh.vertices, spots))
     before = float(mesh.signed_volume())
+    rough = _wobble(mesh.vertices, near)
 
     points = mesh.vertices.clone()
     total = torch.zeros_like(points)
@@ -53,13 +67,55 @@ def relax_surface(mesh: Mesh, strength: float, check: Callable[[], None]) -> Mes
         points = points * near.still + total * near.mix
 
     after = Mesh(points, mesh.faces)
-    logger.info("smooth: averaged across %d of %d edges, %d points held at a crease, "
-                "%d rounds, %s", near.crossed, near.crossed + near.creases, near.held, rounds,
-                _change(before, float(after.signed_volume())))
+    smoother = _wobble(points, near)
+    logger.info("smooth: %d of %d edges averaged, %d points held at a crease, %d rounds, "
+                "wobble %.2g -> %.2g (%s), %s%s",
+                near.crossed, near.crossed + near.creases, near.held, rounds, rough, smoother,
+                _cut(rough, smoother), _change(before, float(after.signed_volume())),
+                _where(near, mesh, spots))
     return after
 
 
-def _neighbours(mesh: Mesh, crease: float) -> _Neighbourhood:
+def _coverage(points: Tensor, spots: Sequence[Sequence[float]]) -> Tensor:
+    """How much of the smoothing each point asks for: one wherever nothing was painted.
+
+    The falloff only ever shrinks with distance, so the nearest spot decides a point and only
+    that one distance is turned into a weight.
+    """
+    span = points.shape[0]
+    if not spots:
+        return torch.ones(span, 1, dtype=points.dtype, device=points.device)
+    here = torch.as_tensor(spots, dtype=torch.float32, device=points.device)
+    centre, radius = here[:, :3], here[:, 3]
+    weight = torch.zeros(span, dtype=torch.float32, device=points.device)
+    rows = max(1024, _CELLS // centre.shape[0])
+    for begin in range(0, span, rows):
+        chunk = points[begin:begin + rows].to(torch.float32)
+        near = (torch.cdist(chunk, centre) / radius).amin(dim=1).clamp(max=1.0)
+        weight[begin:begin + chunk.shape[0]] = 0.5 + 0.5 * torch.cos(math.pi * near)
+    return weight.to(points.dtype).unsqueeze(1)
+
+
+def _wobble(points: Tensor, near: _Neighbourhood) -> float:
+    """How far a point sits from the average of its neighbours, over the points a round may
+    move: held points disagree with their neighbours on purpose and would hide the measure."""
+    total = torch.zeros_like(points).index_add_(0, near.dst, points[near.src])
+    away = (points - total / near.degree.clamp(min=1.0)).norm(dim=-1)
+    return float(away[near.moving].mean()) if bool(near.moving.any()) else 0.0
+
+
+def _cut(before: float, after: float) -> str:
+    return "flat" if not before else f"{100 * (after / before - 1):+.0f}%"
+
+
+def _where(near: _Neighbourhood, mesh: Mesh, spots) -> str:
+    if not spots:
+        return ""
+    share = 100 * near.painted / mesh.vertices.shape[0]
+    return f", painting reached {near.painted} of {mesh.vertices.shape[0]} points ({share:.0f}%)"
+
+
+def _neighbours(mesh: Mesh, crease: float, weight: Tensor) -> _Neighbourhood:
     """The ends of every edge whose two faces meet within ``crease`` degrees."""
     faces, points = mesh.faces, mesh.vertices
     pair = torch.stack((faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]))
@@ -97,12 +153,15 @@ def _neighbours(mesh: Mesh, crease: float) -> _Neighbourhood:
     sharp = torch.zeros(span, dtype=points.dtype, device=points.device)
     sharp.index_add_(0, ends, torch.where(torch.cat((worth, worth)), 0.0, 1.0)
                      .to(points.dtype))
-    free = torch.where(degree > 0.0, 1.0, 0.0) * torch.where(sharp > 0.0, 0.0, 1.0)
+    free = (torch.where(degree > 0.0, 1.0, 0.0) * torch.where(sharp > 0.0, 0.0, 1.0)
+            * weight.squeeze(1))
     return _Neighbourhood(src=src, dst=dst,
                           mix=(free * STEP / degree.clamp(min=1.0)).unsqueeze(1),
-                          still=(1.0 - free * STEP).unsqueeze(1),
+                          still=(1.0 - free * STEP).unsqueeze(1), degree=degree.unsqueeze(1),
+                          moving=free > 0.0,
                           crossed=int(worth.sum()), creases=int((~worth).sum()),
-                          held=int(((sharp > 0.0) & (degree > 0.0)).sum()))
+                          held=int(((sharp > 0.0) & (degree > 0.0)).sum()),
+                          painted=int((weight.squeeze(1) > 0.0).sum()))
 
 
 def _change(before: float, after: float) -> str:
@@ -110,4 +169,4 @@ def _change(before: float, after: float) -> str:
     return "volume unchanged" if not before else f"volume {100 * (after / before - 1):+.1f}%"
 
 
-__all__ = ["MAX_ROUNDS", "relax_surface"]
+__all__ = ["MAX_ROUNDS", "SPOT_LIMIT", "SPOT_RADIUS_LIMIT", "relax_surface"]
