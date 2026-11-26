@@ -455,6 +455,7 @@ const FIELD_LABELS = {
   upscale_factor: 'Upscale factor', upscale_type: 'Upscale type',
   sampler: 'Sampler', lora_specs: 'LoRA',
   mode: 'Mode', frame_count: 'Frames', fps: 'FPS', duration: 'Duration',
+  references: 'References', attention: 'Attention',
   flow_shift: 'Flow shift', output_format: 'Output',
   latents: 'Tokens', octree_resolution: 'Density', bounds: 'Bounds',
   mc_level: 'Cut level', scale: 'Scale',

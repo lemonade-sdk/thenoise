@@ -184,6 +184,18 @@ function fillSamplers(names) {
   }
 }
 
+// Same for attention: `auto` is the field left out, and a model with nothing to choose
+// between gets a dead menu rather than a request it would refuse.
+function fillAttention(methods) {
+  const sel = $('video_attention');
+  const keep = sel.value;
+  const words = (methods || []).filter((m) => m !== 'auto');
+  fillSelect(sel, ['', ...words], (m) => m || 'auto');
+  sel.value = words.includes(keep) ? keep : '';
+  sel.disabled = words.length === 0;
+  sel.title = sel.disabled ? 'this model computes attention one way' : '';
+}
+
 // Gate the UI on the loaded model's capabilities, which the pipeline enforces too.
 async function applyModelState() {
   let models = null; // null = /health unreachable: assume a model that can do it all
@@ -241,10 +253,14 @@ async function applyModelState() {
     ? 'the loaded model has only one way with a reference' : '';
   $('video_i2v_field').classList.toggle('hidden', !video?.i2v);
   $('video_flf2v_field').classList.toggle('hidden', !video?.flf2v);
+  // A packing built without anywhere for a reference has no use for one, so the box
+  // goes rather than earning a refusal.
+  $('video_ref2v_field').classList.toggle('hidden', !video?.ref2v);
   const views = (mesh && mesh.mv2d) || 1;
   $('mesh_file').multiple = views > 1;
   $('mesh_views_hint').classList.toggle('hidden', views < 2);
   fillSamplers(samplers);
+  fillAttention(caps.attention_methods);
 }
 applyModelState();
 

@@ -278,7 +278,9 @@ tower, which steers what gets drawn and leaves nothing of the picture in place. 
 model's `ref_methods` says which of those it offers; naming one it lacks is a 400.
 
 The web UI reads all of this to decide what to show: the Edit tab follows
-`i2i`, and `medium` decides what the Generate tab becomes — a clip form for a
+`i2i`, the clip form's Reference box follows `video.ref2v`, and
+`attention_methods` fills its Attention menu — nothing but `auto` in that list and the
+menu is dead. `medium` decides what the Generate tab becomes — a clip form for a
 video model, a shape form for a mesh model. A request for something the loaded
 model cannot do is refused with HTTP 400, not quietly downgraded. `i2v` and
 `flf2v` come from the variant you loaded, not from the model name.

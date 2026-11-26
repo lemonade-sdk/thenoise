@@ -338,6 +338,15 @@
       </div>
       <div class="ref-thumbs" id="video_end_refs"></div>
     </div>
+
+    <div class="field hidden" id="video_ref2v_field">
+      <label class="label" for="video_ref_file">References <span class="hint">optional</span></label>
+      <div class="dropzone" id="video_ref_dropzone">
+        <input type="file" id="video_ref_file" accept="image/*" multiple hidden>
+        <div class="dz-hint" id="video_ref_dz_hint">Pictures the clip should look like, without being frames of it — drag &amp; drop or <span class="kbd">click to browse</span></div>
+      </div>
+      <div class="ref-thumbs" id="video_ref_refs"></div>
+    </div>
   </div>
 
   <div class="field">
@@ -413,13 +422,21 @@
     </div>
   </div>
 
-  <div class="field">
-    <label class="label" for="video_output_format">Output</label>
-    <select id="video_output_format">
-      <option value="">auto</option>
-      <option value="webm">webm</option>
-      <option value="mp4">mp4</option>
-    </select>
+  <div class="row">
+    <div class="field">
+      <label class="label" for="video_output_format">Output</label>
+      <select id="video_output_format">
+        <option value="">auto</option>
+        <option value="webm">webm</option>
+        <option value="mp4">mp4</option>
+      </select>
+    </div>
+    <div class="field">
+      <label class="label" for="video_attention">Attention</label>
+      <select id="video_attention">
+        <option value="">auto</option>
+      </select>
+    </div>
   </div>
 
   <div class="divider"></div>
