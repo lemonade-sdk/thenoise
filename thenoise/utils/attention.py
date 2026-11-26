@@ -181,7 +181,8 @@ def eager_attention(
 
 # Below sm_80 the memory-efficient SDPA kernel does not take bf16 and the math kernel
 # materializes the full score matrix, so long bf16 sequences run in fp16 there.
-_FP16_MAX = 65504.0
+# Largest bf16 value that fp16 can hold (65504 itself rounds up to 65536 in bf16).
+_FP16_MAX = 65280.0
 _LONG = 1 << 24
 
 

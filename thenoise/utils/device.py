@@ -85,9 +85,9 @@ def int_mm_supported(device: torch.device) -> bool:
     return _capability(device.index or 0) >= INT_MM_MIN_CAPABILITY
 
 
-def compile_supported() -> bool:
-    """False when every visible NVIDIA GPU is too old for Triton."""
-    if not torch.cuda.is_available() or torch.version.hip:
+def compile_supported(device: Union[str, torch.device]) -> bool:
+    """False when ``device`` is an NVIDIA GPU too old for Triton."""
+    dev = torch.device(device)
+    if dev.type != "cuda" or not torch.cuda.is_available() or torch.version.hip:
         return True
-    caps = [torch.cuda.get_device_capability(i) for i in range(torch.cuda.device_count())]
-    return not caps or max(caps) >= COMPILE_MIN_CAPABILITY
+    return torch.cuda.get_device_capability(dev.index or 0) >= COMPILE_MIN_CAPABILITY

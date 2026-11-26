@@ -31,12 +31,11 @@ def test_int_mm_and_compile_support(monkeypatch):
     monkeypatch.setattr(device, "_capability", lambda i: (7, 5))
     assert device.int_mm_supported(torch.device("cuda", 0))
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
-    caps = {0: (6, 0), 1: (6, 1)}
+    caps = {0: (6, 0), 1: (8, 9)}
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda i: caps[i])
-    assert not device.compile_supported()
-    caps[1] = (7, 5)
-    assert device.compile_supported()
+    assert device.compile_supported("cpu")
+    assert not device.compile_supported("cuda:0")
+    assert device.compile_supported("cuda:1")      # the selected device decides
 
 
 def _long_bf16(seed=0):
@@ -80,3 +79,12 @@ def test_bf16_attention_fallback_compiles_fullgraph(pre_ampere, monkeypatch):
     torch._dynamo.reset()
     compiled = torch.compile(fn, backend="eager", fullgraph=True)
     torch.testing.assert_close(compiled(q, k, v), fn(q, k, v))
+
+
+def test_bf16_attention_fallback_never_overflows_fp16(pre_ampere):
+    q, k, v = _long_bf16(2)
+    q[0, 0, :8] = 1e5
+    v[0, 1, :8] = -7e4
+    hq, hk, hv, _ = attention._memory_efficient_dtype(q, k, v)
+    assert all(torch.isfinite(t).all() for t in (hq, hk, hv))
+    assert torch.tensor(attention._FP16_MAX, dtype=torch.bfloat16).item() == attention._FP16_MAX

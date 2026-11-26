@@ -79,7 +79,10 @@ def _cuda_capability(device: Device) -> Optional[tuple[int, int]]:
 
 
 def _kernel_backends(device: Device) -> bool:
-    """Disable the comfy_kitchen backends this card cannot run."""
+    """Disable the comfy_kitchen backends the selected card cannot run.
+
+    comfy_kitchen's own checks read one capability per process, so this is global; it is
+    decided by the device the model runs on, not by every visible GPU."""
     cap = _cuda_capability(device)
     if cap is None:
         return False
