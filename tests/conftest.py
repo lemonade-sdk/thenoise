@@ -1368,9 +1368,7 @@ def volume_of(sdf, resolution: int = 64, bounds: float = 1.0, level: float = 0.0
 
 
 def sphere_cut(resolution: int = 64, radius: float = 0.4):
-    """A real cut of a sphere, junk and all: what the finish chain and the writers are
-    tested against, since a hand-built mesh carries none of it.
-    """
+    """A real cut of a sphere: closed, outward, and rough the way a cut is."""
     return volume_of(lambda points: points.norm(dim=-1) - radius, resolution)
 
 

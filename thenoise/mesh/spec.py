@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator
+from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from thenoise.mesh.finish.options import MeshFinishOptions, options_from
 from thenoise.utils.lora_roles import LoraSpecs, lora_specs_by_role

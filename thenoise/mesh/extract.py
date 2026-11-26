@@ -9,8 +9,7 @@ from torch import Tensor
 from .octree import CORNERS, SdfVolume
 
 NORMAL_CREASE_DEGREES = 40.0
-#: The thinnest face worth writing, on the scale ``face_quality`` scores: 1 is an equilateral
-#: and 0 a line, so this is about a third of a degree at its sharpest corner.
+#: Thinnest face a writer draws; 1 is an equilateral and 0 a line, so this is a third of a degree.
 SLIVER_QUALITY = 0.01
 
 _CREASE_LIMIT = math.cos(math.radians(NORMAL_CREASE_DEGREES))
@@ -19,7 +18,7 @@ _CREASE_LIMIT = math.cos(math.radians(NORMAL_CREASE_DEGREES))
 TETRAHEDRA = torch.tensor([[0, 4, 6, 7], [0, 4, 5, 7], [0, 2, 6, 7],
                            [0, 2, 3, 7], [0, 1, 5, 7], [0, 1, 3, 7]], dtype=torch.long)
 
-#: Triangles per tetrahedron vertex pattern, as tetrahedron edges, wound outward; complements reversed.
+#: Triangles per vertex pattern, as tetrahedron edges wound outward; complements reversed.
 _PATTERNS = {
     0b0001: (((0, 1), (0, 2), (0, 3)),),
     0b0010: (((0, 1), (1, 3), (1, 2)),),
@@ -49,7 +48,7 @@ def _corner_coordinates() -> Tensor:
 
 
 def _orientation() -> Tensor:
-    """+1 per tetrahedron keeping the cube's orientation, -1 per reversal, which the Kuhn split alternates."""
+    """+1 per tetrahedron keeping the cube's orientation, -1 per reversal."""
     corners = _corner_coordinates()[TETRAHEDRA]
     steps = torch.stack((corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0],
                          corners[:, 3] - corners[:, 0]), dim=1)
@@ -107,10 +106,7 @@ class Mesh:
         return self.face_spans().norm(dim=-1) * 0.5
 
     def face_quality(self) -> Tensor:
-        """How near an equilateral every face is: one for an equilateral, zero for a line.
-
-        Both halves are squared lengths, so the score does not care what units the shape is in.
-        """
+        """One for an equilateral, zero for a line: a ratio of lengths, so size is never asked."""
         corners = self.corners()
         there = corners[:, 1] - corners[:, 0]
         on = corners[:, 2] - corners[:, 1]
@@ -134,13 +130,7 @@ class Mesh:
                 * torch.linalg.cross(triangles[:, 1], triangles[:, 2])).sum() / 6.0
 
     def without_degenerate(self) -> "Mesh":
-        """The mesh without the faces no reader can draw: the faceless ones and the needles
-        whose normal is a coin flip, which is what a reader calls degenerate data.
-
-        Thinness is scored by shape and never by size, because a threshold on area alone once
-        cut a fifth of a real cut. What falls below carries a hundredth of a percent of the
-        surface where it appears.
-        """
+        """The mesh without faces no reader can draw: the faceless and the needles, by shape."""
         keep_faces = self.face_quality() > SLIVER_QUALITY
         used = torch.zeros(self.vertices.shape[0], dtype=torch.bool,
                            device=self.faces.device)
@@ -150,9 +140,7 @@ class Mesh:
         return self.select(used, keep_faces)
 
     def smooth_normals(self) -> Tensor:
-        """The direction every point faces: the normals of the faces around it, averaged over
-        those within :data:`NORMAL_CREASE_DEGREES` of its widest one, so a hard edge stays hard.
-        """
+        """The way every point faces: neighbours within NORMAL_CREASE_DEGREES of the widest."""
         span = self.face_spans()
         worth = span.norm(dim=-1)
         unit = span / worth.clamp(min=1e-20).unsqueeze(-1)
@@ -184,7 +172,7 @@ def _unravel(ids: Tensor, stride: int) -> Tensor:
 
 
 def _edge_points(volume: SdfVolume, keys: Tensor, plane: int) -> Tensor:
-    """One point per packed corner pair, interpolated, always low grid id first so both cells sharing an edge agree bit for bit."""
+    """One point per packed corner pair, low grid id first, so both cells sharing an edge agree."""
     stride = volume.resolution + 1
     flat = volume.values.reshape(-1)
     lo, hi = keys // plane, keys % plane

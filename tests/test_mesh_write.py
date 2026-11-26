@@ -134,8 +134,7 @@ def test_a_thin_triangle_is_written_when_it_still_covers_ground(tmp_path):
 
 
 def test_a_needle_is_not_written_though_it_has_area(tmp_path):
-    """Thinner than about a third of a degree, and its normal is a coin flip: a reader calls
-    that degenerate data, so the face goes and the point only it needed goes with it."""
+    """Below the score the face goes, and the point only it needed goes with it."""
     path = tmp_path / "needle.obj"
     write_obj(_flat(apex=0.0004), path)
     text = path.read_text()
@@ -144,8 +143,7 @@ def test_a_needle_is_not_written_though_it_has_area(tmp_path):
 
 
 def _flat(apex: float) -> Mesh:
-    """A wide triangle and one stretched along its base to ``apex`` tall, both in the same
-    plane: the pair the reducer leaves behind, at whatever scale the shape was written."""
+    """A wide triangle and one stretched along its base to ``apex`` tall, in the same plane."""
     return Mesh(vertices=torch.tensor([[0.0, 0.0, 0.0], [8.0, 0.0, 0.0],
                                        [0.0, 8.0, 0.0], [0.5, apex, 0.0]]),
                 faces=torch.tensor([[0, 1, 2], [1, 3, 0]]))
@@ -196,8 +194,7 @@ def test_stl_is_written_by_the_extension_too(tmp_path):
 
 
 def test_a_mesh_still_graded_writes_the_same_file(tmp_path):
-    """A cut comes off the device inside a graph; a writer that forgot one of the two tensors
-    would fail the moment they are indexed together."""
+    """A cut arrives inside a graph; forgetting one tensor fails when the two are indexed."""
     graded = Mesh(triangle().vertices.clone().requires_grad_(), triangle().faces)
     written = write_obj(graded, tmp_path / "graded.obj")
     assert not written.vertices.requires_grad and not written.faces.requires_grad

@@ -122,8 +122,7 @@ def test_scaling_a_shape_is_the_same_shape_about_the_origin():
 
 
 def test_the_face_score_is_one_for_an_equilateral_and_zero_for_a_line():
-    """Every face the writers refuse is decided against this scale, so the scale is what is
-    worth pinning — and it is a ratio of squared lengths, so it holds at any size."""
+    """Every refusal is decided against this scale, so the scale is what is worth pinning."""
     for side in (0.001, 1.0, 750.0):
         fat = Mesh(vertices=torch.tensor([[0.0, 0.0, 0.0], [side, 0.0, 0.0],
                                           [side / 2, side * math.sqrt(3) / 2, 0.0]]),

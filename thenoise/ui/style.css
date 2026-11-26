@@ -909,7 +909,6 @@ body.rgba_out .stage img {
   display: block;
 }
 
-/* A clip or a sound, which has no preview here: the extension stands in for one. */
 .thumb-file {
   width: 100%;
   height: 100%;

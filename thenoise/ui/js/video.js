@@ -51,9 +51,6 @@ function resetVideoResult() {
   hideResult('v_video', 'vplaceholder');
 }
 
-/* ---------- the pictures a clip is asked to look like ---------- */
-
-// In the order they were picked, which is the order a prompt numbers them in.
 let vRefs = [];
 
 const REF_WORD = { picture: 'Picture', video: 'Video', audio: 'Audio' };
@@ -62,8 +59,6 @@ function renderVideoRefs() {
   const box = $('video_ref_refs');
   box.innerHTML = '';
   $('video_ref_dz_hint').style.display = vRefs.length ? 'none' : '';
-  // Ordinals count each kind on its own, which is how a prompt points at one: a clip and
-  // its soundtrack are numbered apart from the pictures beside them.
   const said = {};
   vRefs.forEach((ref, i) => {
     const word = REF_WORD[ref.kind] || 'Reference';
@@ -83,7 +78,7 @@ function fileTag(name) {
 
 async function addVideoRefs(files) {
   const picked = [...files];
-  $('video_ref_file').value = ''; // so the same files can be picked again
+  $('video_ref_file').value = '';
   for (const file of picked) {
     const media = await readMediaFile(file);
     if (media) vRefs.push({dataUrl: media.dataUrl, b64: media.b64,
@@ -92,15 +87,12 @@ async function addVideoRefs(files) {
   renderVideoRefs();
   resetVideoResult();
 }
-
 bindDropzone('video_dropzone', 'video_file', files => loadVideoFrame('image', files[0]));
 bindDropzone('video_end_dropzone', 'video_end_file',
              files => loadVideoFrame('end_image', files[0]));
 bindDropzone('video_ref_dropzone', 'video_ref_file', addVideoRefs);
 bindSwap('video_swap', 'video_width', 'video_height');
-
 initLora('video_');
-
 function collectVideoSettings() {
   const body = {
     prompt: $('video_prompt').value,
@@ -121,7 +113,6 @@ function collectVideoSettings() {
   if (attention) body.attention = attention;
   return body;
 }
-
 function validateVideoInputs() {
   const fail = (message) => {
     setTimer('vtimer', 'vtimer_text', 'error', 'error: ' + message);
@@ -149,7 +140,6 @@ function validateVideoInputs() {
     && check(['flow_shift'], n => real(n) && n > 0,
              'flow shift must be positive (leave empty for the model default)');
 }
-
 $('video_generate').addEventListener('click', () => {
   if (!validateVideoInputs()) return;
   const body = collectVideoSettings();
@@ -168,7 +158,6 @@ $('video_generate').addEventListener('click', () => {
     onArtifact: async (blob, status) => {
       if (vOutUrl) URL.revokeObjectURL(vOutUrl);
       vOutUrl = URL.createObjectURL(blob);
-      // `resolved` has the grid-snapped size and the seed drawn; the frames are dropped.
       const { image, end_image, references, ...sent } = body;
       vOutMeta = { ...sent, references: refNames, model: status.model,
                    ...status.resolved };
@@ -177,9 +166,7 @@ $('video_generate').addEventListener('click', () => {
     },
   });
 });
-
 $('vcancel').addEventListener('click', () => cancelJob(videoJob, $('vcancel')));
-
 function showVideoResult(url) {
   showResult('v_video', 'vplaceholder', url);
   setStageActions($('vdownload'), $('vinfo_btn'), true);

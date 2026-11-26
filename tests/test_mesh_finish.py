@@ -12,14 +12,13 @@ import sys
 import numpy as np
 import pytest
 import torch
-from conftest import (beside_the_shape, cut_with_junk, edge_multiplicity, sphere_cut,
-                      tetra)
+from conftest import beside_the_shape, edge_multiplicity, sphere_cut, tetra
 from test_mesh_controller import DEFAULTS
 
 from thenoise.mesh.extract import Mesh, extract_surface
 from thenoise.mesh.finish import (CHAIN, DEFAULTS as OFF, FILTERS, FINISH_NAMES,
                                   MeshFinishOptions, filter_specs, finish_mesh,
-                                  flat_options, options_from)
+                                  flat_options)
 from thenoise.mesh.finish import cleanup
 from thenoise.mesh.finish.cleanup import drop_islands
 from thenoise.mesh.finish.simplify import reduce_to

@@ -36,8 +36,7 @@ def drop_islands(mesh: Mesh, size: float) -> Mesh:
     return mesh.select(wanted[where], wanted[piece])
 
 
-#: Propagation crosses one edge per round, so a shape with a long thin spike needs more than
-#: any cut has, and the hand merge below is the usual ending rather than the exception.
+#: One edge crossed per round, so a spiked cut needs the hand merge rather than more rounds.
 ROUNDS = 32
 
 

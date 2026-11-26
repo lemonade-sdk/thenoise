@@ -161,7 +161,8 @@ def test_health_publishes_the_shape_knobs_of_the_loaded_model():
     runtime = _runtime()
     runtime._model = type("M", (), {"MEDIUM": "mesh", "default_prefs": hunyuan,
                                     "CAPABILITIES": {"mesh": {"i2d": True}},
-                                    "REF_METHODS": ()})()
+                                    "REF_METHODS": (), "ATTENTION_METHODS": ATTENTION_METHODS,
+                                    "attention_methods": lambda self: self.ATTENTION_METHODS})()
     knobs = _endpoint(create_app(runtime), "/health")()["knobs"]
 
     assert knobs == knob_menu(hunyuan)
@@ -174,7 +175,8 @@ def test_health_publishes_the_shape_knobs_of_the_loaded_model():
     runtime._model = type("M", (), {"MEDIUM": "mesh", "default_prefs": {
         "num_latents": 3072, "octree_resolution": 256, "bounds": 1.0,
         "mc_level": 1 / 256}, "CAPABILITIES": {"mesh": {"i2d": True}},
-        "REF_METHODS": ()})()
+        "REF_METHODS": (), "ATTENTION_METHODS": ATTENTION_METHODS,
+        "attention_methods": lambda self: self.ATTENTION_METHODS})()
     knobs = _endpoint(create_app(runtime), "/health")()["knobs"]
     assert knobs["latents"] == [{"value": 1536, "name": "lean"},
                                {"value": 3072, "name": "standard"},
@@ -312,8 +314,7 @@ _PANE_OPEN = re.compile(r'^<div class="view[^>]*id="(view-[a-z]+)"', re.M)
 
 
 def _pane(page: str, view: str) -> str:
-    """One pane of the page: its markup runs to the next pane's opening div, since the panes
-    are siblings at the top of the body."""
+    """One pane: its markup runs to the next pane's opening div, the panes being siblings."""
     marks = [(one.group(1), one.start()) for one in _PANE_OPEN.finditer(page)]
     here = [at for name, at in marks if name == view]
     assert here, f"the page has no pane {view!r}"

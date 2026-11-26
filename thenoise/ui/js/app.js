@@ -171,12 +171,8 @@ function fillSamplers(names) {
   }
 }
 
-// Same for attention: the loaded model answers the question its own way when the field
-// is left out, and a picker with nothing to pick would only earn a refusal.
 function fillAttention(methods) {
   const words = (methods || []).filter((m) => m !== 'auto');
-  // The picker's first option is the empty one — say nothing and the model's default
-  // stands — so two further words are needed before it is a choice at all.
   const choice = words.length >= 2;
   for (const id of ['attention', 'edit_attention', 'video_attention', 'mesh_attention']) {
     const sel = $(id);
@@ -252,8 +248,6 @@ async function applyModelState() {
     ? 'the loaded model has only one way with a reference' : '';
   $('video_i2v_field').classList.toggle('hidden', !video?.i2v);
   $('video_flf2v_field').classList.toggle('hidden', !video?.flf2v);
-  // A packing built without anywhere for a reference has no use for one, so the box
-  // goes rather than earning a refusal.
   $('video_ref2v_field').classList.toggle('hidden', !video?.ref2v);
   const views = (mesh && mesh.mv2d) || 1;
   $('mesh_file').multiple = views > 1;

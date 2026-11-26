@@ -26,8 +26,7 @@ def _spans(count: int):
 
 
 def _host(mesh: Mesh) -> Mesh:
-    """Every writer starts here: on the host, and without the faces no reader can draw, since
-    a glTF header cannot carry a ``NaN`` position."""
+    """Every writer starts here: on the host, finite, and without the faces no reader can draw."""
     if mesh.is_empty:
         raise ValueError("there is no mesh to write")
     if not bool(torch.isfinite(mesh.vertices).all()):
@@ -62,8 +61,7 @@ def write_obj(mesh: Mesh, path: str | Path) -> Mesh:
 def write_glb(mesh: Mesh, path: str | Path) -> Mesh:
     """One mesh, one primitive, no materials; glTF demands a POSITION min and max."""
     local = _host(mesh)
-    # The order declared here is the order the body is written in, so the offsets in the header
-    # and the bytes after it cannot drift apart.
+    # The body is written in this order, so the header's offsets cannot drift from the bytes.
     arrays = {"POSITION": local.vertices.to(torch.float32).contiguous(),
               "NORMAL": local.smooth_normals().to(torch.float32).contiguous()}
     indices = local.faces.to(torch.int32).contiguous().reshape(-1)
@@ -124,8 +122,7 @@ def write_stl(mesh: Mesh, path: str | Path) -> Mesh:
         out.write(b"thenoise".ljust(80, b"\0") + struct.pack("<I", faces))
         for low, high in _spans(faces):
             corners = positions[local.faces[low:high]]
-            # The span is rebuilt per chunk rather than taken off the mesh, so no whole-mesh
-            # temporary is ever alive here.
+            # Rebuilt per chunk rather than taken off the mesh: no whole-mesh temporary here.
             cross = torch.linalg.cross(corners[:, 1] - corners[:, 0],
                                        corners[:, 2] - corners[:, 0])
             records = np.empty(corners.shape[0], dtype=_STL_DTYPE)
@@ -139,8 +136,7 @@ def write_stl(mesh: Mesh, path: str | Path) -> Mesh:
 
 def write_mesh(mesh: Mesh, path: str | Path,
                output_format: str | None = None) -> Mesh:
-    """The mesh in ``output_format``, or in the format ``path``'s extension promises. What
-    comes back is what landed in the file, which is less the faces no reader can draw."""
+    """The mesh in ``output_format``, or in the format ``path``'s extension promises."""
     if output_format is None:
         output_format = Path(path).suffix[1:].lower()
     if output_format == "glb":
