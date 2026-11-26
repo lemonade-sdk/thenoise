@@ -8,8 +8,7 @@ from PIL import Image
 
 from conftest import cut_with_junk
 from thenoise.jobs import Cancellation, JobCancelled
-from thenoise.mesh.controller import MeshPipelineController, _sampling_bytes
-from thenoise.mesh.memory import volume_bytes
+from thenoise.mesh.controller import MeshPipelineController
 from thenoise.mesh.extract import Mesh
 from thenoise.mesh.finish.chain import finish_mesh
 from thenoise.mesh.spec import MeshSpec
@@ -52,13 +51,13 @@ class FakeMemory:
 
     def __init__(self, events=None):
         self.held: list[tuple[str, ...]] = []
-        self.sized: list[tuple[tuple[str, ...], int, int]] = []
+        self.sized: list[tuple[tuple[str, ...], int]] = []
         self.events = events if events is not None else []
 
     @contextmanager
-    def stage(self, *names, pixels=None, reserve=None):
-        assert pixels or reserve, "a stage must size its transient"
-        self.sized.append((names, pixels, reserve))
+    def stage(self, *names, pixels):
+        assert pixels > 0
+        self.sized.append((names, pixels))
         self.held.append(names)
         self.events.append("hold:" + "+".join(names))
         try:
@@ -153,17 +152,6 @@ def test_a_shape_reports_the_parts_of_itself_that_would_otherwise_be_silent(tmp_
     assert seen[-1] == "cutting", "the volume must not be reported as the solver's last step"
     assert "sampling" in seen[1:-1]
 
-
-
-def test_a_shape_stage_asks_for_room_in_the_units_it_actually_moves():
-    """A volume is not an image: only the conditioning stage may speak in pixels."""
-    model = FakeShapeModel()
-    render(model, octree_resolution=64, latents=512)
-    sized = {names: (pixels, reserve) for names, pixels, reserve in model.memory.sized}
-    assert sized[("codec",)] == (None, volume_bytes(64))
-    assert sized[("dit",)] == (None, _sampling_bytes(512))
-    pixels, reserve = sized[("conditioner",)]
-    assert pixels and reserve is None, "a picture is the one thing measured in pixels"
 
 
 def test_the_three_components_are_brought_in_the_order_the_pipeline_needs_them():

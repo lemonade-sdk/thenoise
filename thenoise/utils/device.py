@@ -38,44 +38,21 @@ def get_device_memory(device: Optional[Union[str, torch.device]]) -> Optional[in
     return None
 
 
-def _host_free() -> Optional[int]:
-    """What the kernel would give a new allocation, from the one figure it keeps for it."""
-    try:
-        with open("/proc/meminfo") as info:
-            for line in info:
-                if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024
-    except (OSError, ValueError):
-        return None
-    return None
-
-
 def get_free_memory(device: Optional[Union[str, torch.device]]) -> Optional[int]:
-    """Bytes the machine would hand out on ``device`` right now, None if it will not say."""
+    """Bytes the driver would hand out on ``device`` right now, None if it will not say.
+
+    Unlike the allocator's measure, this counts the compute context and other processes.
+    """
     if device is None:
         return None
     if isinstance(device, str):
         device = torch.device(device)
     if device.type != "cuda":
-        return _host_free()
+        return None
     try:
         return torch.cuda.mem_get_info(device)[0]
     except (RuntimeError, AttributeError):
         return None
-
-
-def spare_bytes(device: Optional[Union[str, torch.device]]) -> Optional[int]:
-    """What ``device`` could still hand out, counting bytes its allocator holds unused."""
-    free = get_free_memory(device)
-    if free is None:
-        return None
-    if device is not None and torch.device(device).type != "cuda":
-        return free
-    try:
-        kept = torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
-    except (RuntimeError, AttributeError):
-        return free
-    return free + max(0, kept)
 
 
 def synchronize_device(device: Optional[Union[str, torch.device]]):

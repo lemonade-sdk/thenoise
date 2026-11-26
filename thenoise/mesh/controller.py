@@ -17,17 +17,11 @@ from thenoise.utils.lora_roles import check_lora_roles
 from thenoise.utils.pipeline_cache import PipelineCache, content_digest
 
 from .finish import finish_mesh
-from .memory import volume_bytes
 from .shapes import ShapeStore
 from .spec import MeshSpec, ResolvedMesh
 from .write import write_mesh
 
 logger = logging.getLogger(__name__)
-
-
-def _sampling_bytes(latents: int) -> int:
-    """A step's attention is quadratic in the latent tokens; the floor covers the rest."""
-    return latents * latents * 2
 
 
 class MeshPipelineController:
@@ -75,6 +69,8 @@ class MeshPipelineController:
                 num_latents=spec.latents if saved is None else int(saved.shape[1]),
             )
             stages = Stages(model, self._cache)
+            # A shape moves no pixel grid of its own: its token count sizes the claim.
+            work = spec.latents
 
             if saved is not None:
                 x = saved
@@ -86,7 +82,7 @@ class MeshPipelineController:
                     EncodePromptArgs(prompt="", guidance_scale=spec.guidance_scale,
                                      image=images or None),
                     resident=("conditioner",),
-                    pixels=sum(image.width * image.height for image in images),
+                    pixels=sum(image.width * image.height for image in images) or work,
                     cache="prompt", key=self._cache_key(spec),
                 )
                 token.check()
@@ -103,8 +99,7 @@ class MeshPipelineController:
                 again = self._cache.hit("sampling", key)
                 began = time.perf_counter()
                 x = stages.run(self._denoise, latents, model.fuse_text(cond), params, spec,
-                               token, progress, resident=("dit",),
-                               reserve=_sampling_bytes(spec.latents),
+                               token, progress, resident=("dit",), pixels=work,
                                prepare=wear_loras,
                                cache="sampling", key=key)
                 how = ("only the surface was cut again, from a shape this server still held"
@@ -120,7 +115,7 @@ class MeshPipelineController:
                 model.decode_mesh, x,
                 MeshDecodeParams(octree_resolution=spec.octree_resolution,
                                  bounds=spec.bounds, mc_level=spec.mc_level),
-                resident=("codec",), reserve=volume_bytes(spec.octree_resolution),
+                resident=("codec",), pixels=work,
             )
             logger.info("Cut: %d triangles; finish %s", mesh.faces.shape[0], spec.finish)
             mesh = finish_mesh(mesh.scaled(spec.scale), spec.finish, token.check,

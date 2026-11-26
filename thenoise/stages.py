@@ -15,15 +15,14 @@ class Stages:
         self._model = model
         self._cache = cache
 
-    def run(self, work: Callable[..., Any], *args, resident: Sequence[str],
-            pixels: Optional[int] = None, reserve: Optional[int] = None,
+    def run(self, work: Callable[..., Any], *args, resident: Sequence[str], pixels: int,
             cache: Optional[str] = None, key: Any = None,
             prepare: Optional[Callable[[], None]] = None, **kwargs) -> Any:
         """``work(*args)`` with ``resident`` held, cached under ``cache`` when named."""
         if cache is not None and self._cache.hit(cache, key):
             logger.info("%s stage reused: nothing recomputed", cache)
             return self._cache.get(cache)
-        with self._model.memory.stage(*resident, pixels=pixels, reserve=reserve) as stage:
+        with self._model.memory.stage(*resident, pixels=pixels) as stage:
             if prepare is not None:
                 prepare()
             value = stage.run(work, *args, **kwargs)

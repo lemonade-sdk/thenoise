@@ -1,7 +1,6 @@
 import pytest
 import torch
 
-from thenoise.mesh.memory import volume_bytes
 from thenoise.mesh.octree import (CORNERS, MIN_LEVEL_RESOLUTION, octree_levels,
                            sample_sdf)
 
@@ -157,34 +156,3 @@ def test_a_band_refines_the_cells_that_only_come_near_the_level():
 def test_nonsense_grids_are_refused(kwargs):
     with pytest.raises(ValueError):
         sample_sdf(sphere(), device="cpu", **{**{"resolution": 64}, **kwargs})
-
-
-def test_a_cut_costs_the_volume_of_its_grid_and_says_so():
-    """Each step is eight times the memory of the one below, which is what the request's
-    own limit says; the number is what a refusal is quoted from."""
-    assert volume_bytes(192) > 7 * volume_bytes(96)
-    assert volume_bytes(96) > 7 * volume_bytes(48)
-
-
-def test_a_cut_the_device_cannot_pay_for_is_refused_before_anything_is_allocated(monkeypatch):
-    monkeypatch.setattr("thenoise.mesh.memory.spare_bytes", lambda device: 1 << 20)
-    with pytest.raises(ValueError,
-                       match=r"a cut at 192\^3 needs .* lower the voxel resolution"):
-        sample_sdf(lambda points: points.norm(dim=-1) - 0.4, 192, device="cpu")
-
-
-def test_a_level_that_outgrows_the_device_is_named_as_that_level(monkeypatch):
-    """The grids are certain and the band is not: a level the field will not fit in is
-    refused by its own name, and not blamed on a resolution that would have fitted."""
-    rooms = iter([1 << 40, 1 << 40, 1 << 20])
-    monkeypatch.setattr("thenoise.mesh.memory.spare_bytes", lambda device: next(rooms))
-    with pytest.raises(ValueError, match=r"level 192 of a 192\^3 cut"):
-        sample_sdf(lambda points: points.norm(dim=-1) - 0.4, 192, device="cpu")
-
-
-def test_a_device_that_will_not_say_its_room_is_left_alone(monkeypatch):
-    """A probe that will not say is not a reason to refuse anything."""
-    monkeypatch.setattr("thenoise.mesh.memory.spare_bytes", lambda device: None)
-    volume = sample_sdf(lambda points: points.norm(dim=-1) - 0.4, 16, device="cpu",
-                        start=8)
-    assert volume.resolution == 16

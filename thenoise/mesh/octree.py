@@ -7,12 +7,9 @@ from typing import Callable, Tuple
 import torch
 from torch import Tensor
 
-from .memory import room, volume_bytes
-
 CORNERS = torch.tensor(list(product((0, 1), repeat=3)), dtype=torch.long)
 MIN_LEVEL_RESOLUTION = 63
 CHUNK = 8192
-LEVEL_BYTES_PER_CORNER = 32
 
 
 SdfFn = Callable[[Tensor], Tensor]
@@ -107,8 +104,6 @@ def sample_sdf(sdf: SdfFn, resolution: int, *, device, bounds: float = 1.0,
         raise ValueError(f"bounds must be positive, got {bounds}")
     if chunk < 1:
         raise ValueError(f"chunk must be positive, got {chunk}")
-    room(device, volume_bytes(resolution), f"a cut at {resolution}^3",
-         "lower the voxel resolution")
     levels = octree_levels(resolution, start)
     grid = torch.zeros((resolution + 1,) * 3, dtype=torch.float32, device=device)
     sampled = torch.zeros((resolution + 1,) * 3, dtype=torch.bool, device=device)
@@ -118,8 +113,6 @@ def sample_sdf(sdf: SdfFn, resolution: int, *, device, bounds: float = 1.0,
     queried = 0
     holding = None
     for size in levels:
-        room(device, cells.shape[0] * LEVEL_BYTES_PER_CORNER * 8,
-             f"level {size} of a {resolution}^3 cut", "lower the voxel resolution")
         step = resolution // size
         index = (cells[:, None, :] + CORNERS.to(device)).reshape(-1, 3)
         stride = size + 1

@@ -9,14 +9,12 @@ import torch
 from torch import Tensor
 
 from ..extract import Mesh
-from ..memory import room
 
 logger = logging.getLogger(__name__)
 
 CREASE_DEGREES = 50.0
 STEP = 0.5
 MAX_ROUNDS = 16
-SMOOTH_BYTES_PER_TRIANGLE = 420
 
 
 @dataclass(frozen=True)
@@ -39,9 +37,6 @@ def relax_surface(mesh: Mesh, strength: float, check: Callable[[], None]) -> Mes
     if strength <= 0.0 or mesh.is_empty:
         return mesh
 
-    triangles = mesh.faces.shape[0]
-    room(mesh.vertices.device, triangles * SMOOTH_BYTES_PER_TRIANGLE,
-         f"smoothing {triangles} triangles", "lower the level of detail")
     rounds = min(MAX_ROUNDS, max(1, ceil(strength * MAX_ROUNDS)))
     near = _neighbours(mesh, CREASE_DEGREES)
     before = float(mesh.signed_volume())

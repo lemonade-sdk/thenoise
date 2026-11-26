@@ -71,24 +71,6 @@ def _peak_bucket(pixels: int) -> int:
     return 1 << (megapixels - 1).bit_length()
 
 
-def _pow2(nbytes: int) -> int:
-    """The byte bucket: powers of two down, for work that moves no pixels."""
-    return 1 << max(0, int(nbytes).bit_length() - 1)
-
-
-def claim(pixels: Optional[int] = None,
-          reserve: Optional[int] = None) -> Tuple[int, Tuple[str, int]]:
-    """What a stage asks to be left, and the bucket a measurement of it is filed under.
-
-    Pixels for work that moves an image, bytes for work that moves anything else.
-    """
-    if pixels is None and reserve is None:
-        raise ValueError("a stage must size its transient: pixels, or reserve in bytes")
-    if reserve is None or (pixels and reserve <= reserve_bytes(pixels)):
-        return reserve_bytes(pixels), ("megapixels", _peak_bucket(pixels))
-    return max(reserve, _RESERVE_BASE_BYTES), ("bytes", _pow2(reserve))
-
-
 def _tensor_bytes(tensor: torch.Tensor) -> int:
     """Device bytes of ``tensor``. A quantized tensor reports the dtype it stands in for,
     so ask its storage.
@@ -233,29 +215,32 @@ class MemoryManager:
         return target
 
     # ------------------------------------------------------- measured headroom
-    def _reserve_for(self, names: tuple, keep: int, bucket: tuple) -> int:
-        """What ``stage`` keeps free: its own claim, or this device's measurement of it."""
+    def _reserve_for(self, names: tuple, pixels: int) -> int:
+        """What ``stage`` keeps free: the fleet's figure, or this device's own if larger."""
         observed = self._peaks.get(names, {})
-        # a transient grows with the work, so guess an unrun size by the next bucket up
-        return max(keep,
+        bucket = _peak_bucket(pixels)
+        # transient grows with the image, so guess an unrun size by the next bucket up
+        return max(reserve_bytes(pixels),
                    observed.get(bucket, 0),
-                   observed.get((bucket[0], bucket[1] * 2), 0))
+                   observed.get(bucket * 2, 0))
 
-    def _learn(self, names: tuple, keep: int, bucket: tuple, baseline: int) -> None:
+    def _learn(self, names: tuple, pixels: int, baseline: int) -> None:
         """Remember the peak a stage allocated above the bytes live when its work started,
         for its size and itself. The window spans a retry, so a stage that had to squeeze
         learns what sufficed.
         """
         transient = self._peak_end(self._load, baseline)
+        bucket = _peak_bucket(pixels)
         peaks = self._peaks.setdefault(names, {})
         if transient <= peaks.get(bucket, 0):
             return
         peaks[bucket] = transient
-        if transient > keep:
+        fleet = reserve_bytes(pixels)
+        if transient > fleet:
             logger.warning(
-                "stage %s used %.1f GiB, over the %.1f GiB it asked for; "
+                "stage %s used %.1f GiB at %d Mpx, over its %.1f GiB reserve; "
                 "reserving the measured figure for that size from now on",
-                names or ("<room>",), transient / (1 << 30), keep / (1 << 30),
+                names or ("<room>",), transient / (1 << 30), bucket, fleet / (1 << 30),
             )
 
     @staticmethod
@@ -278,31 +263,28 @@ class MemoryManager:
 
     # ------------------------------------------------------------ placement
     @contextmanager
-    def stage(self, *names: str, pixels: Optional[int] = None,
-              reserve: Optional[int] = None) -> Iterator[_Stage]:
-        """Run a stage needing ``names`` on the device, with room for its transient.
+    def stage(self, *names: str, pixels: int) -> Iterator[_Stage]:
+        """Run a stage needing ``names`` on the device, with room for ``pixels``.
 
-        The one thing a caller says about placement. ``pixels`` sizes the reserve for work
-        that moves an image and ``reserve`` states it in bytes for work that does not, so
-        a stage that named a component and sized nothing could fill the device to the last
+        The one thing a caller says about placement. ``pixels`` sizes the reserve, so a
+        stage that named a component and sized nothing could fill the device to the last
         byte; with no names it is a claim on room alone, which is all a consumer that owns
         its own weights has to say. Nothing moves on the way out.
 
         Wrap the work in the yielded handle's ``run`` for a squeeze-and-retry. The stage
         is measured on the way out, so the next one of its size reserves what this used.
         """
-        keep, bucket = claim(pixels, reserve)
         held, self._held = self._held, self._held | set(names)
         depth, self._depth = self._depth, self._depth + 1
         baseline = None
         try:
-            self._place(names, self._reserve_for(names, keep, bucket))
+            self._place(names, self._reserve_for(names, pixels))
             baseline = self._peak_begin(self._load) if depth == 0 else None
             yield _Stage(self)
         finally:
             self._held, self._depth = held, depth
             if depth == 0 and baseline is not None:
-                self._learn(names, keep, bucket, baseline)
+                self._learn(names, pixels, baseline)
 
     def offload(self, *names: str) -> None:
         """Move each named component to the offload device and free compute memory.

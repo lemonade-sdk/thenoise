@@ -16,8 +16,8 @@ class _Memory:
         self.ran: list[str] = []
 
     @contextmanager
-    def stage(self, *names, pixels=None, reserve=None):
-        self.entered.append((names, pixels, reserve))
+    def stage(self, *names, pixels):
+        self.entered.append((names, pixels))
         memory = self
 
         class _Run:
@@ -90,7 +90,7 @@ def test_prepare_runs_inside_the_stage_before_the_work(stages):
                cache="prompt", key=("p",), prepare=prepare)
 
     assert sink == ["prepare", "work"], "a hit skips preparation too"
-    assert model.memory.entered == [(("dit",), 64, None)]
+    assert model.memory.entered == [(("dit",), 64)]
 
 
 def test_storing_a_stage_clears_every_later_slot():

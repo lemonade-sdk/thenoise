@@ -23,7 +23,6 @@ from thenoise.mesh.finish import cleanup
 from thenoise.mesh.finish.cleanup import drop_islands
 from thenoise.mesh.finish.simplify import reduce_to
 from thenoise.mesh.finish.smooth import MAX_ROUNDS, relax_surface
-from thenoise.mesh import memory
 from thenoise.mesh.octree import sample_sdf
 from thenoise.mesh.spec import MeshSpec
 from thenoise.postprocess.options import PostprocessOptions
@@ -259,7 +258,7 @@ def test_the_budget_is_met_and_the_surface_stays_closed():
     assert len(reduced.faces) == max(4, round(len(cut.faces) * keep))
     assert torch.equal(edge_multiplicity(reduced.faces),
                        torch.full_like(edge_multiplicity(reduced.faces), 2))
-    assert reduced.signed_volume() == pytest.approx(cut.signed_volume(), rel=0.01)
+    assert float(reduced.signed_volume()) == pytest.approx(float(cut.signed_volume()), rel=0.01)
 
 
 def test_a_hundredth_of_the_triangles_still_holds_a_closed_shape():
@@ -268,7 +267,7 @@ def test_a_hundredth_of_the_triangles_still_holds_a_closed_shape():
     reduced = reduce_to(cut, 0.01)
     assert torch.equal(edge_multiplicity(reduced.faces),
                        torch.full_like(edge_multiplicity(reduced.faces), 2))
-    assert reduced.signed_volume() == pytest.approx(cut.signed_volume(), rel=0.05)
+    assert float(reduced.signed_volume()) == pytest.approx(float(cut.signed_volume()), rel=0.05)
 
 
 def test_keeping_everything_hands_back_the_very_mesh():
@@ -421,19 +420,13 @@ def test_the_log_says_what_the_smoothing_actually_did(caplog):
     wobbling = roughen(sphere_cut(32))
     with caplog.at_level("INFO", logger="thenoise.mesh.finish.smooth"):
         relax_surface(wobbling, 0.4, _nothing_asked)
-    line = [one.getMessage() for one in caplog.records if one.getMessage().startswith("smooth:")][-1]
+    said = [one.getMessage() for one in caplog.records
+            if one.getMessage().startswith("smooth:")][-1]
     rough, smoother = (float(one) for one in
-                       re.search(r"wobble (\S+) -> (\S+)", line).groups())
+                       re.search(r"wobble (\S+) -> (\S+)", said).groups())
     assert smoother < rough
-    assert f"{math.ceil(0.4 * MAX_ROUNDS)} rounds" in line
-    assert "volume " in line
-
-
-def test_work_the_machine_could_not_take_is_refused_before_any_of_it_starts(monkeypatch):
-    cut = sphere_cut(64)
-    monkeypatch.setattr(memory, "spare_bytes", lambda device: 1 << 20)
-    with pytest.raises(ValueError, match="level of detail"):
-        relax_surface(cut, 0.5, _nothing_asked)
+    assert f"{math.ceil(0.4 * MAX_ROUNDS)} rounds" in said
+    assert "volume " in said
 
 
 # ---------------------------------------------------------------- the request

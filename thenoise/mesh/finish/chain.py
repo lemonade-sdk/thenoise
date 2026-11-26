@@ -5,7 +5,6 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Dict
 
-from thenoise.utils.device import release_device_memory
 from thenoise.utils.options import apply_chain
 
 from .options import DEFAULTS, FINISH, filter_specs
@@ -52,10 +51,7 @@ def _reported(spec, ask: Ask):
 
 def finish_mesh(mesh, options, check: Callable[[], None], progress: Callable[..., None]):
     """What the request asked of the cut, in declared order; the mesh itself if nothing."""
-    device = mesh.vertices.device
-    host = mesh if device.type == "cpu" else mesh.cpu()
-    if device.type != "cpu":
-        release_device_memory(device)
+    host = mesh if mesh.vertices.device.type == "cpu" else mesh.cpu()
     stages = filter_specs(FINISH)
     ask = Ask(check=check)
     return apply_chain(host, options, stages,
