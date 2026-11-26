@@ -8,6 +8,7 @@ so a step is the real packing, the real rope and the real shift maps — only sm
 from __future__ import annotations
 
 import pytest
+import thenoise.models.h3_video as h3_video_module
 import torch
 from PIL import Image
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ from thenoise.models.h3_video import (
     H3VideoModel,
 )
 from thenoise.samplers import create_sampler
+from thenoise.utils.attention import ATTENTION_METHODS
 from thenoise.vae import AutoencoderKLH3Audio, AutoencoderKLH3Video
 from thenoise.vae.h3 import TemporalPlan
 from thenoise.video.spec import VideoSpec
@@ -133,6 +135,23 @@ def test_a_canvas_bigger_than_the_trained_area_runs_with_a_warning(caplog):
 def _canvas():
     """Just enough adapter to call the two request hooks, which need no weights."""
     return object.__new__(H3VideoModel)
+
+
+def test_the_lossy_offer_is_about_this_checkpoint_and_this_box(monkeypatch):
+    """Head width is read out of the file and the kernel off the board: neither is a class
+    fact, so the offer is asked of both."""
+    asked = {}
+
+    def verdict(device, dtype, head_dim):
+        asked["ask"] = (device, dtype, head_dim)
+        return "no compiled sol_attn kernel for cuda:0"
+
+    monkeypatch.setattr(h3_video_module, "routing_unavailable", verdict)
+    canvas = _canvas()
+    canvas.device, canvas.dtype = "cuda:0", torch.bfloat16
+    canvas.params = SimpleNamespace(head_dim=128)
+    assert canvas.attention_methods() == ATTENTION_METHODS
+    assert asked["ask"] == ("cuda:0", torch.bfloat16, 128)
 
 
 # --- the pack ----------------------------------------------------------------
