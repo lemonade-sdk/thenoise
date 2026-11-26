@@ -1,16 +1,14 @@
 """H3 codecs — a 3D causal CNN encoder over a ViT pixel decoder.
 
-Ported from ComfyUI's ``comfy/ldm/minimax/vae.py`` with its module tree — and with it
-the checkpoint key names — verbatim; only the ops differ. Two checkpoints share this
-tree: the video one decodes a clip through ``patch_size_t = 4`` and 3D rope, the image
-one drops the time axis the reference carries and decodes a frame at a time, which is
-why its ``post_quant_conv`` is 2D while ``quant_conv`` stays 3D.
+Ported from ComfyUI's ``comfy/ldm/minimax/vae.py`` with its module tree — and with it the
+checkpoint key names — verbatim; only the ops differ. Two checkpoints share the tree: the
+video one decodes through ``patch_size_t = 4`` and 3D rope, the image one drops the time
+axis, which is why its ``post_quant_conv`` is 2D while ``quant_conv`` stays 3D.
 
-The latent is 24 channels at 16 pixels per cell, normalized by the constants below — the
-image checkpoint ships none, so they are their one home; the video checkpoint ships its
-own and :func:`load_h3_video_vae` reads them off the file. Encoding an image returns a
-posterior *sample* on :data:`ENCODE_SEED`, never the mean: the decoder was trained on
-samples. Encoding a clip returns the mean, as the reference does.
+The latent is 24 channels at 16 pixels per cell. The image checkpoint ships no latent
+statistics, so the constants below are their only home; a video file states its own.
+Encoding an image returns a posterior *sample* on :data:`ENCODE_SEED`, never the mean — the
+decoder was trained on samples. Encoding a clip returns the mean.
 """
 from __future__ import annotations
 
@@ -91,8 +89,8 @@ NORM_EPS = 1e-5
 TILE_SIZE = 256
 TILE_BLEND = 64
 
-#: Frames the video codec encodes per clip, and the tokens it throws away at the end of
-#: each. Both feed :class:`TemporalPlan`, and both are stated by the checkpoint.
+#: Frames the video codec runs per clip, and the tokens it throws away at the end of each.
+#: A file states both.
 CLIP_LENGTH = 17
 TOKEN_DROP = 3
 
@@ -334,12 +332,10 @@ class TransformerBlock(nn.Module):
 class ViTDecoder(nn.Module):
     """The H3 pixel decoder: a ViT over patchified latent cells.
 
-    A token is one latent cell and ``proj_out`` answers the pixels held inside it,
-    ``patch_size`` per spatial axis and ``patch_size_t`` in time — 4 for the video
-    checkpoint, 1 for the image one, which is then taken and returned a frame at a
-    time. The sequence ends in the learnable register tokens plus one spare row
-    (``mask_token``) that inference never reads, parked at the grid origin so the rope
-    reads them as background.
+    A token is one latent cell and ``proj_out`` answers the pixels inside it —
+    ``patch_size`` per spatial axis, ``patch_size_t`` in time. The sequence ends in the
+    learnable register tokens plus a spare row (``mask_token``) inference never reads,
+    parked at the grid origin so the rope reads them as background.
     """
 
     def __init__(self, patch_size: int, dim: int, num_layers: int, patch_size_t: int = 1,
@@ -542,15 +538,15 @@ def tiled_canvas(z: torch.Tensor, decode: Callable[[torch.Tensor], torch.Tensor]
 class TemporalPlan:
     """How the video codec walks a latent's frames on the way out.
 
-    The encoder is causal with a temporal stride of ``ratio_t``, so a decoded clip opens
-    with ``pre_padding`` frames standing in for context it does not have, and they are
-    dropped. Consecutive clips therefore re-read ``overlap_tokens`` latent frames and
-    cross-fade the ``frame_overlap`` pixels that buys, so no frame is ever decoded cold;
-    the same overlap is what costs the sequence ``token_drop`` tokens at the end.
+    A causal encoder at temporal stride ``ratio_t`` opens a decoded clip with
+    ``pre_padding`` frames standing in for context it never had, and they are dropped.
+    Consecutive clips re-read ``overlap_tokens`` latent frames and cross-fade the
+    ``frame_overlap`` pixels that buys, so no frame is decoded cold — and that overlap is
+    what costs the sequence ``token_drop`` tokens at the end.
 
-    :attr:`frames` is the closed form of that walk: the first latent of every group of
-    ``chunk_tokens`` carries the frame the padding took from it and the rest carry
-    ``ratio_t`` each, which is the same schedule the DiT lays its own time axis out by.
+    :attr:`frames` is the closed form of the walk: the first latent of every group of
+    ``chunk_tokens`` carries the frame the padding took from it, the rest carry ``ratio_t``
+    each — the schedule the DiT lays its own time axis out by.
     """
 
     latent_t: int
@@ -634,9 +630,9 @@ class AutoencoderKLH3Video(nn.Module):
     """H3 video codec: canonical ``[B, 24, t, h, w]`` latents, frames in and out of
     the range ``[-1, 1]``.
 
-    A decode is chunked in time and tiled in space, and hands frames out as they finish:
-    the whole clip never exists at once, which on a 124-frame clip is the difference
-    between a working set and an allocator error.
+    A decode is chunked in time and tiled in space, handing frames out as they finish: the
+    whole clip never exists at once, which is the difference between a working set and an
+    allocator error.
     """
 
     compute_dtype = COMPUTE_DTYPE
@@ -651,12 +647,11 @@ class AutoencoderKLH3Video(nn.Module):
                  clip_length: int = CLIP_LENGTH, token_drop: int = TOKEN_DROP,
                  latents_mean=LATENTS_MEAN, latents_std=LATENTS_STD,
                  tile_size: int = TILE_SIZE, tile_blend: int = TILE_BLEND):
-        """The release's geometry by default, as :func:`load_h3_video_vae` checks it; the
-        arguments exist so the codec can be exercised at a fraction of the width.
+        """The release's geometry by default.
 
-        The decoder un-patchifies exactly what the encoder's strides compressed, so the
-        two patch sizes are read off ``space_down``/``time_down`` rather than stated
-        again: a file disagreeing with them is not this codec.
+        The decoder un-patchifies exactly what the encoder's strides compressed, so both
+        patch sizes are read off ``space_down``/``time_down``: a file disagreeing with them
+        is not this codec.
         """
         super().__init__()
         self.patch_size = math.prod(space_down)
@@ -839,9 +834,7 @@ class AutoencoderKLH3Image(nn.Module):
                  patch_size: Optional[int] = None, tile_size: int = TILE_SIZE,
                  tile_blend: int = TILE_BLEND):
         """``ch``/``ch_mult`` are the encoder's stage widths, ``dim``/``num_layers`` the
-        decoder's. The defaults are the release's, which :func:`load_h3_image_vae`
-        checks; the arguments exist so the geometry can be exercised at a fraction of
-        the width.
+        decoder's.
         """
         super().__init__()
         self.patch_size = self.spatial_compression if patch_size is None else patch_size
@@ -964,9 +957,8 @@ def load_h3_image_vae(
 #: What the video checkpoint calls its own geometry inside ``__metadata__``.
 VIDEO_GEOMETRY_SECTION = "minimax_h3_video_vae"
 
-#: The video codec's own claim. The Sol decoder is a different module tree —
-#: ``decoder.blocks.N``, no ``x_embedder`` — so it fails this one on its face rather
-#: than half-loading.
+#: The video codec's own claim: a decoder from another module tree has no
+#: ``x_embedder``, so it fails here on its face rather than half-loading.
 H3_VIDEO_SIGNATURE = Signature("H3 video codec",
                                keys=("decoder.x_embedder.weight",
                                      "decoder.transformer_blocks.0.attn.to_qkv.weight",
@@ -976,11 +968,8 @@ H3_VIDEO_SIGNATURE = Signature("H3 video codec",
 def _video_geometry(header: Header) -> dict:
     """The widths, the depth and the clip policy, as the file states them.
 
-    The released checkpoint carries a :data:`VIDEO_GEOMETRY_SECTION` metadata section with
-    the encoder's stage widths and strides, the decoder's rope and the clip length, and
-    ships its latent statistics as tensors. A file with no such section — a re-export, or
-    a test fixture — is taken to be the release's geometry, which is what the module
-    constants say it is.
+    A file with no :data:`VIDEO_GEOMETRY_SECTION` — a re-export, a fixture — is taken to be
+    the release's geometry, which is what the module constants say it is.
     """
     conv_in = header.shapes.get("encoder.conv_in.weight")
     embed = header.shapes.get("decoder.x_embedder.weight")
