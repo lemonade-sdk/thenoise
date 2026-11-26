@@ -174,6 +174,11 @@ def _add_video_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--end-image", metavar="PATH",
                    help="image the clip ends on, for a model that can be told "
                         "where a clip ends; needs --image")
+    p.add_argument("--attention", choices=["auto", "full", "optimized"],
+                   help="auto leaves it to the model, full is exact attention, optimized "
+                        "is whatever lossy acceleration the model has; what the loaded "
+                        "model answers is in /health. Forcing optimized asks for it even "
+                        "where the clip is too short for it to pay off.")
     p.add_argument("--reference", action="append", default=[], metavar="PATH[@FRAME]",
                    help="something for the clip to look like rather than the frame it "
                         "starts or ends on; repeat once per reference. Append "

@@ -46,6 +46,20 @@ def _plan(**over):
 # ---------------------------------------------------------------- the policy
 
 
+def test_a_request_for_full_attention_is_honoured(monkeypatch):
+    monkeypatch.setattr(wan_sparse, "available", lambda device: True)
+    assert _plan() is not None
+    assert _plan(method="full") is None
+
+
+def test_a_request_for_optimized_attention_asks_past_the_crossover(monkeypatch):
+    """The crossover is an economy, so a request may overrule it -- the gates may not be."""
+    monkeypatch.setattr(wan_sparse, "available", lambda device: True)
+    assert _plan(tokens=MIN_TOKENS - 1) is None
+    assert _plan(tokens=MIN_TOKENS - 1, method="optimized") is not None
+    assert _plan(tokens=MIN_TOKENS - 1, method="optimized", head_dim=64) is None
+
+
 def test_a_long_bf16_clip_on_a_gpu_with_the_kernel_routes(monkeypatch):
     monkeypatch.setattr(wan_sparse, "available", lambda device: True)
     assert _plan() == SolAttention(TAU, TOKEN_AUG_MAX, (0, 25))

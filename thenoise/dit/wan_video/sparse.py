@@ -14,6 +14,7 @@ from typing import Callable, Tuple
 
 import torch
 
+from thenoise.utils.attention import DEFAULT_ATTENTION
 from thenoise.utils.sol_attention import (BLOCK, TOKEN_AUG_MAX, SolAttention, available,
                                           dense_reason, log_once)
 
@@ -51,8 +52,8 @@ def window_sigmas(read: Callable[[float], float],
 
 
 def wan_plan(*, tokens: int, tokens_per_frame: int, dtype: torch.dtype, head_dim: int,
-             device, sigma: float,
-             window: Tuple[float, float]) -> SolAttention | None:
+             device, sigma: float, window: Tuple[float, float],
+             method: str = DEFAULT_ATTENTION) -> SolAttention | None:
     """This step's kernel arguments, or ``None`` to keep the step dense.
 
     Decided by the adapter, outside the compiled blocks: reading a per-step sigma inside them
@@ -62,7 +63,11 @@ def wan_plan(*, tokens: int, tokens_per_frame: int, dtype: torch.dtype, head_dim
     def dense(reason: str) -> None:
         log_once(reason, logging.DEBUG, "sol dense at %d tokens: %s", tokens, reason)
 
-    reason = dense_reason(tokens=tokens, dtype=dtype, head_dim=head_dim, device=device)
+    if method == "full":
+        dense("the request asked for full attention")
+        return None
+    reason = dense_reason(tokens=tokens, dtype=dtype, head_dim=head_dim, device=device,
+                          min_tokens=0 if method == "optimized" else None)
     if reason is None and not window[1] <= sigma <= window[0]:
         reason = f"sigma {sigma:.3g} outside the {WINDOW[0]}-{WINDOW[1]} window"
     if reason is None and not available(device):

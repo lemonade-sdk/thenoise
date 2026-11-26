@@ -56,7 +56,8 @@ def run_video(args) -> None:
             width=args.width, height=args.height,
             frames=args.frames, duration=args.duration, fps=args.fps,
             steps=args.steps, guidance_scale=args.guidance_scale,
-            flow_shift=args.flow_shift, sampler=args.sampler, seed=args.seed,
+            flow_shift=args.flow_shift, sampler=args.sampler,
+            seed=args.seed, attention=args.attention,
             output_format=container_of(args.out, args.output_format, OUTPUT_FORMATS),
             image=read_media(args.image, "video") if args.image else None,
             end_image=(read_media(args.end_image, "video", "--end-image")

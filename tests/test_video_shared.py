@@ -14,6 +14,8 @@ from thenoise.vae.wan_video import _comfy_vae_config
 from thenoise.video.controller import VideoPipelineController
 from thenoise.video_cli import one_reference
 from thenoise.jobs import Cancellation
+from thenoise.utils.attention import (ATTENTION_METHODS,
+                                  DEFAULT_ATTENTION)
 from thenoise.video.spec import Guide, ResolvedVideo, VideoSpec, mode_of
 
 
@@ -243,6 +245,19 @@ def test_a_reference_names_its_frame_in_the_argument():
     assert one_reference("dog.png@12") == ("dog.png", 12)
     assert one_reference("dog.png@-1") == ("dog.png", -1)
     assert one_reference("shots@night.png") == ("shots@night.png", None)
+
+
+def test_attention_a_model_does_not_answer_is_refused_by_name(tmp_path):
+    model = StubVideo(config=_stub_config(tmp_path))
+    assert model.ATTENTION_METHODS == ATTENTION_METHODS
+    with pytest.raises(ValueError, match="does not answer 'optimized' attention"):
+        model.resolve_video(VideoSpec(prompt="fox", attention="optimized"))
+    assert model.resolve_video(VideoSpec(prompt="fox")).attention == DEFAULT_ATTENTION
+
+
+def test_the_two_trunks_with_routing_offer_it():
+    assert "optimized" in H3VideoModel.ATTENTION_METHODS
+    assert "optimized" in Wan22Model.ATTENTION_METHODS
 
 
 def test_only_h3_answers_ref2v():

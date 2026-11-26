@@ -14,6 +14,8 @@ from typing import Optional
 
 import torch
 
+from thenoise.utils.attention import ATTENTION_METHODS
+
 # Every tensor in the suite is toy-sized, and the intra-op thread pool spends more in
 # barrier time than it can win back: one tiny Lumina forward is ~0.25s on 24 threads
 # and ~0.01s on one, which is most of the suite's wall time. One thread is also a
@@ -1285,6 +1287,7 @@ def fake_model_cls():
             # A model that declares no capability; tests override it via ``**attrs``.
             "CAPABILITIES": {},
             "REF_METHODS": (),
+            "ATTENTION_METHODS": ATTENTION_METHODS,
             **attrs,
         }
         return type("FakeModel", (), namespace)

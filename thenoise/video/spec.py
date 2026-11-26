@@ -6,6 +6,7 @@ import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
+from thenoise.utils.attention import DEFAULT_ATTENTION
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -82,6 +83,7 @@ class ResolvedVideo:
     explicit_frames: bool = False
     #: What the clip is asked to look like, as opposed to the frame it starts or ends on.
     references: tuple[Guide, ...] = ()
+    attention: str = DEFAULT_ATTENTION
 
     @property
     def mode(self) -> str:
@@ -94,7 +96,7 @@ class ResolvedVideo:
             "duration": self.frame_count / self.fps, "steps": self.steps,
             "guidance_scale": self.guidance_scale, "seed": self.seed,
             "output_format": self.output_format,
-            "sampler": self.sampler,
+            "sampler": self.sampler, "attention": self.attention,
             "lora_specs": self.lora_specs,
         }
 
@@ -126,6 +128,9 @@ class VideoSpec(BaseModel):
     image: Annotated[bytes, Field(min_length=1)] | None = None
     end_image: Annotated[bytes, Field(min_length=1)] | None = None
     references: list[Guide] = []
+    #: ``auto``, ``full`` or ``optimized``; what this model answers is its own
+    #: ``ATTENTION_METHODS``, and a request outside them is refused at resolve.
+    attention: str | None = None
     sampler: Annotated[str, Field(min_length=1)] | None = None
     lora_specs: LoraSpecs = None
 
@@ -188,5 +193,5 @@ class VideoSpec(BaseModel):
             output_format=output_format, image=self.image, end_image=self.end_image,
             sampler=sampler, lora_specs=lora_specs_by_role(self.lora_specs),
             explicit_frames=self.frames is not None,
-            references=tuple(self.references),
+            references=tuple(self.references), attention=pref("attention"),
         )

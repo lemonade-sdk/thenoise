@@ -132,6 +132,9 @@ class H3VideoModel(VideoModel):
     CAPABILITIES = {**VideoModel.CAPABILITIES, "upscale": False,
                     "video": {"t2v": True, "i2v": True, "flf2v": True,
                                   "ref2v": True}}
+    # Routing applies to a clip. A still is held dense by measurement, so the image half
+    # of this family does not offer the word at all.
+    ATTENTION_METHODS = (*VideoModel.ATTENTION_METHODS, "optimized")
 
     #: A keyframe enters at a fixed timestep and is never denoised, which is what
     #: ``index_timestep_zero`` means here; that it arrives as extra rows rather than as an
@@ -416,7 +419,7 @@ class H3VideoModel(VideoModel):
             video.to(device, self.dtype), own.to(device, self.dtype),
             sigma, h3_sampling.audio_sigma(sigma, shift=self._shift),
             context, layout, self._keyframes, tags=tags, seed=self._seed,
-            sample_sigmas=self._sample_sigmas, rope=rope,
+            sample_sigmas=self._sample_sigmas, rope=rope, attention=self._attention,
         )
         # The audio's velocity comes back in its own variable; the pack carries a scaled
         # version of it, and the carry's own slope belongs to the answer.

@@ -162,6 +162,22 @@ def test_no_compiled_kernel_means_dense(monkeypatch):
     assert _plan() is None
 
 
+def test_a_request_for_full_attention_is_honoured(kernel_present, caplog):
+    caplog.set_level("DEBUG")
+    assert _plan() is not None
+    assert _plan(method="full") is None
+    assert any("full attention" in r.getMessage() for r in caplog.records)
+
+
+def test_a_request_for_optimized_attention_asks_past_the_crossover(kernel_present):
+    """The crossover is an economy, so a request may overrule it -- the gates may not be."""
+    tiny = _lay(text_len=1, latent_t=1, latent_h=2, latent_w=2, audio_t=0, keyframes=[])
+    assert tiny.seq_len < sol.MIN_TOKENS
+    assert _plan(layout=tiny) is None
+    assert _plan(layout=tiny, method="optimized") is not None
+    assert _plan(layout=tiny, method="optimized", cached=True) is None
+
+
 def test_a_still_is_held_dense_on_every_other_qualifying_detail(kernel_present, caplog):
     """The same run, one argument different: the family says no.
 

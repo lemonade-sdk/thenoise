@@ -16,6 +16,7 @@ from thenoise.memory import MemoryManager
 from thenoise.models.config import VideoSamplingParams
 from thenoise.models.pixel_base import PixelModel
 from thenoise.samplers import Step
+from thenoise.utils.attention import DEFAULT_ATTENTION
 from thenoise.utils.image_tensor import load_image
 from thenoise.video.spec import ResolvedVideo, VideoSpec
 
@@ -81,11 +82,12 @@ class VideoModel(PixelModel):
     #: which release it is, so the architecture answers, not the filename.
 
     #: Shared video prefs; ``test_video_shared.py`` checks each variant covers them all.
-    DEFAULT_PREFS = {**PixelModel.DEFAULT_PREFS,
+    DEFAULT_PREFS = {**PixelModel.DEFAULT_PREFS, "attention": DEFAULT_ATTENTION,
                      "negative_prompt": "", "output_format": "webm"}
 
     #: Per-run state the controller sets between steps, never across a swap.
     _segment: Optional[Segment] = None
+    _attention: str = DEFAULT_ATTENTION
 
     # ------------------------------------------------------------ request
     @property
@@ -101,6 +103,10 @@ class VideoModel(PixelModel):
                 spec.width, spec.height, load_image(io.BytesIO(spec.image)))
             spec = spec.model_copy(update={"width": width, "height": height})
         resolved = spec.resolve(self.default_prefs)
+        if resolved.attention not in self.ATTENTION_METHODS:
+            raise ValueError(
+                f"{self.name} does not answer {resolved.attention!r} attention; it answers "
+                f"{', '.join(self.ATTENTION_METHODS)}")
         width, height = self.resolve_size(resolved.width, resolved.height)
         if (width, height) != (resolved.width, resolved.height):
             resolved = dataclasses.replace(resolved, width=width, height=height)
@@ -133,6 +139,7 @@ class VideoModel(PixelModel):
     def begin_segment(self, segment: Segment) -> None:
         """Tell ``denoise_step`` which segment it is inside; called before each one."""
         self._segment = segment
+        self._attention = segment.params.attention
 
     # ------------------------------------------------------------ codec
     def audio_components(self) -> tuple[str, ...]:

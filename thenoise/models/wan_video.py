@@ -24,6 +24,7 @@ from thenoise.models.config import EncodePromptArgs, VideoSamplingParams
 from thenoise.models.pixel_base import expect_latent_width
 from thenoise.models.video_base import Segment, VideoModel
 from thenoise.samplers import Step, sigma_steps
+from thenoise.utils.attention import DEFAULT_ATTENTION
 from thenoise.text_encoders.wan_video import load_wan_text_encoder
 from thenoise.utils.image_tensor import cover_crop
 from thenoise.utils.safetensors import Header
@@ -150,6 +151,7 @@ class Wan22Model(VideoModel):
     # denoised at timestep zero, which is what the edit contract calls
     # `index_timestep_zero`.
     DEFAULT_PREFS = {**VideoModel.DEFAULT_PREFS, "ref_method": "index_timestep_zero"}
+    ATTENTION_METHODS = (*VideoModel.ATTENTION_METHODS, "optimized")
 
     def pref(self, name: str, request_value=None):
         """Which transformer this is decides how a reference enters, so that one
@@ -438,6 +440,7 @@ class Wan22Model(VideoModel):
 
     def denoise_step(self, latents, t, cond, guidance_scale: float, i: int) -> torch.Tensor:
         module = self._segment.module
+        method = self._attention
         x = latents.to(module.dtype)
         clip = ClipReference() if self._clip is None else self._clip
         if clip.channels is not None:
@@ -454,13 +457,16 @@ class Wan22Model(VideoModel):
         else:
             timestep = clip.timestep_mask * timestep
         sigma = float(t)
-        vel = self._velocity(module, x, timestep, cond.cond, self._sol(module, x, sigma))
+        vel = self._velocity(module, x, timestep, cond.cond,
+                             self._sol(module, x, sigma, method))
         if cond.null is None:
             return vel
-        uncond = self._velocity(module, x, timestep, cond.null, self._sol(module, x, sigma))
+        uncond = self._velocity(module, x, timestep, cond.null,
+                                self._sol(module, x, sigma, method))
         return uncond + guidance_scale * (vel - uncond)
 
-    def _sol(self, module, x: torch.Tensor, sigma: float) -> SolAttention | None:
+    def _sol(self, module, x: torch.Tensor, sigma: float,
+             method: str = DEFAULT_ATTENTION) -> SolAttention | None:
         """Whether this step's self-attention routes, and with what sinks.
 
         The patchified geometry is all the trunk's policy needs beside the sigma: the token
@@ -473,7 +479,7 @@ class Wan22Model(VideoModel):
         return wan_plan(tokens=(t // pt) * (h // ph) * (w // pw),
                         tokens_per_frame=(h // ph) * (w // pw), dtype=x.dtype,
                         head_dim=module.params.head_dim, device=x.device, sigma=sigma,
-                        window=window_sigmas(self.percent_to_sigma))
+                        window=window_sigmas(self.percent_to_sigma), method=method)
 
     @staticmethod
     def _velocity(module, x, timestep, context,

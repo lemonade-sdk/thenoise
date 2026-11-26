@@ -23,6 +23,7 @@ from thenoise.dit.h3.trunk import (
     unpack_audio,
 )
 from thenoise.utils.dynamo import mark_token_axis
+from thenoise.utils.attention import DEFAULT_ATTENTION
 
 
 class H3AVDiT(H3DiT):
@@ -67,7 +68,7 @@ class H3AVDiT(H3DiT):
         tags: Optional[torch.Tensor] = None,
         seed: int = 0,
         sample_sigmas: Optional[torch.Tensor] = None,
-        rope: str = "cond",
+        rope: str = "cond", attention: str = DEFAULT_ATTENTION,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """One forward pass; the video velocity ``[1, C, T, H, W]`` and the audio's
         ``[1, audio_dim, 2, frames]``.
@@ -124,7 +125,7 @@ class H3AVDiT(H3DiT):
         # inside them would be a guard, and every block would recompile every step.
         sol = sol_plan(layout=layout, tokens=h.shape[1], dtype=h.dtype, device=device,
                        head_dim=self.params.head_dim, sigma=sigma,
-                       sample_sigmas=sample_sigmas, cached=False)
+                       sample_sigmas=sample_sigmas, cached=False, method=attention)
         for block in self.blocks:
             h = block(h, _spans(rows, block.adaln_proj(t_emb)), (cos, sin), None, sol)
 

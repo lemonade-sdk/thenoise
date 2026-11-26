@@ -15,6 +15,7 @@ from thenoise.dit.kvcache import KVCache
 from thenoise.memory import MemoryManager
 from thenoise.models.lora_support import LoRASupport
 from thenoise.utils.device_patches import apply_device_patches
+from thenoise.utils.attention import ATTENTION_METHODS as ATTENTION_WORDS
 from thenoise.utils.dynamo import apply_recompile_limit
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.image_tensor import ReferenceSizing, flatten_alpha
@@ -79,6 +80,11 @@ class DiffusionModel(LoRASupport, ABC):
 
     #: How this model can use a reference picture, best first; empty means none.
     REF_METHODS: ClassVar[Tuple[str, ...]] = ()
+
+    #: What this model answers for ``attention``: the words in
+    #: :data:`thenoise.utils.attention.ATTENTION_METHODS`, plus ``optimized`` where the
+    #: architecture has a lossy path to offer.
+    ATTENTION_METHODS: ClassVar[Tuple[str, ...]] = ATTENTION_WORDS
 
     #: Created by ``start_kv_caches``, dropped by ``end_kv_caches``.
     _kv_caches: Optional[Dict[str, KVCache]] = None

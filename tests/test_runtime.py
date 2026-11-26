@@ -8,6 +8,7 @@ import torch
 from safetensors.torch import save_file
 
 import thenoise.models as model_catalog
+from thenoise.utils.attention import ATTENTION_METHODS
 from conftest import StubVideo, resolves_to
 from thenoise.errors import ModelReloadNeeded
 from thenoise.inference import inference_lock
@@ -132,7 +133,8 @@ def test_model_capabilities_are_reported_verbatim(catalog):
     runtime.load(ModelPaths("dit", "vae", "te"))
     assert runtime.model_capabilities() == {"image": {"t2i": True, "i2i": True},
                                             "kv_cache": False,
-                                            "ref_methods": ["index", "vision"]}
+                                            "ref_methods": ["index", "vision"],
+                                            "attention_methods": list(ATTENTION_METHODS)}
     runtime.model_capabilities()["kv_cache"] = True
     assert runtime.model_capabilities()["kv_cache"] is False
 

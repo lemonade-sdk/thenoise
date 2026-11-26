@@ -19,6 +19,7 @@ from typing import Optional, Tuple
 
 import torch
 
+from thenoise.utils.attention import DEFAULT_ATTENTION
 from thenoise.utils.sol_attention import (BLOCK, TOKEN_AUG_MAX, SolAttention, available,
                                           dense_reason, log_once, reset_log)
 
@@ -80,7 +81,8 @@ def window_sigmas(sample_sigmas: torch.Tensor,
 
 def sol_plan(*, layout, tokens: int, dtype: torch.dtype, head_dim: int, device,
              sigma: float, sample_sigmas: Optional[torch.Tensor], cached: bool,
-             held_dense: Optional[str] = None) -> Optional[SolAttention]:
+             held_dense: Optional[str] = None,
+             method: str = DEFAULT_ATTENTION) -> Optional[SolAttention]:
     """This run's kernel arguments, or ``None`` to keep the step dense.
 
     The whole step takes one answer, decided outside the compiled blocks: the alternative is
@@ -96,8 +98,13 @@ def sol_plan(*, layout, tokens: int, dtype: torch.dtype, head_dim: int, device,
     if held_dense is not None:
         dense(held_dense)
         return None
+    if method == "full":
+        dense("the request asked for full attention")
+        return None
+    # An asked-for run goes past the length below which dense measures faster: that floor
+    # is an economy, and a request to route anyway is a request to be shown the difference.
     reason = dense_reason(tokens=tokens, dtype=dtype, head_dim=head_dim, device=device,
-                          cached=cached)
+                          cached=cached, min_tokens=0 if method == "optimized" else None)
     if reason is not None:
         dense(reason)
         return None

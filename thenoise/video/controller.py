@@ -118,7 +118,7 @@ class VideoPipelineController:
                 height=spec.height, width=spec.width, steps=spec.steps, seed=spec.seed,
                 guidance_scale=spec.guidance_scale, sampler=spec.sampler,
                 frames=spec.frame_count, flow_shift=spec.flow_shift,
-                fps=spec.fps,
+                fps=spec.fps, attention=spec.attention,
             )
             images = self._reference_images(spec)
             guides = self._guides(spec)

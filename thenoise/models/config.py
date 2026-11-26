@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Optional, Union
 
 from thenoise.mesh.octree import CHUNK
+from thenoise.utils.attention import DEFAULT_ATTENTION
 from thenoise.utils.lora_roles import LoraSpecs
 from thenoise.utils.safetensors import Header, read_header
 
@@ -160,6 +161,8 @@ class VideoSamplingParams(SamplingParams):
     frames: int = 1
     flow_shift: float = 1.0
     fps: int = 24
+    #: ``auto`` / ``full`` / ``optimized``, as the request asked and the model answered.
+    attention: str = DEFAULT_ATTENTION
 
 
 @dataclass(frozen=True)
