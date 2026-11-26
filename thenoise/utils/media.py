@@ -6,7 +6,7 @@ import base64
 import binascii
 import io
 from pathlib import Path
-from typing import NamedTuple, Optional, Union
+from typing import Callable, NamedTuple, Optional, Union
 
 import av
 import numpy as np
@@ -39,9 +39,8 @@ def verified_picture(field: str, encoded: str) -> bytes:
     return data
 
 
-#: How much of a reference file is read. A reference longer than the clip it conditions
-#: is cropped to it anyway, so reading further would only be decoding what gets thrown
-#: away -- and the file is whoever sent it, at whatever length they recorded.
+#: How much of a reference file is read: one longer than the clip it conditions is cropped
+#: to it anyway, and the file is whoever sent it, at whatever length they recorded.
 MAX_REFERENCE_SECONDS = 60.0
 
 
@@ -124,24 +123,28 @@ def verified_media(field: str, encoded: str) -> bytes:
 
 
 def read_reference(data: bytes, *, name: str = "reference",
-                   max_seconds: float = MAX_REFERENCE_SECONDS) -> ReferenceMedia:
-    """One reference file as frames and sound, whatever kind of file it was.
+                   max_seconds: float = MAX_REFERENCE_SECONDS,
+                   max_frames: Optional[int] = None,
+                   fit: Optional[Callable[[Image.Image], Image.Image]] = None
+                   ) -> ReferenceMedia:
+    """One reference file as frames and sound, whatever kind of file it was: the kind is
+    asked of the bytes, since a picture, a clip and a sound arrive through one field. No
+    frame count is snapped here -- which counts the codec runs is the codec's answer.
 
-    The kind is asked of the bytes and not of a name a client chose, because a picture,
-    a clip and a sound all arrive through one field. Nothing is resized and no frame
-    count is snapped here: what shape a reference takes is the model's answer and which
-    counts the codec runs is the codec's.
+    ``fit`` is applied frame by frame as the demuxer gives them up, not to the finished
+    list: at its own resolution a clip outweighs the machine asked to hold it.
     """
     kind = media_kind(data)
     if kind == "unknown":
         raise ValueError(f"{name} is not a picture, a clip or a sound")
     if kind == "picture":
         with Image.open(io.BytesIO(data)) as picture:
-            return ReferenceMedia("picture", (picture.convert("RGB"),))
+            rgb = picture.convert("RGB")
+            return ReferenceMedia("picture", (rgb if fit is None else fit(rgb),))
 
     try:
         with av.open(io.BytesIO(data)) as container:
-            frames, fps = _read_frames(container, max_seconds)
+            frames, fps = _read_frames(container, max_seconds, max_frames, fit)
             sound, rate = _read_sound(data, max_seconds)
     except av.FFmpegError as e:
         raise ValueError(f"{name} cannot be decoded ({e.strerror or e})") from e
@@ -150,34 +153,50 @@ def read_reference(data: bytes, *, name: str = "reference",
     return ReferenceMedia("clip" if frames else "audio", tuple(frames), sound, rate, fps)
 
 
-def _read_frames(container, max_seconds: float) -> tuple[list[Image.Image], Optional[float]]:
+def _read_frames(container, max_seconds: float, max_frames: Optional[int],
+                 fit: Optional[Callable[[Image.Image], Image.Image]]
+                 ) -> tuple[list[Image.Image], Optional[float]]:
     if not container.streams.video:
         return [], None
     stream = container.streams.video[0]
     rate = stream.average_rate or stream.base_rate
+    # A frame with no timestamps never reaches ``frame.time``, so the header's rate
+    # caps the count too.
+    limit = max_frames or (int(max_seconds * float(rate)) if rate else None)
     frames = []
     for frame in container.decode(stream):
         if frame.time is not None and frame.time >= max_seconds:
             break
-        frames.append(frame.to_image())
+        image = frame.to_image()
+        frames.append(image if fit is None else fit(image))
+        if limit is not None and len(frames) >= limit:
+            break
     return frames, (float(rate) if rate else None)
 
 
 def _read_sound(data: bytes, max_seconds: float) -> tuple[Optional[np.ndarray],
                                                           Optional[int]]:
-    """The file's sound as ``[channels, samples]`` float32, at the rate it was recorded."""
+    """The file's sound as ``[channels, samples]`` float32, at the rate it was recorded.
+
+    A fresh open: the frames have already drained the demuxer.
+    """
     with av.open(io.BytesIO(data)) as container:
         if not container.streams.audio:
             return None, None
         stream = container.streams.audio[0]
+        limit = int(max_seconds * (stream.rate or 0)) or None
         resampler = None
         parts: list[np.ndarray] = []
+        read = 0
         for frame in container.decode(stream):
             if resampler is None:
                 resampler = av.AudioResampler(format="fltp", layout=frame.layout,
                                               rate=frame.sample_rate)
             parts.extend(moved.to_ndarray() for moved in resampler.resample(frame))
+            read += frame.samples
             if frame.time is not None and frame.time >= max_seconds:
+                break
+            if limit is not None and read >= limit:
                 break
         if resampler is not None:
             parts.extend(moved.to_ndarray() for moved in resampler.resample(None))

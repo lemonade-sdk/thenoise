@@ -330,16 +330,21 @@ def _png(width: int, height: int) -> bytes:
     return stream.getvalue()
 
 
+def _fit(canvas, images, target):
+    fit = canvas.guide_fit(target)
+    return [fit(image) for image in images]
+
+
 def test_a_reference_is_fitted_to_the_canvas_area_rather_than_cropped_to_it():
     """Both sides come down onto a whole lattice cell, so the aspect is as close as
     the grid allows rather than exact."""
-    [fitted] = H3VideoModel.fit_guides(_canvas(), [Image.new("RGB", (3840, 2160))],
+    [fitted] = _fit(_canvas(), [Image.new("RGB", (3840, 2160))],
                                        (1344, 768))
     assert fitted.size == (1344, 736)
 
 
 def test_a_reference_smaller_than_the_canvas_is_not_enlarged():
-    [kept] = H3VideoModel.fit_guides(_canvas(), [Image.new("RGB", (512, 288))],
+    [kept] = _fit(_canvas(), [Image.new("RGB", (512, 288))],
                                      (1344, 768))
     assert kept.size == (512, 288)
 
@@ -347,7 +352,7 @@ def test_a_reference_smaller_than_the_canvas_is_not_enlarged():
 def test_a_reference_is_floored_onto_whole_latent_cells():
     """A side that is no whole cell is brought down to one rather than up: a reference
     never gains pixels it did not arrive with."""
-    [fitted] = H3VideoModel.fit_guides(_canvas(), [Image.new("RGB", (1920, 400))],
+    [fitted] = _fit(_canvas(), [Image.new("RGB", (1920, 400))],
                                        (1344, 768))
     assert fitted.size == (1920, 384)
 

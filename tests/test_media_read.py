@@ -133,6 +133,17 @@ def test_a_long_file_is_read_only_as_far_as_it_could_be_used():
     assert MAX_REFERENCE_SECONDS == 60.0
 
 
+def test_frames_are_fitted_as_they_are_read():
+    read = read_reference(_clip(frames=12), fit=lambda image: image.resize((64, 32)))
+    assert {one.size for one in read.frames} == {(64, 32)}
+    one = read_reference(_png(), fit=lambda image: image.resize((64, 32)))
+    assert one.frames[0].size == (64, 32)
+
+
+def test_a_frame_cap_stops_a_read_that_has_no_timestamps_to_time_against():
+    assert len(read_reference(_clip(frames=12), max_seconds=1e9, max_frames=4).frames) == 4
+
+
 def test_a_file_that_is_neither_picture_nor_sound_is_refused_by_name():
     with pytest.raises(ValueError, match="my-ref.*picture, a clip or a sound"):
         read_reference(b"not a media file at all", name="my-ref")

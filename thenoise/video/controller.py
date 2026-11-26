@@ -90,15 +90,15 @@ class VideoPipelineController:
         return [load_image(io.BytesIO(data))
                 for data in (spec.image, spec.end_image) if data is not None]
 
-    @staticmethod
-    def _guides(spec: ResolvedVideo) -> list[ReferenceMedia]:
+    def _guides(self, spec: ResolvedVideo) -> list[ReferenceMedia]:
         """The reference conditions, each read from whatever kind of file it arrived as.
 
-        Reading stops where the clip ends: nothing longer than the run has anywhere to go,
-        and a file is whoever sent it, at whatever length they recorded.
+        Reading stops where the clip ends, and each frame is fitted on the way in.
         """
+        fit = self.model.guide_fit((spec.width, spec.height))
         return [read_reference(guide.media, name=f"reference {index}",
-                               max_seconds=spec.frame_count / spec.fps)
+                               max_seconds=spec.frame_count / spec.fps,
+                               max_frames=spec.frame_count, fit=fit)
                 for index, guide in enumerate(spec.references, 1)]
 
     # ------------------------------------------------------------ render
@@ -270,7 +270,7 @@ class VideoPipelineController:
 
         conditions = []
         for index, (media, guide) in enumerate(zip(guides, spec.references), 1):
-            fitted = model.fit_guides(list(media.frames), (spec.width, spec.height))
+            fitted = media.frames
             picture = None
             if fitted:
                 # One entry with its frames along one axis, because what a codec takes

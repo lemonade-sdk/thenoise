@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Callable, ClassVar, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -76,14 +76,15 @@ class PixelModel(DiffusionModel):
         """
         return [self.prepare_reference(img) for img in images]
 
-    def fit_guides(self, images: List[Image.Image],
-                   target: Tuple[int, int]) -> List[Image.Image]:
-        """Reference conditions, fitted for :meth:`encode_references`.
-
-        Separate from :meth:`fit_references` because a model can be strict about the
-        frames of its own clip and generous about the ones it is only asked to resemble.
+    def guide_fit(self, target: Tuple[int, int]
+                  ) -> Callable[[Image.Image], Image.Image]:
+        """One frame of a reference condition, fitted for :meth:`encode_references`: a
+        model may be generous here about what it is only asked to resemble. Per frame, so
+        they can be fitted as they are read.
         """
-        return self.fit_references(images, target)
+        def fit(image: Image.Image) -> Image.Image:
+            return self.fit_references([image], target)[0]
+        return fit
 
     def encode_sound(self, pcm, sample_rate=None) -> torch.Tensor:
         """A reference's sound as a latent.

@@ -267,7 +267,7 @@ def test_a_reference_clip_is_handed_to_the_codec_in_one_piece(tmp_path):
             return [torch.zeros(1, self.Z_DIM, 1, 1, 1)]
 
     model = ClipVideo(config=_stub_config(tmp_path))
-    spec = model.resolve_video(VideoSpec(prompt="like this clip",
+    spec = model.resolve_video(VideoSpec(prompt="like this clip", frames=17,
                                          references=[Guide(media=_clip(sound=False))]))
     controller = VideoPipelineController(model)
     _, [condition] = controller._encode_references([], controller._guides(spec), spec)

@@ -130,8 +130,7 @@ class H3VideoModel(VideoModel):
                                   "ref2v": True}}
 
     #: What the canvas means to a reference: an area to fit into, never a frame to crop
-    #: to. ``fit_guides`` restates the cap as the run's own canvas; this is the claim for
-    #: anywhere the rule is read on its own.
+    #: to. ``guide_fit`` restates the cap as the run's own canvas.
     REFERENCE_SIZING = ReferenceSizing(
         fit="area", cap=DEFAULT_PREFS["width"] * DEFAULT_PREFS["height"],
         align=CANVAS_MULTIPLE, down_only=True)
@@ -237,15 +236,12 @@ class H3VideoModel(VideoModel):
             raise ValueError("H3 video keys a clip on its first frame and, at most, its last")
         return [cover_crop(image, target[0], target[1]) for image in images]
 
-    def fit_guides(self, images, target):
-        """Resized, never cropped, and no ceiling on the count.
-
-        A reference is not a frame of the clip, so nothing has to line up with the
-        canvas: it keeps the shape it arrived in and packs on its own grid, with the
-        canvas only deciding how much area that grid may cover.
+    def guide_fit(self, target):
+        """Scaled into the run's area, never cropped: a reference packs on a grid of its
+        own, and the canvas only bounds how much area that grid covers.
         """
-        sizing = dataclasses.replace(self.REFERENCE_SIZING, cap=target[0] * target[1])
-        return [sizing.apply(image) for image in images]
+        return dataclasses.replace(self.REFERENCE_SIZING,
+                                  cap=target[0] * target[1]).apply
 
     def encode_sound(self, pcm, sample_rate=None) -> torch.Tensor:
         """The codec's posterior mean for a reference's sound, in its own latent shape.
@@ -266,9 +262,9 @@ class H3VideoModel(VideoModel):
         answer every time.
         """
         with torch.no_grad():
-            return [self.vae.encode_pixels_to_latents(one[None, :, None] if one.ndim == 3
-                                                      else one[None, :, :guide_clip(one.shape[1])])
-                    for one in pixels]
+            clips = [one[:, None] if one.ndim == 3 else one[:, :guide_clip(one.shape[1])]
+                     for one in pixels]
+            return [self.vae.encode_pixels_to_latents(clip[None]) for clip in clips]
 
     # ------------------------------------------------------------ conditioning
     def encode_prompt(self, args: EncodePromptArgs) -> H3VideoConditioning:
