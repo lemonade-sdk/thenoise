@@ -61,7 +61,81 @@ def _tiled_int8_gemm(device: Device) -> bool:
     return True
 
 
-PATCHES: tuple[tuple[str, Callable[[Device], bool]], ...] = (("int8_tiled_gemm", _tiled_int8_gemm),)
+# Below sm_75, comfy_kitchen's cuda kernels give wrong output without an error, Triton
+# (and so torch.compile) needs sm_70, and torch._int_mm is not supported.
+PRE_TURING_CAPABILITY = (7, 5)
+
+
+def _cuda_capability(device: Device) -> Optional[tuple[int, int]]:
+    if device is None or not torch.cuda.is_available() or torch.version.hip:
+        return None
+    dev = torch.device(device)
+    if dev.type != "cuda":
+        return None
+    try:
+        return torch.cuda.get_device_capability(dev.index if dev.index is not None else 0)
+    except Exception:
+        return None
+
+
+_BACKEND_MIN_CAPABILITY = {"cuda": PRE_TURING_CAPABILITY, "triton": (7, 0)}
+
+
+def _per_device_backends() -> None:
+    """Answer comfy_kitchen's ``is_available`` for the current card, so newer cards in
+    the same process keep their backends."""
+    try:
+        from comfy_kitchen.registry import registry
+    except ImportError:
+        return
+    native = registry.is_available
+    if getattr(native, _MARK, False):
+        return
+
+    def is_available(backend_name: str) -> bool:
+        if not native(backend_name):
+            return False
+        need = _BACKEND_MIN_CAPABILITY.get(backend_name)
+        if need is None or not torch.cuda.is_available() or torch.version.hip:
+            return True
+        try:
+            return torch.cuda.get_device_capability(torch.cuda.current_device()) >= need
+        except Exception:
+            return True
+
+    setattr(is_available, _MARK, True)
+    registry.is_available = is_available
+
+
+def _pre_turing_fallbacks(device: Device) -> bool:
+    """Pre-Turing NVIDIA: eager comfy_kitchen kernels, no torch.compile, fp32 int-matmul."""
+    cap = _cuda_capability(device)
+    if cap is None or cap >= PRE_TURING_CAPABILITY:
+        return False
+    _per_device_backends()
+    # force_eager rather than dynamo.config.disable: the latter fails fullgraph=True checks.
+    torch.compiler.set_stance("force_eager")
+    if not getattr(torch._int_mm, _MARK, False):
+        native = torch._int_mm
+
+        def int_mm(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+            dev = a.device
+            if dev.type == "cuda" and torch.cuda.get_device_capability(dev) < PRE_TURING_CAPABILITY:
+                # exact while the sum stays below 2^24
+                return torch.matmul(a.float(), b.float()).round_().to(torch.int32)
+            return native(a, b)
+
+        setattr(int_mm, _MARK, True)
+        torch._int_mm = int_mm
+    logger.info("pre-Turing GPU (sm_%d%d) on %s: comfy_kitchen eager kernels on that card, "
+                "torch.compile off, fp32 int-matmul", cap[0], cap[1], device)
+    return True
+
+
+PATCHES: tuple[tuple[str, Callable[[Device], bool]], ...] = (
+    ("int8_tiled_gemm", _tiled_int8_gemm),
+    ("pre_turing_fallbacks", _pre_turing_fallbacks),
+)
 
 
 def apply_device_patches(device: Device = None) -> dict[str, bool]:

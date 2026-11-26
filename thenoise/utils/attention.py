@@ -179,6 +179,22 @@ def eager_attention(
     """
     return attention(qkv_or_q, k=k, v=v, attn_params=attn_params, drop_rate=drop_rate)
 
+# Below sm_80 the memory-efficient SDPA kernel does not take bf16 and the math kernel
+# materializes the full score matrix; run long sequences in fp16 (fp32 if it would overflow).
+_FP16_SAFE = 6.0e4
+
+
+def _memory_efficient_dtype(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+    if (q.dtype is not torch.bfloat16 or not q.is_cuda or torch.version.hip
+            or q.shape[-2] * k.shape[-2] < (1 << 24)):
+        return q, k, v, None
+    if torch.cuda.get_device_capability(q.device) >= (8, 0):
+        return q, k, v, None
+    peak = max(t.abs().amax().item() for t in (q, k, v))
+    dtype = torch.float16 if peak < _FP16_SAFE else torch.float32
+    return q.to(dtype), k.to(dtype), v.to(dtype), torch.bfloat16
+
+
 def attention(
     qkv_or_q: Union[torch.Tensor, list],
     k: Optional[torch.Tensor] = None,
@@ -238,9 +254,13 @@ def attention(
 
     q, k, v = uniform_layout(q, k, v)
 
-    x = F.scaled_dot_product_attention(
-        q, k, v, attn_mask=attn_params.attention_mask, dropout_p=drop_rate
-    )
+    q, k, v, out_dtype = _memory_efficient_dtype(q, k, v)
+    mask = attn_params.attention_mask
+    if mask is not None and mask.is_floating_point() and mask.dtype != q.dtype:
+        mask = mask.to(q.dtype)
+    x = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=drop_rate)
+    if out_dtype is not None:
+        x = x.to(out_dtype)
 
     # Token-major output, heads concatenated per token.
     x = x.transpose(1, 2)  # [B, L, H, D]
