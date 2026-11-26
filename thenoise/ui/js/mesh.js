@@ -83,8 +83,7 @@ const meshHist = makeHistory({
 async function showMeshShape(item) {
   meshOutMeta = item.meta;
   meshOutUrl = item.url;
-  await loadMeshShapes();   // the answer the verdict below is made from
-  // The browser still holds the shape to look at; only the server's latents can be cut again.
+  await loadMeshShapes();
   const kept = meshKept.has(item.meta.job);
   meshSource = kept ? item.meta.job : null;
   meshGone = kept || !item.meta.job ? null : item.meta.job;
@@ -100,9 +99,6 @@ async function showMeshShape(item) {
   }
 }
 
-// A shape whose latents are gone can still be sampled again from the images it was cut from.
-// The File handles are kept rather than their bytes: ten entries of up to four multi-megabyte
-// pictures each is a hundred megabytes held for a shape that has already been downloaded.
 async function adoptMeshImages(meta) {
   meshViews.length = 0;
   for (const file of meta.files || []) {
@@ -130,9 +126,8 @@ function describeMeshSource() {
          : 'that shape is gone from the server \u2014 add a picture to draw a new one')
       : '';
   note.classList.toggle('hidden', !note.textContent);
-  // The only way back to a new shape while a kept one is chosen, because the box takes none.
   $('mesh_shape_clear').classList.toggle('hidden', !meshSource);
-  $('mesh_dropzone').inert = !!meshSource;   // inert covers the hidden input inside it
+  $('mesh_dropzone').inert = !!meshSource;
 
   const shaping = $('mesh_shape_knobs');
   shaping.inert = !!meshSource;
@@ -201,7 +196,7 @@ function meshName(meta) {
 
 function resetMeshResult() {
   meshOutMeta = null;
-  meshGone = null;      // once a request is running, what an old entry lost is no longer the story
+  meshGone = null;
   describeMeshSource();
   meshShown += 1;
   clearMesh();

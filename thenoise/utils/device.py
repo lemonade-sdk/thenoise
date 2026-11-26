@@ -38,17 +38,26 @@ def get_device_memory(device: Optional[Union[str, torch.device]]) -> Optional[in
     return None
 
 
-def get_free_memory(device: Optional[Union[str, torch.device]]) -> Optional[int]:
-    """Bytes the driver would hand out on ``device`` right now, None if it will not say.
+def _host_free() -> Optional[int]:
+    """What the kernel would give a new allocation, from the one figure it keeps for it."""
+    try:
+        with open("/proc/meminfo") as info:
+            for line in info:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError):
+        return None
+    return None
 
-    Unlike the allocator's measure, this counts the compute context and other processes.
-    """
+
+def get_free_memory(device: Optional[Union[str, torch.device]]) -> Optional[int]:
+    """Bytes the machine would hand out on ``device`` right now, None if it will not say."""
     if device is None:
         return None
     if isinstance(device, str):
         device = torch.device(device)
     if device.type != "cuda":
-        return None
+        return _host_free()
     try:
         return torch.cuda.mem_get_info(device)[0]
     except (RuntimeError, AttributeError):

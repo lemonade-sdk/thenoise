@@ -7,39 +7,13 @@ from typing import Callable, Tuple
 import torch
 from torch import Tensor
 
-from thenoise.utils.device import spare_bytes
+from .memory import room, volume_bytes
 
-#: The eight corners of a cell, offsets from its index.
 CORNERS = torch.tensor(list(product((0, 1), repeat=3)), dtype=torch.long)
-
-#: Where the reference stops halving: a 384 ladder starts at 96, a 128 one at 64.
 MIN_LEVEL_RESOLUTION = 63
-
-#: Points per geometry-decoder call while sampling.
 CHUNK = 8192
 LEVEL_BYTES_PER_CORNER = 32
-CUT_BYTES_PER_CORNER = 48
 
-
-def volume_bytes(resolution: int) -> int:
-    """What a cut at ``resolution`` asks the device to have, per corner of its grid.
-
-    Measured on gfx1151 rather than derived: the widest level's working set is most of it.
-    """
-    return (resolution + 1) ** 3 * CUT_BYTES_PER_CORNER
-
-
-def _amount(nbytes: int) -> str:
-    return (f"{nbytes / (1 << 30):.1f} GiB" if nbytes >= 1 << 30
-            else f"{nbytes / (1 << 20):.0f} MiB")
-
-
-def _room(device, need: int, saying: str) -> None:
-    """Refuse work the machine cannot take, before it is asked for."""
-    spare = spare_bytes(device)
-    if spare is not None and need > spare:
-        raise ValueError(f"{saying} needs {_amount(need)} and the device would give it "
-                         f"{_amount(spare)}: lower the voxel resolution")
 
 SdfFn = Callable[[Tensor], Tensor]
 
@@ -128,17 +102,13 @@ def _evaluate(sdf: SdfFn, points: Tensor, chunk: int) -> Tensor:
 def sample_sdf(sdf: SdfFn, resolution: int, *, device, bounds: float = 1.0,
                level: float = 0.0, chunk: int = CHUNK,
                start: int = MIN_LEVEL_RESOLUTION, band: float = 0.0) -> SdfVolume:
-    """Narrow-band octree sampling of ``sdf`` (``[M, 3] -> [M]``), costing surface area rather than volume.
-
-    ``band`` also refines a cell whose corners come within ``band`` of ``level``. A field
-    that saturates -- the shape codec's, at about ±1 -- can hide a surface in a coarse cell
-    none of whose corners straddles the level, and only magnitude gives it away.
-    """
+    """Narrow-band octree sampling of ``sdf`` (``[M, 3] -> [M]``), costing surface not volume."""
     if bounds <= 0:
         raise ValueError(f"bounds must be positive, got {bounds}")
     if chunk < 1:
         raise ValueError(f"chunk must be positive, got {chunk}")
-    _room(device, volume_bytes(resolution), f"a cut at {resolution}^3")
+    room(device, volume_bytes(resolution), f"a cut at {resolution}^3",
+         "lower the voxel resolution")
     levels = octree_levels(resolution, start)
     grid = torch.zeros((resolution + 1,) * 3, dtype=torch.float32, device=device)
     sampled = torch.zeros((resolution + 1,) * 3, dtype=torch.bool, device=device)
@@ -148,8 +118,8 @@ def sample_sdf(sdf: SdfFn, resolution: int, *, device, bounds: float = 1.0,
     queried = 0
     holding = None
     for size in levels:
-        _room(device, cells.shape[0] * LEVEL_BYTES_PER_CORNER * 8,
-              f"level {size} of a {resolution}^3 cut")
+        room(device, cells.shape[0] * LEVEL_BYTES_PER_CORNER * 8,
+             f"level {size} of a {resolution}^3 cut", "lower the voxel resolution")
         step = resolution // size
         index = (cells[:, None, :] + CORNERS.to(device)).reshape(-1, 3)
         stride = size + 1
@@ -163,6 +133,7 @@ def sample_sdf(sdf: SdfFn, resolution: int, *, device, bounds: float = 1.0,
         around = values[inverse.view(-1).view(cells.shape[0], 8)]
         lo, hi = around.amin(dim=1), around.amax(dim=1)
         crossing = (lo <= level) & (hi >= level)
+        # ``band`` reads magnitude too: a saturated field hides a surface no corner straddles.
         held = (crossing if band <= 0.0
                 else crossing | ((around - level).abs().amin(dim=1) < band))
         if size == levels[-1]:

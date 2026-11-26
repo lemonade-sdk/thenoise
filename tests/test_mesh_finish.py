@@ -4,6 +4,7 @@ The assertions are made against spheres and detached tetrahedra cut by the real
 extractor, so a filter that quietly opened the surface or ate the shape shows up here
 rather than in a file somebody tries to print.
 """
+import math
 import subprocess
 import sys
 
@@ -19,6 +20,8 @@ from thenoise.mesh.finish import (CHAIN, DEFAULTS as OFF, FILTERS, FINISH_NAMES,
 from thenoise.mesh.finish import cleanup
 from thenoise.mesh.finish.cleanup import drop_islands
 from thenoise.mesh.finish.simplify import reduce_to
+from thenoise.mesh.finish.smooth import MAX_ROUNDS, relax_surface
+from thenoise.mesh import memory
 from thenoise.mesh.octree import sample_sdf
 from thenoise.mesh.spec import MeshSpec
 from thenoise.postprocess.options import PostprocessOptions
@@ -96,17 +99,17 @@ class _NothingAsked:
 
 
 def test_the_chain_runs_in_the_order_it_is_declared():
-    assert [spec.name for spec in CHAIN] == ["floaters", "simplify"]
+    assert [spec.name for spec in CHAIN] == ["floaters", "simplify", "smooth"]
     assert [spec.name for spec in filter_specs()] == [spec.name for spec in CHAIN]
 
 
 def test_the_knobs_a_filter_reads_are_the_ones_it_declared():
-    assert [spec.options for spec in CHAIN] == [("floaters",), ("triangles",)]
+    assert [spec.options for spec in CHAIN] == [("floaters",), ("triangles",), ("smooth",)]
     assert {spec.name for spec in CHAIN} == set(FILTERS)
 
 
 def test_no_knob_asks_for_anything_by_default():
-    assert OFF == {"floaters": 0.0, "triangles": 1.0}
+    assert OFF == {"floaters": 0.0, "triangles": 1.0, "smooth": 0.0}
     assert options_schema(MeshFinishOptions)[0]["label"] == "Clean up junk"
 
 
@@ -136,6 +139,9 @@ def test_the_pane_is_told_the_words_the_bounds_and_the_defaults():
     assert described["floaters"] == {"name": "floaters", "label": "Clean up junk",
                                      "type": "number", "default": 0.0, "min": 0.0,
                                      "max": 1.0, "step": 0.01}
+    assert described["smooth"] == {"name": "smooth", "label": "Smooth the surface",
+                                   "type": "number", "default": 0.0, "min": 0.0,
+                                   "max": 1.0, "step": 0.01}
 
 
 # ------------------------------------------------------------------ the chain
@@ -147,11 +153,11 @@ def test_a_chain_nobody_asked_anything_of_hands_back_the_very_mesh():
     assert observer.stages == []
 
 
-def test_both_filters_run_and_the_declared_order_is_kept(monkeypatch):
+def test_every_filter_runs_and_the_declared_order_is_kept(monkeypatch):
     seen = []
 
     def record(name):
-        def adapter(mesh, **_knobs):
+        def adapter(mesh, _check, **_knobs):
             seen.append(name)
             return mesh
 
@@ -160,12 +166,10 @@ def test_both_filters_run_and_the_declared_order_is_kept(monkeypatch):
     for name in FILTERS:
         monkeypatch.setitem(FILTERS, name, record(name))
     cut = sphere(32)
-    finish_mesh(cut, MeshFinishOptions(floaters=0.01, triangles=0.5),
+    finish_mesh(cut, MeshFinishOptions(floaters=0.01, triangles=0.5, smooth=0.4),
                 (observer := _NothingAsked()).check, observer.progress)
-    assert seen == ["floaters", "simplify"]
-    # The stage word says only that finishing is running; which filter it was, and how long it
-    # took, is what the log is for.
-    assert observer.stages == ["finish", "finish"]
+    assert seen == ["floaters", "simplify", "smooth"]
+    assert observer.stages == ["finish"] * 3
 
 
 def test_a_chain_that_never_returns_still_names_the_filter_it_entered(caplog):
@@ -307,6 +311,138 @@ def test_the_mesh_comes_back_the_kind_the_cut_was():
     assert reduced.vertices.device == cut.vertices.device
 
 
+# ---------------------------------------------------------------- the relaxation
+
+CELL = 0.05
+
+
+def sheet(side=17) -> Mesh:
+    """A flat grid in the XZ plane: the one shape whose every wavelength is known exactly."""
+    lattice = torch.arange(side, dtype=torch.float32) * CELL
+    x, z = torch.meshgrid(lattice, lattice, indexing="ij")
+    points = torch.stack((x, torch.zeros_like(x), z), dim=-1).reshape(-1, 3)
+    faces = []
+    for i in range(side - 1):
+        for j in range(side - 1):
+            corner = i * side + j
+            faces += [[corner, corner + 1, corner + side + 1],
+                      [corner, corner + side + 1, corner + side]]
+    return Mesh(points, torch.tensor(faces, dtype=torch.long))
+
+
+def fold(lying: Mesh, cells: int, height=0.01) -> Mesh:
+    """``lying`` folded into a wave ``cells`` of it wide: roughness measured the way a cut's is."""
+    points = lying.vertices.clone()
+    lattice = (points[:, 0] + points[:, 2]) / CELL
+    points[:, 1] = torch.sin(math.pi * lattice / cells) * height
+    return Mesh(points, lying.faces)
+
+
+def heave(waving: Mesh) -> float:
+    """How far the middle of a folded sheet stands out of its plane; the held rim says nothing."""
+    flat = waving.vertices[:, (0, 2)]
+    inside = (flat > 0).all(dim=1) & (flat < flat.max(dim=0).values).all(dim=1)
+    return waving.vertices[inside, 1].abs().mean().item()
+
+
+def cube(size=0.3, resolution=64) -> Mesh:
+    """A closed box, whose every edge is a corner the smoothing must answer for."""
+    def faces_outward(points):
+        near = points.abs() - size
+        inside = torch.maximum(torch.maximum(near[:, 0], near[:, 1]), near[:, 2])
+        return torch.where(inside > 0, near.clamp(min=0).norm(dim=-1), inside)
+
+    return extract_surface(sample_sdf(faces_outward, resolution, device="cpu", bounds=1.0,
+                                      level=0.0, start=8))
+
+
+def roughen(shape: Mesh, amount=0.0008, seed=7) -> Mesh:
+    """The surface wobbling by ``amount``; per-point dice is harsher than a real cut."""
+    drawn = torch.Generator().manual_seed(seed)
+    return Mesh(shape.vertices + torch.randn(shape.vertices.shape, generator=drawn) * amount,
+                shape.faces)
+
+
+_nothing_asked = lambda: None
+
+
+def _boom():
+    raise AssertionError("a filter at rest asks nothing of anyone")
+
+
+def test_a_ripple_two_cells_wide_is_eased_out_of_the_surface():
+    """What a cut leaves is roughness a cell or two wide: the wavelength a round erases fastest."""
+    waving = fold(sheet(), cells=2)
+    eased = relax_surface(waving, 0.4, _nothing_asked)
+    assert heave(eased) < heave(waving) * 0.3
+
+
+def test_a_ripple_wide_as_the_shape_stays_because_it_is_the_shape():
+    """A knob that could flatten a shape's own form would be a shape editor, not a finish."""
+    waving = fold(sheet(), cells=16)
+    eased = relax_surface(waving, 1.0, _nothing_asked)
+    assert heave(eased) > heave(waving) * 0.75
+
+
+def test_a_cube_relaxes_its_faces_and_keeps_its_corners():
+    """A corner averaged with both faces either side drifts inward, which rounds a cube away."""
+    wobbling = roughen(cube())
+    eased = relax_surface(wobbling, 1.0, _nothing_asked)
+    across = wobbling.vertices.max(dim=0).values - wobbling.vertices.min(dim=0).values
+    eased_across = eased.vertices.max(dim=0).values - eased.vertices.min(dim=0).values
+    assert torch.allclose(across, eased_across, rtol=0.01)
+    moved = (eased.vertices - wobbling.vertices).norm(dim=-1)
+    assert int((moved > 1e-5).sum()) > wobbling.vertices.shape[0] // 2
+    assert int((moved == 0.0).sum()) > 0, "nothing was held at a crease"
+
+
+def test_the_surface_it_was_handed_is_left_as_it_was():
+    wobbling = roughen(sphere(32))
+    points = wobbling.vertices.clone()
+    relax_surface(wobbling, 1.0, _nothing_asked)
+    assert torch.equal(wobbling.vertices, points)
+
+
+def test_zero_asks_for_the_very_mesh():
+    cut = sphere(32)
+    assert relax_surface(cut, 0.0, _boom) is cut
+
+
+def test_the_rounds_a_request_costs_are_its_own_and_bounded():
+    """Time follows the request and stops somewhere: the knob buys rounds, one pass each."""
+    for strength, wanted in ((0.01, 1), (0.4, math.ceil(0.4 * MAX_ROUNDS)),
+                             (1.0, MAX_ROUNDS)):
+        asked = []
+        relax_surface(sphere(32), strength, lambda: asked.append(1))
+        assert len(asked) == wanted
+
+
+def test_a_canceled_request_stops_at_the_next_round():
+    """The rounds are the only long thing here, so every one of them asks first."""
+    class Stopped(Exception):
+        pass
+
+    class Third:
+        calls = 0
+
+        def __call__(self):
+            self.calls += 1
+            if self.calls == 3:
+                raise Stopped
+
+    ticker = Third()
+    with pytest.raises(Stopped):
+        relax_surface(sphere(64), 1.0, ticker)
+    assert ticker.calls == 3
+
+
+def test_work_the_machine_could_not_take_is_refused_before_any_of_it_starts(monkeypatch):
+    cut = sphere(64)
+    monkeypatch.setattr(memory, "spare_bytes", lambda device: 1 << 20)
+    with pytest.raises(ValueError, match="level of detail"):
+        relax_surface(cut, 0.5, _nothing_asked)
+
+
 # ---------------------------------------------------------------- the request
 
 
@@ -330,9 +466,10 @@ def test_the_knobs_read_off_anything_that_carries_them():
     class Holder:
         floaters = 0.02
         triangles = 0.4
+        smooth = 0.5
 
-    assert flat_options(Holder()) == {"floaters": 0.02, "triangles": 0.4}
-    assert set(FINISH_NAMES) == {"floaters", "triangles"}
+    assert flat_options(Holder()) == {"floaters": 0.02, "triangles": 0.4, "smooth": 0.5}
+    assert set(FINISH_NAMES) == {"floaters", "triangles", "smooth"}
 
 
 def test_every_filter_knob_lands_where_a_slider_can_put_it():

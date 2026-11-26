@@ -26,6 +26,12 @@ class MeshFinishOptions:
              "coarser shape",
         filter="simplify", stage=FINISH)
 
+    smooth: float = option(
+        0.0, label="Smooth the surface", ge=0.0, le=1.0, step=0.01,
+        help="ease out the roughness a cut leaves, corners and all, on whatever the detail "
+             "level has left by then",
+        filter="smooth", stage=FINISH)
+
     def __post_init__(self) -> None:
         validate(self)
 

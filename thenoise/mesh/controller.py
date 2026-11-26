@@ -17,7 +17,7 @@ from thenoise.utils.lora_roles import check_lora_roles
 from thenoise.utils.pipeline_cache import PipelineCache, content_digest
 
 from .finish import finish_mesh
-from .octree import volume_bytes
+from .memory import volume_bytes
 from .shapes import ShapeStore
 from .spec import MeshSpec, ResolvedMesh
 from .write import write_mesh

@@ -8,7 +8,7 @@ from PIL import Image
 
 from thenoise.jobs import Cancellation, JobCancelled
 from thenoise.mesh.controller import MeshPipelineController, _sampling_bytes
-from thenoise.mesh.octree import volume_bytes
+from thenoise.mesh.memory import volume_bytes
 from thenoise.mesh.extract import Mesh
 from thenoise.mesh.spec import MeshSpec
 from thenoise.models.base import Conditioning, DiffusionModel

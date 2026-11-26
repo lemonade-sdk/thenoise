@@ -25,12 +25,14 @@ def test_the_shape_server_declares_its_finish_chain(tmp_path):
             described = client.get("/finish").json()["options"]
     finally:
         queue.close()
-    assert [entry["name"] for entry in described] == ["floaters", "triangles"]
+    assert [entry["name"] for entry in described] == ["floaters", "triangles", "smooth"]
     assert all(entry["type"] == "number" for entry in described)
     assert {entry["name"]: entry["default"] for entry in described} == {"floaters": 0.0,
-                                                                       "triangles": 1.0}
+                                                                       "triangles": 1.0,
+                                                                       "smooth": 0.0}
     assert {entry["name"]: entry["max"] for entry in described} == {"floaters": 1.0,
-                                                                   "triangles": 1.0}
+                                                                   "triangles": 1.0,
+                                                                   "smooth": 1.0}
 
 
 def _cut_with_junk():
