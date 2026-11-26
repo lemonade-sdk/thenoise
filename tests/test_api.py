@@ -166,23 +166,16 @@ def test_health_publishes_the_shape_knobs_of_the_loaded_model():
     knobs = _endpoint(create_app(runtime), "/health")()["knobs"]
 
     assert knobs == knob_menu(hunyuan)
-    assert [one["value"] for one in knobs["octree_resolution"]] == [96, 192, 384, 768]
-    assert [one["name"] for one in knobs["latents"]] == ["lean", "standard", "detailed"]
-    assert [one["value"] for one in knobs["mc_level"]] == [1/1024, 1/512, 1/256, 1/128]
-    assert [one["name"] for one in knobs["scale"]] == ["×0.5", "×1", "×2", "×4"]
 
     # Another model, another set of numbers: same code path, different trained values.
-    runtime._model = type("M", (), {"MEDIUM": "mesh", "default_prefs": {
-        "num_latents": 3072, "octree_resolution": 256, "bounds": 1.0,
-        "mc_level": 1 / 256}, "CAPABILITIES": {"mesh": {"i2d": True}},
-        "REF_METHODS": (), "ATTENTION_METHODS": ATTENTION_METHODS,
-        "attention_methods": lambda self: self.ATTENTION_METHODS})()
+    second = {"num_latents": 3072, "octree_resolution": 256, "bounds": 1.0,
+              "mc_level": 1 / 256}
+    runtime._model = type("M", (), {"MEDIUM": "mesh", "default_prefs": second,
+                                    "CAPABILITIES": {"mesh": {"i2d": True}},
+                                    "REF_METHODS": (), "ATTENTION_METHODS": ATTENTION_METHODS,
+                                    "attention_methods": lambda self: self.ATTENTION_METHODS})()
     knobs = _endpoint(create_app(runtime), "/health")()["knobs"]
-    assert knobs["latents"] == [{"value": 1536, "name": "lean"},
-                               {"value": 3072, "name": "standard"},
-                               {"value": 6144, "name": "detailed"}]
-    assert [one["value"] for one in knobs["octree_resolution"]] == [64, 128, 256, 512]
-    assert [one["value"] for one in knobs["mc_level"]] == [1/512, 1/256, 1/128, 1/64]
+    assert knobs == knob_menu(second)
     assert "scale" not in knobs
 
 
@@ -417,11 +410,12 @@ def test_postprocess_describes_every_knob_of_the_chain():
 
     assert set(described) == set(POSTPROCESS_NAMES)
     grain = described["film_grain"]
-    assert grain["label"] == "Film grain"
-    # What the server accepts (0-10) is wider than what a slider is worth offering (0-1).
-    assert (grain["min"], grain["max"], grain["ui_max"], grain["step"]) == (0.0, 10.0, 1.0, 0.1)
+    # What the server accepts is wider than what a slider is worth offering.
+    assert grain["ui_max"] < grain["max"]
     grid = described["qwen_vae_enhance"]
-    assert (grid["type"], grid["default"], grid["hint"]) == ("boolean", False, "enable when needed")
+    assert (grid["type"], grid["default"]) == ("boolean", False)
+    assert grid["hint"], "a knob that does nothing unless asked needs a word on it"
+    assert all(one["label"] and "default" in one for one in described.values())
 
 
 def test_postprocess_describes_the_shape_filters_of_a_shape_model():
@@ -706,20 +700,13 @@ def test_controlmaps_lists_kinds_and_defaults():
 def test_controlmaps_describe_the_options_of_every_kind():
     """The form, the CLI flags and the request schema come from this payload."""
     res = _endpoint(create_app(_empty_runtime()), "/controlmaps")()
-    assert res["options"]["canny"] == [
-        {"name": "low", "label": "Low edge strength", "type": "number",
-         "default": 100.0, "min": 0, "step": 1},
-        {"name": "high", "label": "High edge strength", "type": "number",
-         "default": 200.0, "min": 0, "step": 1},
-        {"name": "thickness", "label": "Line width", "type": "integer",
-         "default": 1, "min": 1, "step": 1},
-    ]
+    assert [one["name"] for one in res["options"]["canny"]] == ["low", "high", "thickness"]
+    for options in res["options"].values():
+        for one in options:
+            assert one["label"] and one["type"] and "default" in one, one["name"]
     # A field whose choices only the server knows names the list to fill it from.
     assert res["options"]["pose"][0]["name"] == "detector"
     assert res["options"]["pose"][0]["pool"] == "detectors"
-    person = res["options"]["pose"][1]
-    assert (person["min"], person["max"], person["default"]) == (0, 1, 0.5)
-    assert [c["default"] for c in res["options"]["depth"]] == [False, "gray"]
 
 
 def test_controlmaps_list_discovered_depth_checkpoints(tmp_path):

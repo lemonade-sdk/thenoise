@@ -28,7 +28,7 @@ _LIMITS = {
 }
 
 KNOB_STEPS = {
-    "octree_resolution": (("draft", 0.25), ("fine", 0.5), ("standard", 1), ("ultra", 2)),
+    "octree_resolution": (("draft", 0.25), ("coarse", 0.5), ("standard", 1), ("ultra", 2)),
     "latents": (("lean", 0.5), ("standard", 1), ("detailed", 2)),
     "bounds": (("tight", 0.9), ("standard", 1), ("roomy", 1.2), ("wide", 1.5)),
     "mc_level": (("sharp", 0.5), ("standard", 1), ("fatten", 2), ("extra fatten", 4)),

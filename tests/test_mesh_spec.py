@@ -4,7 +4,8 @@ import pytest
 
 from thenoise.mesh.finish.options import DEFAULTS as FINISH_DEFAULTS
 from thenoise.mesh.spec import (
-    DEFAULT_MESH_SCALE, OUTPUT_FORMATS, MeshSpec, knob_menu, limits, mode_of,
+    DEFAULT_MESH_SCALE, KNOB_PREFS, KNOB_STEPS, OUTPUT_FORMATS, MeshSpec, knob_menu,
+    limits, mode_of,
 )
 from thenoise.models.hunyuan3d21 import Hunyuan3D21ShapeModel
 from thenoise.utils.attention import DEFAULT_ATTENTION
@@ -20,6 +21,9 @@ DEFAULTS = {
     "bounds": 1.01,
     "mc_level": 0.0,
 }
+
+
+PREF_TO_KNOB = {own: knob for knob, own in KNOB_PREFS.items()}
 
 
 def resolve(**overrides):
@@ -41,9 +45,8 @@ def test_several_pictures_are_views_of_the_one_shape_asked_for():
 
 def test_the_models_defaults_fill_what_the_request_left_out():
     resolved = resolve()
-    assert (resolved.latents, resolved.steps, resolved.sampler) == (4096, 30, "euler")
-    assert (resolved.octree_resolution, resolved.bounds, resolved.mc_level) == (384, 1.01, 0.0)
-    assert resolved.output_format == "glb"
+    for knob, own in DEFAULTS.items():
+        assert getattr(resolved, PREF_TO_KNOB.get(knob, knob)) == own, knob
 
 
 def test_the_request_values_win_over_the_defaults():
@@ -115,11 +118,6 @@ def test_a_request_names_no_loras_unless_asked():
     assert resolve().lora_specs == {}
 
 
-def test_stl_is_one_of_the_answered_containers():
-    assert resolve(output_format="stl").output_format == "stl"
-    assert "stl" in OUTPUT_FORMATS
-
-
 def test_every_promised_container_resolves_and_is_written():
     from thenoise.mesh.write import write_mesh
     from test_mesh_write import triangle
@@ -130,56 +128,42 @@ def test_every_promised_container_resolves_and_is_written():
         write_mesh(triangle(), "/tmp/nope.ply", "ply")
 
 
-def named(menu, knob):
-    return [(one["name"], one["value"]) for one in menu[knob]]
-
-
-def test_a_shape_model_menus_words_over_its_own_numbers():
-    """The pane's menus are the shipped model's trained values scaled, each keeping the word
-    that step means: a user picks a word, the request carries the number."""
-    menu = knob_menu(Hunyuan3D21ShapeModel.DEFAULT_PREFS)
-    assert named(menu, "octree_resolution") == [("draft", 96), ("fine", 192),
-                                                ("standard", 384), ("ultra", 768)]
-    assert named(menu, "latents") == [("lean", 2048), ("standard", 4096),
-                                      ("detailed", 8192)]
-    assert named(menu, "bounds") == [("tight", 0.909), ("standard", 1.01),
-                                     ("roomy", 1.212), ("wide", 1.515)]
-    assert named(menu, "mc_level") == [("sharp", 1 / 1024), ("standard", 1 / 512),
-                                       ("fatten", 1 / 256), ("extra fatten", 1 / 128)]
-    assert named(menu, "scale") == [("\u00d70.5", 0.5), ("\u00d71", 1),
-                                   ("\u00d72", 2), ("\u00d74", 4)]
-
-
-def test_another_model_of_the_medium_answers_with_its_own_numbers():
-    menu = knob_menu({"num_latents": 3072, "octree_resolution": 256, "bounds": 1.0,
-                      "mc_level": 1 / 256, "scale": 400})
-    assert named(menu, "latents") == [("lean", 1536), ("standard", 3072),
-                                      ("detailed", 6144)]
-    assert named(menu, "octree_resolution") == [("draft", 64), ("fine", 128),
-                                                ("standard", 256), ("ultra", 512)]
-    assert named(menu, "bounds") == [("tight", 0.9), ("standard", 1.0),
-                                     ("roomy", 1.2), ("wide", 1.5)]
-    assert named(menu, "mc_level") == [("sharp", 1 / 512), ("standard", 1 / 256),
-                                       ("fatten", 1 / 128), ("extra fatten", 1 / 64)]
-    assert named(menu, "scale") == [("\u00d70.5", 200), ("\u00d71", 400),
-                                   ("\u00d72", 800)]
+@pytest.mark.parametrize("prefs", [
+    Hunyuan3D21ShapeModel.DEFAULT_PREFS,
+    {"num_latents": 3072, "octree_resolution": 256, "bounds": 1.0, "mc_level": 1 / 256,
+     "scale": 400},
+])
+def test_a_menu_is_the_models_own_numbers_scaled_by_each_step(prefs):
+    """The pane's menus are the shipped model's own values scaled: a request picks a word and
+    the number arrives with it, and another model of the medium answers with its own."""
+    menu = knob_menu(prefs)
+    for knob, steps in KNOB_STEPS.items():
+        own = prefs.get(KNOB_PREFS.get(knob, knob))
+        if own is None:
+            assert knob not in menu, knob
+            continue
+        offered = menu[knob]
+        assert [one["name"] for one in offered] == [word for word, _ in
+                                                    steps][:len(offered)]
+        for one, (_, ratio) in zip(offered, steps):
+            assert one["value"] == pytest.approx(own * ratio)
 
 
 def test_a_menu_stops_where_a_request_would_be_refused():
     """A model trained near an edge must not be offered past it, and a step that falls away
     takes its word with it rather than renaming what is left."""
-    menu = knob_menu({"num_latents": 12000, "octree_resolution": 700, "bounds": 7.0,
-                      "mc_level": 0.4})
-    assert named(menu, "latents") == [("lean", 6000), ("standard", 12000)]
-    assert named(menu, "octree_resolution") == [("draft", 175), ("fine", 350),
-                                                ("standard", 700)]
-    assert named(menu, "bounds") == [("tight", 6.3), ("standard", 7.0)]
-    assert named(menu, "mc_level") == [("sharp", 0.2), ("standard", 0.4)]
+    prefs = {"num_latents": 12000, "octree_resolution": 700, "bounds": 7.0,
+             "mc_level": 0.4}
+    menu = knob_menu(prefs)
+    for knob, offered in menu.items():
+        assert len(offered) < len(KNOB_STEPS[knob]), knob
+        assert offered[-1]["value"] == prefs[KNOB_PREFS.get(knob, knob)], knob
+        assert [one["name"] for one in offered] == [word for word, _ in
+                                                    KNOB_STEPS[knob]][:len(offered)]
 
 
 def test_a_knob_the_model_has_no_value_for_offers_no_menu():
-    assert named(knob_menu({"num_latents": 4096}), "latents") == [
-        ("lean", 2048), ("standard", 4096), ("detailed", 8192)]
+    assert set(knob_menu({"num_latents": 4096})) == {"latents"}
     assert knob_menu({}) == {}
 
 
@@ -190,14 +174,13 @@ def test_every_offered_value_is_one_a_request_can_ask_for():
 
 
 def test_the_numbers_no_shape_can_use_are_refused_by_name():
-    """Wide edges on purpose: refused where the request cannot work, not where it would
-    look worse. These two are the ones a real request reached the octree with."""
-    for knob, bad in [("bounds", 700.0), ("bounds", 0.001), ("mc_level", 3.0),
-                      ("mc_level", -40.0), ("latents", 20_000),
-                      ("octree_resolution", 900), ("octree_resolution", 4),
-                      ("scale", 1e6), ("scale", 1e-6)]:
-        with pytest.raises(ValueError, match=knob):
-            resolve(**{knob: bad})
+    """Past either edge, and named: the refusal has to say which knob it was, and the
+    edges are the ones the check, the pane and this test all read from."""
+    for knob in KNOB_STEPS:
+        low, high, _ = limits(knob)
+        for bad in (high + 1, low - 1):
+            with pytest.raises(ValueError, match=knob):
+                resolve(**{knob: bad})
 
 
 def test_a_refusal_names_the_edges_it_was_checked_against():

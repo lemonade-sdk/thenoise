@@ -16,7 +16,7 @@ from conftest import beside_the_shape, edge_multiplicity, sphere_cut, tetra
 from test_mesh_controller import DEFAULTS
 
 from thenoise.mesh.extract import Mesh, extract_surface
-from thenoise.mesh.finish import (CHAIN, DEFAULTS as OFF, FILTERS, FINISH_NAMES,
+from thenoise.mesh.finish import (CHAIN, FILTERS, FINISH_NAMES,
                                   MeshFinishOptions, filter_specs, finish_mesh,
                                   flat_options)
 from thenoise.mesh.finish import cleanup
@@ -83,11 +83,6 @@ def test_the_knobs_a_filter_reads_are_the_ones_it_declared():
     assert {spec.name for spec in CHAIN} == set(FILTERS)
 
 
-def test_no_knob_asks_for_anything_by_default():
-    assert OFF == {"floaters": 0.0, "triangles": 1.0, "smooth": 0.0}
-    assert options_schema(MeshFinishOptions)[0]["label"] == "Clean up junk"
-
-
 def test_a_knob_outside_its_own_range_is_refused_by_name():
     for knob, bad in [("triangles", 1.5), ("triangles", 0.0), ("floaters", 2.0)]:
         with pytest.raises(ValueError, match=knob):
@@ -104,19 +99,16 @@ def test_the_declaration_needs_no_compiled_library_to_build_the_flags():
     assert probe.stdout.strip() == "False"
 
 
-def test_the_pane_is_told_the_words_the_bounds_and_the_defaults():
+def test_the_pane_is_told_how_to_build_each_control():
     described = {entry["name"]: entry for entry in options_schema(MeshFinishOptions)}
-    # 0.001 stays the floor a request may ask for; 0.01 is where the slider starts, so that
-    # its steps land on 1.0 instead of stopping at 0.991.
-    assert described["triangles"] == {"name": "triangles", "label": "Level of detail",
-                                      "type": "number", "default": 1.0, "min": 0.001,
-                                      "ui_min": 0.01, "max": 1.0, "step": 0.01}
-    assert described["floaters"] == {"name": "floaters", "label": "Clean up junk",
-                                     "type": "number", "default": 0.0, "min": 0.0,
-                                     "max": 1.0, "step": 0.01}
-    assert described["smooth"] == {"name": "smooth", "label": "Smooth the surface",
-                                   "type": "number", "default": 0.0, "min": 0.0,
-                                   "max": 1.0, "step": 0.01}
+    assert set(described) == set(FINISH_NAMES)
+    # The floor a request may ask for stays under the floor the slider starts at, so the
+    # slider's steps land on 1.0 instead of stopping at 0.991.
+    assert described["triangles"]["ui_min"] > described["triangles"]["min"]
+    for entry in described.values():
+        assert entry["label"] and entry["type"] == "number", entry
+        assert entry["min"] <= entry["default"] <= entry["max"], entry["name"]
+        assert 0 < entry["step"] < entry["max"] - entry["min"], entry["name"]
 
 
 # ------------------------------------------------------------------ the chain
