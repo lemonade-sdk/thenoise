@@ -22,6 +22,8 @@ import torch.nn.functional as F
 
 import numpy as np
 
+from thenoise.dit.quantized import QuantizedLinear
+from thenoise.utils.attention import AttentionParams, attention
 from thenoise.utils.loader import load_codec
 from thenoise.utils.media import pcm_resample
 from thenoise.utils.safetensors import Header, Signature
@@ -263,9 +265,9 @@ class GeGluMlp(nn.Module):
     def __init__(self, in_features: int, hidden_features: int):
         super().__init__()
         self.norm = nn.LayerNorm(in_features)
-        self.w0 = nn.Linear(in_features, hidden_features)
-        self.w1 = nn.Linear(in_features, hidden_features)
-        self.w2 = nn.Linear(hidden_features, in_features)
+        self.w0 = QuantizedLinear(in_features, hidden_features)
+        self.w1 = QuantizedLinear(in_features, hidden_features)
+        self.w2 = QuantizedLinear(hidden_features, in_features)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.norm(x)
@@ -286,21 +288,27 @@ class CausalAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = in_dim // num_heads
         self.out_dim = out_dim
-        self.qkv = nn.Linear(in_dim, in_dim * 3, bias=False)
+        # The fused QKV bias is not one tensor in the checkpoint but three: q's, k's --
+        # which trains to zeros and is stored as one -- and v's.
+        self.qkv = QuantizedLinear(in_dim, in_dim * 3, bias=False)
         self.q_bias = nn.Parameter(torch.empty(in_dim))
         self.v_bias = nn.Parameter(torch.empty(in_dim))
         self.register_buffer("zero_k_bias", torch.empty(in_dim))
-        self.proj = nn.Linear(out_dim, out_dim)
+        self.proj = QuantizedLinear(out_dim, out_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        batch, rows, channels = x.shape
-        bias = torch.cat((self.q_bias, self.zero_k_bias.to(x), self.v_bias))
-        qkv = F.linear(x, self.qkv.weight, bias.to(x))
-        qkv = qkv.reshape(batch, rows, 3, self.num_heads, self.head_dim)
+        batch, rows, _ = x.shape
+        bias = torch.cat((self.q_bias, self.zero_k_bias, self.v_bias)).to(x)
+        qkv = (self.qkv(x) + bias).view(batch, rows, 3, self.num_heads, self.head_dim)
         q, k, v = qkv.permute(2, 0, 3, 1, 4)
-        seen = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-        pooled = F.adaptive_avg_pool1d(seen.mean(dim=1), self.out_dim)
-        return self.proj(pooled)
+        # Causal rows see a triangle, and no crop of the keys says so: the mask is an
+        # operand of the one call.
+        mask = torch.ones(rows, rows, dtype=torch.bool, device=x.device).tril()
+        seen = attention([q, k, v], attn_params=AttentionParams(attention_mask=mask))
+        # Token-major and head-major hold the same values in another order, so the mean
+        # over heads is taken here rather than inside the call.
+        seen = seen.view(batch, rows, self.num_heads, self.head_dim).mean(dim=2)
+        return self.proj(F.adaptive_avg_pool1d(seen, self.out_dim))
 
 
 class AttnProjection(nn.Module):
@@ -310,7 +318,7 @@ class AttnProjection(nn.Module):
         super().__init__()
         self.norm1 = nn.LayerNorm(in_dim)
         self.attn = CausalAttention(in_dim, out_dim, num_heads)
-        self.proj = nn.Linear(in_dim, out_dim)
+        self.proj = QuantizedLinear(in_dim, out_dim)
         self.norm3 = nn.LayerNorm(in_dim)
         self.norm2 = nn.LayerNorm(out_dim)
         self.mlp = GeGluMlp(out_dim, int(out_dim * mlp_ratio))
