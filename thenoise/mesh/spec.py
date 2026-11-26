@@ -68,9 +68,6 @@ def knob_menu(defaults: Mapping[str, Any]) -> dict[str, list[dict]]:
     return menu
 
 
-SHAPE_MODE = "shape"
-
-
 def mode_of(images: tuple[bytes, ...]) -> str:
     """``t2d``, ``i2d`` or ``mv2d``, from how many pictures a request carries."""
     if not images:
@@ -81,7 +78,6 @@ def mode_of(images: tuple[bytes, ...]) -> str:
 @dataclass(frozen=True)
 class ResolvedMesh:
     images: tuple[bytes, ...]
-    from_shape: str | None
     latents: int
     steps: int
     guidance_scale: float
@@ -98,12 +94,11 @@ class ResolvedMesh:
 
     @property
     def mode(self) -> str:
-        """``shape`` stands in for the image modes: their conditioning is already spent."""
-        return SHAPE_MODE if self.from_shape else mode_of(self.images)
+        return mode_of(self.images)
 
     def public(self) -> dict:
         return {
-            "mode": self.mode, "from_shape": self.from_shape,
+            "mode": self.mode,
             "latents": self.latents, "steps": self.steps,
             "guidance_scale": self.guidance_scale, "sampler": self.sampler,
             "attention": self.attention,
@@ -120,7 +115,6 @@ class _MeshBody(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     image: Picture | list[Picture] | None = None
-    from_shape: Annotated[str, Field(min_length=1)] | None = None
     latents: Positive | None = None
     steps: Positive | None = None
     guidance_scale: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None = None
@@ -160,9 +154,6 @@ class _MeshBody(BaseModel):
         scale = self.scale
         if scale is None:
             scale = defaults.get("scale", DEFAULT_MESH_SCALE)
-        if self.from_shape and self.images:
-            raise ValueError("from_shape reuses a shape whose image is already spent: "
-                             "send either image or from_shape, not both")
         if steps < 1:
             raise ValueError("steps must be positive")
         for knob, value in (("latents", latents), ("bounds", bounds),
@@ -179,7 +170,7 @@ class _MeshBody(BaseModel):
         if output_format not in OUTPUT_FORMATS:
             raise ValueError(f"output_format must be one of {', '.join(OUTPUT_FORMATS)}")
         return ResolvedMesh(
-            images=self.images, from_shape=self.from_shape,
+            images=self.images,
             latents=latents, steps=steps,
             guidance_scale=guidance_scale, sampler=sampler, attention=attention,
             seed=resolve_seed(self.seed),
@@ -194,5 +185,5 @@ MeshSpec = create_model("MeshSpec", __base__=_MeshBody, **wire_fields(MeshFinish
 MeshSpec.__doc__ = "What a mesh request asks for, from cutting the surface to writing it."
 
 
-__all__ = ["DEFAULT_MESH_SCALE", "KNOB_STEPS", "OUTPUT_FORMATS", "SHAPE_MODE", "MeshSpec",
+__all__ = ["DEFAULT_MESH_SCALE", "KNOB_STEPS", "OUTPUT_FORMATS", "MeshSpec",
            "ResolvedMesh", "knob_menu", "limits", "mode_of"]

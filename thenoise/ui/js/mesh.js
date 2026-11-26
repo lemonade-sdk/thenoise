@@ -4,9 +4,6 @@ const MESH_GLYPH = 'data:image/svg+xml;utf8,' + encodeURIComponent(
   + '<g fill="none" stroke="#8b8fa3" stroke-width="3" stroke-linejoin="round">'
   + '<path d="M32 6 58 20v24L32 58 6 44V20z"/><path d="M6 20l26 14 26-14M32 34v24"/></g></svg>');
 
-let meshSource = null;
-let meshGone = null;
-let meshKept = new Set();
 let meshOutUrl = null;
 let meshOutMeta = null;
 let meshShown = 0;
@@ -14,9 +11,7 @@ let meshShown = 0;
 const meshJob = { id: null };
 const MESH_PROGRESS = { root: 'mesh_progress', label: 'mesh_progress_label', bar: 'mesh_bar',
   labels: { conditioning: 'reading the image', sampling: 'shaping' } };
-const MESH_MODES = {i2d: 'image-to-shape', mv2d: 'views-to-shape', t2d: 'text-to-shape',
-                    shape: 'cut again from a kept shape'};
-const MESH_SOLVED = ['latents', 'steps', 'seed', 'guidance_scale', 'sampler'];
+const MESH_MODES = {i2d: 'image-to-shape', mv2d: 'views-to-shape', t2d: 'text-to-shape'};
 const MESH_FORMATS = { glb: 'model/gltf-binary', obj: 'text/plain', stl: 'model/stl' };
 const MESH_MAX_VIEWS = 4;
 const meshViews = [];
@@ -64,7 +59,6 @@ async function loadMeshPicture(file) {
   }
   const image = await readImageFile(file);
   if (!image) return;
-  meshSource = meshGone = null;
   meshViews.push({ dataUrl: image.dataUrl, b64: image.b64, name: file.name, file });
   renderMeshViews();
   resetMeshResult();
@@ -83,12 +77,7 @@ const meshHist = makeHistory({
 async function showMeshShape(item) {
   meshOutMeta = item.meta;
   meshOutUrl = item.url;
-  await loadMeshShapes();
-  const kept = meshKept.has(item.meta.job);
-  meshSource = kept ? item.meta.job : null;
-  meshGone = kept || !item.meta.job ? null : item.meta.job;
-  if (!kept) await adoptMeshImages(item.meta);
-  describeMeshSource();
+  await adoptMeshImages(item.meta);
   applyMeshSettings(item.meta);
   try {
     const answer = await fetch(item.url);
@@ -116,30 +105,6 @@ function applyMeshSettings(meta) {
   }
 }
 
-function describeMeshSource() {
-  const note = $('mesh_shape_note');
-  note.textContent = meshSource
-    ? 'this cuts a shape you already made \u2014 nothing new is drawn'
-    : meshGone
-      ? (meshViews.length
-         ? 'that shape is gone from the server \u2014 its pictures are back, so this draws a new one'
-         : 'that shape is gone from the server \u2014 add a picture to draw a new one')
-      : '';
-  note.classList.toggle('hidden', !note.textContent);
-  $('mesh_shape_clear').classList.toggle('hidden', !meshSource);
-  $('mesh_dropzone').inert = !!meshSource;
-
-  const shaping = $('mesh_shape_knobs');
-  shaping.inert = !!meshSource;
-  shaping.classList.toggle('muted', !!meshSource);
-}
-
-async function loadMeshShapes() {
-  const listing = await fetchJSON('/shapes');
-
-  if (listing && Array.isArray(listing.shapes)) meshKept = new Set(listing.shapes);
-}
-
 registerKnobs('finish', '/finish');
 loadKnobs('finish', ['mesh_']);
 
@@ -153,28 +118,18 @@ function collectMeshSettings() {
   }
   const lora_specs = parseLora($('mesh_lora_specs').value);
   if (lora_specs) body.lora_specs = lora_specs;
-  if (meshSource) {
-    body.from_shape = meshSource;
-
-    for (const key of MESH_SOLVED) delete body[key];
-  } else {
-    body.image = meshViews.length === 1 ? meshViews[0].b64
-                                        : meshViews.map(view => view.b64);
-  }
+  body.image = meshViews.length === 1 ? meshViews[0].b64
+                                      : meshViews.map(view => view.b64);
   return { ...body, ...collectKnobs('finish', 'mesh_') };
 }
 
 function validateMeshInputs() {
-  if (!meshViews.length && !meshSource) {
-    if (meshGone) {
-      return meshFail('that shape is no longer on the server \u2014 add an image for a new one');
-    }
+  if (!meshViews.length) {
     return meshFail(meshHist.items.length
-      ? 'a shape needs an image \u2014 or pick one from History to cut it again'
+      ? 'a shape needs an image \u2014 or pick one from History to bring its pictures back'
       : 'a shape needs an image');
   }
 
-  if (meshSource) return true;
   const check = (fields, ok, message) => {
     for (const f of fields) {
       const v = $('mesh_' + f).value;
@@ -196,8 +151,6 @@ function meshName(meta) {
 
 function resetMeshResult() {
   meshOutMeta = null;
-  meshGone = null;
-  describeMeshSource();
   meshShown += 1;
   clearMesh();
   $('mesh_wire').disabled = true;
@@ -261,18 +214,10 @@ $('mesh_generate').addEventListener('click', () => {
       const meta = meshOutMeta;
       showMeshResult(blob).then((still) => {
         meshHist.add(url, meta, still || MESH_GLYPH);
-        loadMeshShapes();
       });
     },
   });
 });
-
-$('mesh_shape_clear').addEventListener('click', () => {
-  meshSource = meshGone = null;
-  describeMeshSource();
-});
-describeMeshSource();
-loadMeshShapes();
 
 $('mesh_cancel').addEventListener('click', () => cancelJob(meshJob, $('mesh_cancel')));
 
@@ -286,10 +231,8 @@ function renderMeshInfo() {
   if (m.model) rows.push(['Model', m.model, '']);
   if (m.mode) rows.push([FIELD_LABELS.mode, MESH_MODES[m.mode] || m.mode, '']);
 
-  const ignored = m.mode === 'shape' ? MESH_SOLVED : [];
   for (const key of ['latents', 'steps', 'guidance_scale', 'sampler', 'octree_resolution',
                      'bounds', 'mc_level', 'scale', 'seed', 'output_format']) {
-    if (ignored.includes(key)) continue;
     if (m[key] != null && m[key] !== '') {
       rows.push([FIELD_LABELS[key], knobLabel(key, m[key]), '']);
     }

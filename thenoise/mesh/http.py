@@ -9,7 +9,6 @@ from ..jobs import JobPlan, JobQueue
 from ..media_request import MediaRequest
 from ..media_routes import install_knobs_route, install_media_routes
 from .finish.options import MeshFinishOptions
-from .shapes import ShapeStore
 from .spec import MeshSpec
 
 
@@ -24,14 +23,9 @@ class MeshRequest(MediaRequest, MeshSpec):
 
 def install_mesh_routes(app: FastAPI, queue: JobQueue,
                         planner: Callable[[MeshSpec], JobPlan],
-                        model_name: str, shapes: ShapeStore) -> None:
+                        model_name: str) -> None:
     install_media_routes(app, queue, planner, model_name, "mesh", MeshRequest)
     install_knobs_route(app, "/finish", MeshFinishOptions)
-
-    @app.get("/shapes")
-    def kept() -> dict:
-        """Newest first: offering more than this offers shapes the server has let go."""
-        return {"shapes": shapes.kept()}
 
 
 __all__ = ["MeshRequest", "install_mesh_routes"]

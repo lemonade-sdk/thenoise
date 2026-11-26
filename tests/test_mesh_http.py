@@ -1,8 +1,6 @@
 import base64
 import io
-import os
 
-import torch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -15,7 +13,6 @@ from thenoise.mesh.finish.chain import finish_mesh
 from thenoise.mesh.finish.options import MeshFinishOptions
 from thenoise.mesh.http import install_mesh_routes
 from thenoise.mesh.service import mesh_planner
-from thenoise.mesh.shapes import ShapeStore
 
 MODEL = "hunyuan3d21"
 
@@ -100,13 +97,12 @@ class _Runtime:
         return action(self.pipeline)
 
 
-def _client(pipeline, queue, shapes=None):
+def _client(pipeline, queue):
     app = FastAPI()
     from thenoise.jobs_http import install_job_routes
 
     install_job_routes(app, queue)
-    store = shapes if shapes is not None else ShapeStore(queue.root)
-    install_mesh_routes(app, queue, mesh_planner(_Runtime(pipeline), store), MODEL, store)
+    install_mesh_routes(app, queue, mesh_planner(_Runtime(pipeline)), MODEL)
     return TestClient(app)
 
 
@@ -117,7 +113,7 @@ def _controller(body=b"glTF fake"):
         # The real resolve, so what the controller refuses is what the route answers 400.
         resolve = real.resolve
 
-        def render(self, spec, token, progress, output, shapes=None):
+        def render(self, spec, token, progress, output):
             progress("sampling", spec.steps, spec.steps)
             output.write_bytes(body)
 
@@ -129,7 +125,7 @@ def _failing(failure):
         def resolve(self, spec):
             raise failure
 
-        def render(self, spec, token, progress, output, shapes=None):
+        def render(self, spec, token, progress, output):
             raise failure
 
     return Controller()
@@ -232,41 +228,6 @@ def test_a_request_without_a_picture_cannot_ask_for_a_shape(tmp_path):
             answer = client.post("/mesh", json={})
             assert answer.status_code == 400
             assert "t2d" in answer.text
-    finally:
-        queue.close()
-
-
-def test_a_saved_shape_can_stand_in_for_an_image(tmp_path):
-    """A request bringing both an image and a shape is refused, not decided for."""
-    queue = JobQueue(tmp_path)
-    try:
-        with _client(_controller(), queue) as client:
-            answer = client.post("/jobs/mesh", json={"from_shape": "job_first"})
-            assert answer.status_code == 202
-            ident = answer.json()["id"]
-            until(lambda: client.get(f"/jobs/{ident}").json()["status"] == "completed")
-            resolved = client.get(f"/jobs/{ident}").json()["resolved"]
-            assert resolved["mode"] == "shape"
-            assert resolved["from_shape"] == "job_first"
-
-            answer = client.post("/mesh", json={"image": _b64(), "from_shape": "job_first"})
-            assert answer.status_code == 400
-            assert "either image or from_shape" in answer.text
-    finally:
-        queue.close()
-
-
-def test_the_shapes_a_request_can_name_are_listed_newest_first(tmp_path):
-    """The list the refusals speak from: what the server holds now, and nothing after a restart."""
-    queue = JobQueue(tmp_path)
-    shapes = ShapeStore(tmp_path)
-    try:
-        with _client(_controller(), queue, shapes) as client:
-            assert client.get("/shapes").json() == {"shapes": []}
-            shapes.save("job_alpha", torch.zeros(1, 2, 2), MODEL)
-            shapes.save("job_beta", torch.zeros(1, 2, 2), MODEL)
-            os.utime(shapes.path("job_beta"), (1, 1))
-            assert client.get("/shapes").json() == {"shapes": ["job_alpha", "job_beta"]}
     finally:
         queue.close()
 

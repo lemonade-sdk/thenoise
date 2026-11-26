@@ -4,15 +4,13 @@ from __future__ import annotations
 from typing import Callable
 
 from ..jobs import JobPlan
-from .shapes import ShapeStore
 from .spec import MeshSpec
 
 
-def mesh_planner(runtime, shapes: ShapeStore) -> Callable[[MeshSpec], JobPlan]:
+def mesh_planner(runtime) -> Callable[[MeshSpec], JobPlan]:
     """Nothing of the runtime is held: a reload can swap it under a running planner."""
     def render(spec, token, progress, output):
-        runtime.run(lambda controller: controller.render(spec, token, progress, output,
-                                                          shapes))
+        runtime.run(lambda controller: controller.render(spec, token, progress, output))
 
     def plan(spec: MeshSpec) -> JobPlan:
         controller = runtime.pipeline
