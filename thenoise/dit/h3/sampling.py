@@ -59,7 +59,7 @@ def audio_sigma(sigma: float, *, shift: float) -> float:
 
 
 def shift_ratio(shift: float) -> float:
-    """How far the video shift overshoots the audio's — four at the released 12.0."""
+    """How far the video shift overshoots the audio's."""
     return shift / AUDIO_SHIFT
 
 

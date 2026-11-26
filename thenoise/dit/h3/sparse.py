@@ -29,11 +29,10 @@ TAU = 1.3
 #: Percents of the schedule inside which routing is used; the earliest steps stay dense,
 #: where the run decides its structure.
 WINDOW = (0.2, 1.0)
-#: Stills do not route. Routed, H3-Image degrades visibly and badly, and the mechanism fits:
-#: the threshold is fitted to proxy rows that look near-Gaussian, which is what video scores
-#: look like and a smooth spatial field does not. On smooth operands routing keeps only the
-#: always-exact diagonal and stops responding to tau, so this is not fixable with a different
-#: tau — it wants a kept-fraction readout from a real image run first.
+#: Stills do not route: routed, H3-Image degrades visibly. The threshold is fitted to proxy
+#: rows that look near-Gaussian, which a smooth spatial field does not — on smooth operands
+#: routing keeps only the always-exact diagonal and stops responding to tau, so no tau fixes
+#: it. It wants a kept-fraction readout from a real image run first.
 STILL_HELD_DENSE = "a still: routing degrades it"
 
 
@@ -81,12 +80,9 @@ def sol_plan(*, layout, tokens: int, dtype: torch.dtype, head_dim: int, device,
              method: str = DEFAULT_ATTENTION) -> Optional[SolAttention]:
     """This run's kernel arguments, or ``None`` to keep the step dense.
 
-    The whole step takes one answer, decided outside the compiled blocks: the alternative is
-    reading a per-step sigma inside them, which dynamo would guard on and recompile every
-    block of every step. The first transition from dense to sparse recompiles once, which is
-    the cost the window buys and is paid whether or not the window exists.
-
-    ``held_dense`` is a family's own veto, stated as the reason a log should give.
+    The whole step takes one answer, decided outside the compiled blocks: a per-step sigma
+    read inside them is a dynamo guard, and every block recompiles every step.
+    ``held_dense`` is a family's own veto, worded as the reason a log should give.
     """
     def dense(reason: str) -> None:
         log_once(reason, logging.DEBUG, "sol dense at %d tokens: %s", tokens, reason)
@@ -97,8 +93,7 @@ def sol_plan(*, layout, tokens: int, dtype: torch.dtype, head_dim: int, device,
     if method == "full":
         dense("the request asked for full attention")
         return None
-    # An asked-for run goes past the length below which dense measures faster: that floor
-    # is an economy, and a request to route anyway is a request to be shown the difference.
+    # The crossover is an economy, so an explicit request walks past it.
     reason = dense_reason(tokens=tokens, dtype=dtype, head_dim=head_dim, device=device,
                           cached=cached, min_tokens=0 if method == "optimized" else None)
     if reason is not None:
