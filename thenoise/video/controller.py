@@ -183,8 +183,8 @@ class VideoPipelineController:
 
                     # Preparation must happen while the stage is resident.
                     if x is None:
-                        # Only an adapter that takes reference conditions is asked
-                        # for them, so the ones without them keep their own signature.
+                        # Asked for only by a model that takes reference conditions, so
+                        # the ones without them keep their own signature.
                         pinned = {"conditions": ref[1]} if ref[1] else {}
                         x = model.prepare_latent(
                             latents, cond, params, ref=ref[0] or None,
@@ -207,8 +207,7 @@ class VideoPipelineController:
             x = model.finalize_latent(x, params)
             del cond_raw, latents, ref
 
-            # Audio decoding is optional and belongs to its own
-            # MemoryManager stage.
+            # Audio decoding is optional and gets its own residency stage.
             audio = None
             roles = model.audio_components()
 
@@ -289,7 +288,6 @@ class VideoPipelineController:
 
         progress("encoding", 0, total)
         if audio is None:
-            # WAN and other video-only adapters keep their existing call.
             encode_video(frames(), spec, token, output, progress)
         else:
             encode_video(frames(), spec, token, output, progress,

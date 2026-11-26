@@ -79,7 +79,7 @@ class VideoModel(PixelModel):
     DEFAULT_PREFS = {**PixelModel.DEFAULT_PREFS, "attention": DEFAULT_ATTENTION,
                      "negative_prompt": "", "output_format": "webm"}
 
-    #: Per-run state the controller sets between steps, never across a swap.
+    #: Per-run state, set between steps and never carried across a component swap.
     _segment: Optional[Segment] = None
     _attention: str = DEFAULT_ATTENTION
 
