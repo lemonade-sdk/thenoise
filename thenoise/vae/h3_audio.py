@@ -1,18 +1,13 @@
 """H3 audio codec — a DAC-lineage waveform encoder behind a BigVGAN vocoder.
 
-Ported from ComfyUI's ``comfy/ldm/minimax/audio_vae.py`` with its module tree — and with
-it the checkpoint key names — verbatim; only the ops differ. The weight-norm
-parametrizations are already folded into plain weights in the released file, so ordinary
-convs load it as it is.
+Ported from ComfyUI's ``comfy/ldm/minimax/audio_vae.py`` with its module tree — and so its
+checkpoint key names — verbatim; only the ops differ. The released file already has its
+weight-norm parametrizations folded into plain weights.
 
-Only the vocoder half is built. A clip's sound is decoded, never re-encoded, until
-reference audio is something this engine accepts, and :func:`load_h3_audio_vae` drops the
-encoder's tensors rather than holding a fifth of a gigabyte of nothing.
+Only the vocoder half is built: a clip's sound is decoded, never re-encoded, so
+:func:`load_h3_audio_vae` drops the encoder's tensors instead of holding them.
 
-The latent is ``[B, 32, 2, T]`` — 32 channels over 2 stereo lanes at 40 frames per second,
-each standing for 800 samples. Stereo lanes are processed independently, which is what
-makes the fold of ``2`` into the batch in :meth:`AutoencoderKLH3Audio.decode_to_pcm` the
-whole of the stereo story.
+The latent is ``[B, 32, 2, T]`` — 32 channels over 2 stereo lanes at 40 frames per second.
 """
 from __future__ import annotations
 
@@ -47,9 +42,8 @@ UPSAMPLE_KERNELS = (9, 9, 4, 4, 4, 4, 4)
 RESBLOCK_KERNELS = (3, 7, 11)
 RESBLOCK_DILATIONS = ((1, 3, 5), (1, 3, 5), (1, 3, 5))
 
-#: Samples one latent frame stands for, and the frames one second of audio is. The
-#: encoder's rates and the vocoder's are the same product: what one squashes, the other
-#: restores, exactly.
+#: Samples one latent frame stands for, and the frames one second of audio is: what the
+#: encoder squashes the vocoder restores, exactly.
 SAMPLES_PER_LATENT = math.prod(ENCODER_RATES)
 LATENTS_PER_SECOND = SAMPLE_RATE // SAMPLES_PER_LATENT
 
@@ -93,9 +87,8 @@ class SnakeBeta(nn.Module):
 def kaiser_sinc_filter1d(cutoff: float, half_width: float, kernel_size: int) -> torch.Tensor:
     """The lowpass ``[1, 1, kernel_size]`` an alias-free activation resamples with.
 
-    Designed, not stored: the window's sidelobe level follows from the transition width,
-    and the filter is then normalized to unit sum so a constant input stays constant —
-    without that, the constant component leaks at the new rate.
+    Designed, not stored, and normalized to unit sum: otherwise the constant component
+    leaks at the new rate.
     """
     half_size = kernel_size // 2
     delta_f = 4 * half_width
@@ -279,8 +272,8 @@ class BigVGAN(nn.Module):
 class AutoencoderKLH3Audio(nn.Module):
     """H3 audio codec: canonical ``[B, 32, 2, T]`` latents to samples in ``[-1, 1]``.
 
-    A latent frame is 800 samples, so a whole clip's sound is small: unlike the video
-    codec there is nothing to chunk, and the decode is one pass over the clip.
+    A latent frame is 800 samples, so a clip's sound is small enough to decode in one
+    pass — nothing like the video codec's chunking.
     """
 
     compute_dtype = COMPUTE_DTYPE
@@ -322,8 +315,8 @@ class AutoencoderKLH3Audio(nn.Module):
     def decode_to_pcm(self, latents: torch.Tensor) -> torch.Tensor:
         """Normalized latent ``[B, 32, 2, T]`` -> ``[B, 2, L]`` in ``[-1, 1]``.
 
-        The stereo lanes fold into the batch, which is the whole of the stereo story:
-        the vocoder is a mono one and each lane keeps its own copy of everything.
+        The lanes fold into the batch: the vocoder is mono and each lane keeps its own
+        copy of everything.
         """
         z = latents.to(self.device, self.dtype)
         if z.ndim != 4 or z.shape[1] != self.z_dim:
@@ -359,8 +352,7 @@ H3_AUDIO_SIGNATURE = Signature("H3 audio codec",
 def _audio_geometry(header: Header) -> dict:
     """The widths and rates the file states, falling back to the release's constants.
 
-    The vocoder's own shape is checked against the tensors, since a file whose
-    ``dec_in_proj`` does not answer ``latent_dim`` channels is not this codec.
+    A file whose ``dec_in_proj`` does not answer ``latent_dim`` channels is not this codec.
     """
     meta = header.metadata_json(AUDIO_GEOMETRY_SECTION)
     kwargs = meta.get("kwargs") or {}
