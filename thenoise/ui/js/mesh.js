@@ -105,7 +105,7 @@ function applyMeshSettings(meta) {
   }
 }
 
-registerKnobs('finish', '/finish');
+registerKnobs('finish', '/postprocess');
 loadKnobs('finish', ['mesh_']);
 
 function collectMeshSettings() {

@@ -57,6 +57,7 @@ packages = [
     "thenoise.dit.flux2",
     "thenoise.dit.flux3",
     "thenoise.mesh",
+    "thenoise.mesh.finish",
     "thenoise.models",
     "thenoise.postprocess",
     "thenoise.controlmap",

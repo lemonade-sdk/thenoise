@@ -424,6 +424,18 @@ def test_postprocess_describes_every_knob_of_the_chain():
     assert (grid["type"], grid["default"], grid["hint"]) == ("boolean", False, "enable when needed")
 
 
+def test_postprocess_describes_the_shape_filters_of_a_shape_model():
+    """A shape has no pixels to colour, so the same route describes its finish chain."""
+    runtime = _runtime()
+    runtime._model = type("Model", (), {"MEDIUM": "mesh"})()
+    described = {entry["name"]: entry
+                 for entry in _endpoint(create_app(runtime), "/postprocess")()["options"]}
+
+    assert list(described) == ["floaters", "triangles", "smooth"]
+    assert all(entry["type"] == "number" and entry["max"] == 1.0 for entry in described.values())
+    assert described["triangles"]["default"] == 1.0
+
+
 # ----------------------------------------------------------------- /text2image
 
 

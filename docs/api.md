@@ -21,7 +21,7 @@ Start the server with [`serve`](cli.md#serve-a-model-over-http) and TheNoise exp
 | `GET` | `/health` | Server status, what the loaded model produces and its capabilities (see below) |
 | `GET` | `/lora` | List available LoRA names, and the roles they can be given to |
 | `GET` | `/upscalers` | List available pixel upscaler names (works even with no model loaded) |
-| `GET` | `/postprocess` | Describe the post-decode knobs, in the order their filters run (works even with no model loaded) |
+| `GET` | `/postprocess` | Describe the loaded medium's post-processing knobs, in the order their filters run: colour, sharpening and grain, or a shape's finish (works even with no model loaded) |
 | `POST` | `/upscale` | Pixel-upscale an input image (works even with no model loaded) |
 | `GET` | `/controlmaps` | List the extractable control-map types (works even with no model loaded) |
 | `POST` | `/controlmap` | Extract a control map from an input image (works even with no model loaded) |
@@ -29,7 +29,6 @@ Start the server with [`serve`](cli.md#serve-a-model-over-http) and TheNoise exp
 | `POST` | `/edit` | Edit an image from an instruction (image + prompt → edited image); requires an editing-capable model |
 | `POST` | `/video` | Generate a video synchronously, returning MP4 or WebM bytes |
 | `POST` | `/mesh` | Generate a shape synchronously, returning GLB, OBJ or STL bytes |
-| `GET` | `/finish` | Describe a shape's post-cut knobs, in the order their filters run (requires a shape model) |
 | `POST` | `/jobs/text2image` | Queue a generation (202) |
 | `POST` | `/jobs/edit` | Queue an edit (202) |
 | `POST` | `/jobs/video` | Queue a video generation (202) |
@@ -206,6 +205,10 @@ one refuses the second picture.
 | `smooth` | number | Ease out the roughness the cut leaves, holding creases |
 | `lora_specs` | string[] \| object | Optional LoRAs, as `name:weight`, looked up in `--lora-dir` |
 | `output_format` | string | `glb`, `obj` or `stl` (model default when omitted) |
+
+`floaters`, `triangles` and `smooth` are described with their labels, defaults and bounds
+by `GET /postprocess`, which describes a shape's finish chain while a shape model is
+loaded.
 
 For a synchronous glb response:
 
@@ -452,6 +455,27 @@ curl -s localhost:8000/upscale \
   ]
 }
 ```
+
+What it describes is the tail of the medium that is loaded, since that is what a pane
+has to build: the pixel filters an image or clip decodes into, or the filters a shape
+is cleaned with. With nothing loaded it describes the pixel filters. For a shape model:
+
+```json
+{
+  "options": [
+    {"name": "floaters", "label": "Clean up junk", "type": "number",
+     "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05},
+    {"name": "triangles", "label": "Level of detail", "type": "number",
+     "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05},
+    {"name": "smooth", "label": "Smooth the surface", "type": "number",
+     "default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05}
+  ]
+}
+```
+
+The three are described as one dial each: they run in list order, so a request cannot
+say how much to smooth before saying how many triangles to keep, and the pane reads
+the order off this payload rather than repeating it.
 
 ## `GET /controlmaps`
 
