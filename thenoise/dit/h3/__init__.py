@@ -13,7 +13,7 @@ from .checkpoint import (
     load_h3_image_dit,
 )
 from .image import H3ImageDiT
-from .layout import FRAME_PER_TOKEN, Keyframe, Layout, Reference
+from .layout import Keyframe, Layout, Reference, pixel_frames
 from .trunk import H3DiT, H3Params
 
 __all__ = [
@@ -23,10 +23,10 @@ __all__ = [
     "H3DiT",
     "H3ImageDiT",
     "H3Params",
-    "FRAME_PER_TOKEN",
     "Keyframe",
     "Layout",
     "Reference",
+    "pixel_frames",
     "detect_params",
     "load_h3_av_dit",
     "load_h3_image_dit",

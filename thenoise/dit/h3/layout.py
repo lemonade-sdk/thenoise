@@ -24,14 +24,12 @@ RefShape = Tuple[int, int]
 class Keyframe(NamedTuple):
     """A condition pinned to a pixel frame of the clip, on the target's own grid.
 
-    ``latent_t`` latent frames and ``audio_t`` audio latent frames, both read at that
-    pixel frame's time coordinate: a keyframe has one of each, a guide clip has several
-    video frames, and an audio guide has video none at all.
+    ``latent_t`` latent frames, read at that pixel frame's time coordinate: one for a
+    keyframe, several for a guide clip.
     """
 
     frame: int
     latent_t: int = 1
-    audio_t: int = 0
 
 
 class Reference(NamedTuple):
@@ -40,25 +38,18 @@ class Reference(NamedTuple):
     A reference is packed ahead of the target timeline and keeps its own spatial grid --
     the released pipeline sizes it to the generation's area or to a 2048px short edge, not
     to the canvas -- so it occupies rope time units of its own and moves the whole target
-    ahead of them. ``kind`` decides which rows it contributes; a video and its soundtrack
-    are one reference, because they share a cursor and the presentation names them next to
-    each other.
+    ahead of them.
     """
 
     kind: str
     latent_t: int = 0
     latent_h: int = 0
     latent_w: int = 0
-    audio_t: int = 0
 
 
 def ref_span(ref: Reference) -> float:
     """The rope time units one reference occupies ahead of the target streams."""
-    if ref.kind == "image":
-        return 1.0
-    if ref.kind == "audio":
-        return float(ref.audio_t)
-    return max(float(ref.audio_t), sum(time_spans(ref.latent_t)))
+    return 1.0 if ref.kind == "image" else sum(time_spans(ref.latent_t))
 
 #: Latent cells per DiT token: one frame, a 2x2 spatial block.
 PATCH_SIZE = (1, 2, 2)
@@ -115,6 +106,11 @@ def frame_grid(latent_h: int, latent_w: int) -> Tuple[torch.Tensor, torch.Tensor
     w_axis = _axis(latent_w, PATCH_SIZE[1], area)
     hh, ww = torch.meshgrid(h_axis, w_axis, indexing="ij")
     return torch.stack([hh.reshape(-1), ww.reshape(-1)], dim=-1), w_axis
+
+
+def pixel_frames(latent_t: int) -> int:
+    """How many pixel frames ``latent_t`` latent frames decode to."""
+    return sum(FRAME_PER_TOKEN[k % len(FRAME_PER_TOKEN)] for k in range(latent_t))
 
 
 def time_spans(latent_t: int) -> List[float]:
@@ -274,26 +270,15 @@ class Layout:
 
         for pinned in keyframes:
             anchor = origin + FRAME_RESCALE * pinned.frame
-            if pinned.latent_t:
-                packing.add("cond", pinned.latent_t * frame.shape[0],
-                            _video_grid(pinned.latent_t, frame, anchor))
-            if pinned.audio_t:
-                packing.add("cond_audio", pinned.audio_t * 2,
-                            _audio_grid(pinned.audio_t, anchor, w_low, w_high))
+            packing.add("cond", pinned.latent_t * frame.shape[0],
+                        _video_grid(pinned.latent_t, frame, anchor))
 
         cursor = float(text_len)
         for ref in refs:
-            # A video's soundtrack packs immediately before its frames at the same cursor,
-            # so the two read as one moment of one reference.
-            if ref.audio_t and ref.kind != "image":
-                ref_w = frame_grid(ref.latent_h, ref.latent_w)[1] if ref.kind != "audio" else w_axis
-                packing.add("ref_audio", ref.audio_t * 2, _audio_grid(
-                    ref.audio_t, cursor, float(ref_w[0]), float(ref_w[-1])))
+            ref_frame = frame_grid(ref.latent_h, ref.latent_w)[0]
             if ref.kind == "image":
-                ref_frame = frame_grid(ref.latent_h, ref.latent_w)[0]
                 packing.add("ref_img", ref_frame.shape[0], _frame_rows(ref_frame, cursor))
-            elif ref.kind in ("video", "video_audio"):
-                ref_frame = frame_grid(ref.latent_h, ref.latent_w)[0]
+            else:
                 packing.add("ref_img", ref.latent_t * ref_frame.shape[0],
                             _video_grid(ref.latent_t, ref_frame, cursor))
             cursor += ref_span(ref)

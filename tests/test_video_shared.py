@@ -7,7 +7,6 @@ import torch
 from conftest import StubVideo, header_of, wan_adapter
 from thenoise.models.config import ModelConfig
 from thenoise.models.video_base import Segment, VideoModel
-from thenoise.models.h3_video import H3VideoModel
 from thenoise.models.wan_video import VARIANTS, Wan22Model
 from thenoise.vae.wan22 import WAN22_LATENTS_MEAN, WAN22_LATENTS_STD
 from thenoise.vae.wan_video import _comfy_vae_config

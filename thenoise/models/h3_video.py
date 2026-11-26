@@ -27,11 +27,11 @@ from typing import TYPE_CHECKING, Iterator, List, Optional, Sequence, Tuple
 import torch
 
 from thenoise.dit.h3 import (
-    FRAME_PER_TOKEN,
     H3_AV_SIGNATURE,
     H3Params,
     Keyframe,
     Layout,
+    pixel_frames,
     Reference,
     detect_params,
     load_h3_av_dit,
@@ -348,7 +348,7 @@ class H3VideoModel(VideoModel):
             frame = one.frame if one.frame >= 0 else params.frames + one.frame
             # The condition's own length in pixel frames, by the decode plan the clip
             # follows: an anchor near the end must leave room for all of them.
-            length = sum(FRAME_PER_TOKEN[k % len(FRAME_PER_TOKEN)] for k in range(latent_t))
+            length = pixel_frames(latent_t)
             if not 0 <= frame < params.frames or frame + length > params.frames:
                 raise ValueError(
                     f"a {length}-frame condition anchored at frame {one.frame} does not fit "
