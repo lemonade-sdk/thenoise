@@ -1,8 +1,6 @@
 from __future__ import annotations
-
 import numpy as np
 import torch
-
 from ..extract import Mesh
 
 
@@ -11,7 +9,6 @@ def reduce_to(mesh: Mesh, keep: float) -> Mesh:
     if keep >= 1.0 or mesh.is_empty:
         return mesh
 
-    # here, not at module level: the CLI builds its flags without the wheel
     import fast_simplification
 
     local = mesh.cpu()

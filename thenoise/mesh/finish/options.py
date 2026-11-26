@@ -1,19 +1,15 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
-
 from thenoise.utils.options import (FilterSpec, chain_in_stage, declared_chain,
                                    defaults_of, flat_values, option,
                                    option_names, validate)
 
 FINISH = "finish"
 
-
 @dataclass
 class MeshFinishOptions:
     """What a request asks of a shape once its surface has been cut."""
-
     floaters: float = option(
         0.0, label="Clean up junk", ge=0.0, le=1.0, step=0.01,
         help="throw away pieces of the shape smaller than this fraction of its widest part; "
@@ -37,9 +33,7 @@ class MeshFinishOptions:
 
 
 FINISH_NAMES = option_names(MeshFinishOptions)
-
 DEFAULTS: Dict[str, Any] = defaults_of(MeshFinishOptions)
-
 CHAIN: Tuple[FilterSpec, ...] = declared_chain(MeshFinishOptions)
 
 

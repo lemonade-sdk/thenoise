@@ -99,6 +99,43 @@ class Mesh:
         return (triangles[:, 0]
                 * torch.linalg.cross(triangles[:, 1], triangles[:, 2])).sum() / 6.0
 
+    def without_degenerate(self) -> "Mesh":
+        """The mesh with faceless triangles cut, which readers refuse or misprint."""
+        corners = self.vertices[self.faces]
+        area2 = torch.linalg.cross(corners[:, 1] - corners[:, 0],
+                                   corners[:, 2] - corners[:, 0]).square().sum(dim=-1)
+        across = (self.vertices.amax(dim=0) - self.vertices.amin(dim=0)).square().sum()
+        keep_faces = area2 > across * DEGENERATE_AREA
+        used = torch.zeros(self.vertices.shape[0], dtype=torch.bool,
+                           device=self.faces.device)
+        used[self.faces[keep_faces]] = True
+        if bool(keep_faces.all()):
+            return self
+        return self.select(used, keep_faces)
+
+    def smooth_normals(self) -> Tensor:
+        """The direction every point faces: its own face and its neighbours' averaged,
+        counting only those within :data:`NORMAL_CREASE_DEGREES` so a hard edge stays hard.
+        """
+        corners = self.vertices[self.faces]
+        span = torch.linalg.cross(corners[:, 1] - corners[:, 0],
+                                  corners[:, 2] - corners[:, 0])
+        worth = span.norm(dim=-1)
+        unit = span / worth.clamp(min=1e-20).unsqueeze(-1)
+        flat = self._gather(unit, worth.unsqueeze(1), torch.ones_like(worth.unsqueeze(1)))
+        inside = (unit.unsqueeze(1) * flat[self.faces]).sum(dim=-1) >= _CREASE_LIMIT
+        turned = self._gather(unit, worth.unsqueeze(1) * inside.to(worth.dtype),
+                              flat[self.faces])
+        return torch.where(turned.square().sum(dim=-1, keepdim=True) > 0.0,
+                           turned, flat[self.faces].amax(dim=1)).renorm(2, 1, 1.0)
+
+    def _gather(self, unit: Tensor, weight: Tensor, away: Tensor) -> Tensor:
+        """Every face's weighted normal added to each point it touches, then away."""
+        total = away.clone()
+        total.index_add_(0, self.faces.reshape(-1),
+                         (unit.unsqueeze(1) * weight).reshape(-1, 3))
+        return total
+
 
 def empty_mesh(device=None) -> Mesh:
     return Mesh(torch.zeros((0, 3), device=device),

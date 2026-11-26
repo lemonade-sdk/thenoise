@@ -1,7 +1,5 @@
 import logging
-
 import torch
-
 from ..extract import Mesh
 
 logger = logging.getLogger(__name__)
@@ -56,10 +54,7 @@ def _components(faces: torch.Tensor, vertices: int) -> torch.Tensor:
 
 
 def _settled_by_hand(label: torch.Tensor, faces: torch.Tensor) -> torch.Tensor:
-    """Merge the labels the rounds left disagreeing, in the number of pieces rather than vertices.
-
-    Nothing bounds the round count on a real cut; the bound is safe because this pass is exact.
-    """
+    """Merge the labels the rounds left disagreeing, in the number of pieces rather than vertices."""
     a, b, c = (label[faces[:, i]] for i in (0, 1, 2))
     joined = faces[(a != b) | (b != c) | (c != a)]
     x, y, z = (label[joined[:, i]] for i in (0, 1, 2))
