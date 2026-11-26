@@ -68,6 +68,9 @@ _FP32_ISLANDS = ("video_patch_proj.weight", "adaln_t_table",
                  "final_layer.video_out.weight", *_AUDIO_KEYS)
 _STORES_F32 = ("F32", "F64", "F16", "BF16")
 
+#: The affine prunes ship to rotate unpruned-space LoRAs; the fold is already in the weights.
+_DROP_KEYS = ("adaln_basis", "adaln_mean")
+
 
 def detect_params(checkpoint: Union[str, Header], signature: Signature) -> H3Params:
     """Read the architecture, the head-bank rows and its sigma grid out of a file.
@@ -178,6 +181,7 @@ def load_h3_av_dit(
         dtype=None,
         key_map=qk_norm_key_map,
         relay_stores=RELAY_STORES,
+        drop_keys=_DROP_KEYS,
     )
     model.to(dtype=dtype)
     return model
@@ -202,6 +206,7 @@ def load_h3_image_dit(
         dtype=None,
         key_map=qk_norm_key_map,
         relay_stores=RELAY_STORES,
+        drop_keys=_DROP_KEYS,
     )
     model.to(dtype=dtype)
     return model
