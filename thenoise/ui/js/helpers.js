@@ -900,6 +900,9 @@ function collectSettings(prefix, extra) {
   addNumbers(body, prefix, ['width', 'height', 'steps', 'seed'], ['guidance_scale']);
   const samplerVal = $(prefix + 'sampler').value;
   if (samplerVal) body.sampler = samplerVal;
+  // Every medium is asked the same question, even one that answers it one way only.
+  const attention = $(prefix + 'attention');
+  if (attention && attention.value) body.attention = attention.value;
   Object.assign(body, extra);
   return body;
 }

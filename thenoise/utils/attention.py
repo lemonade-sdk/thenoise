@@ -11,7 +11,17 @@ from typing import Optional, Union
 #: acceleration the architecture has -- block routing today -- so a model offers it only where
 #: one exists; the rest are :data:`ATTENTION_METHODS`.
 ATTENTION_METHODS = ("auto", "full")
+LOSSY_ATTENTION = "optimized"
+#: Every word a request may carry, whether a given model answers it or not: what a
+#: client is offered to choose from, before the model and the hardware have answered.
+ATTENTION_CHOICES = (*ATTENTION_METHODS, LOSSY_ATTENTION)
 DEFAULT_ATTENTION = ATTENTION_METHODS[0]
+
+#: One home for what the words mean, which the CLI, the wire and the docs all say.
+ATTENTION_HELP = (
+    "auto leaves it to the model, full is exact attention, optimized is whatever lossy "
+    "acceleration the model has; what the loaded model answers is in /health. Forcing "
+    "optimized asks for it even where the sequence is too short for it to pay off.")
 
 
 @dataclass

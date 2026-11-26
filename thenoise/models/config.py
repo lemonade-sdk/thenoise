@@ -130,6 +130,8 @@ class GenerateRequest:
     kv_cache: Optional[bool] = None
     # Reference conditioning method for editing (edit only); None = auto.
     ref_method: Optional[str] = None
+    # How attention is computed (``auto`` / ``full`` / ``optimized``); None = auto.
+    attention: Optional[str] = None
 
     def postprocess_options(self) -> PostprocessOptions:
         """The post-decode knobs, as the filter chain wants them."""
@@ -146,6 +148,10 @@ class SamplingParams:
     seed: int
     guidance_scale: float
     sampler: str
+    #: ``auto`` / ``full`` / ``optimized``, as the request asked and the model answered.
+    #: Every medium carries it; a trunk with one way of computing attention simply never
+    #: reads it, and such a model does not offer ``optimized``.
+    attention: str = DEFAULT_ATTENTION
     # Resolved K/V caching preference for this sampling run.
     kv_cache: bool = False
 
@@ -161,8 +167,6 @@ class VideoSamplingParams(SamplingParams):
     frames: int = 1
     flow_shift: float = 1.0
     fps: int = 24
-    #: ``auto`` / ``full`` / ``optimized``, as the request asked and the model answered.
-    attention: str = DEFAULT_ATTENTION
 
 
 @dataclass(frozen=True)

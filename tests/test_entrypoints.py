@@ -104,6 +104,7 @@ class _FakeShape:
 
     DEFAULTS = {"output_format": "glb", "num_latents": 64,
                 "steps": 12, "guidance_scale": 5.0, "sampler": "euler",
+                "attention": DEFAULT_ATTENTION,
                 "octree_resolution": 64, "bounds": 1.01, "mc_level": 0.0}
 
     def __init__(self):

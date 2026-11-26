@@ -83,6 +83,14 @@
     </select>
   </div>
 
+  <div class="field" id="attention_field">
+    <label class="label" for="attention">Attention</label>
+    <!-- What the loaded model answers comes from /health. -->
+    <select id="attention">
+      <option value="">auto</option>
+    </select>
+  </div>
+
   <div class="field">
     <label class="label" for="seed">Seed</label>
     <input type="number" id="seed" placeholder="random" min="0">
@@ -222,6 +230,14 @@
   <div class="field">
     <label class="label" for="edit_sampler">Sampler</label>
     <select id="edit_sampler">
+      <option value="">auto</option>
+    </select>
+  </div>
+
+  <div class="field" id="edit_attention_field">
+    <label class="label" for="edit_attention">Attention</label>
+    <!-- What the loaded model answers comes from /health. -->
+    <select id="edit_attention">
       <option value="">auto</option>
     </select>
   </div>
@@ -431,7 +447,7 @@
         <option value="mp4">mp4</option>
       </select>
     </div>
-    <div class="field">
+    <div class="field" id="video_attention_field">
       <label class="label" for="video_attention">Attention</label>
       <select id="video_attention">
         <option value="">auto</option>

@@ -258,8 +258,9 @@ asked to resemble — as opposed to the frames it starts or ends on, which are `
 One mesh mode is not a boolean: `mv2d` is how many views of one object the model's tower
 numbers, and its absence is the refusal — which is every mesh model served today.
 
-`attention_methods` lists what the loaded model accepts for `attention` — a field the
-clip request sends (see [`/jobs/video`](#post-jobsvideo)) — on the box it is running on,
+`attention_methods` lists what the loaded model accepts for `attention` — a field every
+medium's request takes (`/text2image`, `/edit`, `/jobs/video`, `/jobs/mesh`), whether or
+not that trunk has more than one way to compute attention — on the box it is running on,
 which is why the list can come and go with the hardware:
 
 - `auto` — the engine chooses at every step. Block-sparse attention runs on a clip long
@@ -280,8 +281,9 @@ model's `ref_methods` says which of those it offers; naming one it lacks is a 40
 
 The web UI reads all of this to decide what to show: the Edit tab follows
 `i2i`, the clip form's Reference box follows `video.ref2v`, and
-`attention_methods` fills its Attention menu — nothing but `auto` in that list and the
-menu is dead. `medium` decides what the Generate tab becomes — a clip form for a
+`attention_methods` decides whether the Attention picker is there at all — the picker's
+own first option is the empty one, so two further words are needed before it is a choice,
+and a model answering `auto` and `full` only hides the control. `medium` decides what the Generate tab becomes — a clip form for a
 video model, a shape form for a mesh model. A request for something the loaded
 model cannot do is refused with HTTP 400, not quietly downgraded. `i2v` and
 `flf2v` come from the variant you loaded, not from the model name.
@@ -310,6 +312,7 @@ index_timestep_zero` (see [`/edit`](#post-edit)).
 | `upscale_type` | `string` | `refined` | `refined` (latent 2x + refiner) or `no-refiner` (pixel upscaler only) |
 | `pixel_upscaler` | `string` | `null` | Pixel upscaler name (no `.safetensors` suffix) from `--upscaler-dir` |
 | `sampler` | `string` | model default | Denoising solver — one of `GET /health`'s `samplers` |
+| `attention` | `string` | model default | How attention is computed — one of `GET /health`'s `attention_methods`. Every medium takes it; a model with one way to compute it answers only `auto` and `full` |
 | `kv_cache` | `boolean` | auto | Reuse step-invariant K/V across denoising steps. T2I defaults off (opt-in); compatible edits auto-enable based on `ref_method`. Explicit `true` requires model support |
 | `qwen_vae_enhance` | `bool` | `false` | Nyquist notch post-filter (removes 2px grid artifacts) |
 | `saturation` | `float` | `0.0` | Colour saturation around neutral `0.0`: -1.0 greyscales, 1.0 doubles |

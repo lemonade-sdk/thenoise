@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 
 from thenoise.controlmap.options import OPTIONS_BY_KIND, add_option_args
+from thenoise.utils.attention import ATTENTION_CHOICES, ATTENTION_HELP
 from thenoise.postprocess.options import PostprocessOptions
 from thenoise.utils.options import add_flags
 
@@ -96,6 +97,7 @@ def _add_solver_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--sampler", metavar="NAME",
                    help="denoising solver (default: the model's)")
     p.add_argument("--seed", type=int)
+    p.add_argument("--attention", choices=list(ATTENTION_CHOICES), help=ATTENTION_HELP)
 
 
 def _add_device_arg(p: argparse.ArgumentParser) -> None:
@@ -174,11 +176,6 @@ def _add_video_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--end-image", metavar="PATH",
                    help="image the clip ends on, for a model that can be told "
                         "where a clip ends; needs --image")
-    p.add_argument("--attention", choices=["auto", "full", "optimized"],
-                   help="auto leaves it to the model, full is exact attention, optimized "
-                        "is whatever lossy acceleration the model has; what the loaded "
-                        "model answers is in /health. Forcing optimized asks for it even "
-                        "where the clip is too short for it to pay off.")
     p.add_argument("--reference", action="append", default=[], metavar="PATH[@FRAME]",
                    help="something for the clip to look like rather than the frame it "
                         "starts or ends on; repeat once per reference. Append "

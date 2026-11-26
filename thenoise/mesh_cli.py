@@ -26,6 +26,7 @@ def run_mesh(args) -> None:
         spec = MeshSpec(
             image=[read_media(path, "mesh") for path in args.image], latents=args.latents,
             steps=args.steps, guidance_scale=args.guidance_scale, sampler=args.sampler,
+            attention=args.attention,
             seed=args.seed,
             output_format=container_of(args.out, args.output_format, OUTPUT_FORMATS),
             octree_resolution=args.octree_resolution, bounds=args.bounds,

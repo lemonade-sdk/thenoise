@@ -35,6 +35,7 @@ class ResolvedMesh:
     steps: int
     guidance_scale: float
     sampler: str
+    attention: str
     seed: int
     output_format: str
     octree_resolution: int
@@ -51,6 +52,7 @@ class ResolvedMesh:
         return {
             "mode": self.mode, "latents": self.latents, "steps": self.steps,
             "guidance_scale": self.guidance_scale, "sampler": self.sampler,
+            "attention": self.attention,
             "seed": self.seed, "output_format": self.output_format,
             "octree_resolution": self.octree_resolution, "bounds": self.bounds,
             "mc_level": self.mc_level, "scale": self.scale,
@@ -68,6 +70,8 @@ class MeshSpec(BaseModel):
     steps: _Positive | None = None
     guidance_scale: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None = None
     sampler: Annotated[str, Field(min_length=1)] | None = None
+    #: ``auto``, ``full`` or ``optimized``.
+    attention: str | None = None
     seed: int | None = None
     output_format: Literal["glb", "obj", "stl"] | None = None
     octree_resolution: _Positive | None = None
@@ -102,6 +106,7 @@ class MeshSpec(BaseModel):
 
         latents, steps = pref("latents", "num_latents"), pref("steps")
         guidance_scale, sampler = pref("guidance_scale"), pref("sampler")
+        attention = pref("attention")
         output_format = pref("output_format")
         octree_resolution = pref("octree_resolution")
         bounds, mc_level = pref("bounds"), pref("mc_level")
@@ -129,7 +134,7 @@ class MeshSpec(BaseModel):
             raise ValueError("scale must be finite and positive")
         return ResolvedMesh(
             images=self.images, latents=latents, steps=steps,
-            guidance_scale=guidance_scale, sampler=sampler,
+            guidance_scale=guidance_scale, sampler=sampler, attention=attention,
             seed=secrets.randbits(32) if self.seed is None or self.seed == -1 else self.seed,
             output_format=output_format, octree_resolution=octree_resolution,
             bounds=bounds, mc_level=mc_level, scale=scale,

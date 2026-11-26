@@ -77,6 +77,8 @@ class ResolvedImage:
     refined: bool
     pixel_scale: int
     effective_sampler: str
+    #: How attention is computed, as this model and this box answered the request.
+    attention: str
     seed: int
     pixel_upscaler: Optional[str]
     kv_cache: bool
@@ -109,6 +111,7 @@ class ResolvedImage:
             "mode": self.mode, "width": self.width, "height": self.height,
             "steps": self.steps, "sigmas": list(self.sigmas) if self.sigmas else None,
             "guidance_scale": self.guidance_scale, "sampler": self.effective_sampler,
+            "attention": self.attention,
             "seed": self.seed, "upscale_factor": self.factor,
             "upscale_type": self.upscale_type, "pixel_upscaler": self.pixel_upscaler,
             "kv_cache": self.kv_cache,
@@ -250,6 +253,7 @@ class PipelineController:
         steps: int,
         seed: int,
         sampler: str,
+        attention: str,
         ref_method: Optional[str] = None,
         kv_cache: bool = False,
         sigmas: Optional[Tuple[float, ...]] = None,
@@ -259,9 +263,10 @@ class PipelineController:
         Embeds the prompt key so any prompt/guidance/LoRA change cascades, and the
         custom ``sigmas`` grid so two grids of the same length never share cached
         latents. The KV-cache flag is part of both T2I and edit keys so toggling
-        it cannot reuse an incompatible sampling result.
+        it cannot reuse an incompatible sampling result -- and so is the attention
+        method, since a routed attention is a different function over the same rows.
         """
-        base = (prompt_key, width, height, steps, seed, sampler, sigmas)
+        base = (prompt_key, width, height, steps, seed, sampler, attention, sigmas)
         if ref_method is None:
             return ("sampling",) + base + (kv_cache,)
         return ("sampling_edit",) + base + (ref_method, kv_cache)
@@ -397,7 +402,7 @@ class PipelineController:
         )
         sampling_key = self._cache_key_sampling(
             prompt_key, r.width, r.height, r.steps, r.seed, r.effective_sampler,
-            ref_method=r.ref_method, kv_cache=r.kv_cache, sigmas=r.sigmas,
+            r.attention, ref_method=r.ref_method, kv_cache=r.kv_cache, sigmas=r.sigmas,
         )
         decode_key = self._cache_key_decode(sampling_key, r.refined)
 
@@ -430,7 +435,7 @@ class PipelineController:
             params = SamplingParams(
                 height=r.height, width=r.width, steps=r.steps, seed=r.seed,
                 guidance_scale=r.guidance_scale, sampler=r.effective_sampler,
-                kv_cache=r.kv_cache,
+                attention=r.attention, kv_cache=r.kv_cache,
             )
             token.check()
 
@@ -530,6 +535,7 @@ class PipelineController:
         steps = model.pref("steps", request.steps)
         guidance_scale = model.pref("guidance_scale", request.guidance_scale)
         effective_sampler = model.pref("sampler", request.sampler)
+        attention = model.resolve_attention(model.pref("attention", request.attention))
         ref_method = (model.pref("ref_method", request.ref_method) if reference
                       else None)
         # A model's ways with a picture are its own, so an unusable one is refused here
@@ -622,7 +628,8 @@ class PipelineController:
             guidance_scale=guidance_scale,
             factor=factor, upscale_type=upscale_type, target_width=target_width,
             target_height=target_height, refined=refined, pixel_scale=pixel_scale,
-            effective_sampler=effective_sampler, seed=seed, pixel_upscaler=pixel_upscaler,
+            effective_sampler=effective_sampler, attention=attention, seed=seed,
+            pixel_upscaler=pixel_upscaler,
             kv_cache=kv_cache, ref_method=ref_method, mode=mode, lora_specs=loras,
         )
 

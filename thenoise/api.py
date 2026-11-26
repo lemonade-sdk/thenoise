@@ -81,6 +81,7 @@ class _Text2ImageBody(BaseModel):
     pixel_upscaler: Optional[str] = None  # name (no .safetensors) in upscaler_dir
     kv_cache: Optional[bool] = None  # T2I opt-in, compatible edits auto; null = auto
     ref_method: Optional[str] = None  # reference conditioning (edit only; null = auto)
+    attention: Optional[str] = None  # auto / full / optimized; null = auto
     out: Literal["png", "json"] = "png"
 
     def to_request(self):
@@ -105,6 +106,7 @@ class _Text2ImageBody(BaseModel):
             pixel_upscaler=self.pixel_upscaler,
             kv_cache=self.kv_cache,
             ref_method=self.ref_method,
+            attention=self.attention,
         )
 
 Text2ImageRequest = create_model(

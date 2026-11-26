@@ -16,6 +16,7 @@ from thenoise.memory import MemoryManager
 from thenoise.models.lora_support import LoRASupport
 from thenoise.utils.device_patches import apply_device_patches
 from thenoise.utils.attention import ATTENTION_METHODS as ATTENTION_WORDS
+from thenoise.utils.attention import DEFAULT_ATTENTION, LOSSY_ATTENTION
 from thenoise.utils.dynamo import apply_recompile_limit
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.image_tensor import ReferenceSizing, flatten_alpha
@@ -68,6 +69,9 @@ class DiffusionModel(LoRASupport, ABC):
 
     #: Model defaults behind ``pref``; an adapter merges the entries it differs on.
     DEFAULT_PREFS: ClassVar[Dict[str, Any]] = {
+        # Every medium carries the field, whether its trunk has more than one way to
+        # compute attention yet or not: a client asks the same question of all of them.
+        "attention": DEFAULT_ATTENTION,
         "steps": 28,
         # CFG scale; <= 1.0 disables the unconditional forward.
         "guidance_scale": 0.0,
@@ -350,7 +354,24 @@ class DiffusionModel(LoRASupport, ABC):
             return self.ATTENTION_METHODS
         blocked = self.attention_routing_blocked()
         return self.ATTENTION_METHODS if blocked is None else tuple(
-            w for w in self.ATTENTION_METHODS if w != "optimized")
+            w for w in self.ATTENTION_METHODS if w != LOSSY_ATTENTION)
+
+    def resolve_attention(self, method: str) -> str:
+        """The attention a request asked for, checked against this model and this box.
+
+        The words are the architecture's; whether this box runs the lossy one is only
+        worth asking when the request asked for it.
+        """
+        if method not in self.ATTENTION_METHODS:
+            raise ValueError(
+                f"{self.name} does not answer {method!r} attention; it answers "
+                f"{', '.join(self.ATTENTION_METHODS)}")
+        blocked = (self.attention_routing_blocked()
+                   if method == LOSSY_ATTENTION else None)
+        if blocked is not None:
+            raise ValueError(
+                f"{self.name} cannot run optimized attention here: {blocked}")
+        return method
 
     def attention_routing_blocked(self) -> Optional[str]:
         """Why this box cannot run the model's lossy attention path, ``None`` when it can.
