@@ -800,13 +800,13 @@ def fake_video(tmp_path, monkeypatch):
         def __init__(self):
             super().__init__()
             self.weight = torch.nn.Parameter(torch.ones(1, dtype=torch.float16))
-            self.params = types.SimpleNamespace(patch_size=(1, 2, 2))
+            self.params = types.SimpleNamespace(patch_size=(1, 2, 2), head_dim=128)
 
         @property
         def dtype(self):
             return self.weight.dtype
 
-        def forward(self, x, timestep, encoder_hidden_states):
+        def forward(self, x, timestep, encoder_hidden_states, sol=None):
             calls.append("dit")
             return torch.zeros_like(x)
 
@@ -1502,7 +1502,7 @@ def test_every_forward_pass_carries_the_reference_beside_the_noise(monkeypatch):
     model = wan_adapter("i2v_14b")
     seen = []
     monkeypatch.setattr(Wan22Model, "_velocity", staticmethod(
-        lambda module, x, timestep, context: seen.append(x.shape[1]) or x))
+        lambda module, x, timestep, context, sol=None: seen.append(x.shape[1]) or x))
     model._segment = types.SimpleNamespace(module=model.dit)
     model._clip = ClipReference(channels=torch.zeros(1, 20, 2, 2, 2))
     model.denoise_step(torch.zeros(1, 16, 2, 2, 2), 0.5,

@@ -12,6 +12,7 @@ from .fibo2 import Fibo2Model
 from .flux_klein import FluxKleinModel
 from .flux3 import Flux3Model
 from .h3_image import H3ImageModel
+from .h3_video import H3VideoModel
 from .hunyuan3d21 import Hunyuan3D21ShapeModel
 from .krea2 import Krea2Model
 from .mage_flow import MageFlowModel
@@ -31,6 +32,7 @@ MODEL_CATALOG: list[type] = [
     FluxKleinModel,
     Flux3Model,
     H3ImageModel,
+    H3VideoModel,
     MageFlowModel,
     QwenImageModel,
     QwenImage21Model,

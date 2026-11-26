@@ -78,6 +78,8 @@ Usage
         --section gemm
     .venv/bin/python bench-scripts/block_probe.py --block flux2_klein9b/double \
         --arms pitch_pad
+    .venv/bin/python bench-scripts/block_probe.py --block h3/av_block --tokens 40114 \
+        --arms dense_attention,adaln_ck,qk_rope_ck,sol_producer
 
 Any case ``block_bench`` can build can be probed: pass its ``model/block``, and the sections
 run with the GEMM list read off that block's own profile and four layout arms standing in for
@@ -93,6 +95,16 @@ What a block needs to be asked sharper questions is an arm set of its own, and a
 decomposing its terms for the rate column; neither is needed to time it or to read its
 kernels. LTX has both, because its terms are the ones that were worth ablating one at a
 time: the arms are the part that does not transfer, which is the point of writing them down.
+
+``h3/av_block`` is the audiovisual trunk's block over a pack the adapter would really build,
+and its arms are the fused-kernel candidates: what ``comfy_kitchen`` offers against what
+Inductor already does with the same terms when they are inside a compiled region. Isolated
+elementwise numbers are worth nothing for that question — ``ck.rms_adaln`` measured 10x
+faster and 6x smaller on its own and came out 1.7% *slower* here — so nothing about this
+trunk should be adopted from a measurement taken outside it. Every arm is compared against
+the baseline in its own process, and the numerics line says how far the arm's answer is from
+the shipped one, which is also the only thing that catches a rope table built with the wrong
+sign dialect.
 """
 from __future__ import annotations
 
@@ -107,6 +119,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -123,6 +136,8 @@ from thenoise.dit.quantized import PITCH_MIN_BYTES, PITCH_MIN_ROWS, PITCH_PAD_EL
 from thenoise.utils.layout import TRANSPOSE_MIN_RATIO
 from thenoise.utils.attention import eager_attention
 from thenoise.utils.dynamo import apply_recompile_limit
+from thenoise.dit.h3.sparse import (BLOCK as SOL_BLOCK, sol_plan,
+                                     sol_sinks as sink_policy)
 
 #: Below this a delta is smaller than the box's own drift over a ladder.
 FLOOR_PCT = 1.0
@@ -324,6 +339,95 @@ def ltx_fixture(ctx: bb.Ctx, tokens: int, *, i2v: bool) -> Fixture:
             terms[name] = (bb.gemm_flops((query, queries), (key_values, keys))
                            + bb.attn_flops(*shape, ((queries, keys),)))
     return Fixture(blk, case.run, case.seq, case.detail, terms, attentions)
+
+
+#: The trunk's own geometry, read where the camera reads it: 56x128 over a 5376-wide
+#: stream, the checkpoint's adaln and rope shapes, nothing invented here.
+H3_FRAMES = tuple(range(5, 125, 17))        # the codec's valid clip lengths
+
+
+def h3_pack(tokens: int):
+    """The pack whose sequence is nearest ``tokens``, off the release's two canvases."""
+    from thenoise.dit.h3.layout import Layout
+    from thenoise.vae.h3 import TemporalPlan
+    from thenoise.vae.h3_audio import LATENTS_PER_SECOND
+
+    best = None
+    for _, width, height, frames in SOL_PACKS:
+        plan = TemporalPlan.of_frames(frames)
+        layout = Layout.av(text_len=SOL_TEXT, latent_t=plan.latent_t,
+                           latent_h=-(-height // 16), latent_w=-(-width // 16),
+                           audio_t=max(1, round(frames / SOL_FPS * LATENTS_PER_SECOND)))
+        gap = abs(layout.seq_len - tokens)
+        if best is None or gap < best[0]:
+            best = (gap, layout)
+    return best[1]
+
+
+def h3_fixture(ctx: bb.Ctx, tokens: int) -> Fixture:
+    """The audiovisual trunk's block, over a pack a request would really build.
+
+    The camera has ``h3_image/block``, which is a still: a still never routes, so there is
+    no plan to hand it and the question this lab asks — what is a fused kernel worth inside
+    a routed block — cannot be asked of it. The block is the camera's own construction,
+    reached by the same spy ``ltx_fixture`` uses.
+    """
+    from thenoise.dit.h3.checkpoint import RELAY_STORES
+    from thenoise.dit.h3.trunk import DiTBlock, _spans
+    from thenoise.utils.rope import split_half_rope_axes
+
+    layout = h3_pack(tokens)
+    params = bb.h3_params()
+    captured: list[nn.Module] = []
+    original = bb.new_block
+
+    def spy(c, name, cls, *args, **kwargs):
+        blk = original(c, name, cls, *args, **kwargs)
+        captured.append(blk)
+        return blk
+
+    steps = layout.timesteps(video=0.5, audio=0.5)
+    bb.new_block = spy
+    try:
+        blk = bb.new_block(ctx, "h3/av_block", DiTBlock, params, ctx.dtype,
+                           relay_stores=RELAY_STORES)
+        x = bb.randn(ctx, 1, layout.seq_len, params.hidden_size)
+        t_emb = bb.randn(ctx, len(steps.values), params.adaln_dim)
+        rows = layout.modulation_rows(steps)
+        # The frequencies come off the checkpoint in a real run; only their count is a shape.
+        inv_freq = 1.0 / 1000 ** (torch.arange(params.rope_inv_freq, device=ctx.tdev,
+                                               dtype=torch.float32) / params.rope_inv_freq)
+        pos = layout.position_ids.to(ctx.tdev, torch.float32)
+        cos, sin = (one.to(ctx.dtype) for one in split_half_rope_axes(inv_freq)(pos))
+        spans = _spans(rows, blk.adaln_proj(t_emb))
+    finally:
+        bb.new_block = original
+
+    plan = sol_plan(layout=layout, tokens=layout.seq_len, dtype=ctx.dtype,
+                    head_dim=SOL_HEAD_DIM, device=ctx.tdev, sigma=0.5,
+                    sample_sigmas=torch.linspace(1.0, 0.0, 5, device=ctx.tdev),
+                    method="optimized")
+    if plan is None:
+        raise SystemExit("no sol plan: this device cannot route, so the routed arms of this "
+                         "fixture have nothing to be measured against")
+    rows_all = layout.seq_len
+
+    def run():
+        return blk(x, spans, (cos, sin), None, plan)
+
+    inner = params.num_heads * params.head_dim
+    terms = {
+        "self_proj": bb.gemm_flops((bb.gemm_params(blk.attn.qkv_proj), rows_all),
+                                   (bb.gemm_params(blk.attn.out_proj), rows_all)),
+        "self_attn": bb.attn_flops(params.num_heads, params.head_dim,
+                                   ((rows_all, rows_all),)),
+        "ffn": bb.gemm_flops((bb.gemm_params(blk.mlp), rows_all)),
+    }
+    detail = f"{layout.latents} latent, txt={SOL_TEXT}"
+    # No attention is counted as expected inside the graph: sol_attention is a
+    # ``torch._dynamo.disable`` island, so its absence there is the shipped design and not a
+    # stale artifact.
+    return Fixture(blk, run, rows_all, detail, terms, 0)
 
 
 def camera_fixture(ctx: bb.Ctx, name: str, tokens: int,
@@ -701,9 +805,122 @@ def ltx_arms() -> dict[str, Arm]:
     )}
 
 
+# ------------------------------------------- the audiovisual trunk's fused-kernel arms
+#: Isolated elementwise measurements mislead here. The engine compiles its blocks, so
+#: today's rms_norm plus modulation is not a chain of materialised tensors: Inductor fuses
+#: it into its neighbours, and an opaque comfy_kitchen call replaces that fusion with a
+#: graph cut. ``ck.rms_adaln`` measured 10x faster and 6x smaller in isolation and came out
+#: 1.7% *slower* inside the block, which is why these arms exist and why no adoption in the
+#: project rests on an isolated number.
+#: The producer's chunk. 2 048 and 4 096 measured the same to 0.7 ms at 40 114 tokens, so
+#: the cost is not per chunk and there is nothing to tune here.
+PRODUCER_CHUNK = 4096
+
+
+def h3_modulate(x, spans, norm, attn):
+    import comfy_kitchen as ck
+    import thenoise.dit.h3.trunk as trunk
+
+    parts = []
+    for span in spans:
+        mod = span.attn if attn else span.mlp
+        parts.append(ck.rms_adaln(x[:, span.start:span.end], mod.scale, mod.shift, norm.eps))
+    return parts[0] if len(parts) == 1 else torch.cat(parts, dim=1)
+
+
+def h3_rope_table(cos, sin):
+    """The trunk's (cos, sin) in the kernel's dialect: ``[B, T, 1, rot/2, 2, 2]``, rows ``[[c,s],[-s,c]]``.
+
+    The sign placement is the opposite of what the rotation formula suggests, and nothing
+    complains when it is wrong: the kernel accepts the transposed-sign table and returns
+    garbage at 1.1 relative error, which is what the numerics line is for. Built per call:
+    a cache keyed on tensor identity would hand the compiled region a constant the graph
+    cannot see through.
+    """
+    c, s = cos.transpose(-2, -3), sin.transpose(-2, -3)
+    return torch.stack((torch.stack((c, s), dim=-1),
+                        torch.stack((-s, c), dim=-1)), dim=-1)
+
+
+def h3_arms() -> dict[str, Arm]:
+    """Fused replacements for the three terms a routed trunk block still pays for itself.
+
+    Each one patches a name the compiled forward calls, so the block under test is the real
+    one and every arm is its own Inductor artifact. None of them answers what the shipped
+    block answers: two because a fused kernel computes a slightly different thing, one
+    because ``ck.rms_adaln`` has no learned norm weight at all. The numerics line says by how
+    much, and a rope table with the wrong dialect shows up near 1.0 rather than 5e-4.
+    """
+    import thenoise.dit.h3.trunk as trunk
+    from thenoise.dit.h3.trunk import Attention, attend
+
+    dense = "ignore the plan: the same block run with exact attention"
+    shipped = Attention.forward
+
+    def dense_forward(self, x, rope=None, bufs=None, sol=None):
+        return shipped(self, x, rope, bufs, None)
+
+    def fused_rope_forward(self, x, rope=None, bufs=None, sol=None):
+        """Mirror of ``Attention.forward`` with QK-norm and rope in one kernel."""
+        import comfy_kitchen as ck
+        from thenoise.utils.rope import apply_rope_split_half
+
+        batch, rows, _ = x.shape
+        inner = self.heads * self.head_dim
+        q, k, v = self.qkv_proj(x).split(inner, dim=-1)
+        q, k, v = (t.view(batch, rows, self.heads, self.head_dim)
+                   for t in (q, k, v))
+        norm = self.qk_norm
+        q, k = ck.rms_rope_split_half(q, k, h3_rope_table(*rope),
+                                      norm.query_norm.weight, norm.key_norm.weight,
+                                      norm.query_norm.eps, 2 * rope[0].shape[-1])
+        if sol is None:
+            q, k, v = (t.transpose(1, 2) for t in (q, k, v))
+            return self.out_proj(attend(q, k, v, bufs))
+        return self.out_proj(trunk.sol_attention(q, k, v, sol).reshape(batch, rows, inner))
+
+    @torch._dynamo.disable()      # the producer takes a generator, which Inductor cannot trace
+    def producer(self, x, rope, sol, chunk):
+        import comfy_kitchen as ck
+
+        norm = self.qk_norm
+
+        def chunks():
+            for start in range(0, x.shape[1], chunk):
+                yield self.qkv_proj(x[:, start:start + chunk])
+
+        out, *_carried = ck.sol_attn_chunked(
+            chunks, x.shape[1], self.heads, h3_rope_table(*rope),
+            (norm.query_norm.weight, norm.key_norm.weight), kmean=None, vscale=None,
+            tau=sol.tau, sink_blocks=sol.sink_blocks, sink_q=sol.sink_q,
+            token_aug=sol.token_aug, rope_eps=norm.query_norm.eps, rope_split_half=True)
+        return out.flatten(2)
+
+    def producer_forward(self, x, rope=None, bufs=None, sol=None):
+        return self.out_proj(producer(self, x, rope, sol, PRODUCER_CHUNK))
+
+    return {a.name: a for a in (
+        Arm("baseline", "routed as shipped: sol_attn on token-major slices, "
+            "Inductor fusing the norms, the modulation and the rope"),
+        Arm("dense_attention", dense, terms=("self_attn",), exact=False,
+            patches=[(Attention, "forward", dense_forward)]),
+        Arm("adaln_ck", "ck.rms_adaln for both modulations: rejected, it has no learned "
+            "norm weight and the block has one",
+            exact=False, patches=[(trunk, "_modulate", h3_modulate)]),
+        Arm("qk_rope_ck", "ck.rms_rope_split_half for q and k in one call: needs both "
+            "tensors at the call site, so the trunk has no drop-in seam for it",
+            exact=False, patches=[(Attention, "forward", fused_rope_forward)]),
+        Arm("sol_producer", "ck.sol_attn_chunked: the one candidate that never materialises "
+            "q, k and v for the sequence, and it pays for the projection running eager",
+            exact=False, patches=[(Attention, "forward", producer_forward)]),
+    )}
+
+
 ARMS: dict[str, Callable[[], dict[str, Arm]]] = ({"ltx/av": ltx_arms,
-                                                   "ltx/av_i2v": ltx_arms})
-FIXTURES = {"ltx/av": ltx_fixture, "ltx/av_i2v": ltx_fixture}
+                                                   "ltx/av_i2v": ltx_arms,
+                                                   "h3/av_block": h3_arms})
+FIXTURES = {"ltx/av": ltx_fixture, "ltx/av_i2v": partial(ltx_fixture, i2v=True),
+            "h3/av_block": h3_fixture}
 
 
 def arm_modules(arms: dict[str, Arm], blk: nn.Module, rules: LayoutRules) -> None:
@@ -1114,6 +1331,135 @@ def sdpa_section(ctx: bb.Ctx, tokens: int, iters: int, verbose: bool = False) ->
             for note in notes:
                 print(f"  {op.name:32s} {note}")
         del q, k, v, mask
+
+
+# --------------------------------------------------------------- sparse attention
+#: The trunk's own attention geometry — 56 heads of 128 over the 5376-wide stream, which
+#: is also the only head width ``sol_attn`` is compiled for. The stock clip decoder is
+#: 64 and cannot use it; the trunk can.
+SOL_HEADS, SOL_HEAD_DIM = 56, 128
+
+#: Packs to price, as ``(name, width, height, frames)``: the release's canvas plus the
+#: same one at 544p, each with a short clip so the crossover below the kernel's own ~12 k
+#: token threshold is in the table. The latent grid, the audio length, the spans and the
+#: sequence length all come out of the codec's temporal plan and the layout's frame grid,
+#: so a row is the shape a request builds rather than a rounding of it.
+SOL_PACKS = (
+    ("544p/5f", 960, 544, 5),
+    ("768p/22f", 1344, 768, 22),
+    ("544p/124f", 960, 544, 124),
+    ("768p/124f", 1344, 768, 124),
+)
+SOL_TEXT = 220          # a prompt's worth of rows; the prefix is a sink at any length
+SOL_FPS = 24            # the release's frame rate, which is what sets the audio length
+
+
+def sol_pack(width: int, height: int, frames: int, fps: int = SOL_FPS):
+    """One pack as the adapter builds it: latent grid, audio length, layout."""
+    from thenoise.dit.h3.layout import Layout
+    from thenoise.vae.h3 import TemporalPlan
+    from thenoise.vae.h3_audio import LATENTS_PER_SECOND
+
+    plan = TemporalPlan.of_frames(frames)
+    return Layout.av(text_len=SOL_TEXT, latent_t=plan.latent_t,
+                     latent_h=-(-height // 16), latent_w=-(-width // 16),
+                     audio_t=max(1, round(frames / fps * LATENTS_PER_SECOND)))
+
+
+def sol_sinks(layout, mode: str = "exact_rows") -> tuple[tuple[int, int], tuple[int, int]]:
+    """The engine's sink policy for a pack, in the mode this run is pricing.
+
+    :func:`thenoise.dit.h3.sparse.sol_sinks` is the policy a run uses — every row before the
+    video span exact-KV for every query, and on ``exact_rows`` the audio query rows dense as
+    well, because routing them damages the sound. ``off`` and ``exact`` exist here and not in
+    the engine to price that policy rather than assume it.
+    """
+    if mode == "off":
+        return (0, 0), (0, 0)
+    return sink_policy(layout, audio_rows_dense=mode == "exact_rows")
+
+
+def sol_section(ctx: bb.Ctx, iters: int, repeats: int, taus: list[float],
+                only: str, sinks: str, verbose: bool = False) -> None:
+    """Dense attention against ``comfy_kitchen.sol_attn``, on the shapes the trunk runs.
+
+    One q/k/v per pack, read the way each path wants it: SDPA takes ``[B, H, T, D]``,
+    which is what a projected stream becomes on its way into the engine's attention, and
+    the kernel takes ``[B, T, H, D]``, which is what that stream is before the transpose.
+    Both are views of the same bytes, so neither is handed a copy the other does not pay.
+
+    ``speedup`` is against the dense call at the same shape. ``rel`` is how far the sparse
+    answer sits from the dense one — but on unit-variance operands, where no query row is
+    selective and every key block carries comparable mass, which is the pessimistic end for
+    a router: the trunk's rows are normed and peaked, and the question of what a finished
+    clip tolerates is not answerable from a microbenchmark. Read the speedup column here and
+    the error from a run. The short packs are in the table because the kernel's own
+    documentation puts the crossover near 12 k tokens, and a device without the compiled
+    kernel reports the refusal per shape rather than leaving a blank.
+    """
+    import comfy_kitchen as ck
+
+    from thenoise.utils.attention import eager_attention
+
+    heads, head_dim = SOL_HEADS, SOL_HEAD_DIM
+    here = ck.sol_attn_is_available(ctx.tdev)
+    print(f"\nsol: sol_attn against dense SDPA, {ctx.dtype}, {heads}x{head_dim}, "
+          f"sinks={sinks}, {iters} iters x {repeats} groups\n"
+          + (f"  kernel available on {ctx.tdev}" if here
+             else "  NO COMPILED KERNEL FOR THIS DEVICE: the dense column only"))
+    print(f"\n{'pack':12s} {'tokens':>7s} {'exact':>9s} {'dense q':>9s} {'ms':>8s} {'TF/s':>6s}"
+          + "".join(f"{f'ms (x) rel @tau {t:g}':>22s}" for t in taus))
+    print(f"{'':12s} {'':7s}   (64-row blocks; a pack's frame count is on the codec's "
+          f"own clip ladder)")
+
+    for name, width, height, frames in SOL_PACKS:
+        if only and name not in (p.strip() for p in only.split(",")):
+            continue
+        layout = sol_pack(width, height, frames)
+        tokens = layout.seq_len
+        sink, sink_q = sol_sinks(layout, sinks)
+        streams = [torch.randn(1, tokens, heads * head_dim, device=ctx.tdev, dtype=ctx.dtype)
+                   for _ in range(3)]
+        bthd = [s.view(1, tokens, heads, head_dim) for s in streams]
+
+        def dense():
+            return eager_attention([t.transpose(1, 2) for t in bthd])
+
+        row = f"{name:12s} {tokens:7d} {sink[1]:9d} {sink_q[1] - sink_q[0]:9d}"
+        try:
+            base = _median_ms(dense, iters, repeats)
+            flops = 4 * heads * head_dim * tokens * tokens
+            row += f" {base:8.1f} {flops / base * 1e-9:6.1f}"
+            reference = dense().float()
+        except torch.cuda.OutOfMemoryError:
+            print(row + "   no room for the dense call at this shape")
+            del streams, bthd
+            torch.cuda.empty_cache()
+            continue
+        for tau in taus:
+
+            def call():
+                return ck.sol_attn(bthd[0], bthd[1], bthd[2], tau=tau,
+                                   sink_blocks=list(sink), sink_q=list(sink_q))
+
+            try:
+                ms = _median_ms(call, iters, repeats)
+                got = call().float().reshape(reference.shape)
+                rel = ((got - reference).norm() / reference.norm()).item()
+                row += f"  {ms:8.1f} ({base / ms:4.2f}x) {rel:6.1e}"
+            except Exception as exc:                                # noqa: BLE001
+                first = str(exc).splitlines()[0]
+                room = "out of memory" in first.lower()
+                row += f"{'no room' if room else 'refused':>22s}"
+                print(f"  {name}: tau {tau:g} {'ran out of room' if room else 'refused'}: "
+                      f"{first[:80]}")
+            finally:
+                torch.cuda.empty_cache()
+        print(row)
+        del streams, bthd, reference
+        torch.cuda.empty_cache()
+    print("  rel is the distance from the dense answer on random operands, the pessimistic\n"
+          "  end for routing: no row of those is selective. What a clip tolerates is a run.")
 
 
 # ------------------------------------------------------------------ eager GEMMs
@@ -1641,7 +1987,16 @@ def main() -> None:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--section", default="ablate",
                     choices=("ablate", "sdpa", "gemm", "profile", "shapes", "buckets",
-                             "all"))
+                             "sol", "all"))
+    ap.add_argument("--sol-tau", default="1.0,1.3,2.0",
+                    help="routing thresholds to price; higher routes fewer key blocks "
+                         "exactly (the reference's default is 1.3)")
+    ap.add_argument("--sol-packs", default="",
+                    help="comma-separated subset of " + ", ".join(p[0] for p in SOL_PACKS)
+                         + "; default all of them")
+    ap.add_argument("--sol-sinks", default="exact_rows", choices=("off", "exact", "exact_rows"),
+                    help="the conditioning rows kept out of the routing: none, the packed "
+                         "prefix as exact keys, or that plus the audio query rows dense")
     ap.add_argument("--arms", default="", help="comma-separated, in order; default all")
     ap.add_argument("--profile-arm", default="baseline")
     ap.add_argument("--profile-iters", type=int, default=3)
@@ -1719,9 +2074,14 @@ def main() -> None:
 
     ctx = bb.Ctx(device=args.device, txt=args.txt, warmup=args.warmup, iters=args.iters,
                  repeats=args.repeats, weights=args.weights)
-    i2v = args.block.endswith("i2v")
+    if args.section == "sol":
+        with torch.no_grad():
+            sol_section(ctx, args.iters, args.repeats,
+                        [float(t) for t in args.sol_tau.split(",") if t.strip()],
+                        args.sol_packs, args.sol_sinks, args.verbose)
+        return
     known = args.block in FIXTURES
-    fixture = (FIXTURES[args.block](ctx, args.tokens, i2v=i2v) if known
+    fixture = (FIXTURES[args.block](ctx, args.tokens) if known
                else camera_fixture(ctx, args.block, args.tokens, args.scenario))
     total = sum(fixture.terms.values())
     print(f"{args.block} {args.weights} tokens={args.tokens} txt={args.txt} "
@@ -1748,7 +2108,7 @@ def main() -> None:
             continue
         if arm.inputs:
             with patches(arm.inputs):
-                runs[arm.name] = FIXTURES[args.block](ctx, args.tokens, i2v=i2v).run
+                runs[arm.name] = FIXTURES[args.block](ctx, args.tokens).run
         else:
             runs[arm.name] = fixture.run
 

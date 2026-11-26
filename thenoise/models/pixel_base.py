@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import abstractmethod
-from typing import TYPE_CHECKING, ClassVar, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Callable, ClassVar, List, Optional, Sequence, Tuple
 
 import torch
 
@@ -56,9 +56,12 @@ class PixelModel(DiffusionModel):
         """What a request named, or the reference's size when it named neither.
 
         `default_edit_size` is what turns the reference into this model's answer.
+        ``reference`` is a decoded image, or the ``(width, height)`` a file's header
+        stated -- which is all a run needs from a reference that only names a size.
         """
         if width is None and height is None:
-            return self.default_edit_size(*reference.size)
+            return self.default_edit_size(*(reference.size if hasattr(reference, "size")
+                                            else reference))
         return width, height
 
     # ------------------------------------------------------------ editing
@@ -73,20 +76,48 @@ class PixelModel(DiffusionModel):
         """
         return [self.prepare_reference(img) for img in images]
 
+    def guide_fit(self, target: Tuple[int, int]
+                  ) -> Callable[[Image.Image], Image.Image]:
+        """One frame of a reference condition, fitted for :meth:`encode_references`: a
+        model may be generous here about what it is only asked to resemble. Per frame, so
+        they can be fitted as they are read.
+        """
+        def fit(image: Image.Image) -> Image.Image:
+            return self.fit_references([image], target)[0]
+        return fit
+
+    def encode_sound(self, pcm, sample_rate=None) -> torch.Tensor:
+        """A reference's sound as a latent.
+
+        A model with no audio codec has nothing to put one in, and a trunk that has the
+        codec but no condition rows for it says so when the packing is built.
+        """
+        raise ValueError(
+            f"{self.name} has no audio codec: a reference's sound needs condition rows "
+            "in the trunk's audio stream")
+
     def encode_reference(self, pixels: torch.Tensor) -> torch.Tensor:
         """Encode input pixels (``[C,H,W]`` in [-1, 1]) into the canonical latent."""
         raise NotImplementedError(f"{self.name} does not support reference editing")
 
     def encode_references(self, pixels: list[torch.Tensor],
                           frames: int = 1) -> list[torch.Tensor]:
-        """The latents a run conditions on, from fitted images: one per image, unless
-        the model takes its reference some other way.
+        """The latents a run conditions on, one per condition, unless the model takes
+        its reference some other way.
 
-        `frames` is the temporal extent the run spans. A model whose reference is one
-        latent for a whole clip has to override this rather than be handed per-frame
-        latents, because the codec is causal: the later latent frames of a clip are not
-        the first one repeated.
+        An entry is a fitted picture ``[C,H,W]`` or the frames of a reference clip
+        ``[C,T,H,W]``. `frames` is the temporal extent the run spans. A model whose
+        reference is one latent for a whole clip has to override this rather than be
+        handed per-frame latents, because the codec is causal: the later latent frames of
+        a clip are not the first one repeated -- and one that cannot says so here, because
+        a reference clip arrives through the same field as a picture and has no other way
+        to be refused.
         """
+        for one in pixels:
+            if one.ndim != 3:
+                raise ValueError(
+                    f"{self.name} puts one picture in each latent: a reference clip "
+                    "needs a codec that takes a clip's frames into one latent")
         return [self.encode_reference(image) for image in pixels]
 
     def pack_reference_latent(

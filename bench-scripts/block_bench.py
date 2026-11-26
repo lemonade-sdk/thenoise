@@ -313,10 +313,7 @@ def n_refs(ctx: Ctx, scenario: str) -> int:
 
 def grid_side(tokens: int) -> int:
     """Square latent side for a token count (snapped, since grids are square)."""
-    side = int(round(math.sqrt(max(tokens, 1))))
-    if side * side != tokens:
-        print(f"  (snapping {tokens} image tokens to {side * side})", file=sys.stderr)
-    return side
+    return int(round(math.sqrt(max(tokens, 1))))
 
 
 def gemm_params(module: nn.Module) -> int:
@@ -1180,12 +1177,12 @@ def fibo2_perceiver(ctx: Ctx, tokens: int, scenario: str) -> Case:
 
 def h3_params():
     """The H3-Image geometry ``detect_params`` reads off the shipped checkpoint's header."""
-    from thenoise.dit.h3_image.models import H3ImageParams
+    from thenoise.dit.h3.trunk import H3Params
 
-    return H3ImageParams(hidden_size=5376, num_layers=50, token_refiner_layers=2,
-                         num_heads=56, head_dim=128, ffn_hidden_size=14336,
-                         latents_dim=24, text_dim=5120, rope_inv_freq=16,
-                         adaln_grid=1025, adaln_dim=8, pdd_steps=6, pdd_sigmas=())
+    return H3Params(hidden_size=5376, num_layers=50, token_refiner_layers=2,
+                    num_heads=56, head_dim=128, ffn_hidden_size=14336,
+                    latents_dim=24, text_dim=5120, rope_inv_freq=16,
+                    adaln_grid=1025, adaln_dim=8, pdd_steps=6, pdd_sigmas=())
 
 
 @fixture("h3_image", "block", CACHE_SCENARIOS)
@@ -1195,9 +1192,9 @@ def h3_image_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     References are packed last so the cache can freeze them; the modulation is projected
     outside the compiled block, so ``run`` does both, as the model's block loop does.
     """
-    from thenoise.dit.h3_image.layout import Layout
-    from thenoise.dit.h3_image.models import DiTBlock, _spans
-    from thenoise.dit.h3_image.utils import RELAY_STORES
+    from thenoise.dit.h3.layout import Layout
+    from thenoise.dit.h3.trunk import DiTBlock, _spans
+    from thenoise.dit.h3.checkpoint import RELAY_STORES
     from thenoise.utils.rope import split_half_rope_axes
 
     params = h3_params()
@@ -1205,8 +1202,8 @@ def h3_image_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
     cells = 2 * grid_side(tokens)          # one DiT row is a 2x2 latent patch
     refs = n_refs(ctx, scenario)
     read = scenario == "read"
-    layout = Layout(ctx.txt, cells, cells, ((cells, cells),) * refs)
-    n = layout.target_span[1] if read else layout.seq_len
+    layout = Layout.image(ctx.txt, cells, cells, ((cells, cells),) * refs)
+    n = layout.video_span[1] if read else layout.seq_len
 
     blk = new_block(ctx, name, DiTBlock, params, ctx.dtype, relay_stores=RELAY_STORES)
     seed_inputs(name, scenario, tokens)
@@ -1218,7 +1215,10 @@ def h3_image_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
                                            dtype=torch.float32) / params.rope_inv_freq)
     pos = layout.position_ids.to(ctx.tdev, torch.float32)[:n]
     cos, sin = (t.to(ctx.dtype) for t in split_half_rope_axes(inv_freq)(pos))
-    rows = [row for row in layout.modulation_rows() if row[0] < n]
+    # Any step below the pinned condition timestep answers two rows, which is what
+    # ``t_emb`` carries: the step's, and the one the references read.
+    steps = layout.timesteps(video=0.5)
+    rows = [row for row in layout.modulation_rows(steps) if row[0] < n]
 
     bufs = None
     kv_shape = (1, params.num_heads, layout.seq_len, params.head_dim)
@@ -1240,8 +1240,8 @@ def h3_image_block(ctx: Ctx, tokens: int, scenario: str) -> Case:
 @fixture("h3_image", "refiner", fixed_seq=True)
 def h3_image_refiner(ctx: Ctx, tokens: int, scenario: str) -> Case:
     """H3-Image's prompt stream: two unmodulated, unrotated blocks over the text."""
-    from thenoise.dit.h3_image.models import RefinerBlock
-    from thenoise.dit.h3_image.utils import RELAY_STORES
+    from thenoise.dit.h3.trunk import RefinerBlock
+    from thenoise.dit.h3.checkpoint import RELAY_STORES
 
     params = h3_params()
     name = "h3_image/refiner"
@@ -1283,9 +1283,6 @@ def _wan_case(ctx: Ctx, tokens: int, role: str, geometry: dict, token_temb: bool
     heads, head_dim = params.heads, params.head_dim
     frames = WAN_FRAMES
     side = int(round(math.sqrt(max(tokens, frames) / frames)))
-    if frames * side * side != tokens:
-        print(f"  (snapping {tokens} video tokens to {frames}x{side}x{side})",
-              file=sys.stderr)
     n = frames * side * side
     txt = ctx.txt
 
@@ -1405,9 +1402,6 @@ def _ltx_case(ctx: Ctx, tokens: int, role: str, token_timestep: bool) -> Case:
     vctx, actx = vdim, adim           # a release ships each prompt width as its trunk
     frames = LTX_FRAMES
     side = int(round(math.sqrt(max(tokens, frames) / frames)))
-    if frames * side * side != tokens:
-        print(f"  (snapping {tokens} video tokens to {frames}x{side}x{side})",
-              file=sys.stderr)
     n = frames * side * side
     seconds = ((LTX_VIDEO_SCALE * (frames - 1) + 1) / LTX_FPS)
     audio_tokens = max(1, round(seconds * LTX_AUDIO_TPS))

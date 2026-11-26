@@ -113,13 +113,15 @@ defaults when optional fields are omitted.
 | `model` | string | Optional loaded model name, checked if provided |
 | `image` | string | Optional base64-encoded first frame (I2V; omit for T2V) |
 | `end_image` | string | Optional base64-encoded last frame (FLF2V; needs `image`) |
+| `references` | array | Optional things the clip should look like without being frames of it. Each item is base64, or `{"media": ..., "frame": n}` to pin it to the frame at `n` instead (negative counts back from the last). A file is asked what it is — picture, clip or sound — so there is no kind to declare. Needs `video.ref2v` |
+| `attention` | string | `auto` (default), `full` or `optimized` — how attention is computed. See [`attention_methods`](#get-health) |
 | `negative_prompt` | string | Optional negative text prompt |
 | `width`, `height` | integer | Video dimensions |
 | `frames` | integer | Desired frame count |
 | `duration`, `fps` | number, integer | Duration in seconds and frames/second; explicit `frames` takes priority |
 | `steps`, `guidance_scale`, `seed` | number | Sampling parameters |
 | `flow_shift` | number | Noise schedule shift. Defaults to the model's release value |
-| `sampler` | string | model default | Denoising solver — one of `GET /health`'s `samplers` |
+| `sampler` | string | Denoising solver, model default when omitted — one of `GET /health`'s `samplers` |
 | `lora_specs` | string[] \| object | Optional LoRAs, as `name:weight`, looked up in `--lora-dir`. A model with more than one LoRA-able component also takes them by component: `{"dit": ["a:0.8"], "dit_low": ["b"]}` |
 | `output_format` | string | `mp4` or `webm` (model default when omitted) |
 
@@ -215,8 +217,8 @@ curl -fS http://127.0.0.1:8000/mesh -H 'content-type: application/json' \
 {"status": "ok", "models": ["qwen_image"], "medium": "image",
   "samplers": ["er_sde", "euler", "unipc"],
   "capabilities": {"image": {"t2i": true, "i2i": true}, "kv_cache": true,
-                   "upscale": true,
-                   "ref_methods": ["index", "index_timestep_zero", "vision"]}}
+                   "upscale": true, "ref_methods": ["index", "index_timestep_zero", "vision"],
+                   "attention_methods": ["auto", "full"]}}
 ```
 
 With a video model:
@@ -225,7 +227,8 @@ With a video model:
 {"status": "ok", "models": ["wan22"], "medium": "video",
   "samplers": ["er_sde", "euler", "unipc"],
   "capabilities": {"image": null, "kv_cache": false, "upscale": false,
-                   "video": {"t2v": true, "i2v": true, "flf2v": true}}}
+                   "video": {"t2v": true, "i2v": true, "flf2v": true, "ref2v": false},
+                   "attention_methods": ["auto", "full", "optimized"]}}
 ```
 
 With a mesh model:
@@ -233,21 +236,42 @@ With a mesh model:
 ```json
 {"status": "ok", "models": ["hunyuan3d21"], "medium": "mesh",
   "samplers": ["er_sde", "euler", "unipc"],
-  "capabilities": {"kv_cache": false, "mesh": {"i2d": true, "t2d": false}}}
+  "capabilities": {"kv_cache": false, "mesh": {"i2d": true, "t2d": false},
+                   "attention_methods": ["auto", "full"]}}
 ```
 
 `models` is empty until a DiT is loaded, `medium` says what the loaded model produces
 (`image` when none is loaded, so every route stays listed), and `capabilities` is that
-adapter's own `CAPABILITIES` dict plus `ref_methods`, the reference methods it honours
-(`{}` with nothing loaded).
+adapter's own `CAPABILITIES` dict plus the two lists a request chooses from:
+`ref_methods` and `attention_methods` (`{}` with nothing loaded).
 
-The request modes sit under their medium: `t2i` and `i2i` under `image`, `t2v`,
-`i2v` and `flf2v` under `video`. A model answers the other medium with `null`.
+The request modes sit under their medium: `t2i` and `i2i` under `image`, `t2v`, `i2v`,
+`flf2v` and `ref2v` under `video`. A model answers the other medium with `null`.
 `kv_cache` and `upscale` are not modes, so they stay at the top; either medium
 can use them.
 
+`ref2v` is whether the loaded model has anywhere in its packing for a picture the clip is
+asked to resemble — as opposed to the frames it starts or ends on, which are `i2v` and
+`flf2v`. It is answered by the architecture: a checkpoint does not say which release it is.
+`ref2v: false` means a `references` field is refused, not ignored.
+
 One mesh mode is not a boolean: `mv2d` is how many views of one object the model's tower
 numbers, and its absence is the refusal — which is every mesh model served today.
+
+`attention_methods` lists what the loaded model accepts for `attention` — a field every
+medium's request takes (`/text2image`, `/edit`, `/jobs/video`, `/jobs/mesh`), whether or
+not that trunk has more than one way to compute attention — on the box it is running on,
+which is why the list can come and go with the hardware:
+
+- `auto` — the engine chooses at every step. Block-sparse attention runs on a clip long
+  enough for it to be the faster of the two; exact attention runs otherwise.
+- `full` — exact attention at every step: every token reads every token.
+- `optimized` — block-sparse attention whatever the clip's length, including the short
+  clips where exact attention is normally faster.
+
+Block-sparse attention reads the key blocks it keeps exactly and approximates the rest, so
+it is faster and can cost detail. Only a model that has it lists `optimized`; sending a
+value the loaded model does not list is a 400.
 
 `i2i` says a model takes a picture with the request, not what it does with one. That is
 `ref_method`: `index` and `index_timestep_zero` encode the picture as a latent the DiT
@@ -256,11 +280,13 @@ tower, which steers what gets drawn and leaves nothing of the picture in place. 
 model's `ref_methods` says which of those it offers; naming one it lacks is a 400.
 
 The web UI reads all of this to decide what to show: the Edit tab follows
-`i2i`, and `medium` decides what the Generate tab becomes — a clip form for a
+`i2i`, the clip form's Reference box follows `video.ref2v`, and
+`attention_methods` decides whether the Attention picker is there at all — the picker's
+own first option is the empty one, so two further words are needed before it is a choice,
+and a model answering `auto` and `full` only hides the control. `medium` decides what the Generate tab becomes — a clip form for a
 video model, a shape form for a mesh model. A request for something the loaded
 model cannot do is refused with HTTP 400, not quietly downgraded. `i2v` and
 `flf2v` come from the variant you loaded, not from the model name.
-
 ## `POST /text2image`
 
 All fields except `prompt` are optional. An omitted field resolves as
@@ -286,6 +312,7 @@ index_timestep_zero` (see [`/edit`](#post-edit)).
 | `upscale_type` | `string` | `refined` | `refined` (latent 2x + refiner) or `no-refiner` (pixel upscaler only) |
 | `pixel_upscaler` | `string` | `null` | Pixel upscaler name (no `.safetensors` suffix) from `--upscaler-dir` |
 | `sampler` | `string` | model default | Denoising solver — one of `GET /health`'s `samplers` |
+| `attention` | `string` | model default | How attention is computed — one of `GET /health`'s `attention_methods`. Every medium takes it; a model with one way to compute it answers only `auto` and `full` |
 | `kv_cache` | `boolean` | auto | Reuse step-invariant K/V across denoising steps. T2I defaults off (opt-in); compatible edits auto-enable based on `ref_method`. Explicit `true` requires model support |
 | `qwen_vae_enhance` | `bool` | `false` | Nyquist notch post-filter (removes 2px grid artifacts) |
 | `saturation` | `float` | `0.0` | Colour saturation around neutral `0.0`: -1.0 greyscales, 1.0 doubles |

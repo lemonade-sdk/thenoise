@@ -17,15 +17,15 @@ from typing import List, Optional, Tuple
 
 import torch
 
-from thenoise.dit.h3_image import sampling as h3_sampling
-from thenoise.dit.h3_image.encoder import load_h3_image_text_encoder
-from thenoise.dit.h3_image.layout import PATCH_SIZE, Layout, pad_to_patch
-from thenoise.dit.h3_image.models import H3ImageParams
-from thenoise.dit.h3_image.utils import (
+from thenoise.dit.h3 import sampling as h3_sampling
+from thenoise.dit.h3.encoder import VISION_SHORT_EDGE, load_h3_text_encoder
+from thenoise.dit.h3.checkpoint import (
     H3_IMAGE_SIGNATURE,
     detect_params,
     load_h3_image_dit,
 )
+from thenoise.dit.h3.layout import PATCH_SIZE, Layout, pad_to_patch
+from thenoise.dit.h3.trunk import H3Params
 from thenoise.models.base import (
     VISION_REF_METHOD,
     Conditioning,
@@ -35,15 +35,11 @@ from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.samplers import Step, sigma_ladder
 from thenoise.upscale import LatentUpscaler, VAEPixelUpscaler
 from thenoise.utils.image_tensor import ReferenceSizing, resize_to_short_edge
+from thenoise.utils.text_encoder import PICTURE_LABEL
 from thenoise.utils.math import round_up
 from thenoise.vae import load_h3_image_vae
 
 logger = logging.getLogger(__name__)
-
-#: Short edge of the picture the language model is shown. The DiT is shown a larger one
-#: (up to :attr:`REFERENCE_SIZING`'s cap): the vision tower compresses 32x32 pixels into
-#: one token, so a bigger copy buys detail the text stream cannot use.
-VISION_SHORT_EDGE = 1024
 
 #: The model's own canvas multiple.
 CANVAS_MULTIPLE = 32
@@ -88,17 +84,18 @@ class H3ImageModel(PixelModel):
     def __init__(self, *, config: ModelConfig):
         super().__init__(config=config)
 
-        self.params: H3ImageParams = detect_params(self.header)
+        self.params: H3Params = detect_params(self.header, self.SIGNATURE)
         self.dit = load_h3_image_dit(
             self.header, self.params,
             device=self._load_target(self.dit_path), dtype=config.dtype,
         )
 
         logger.info("Loading H3-Image text encoder from %s", config.text_encoder_path)
-        self.text_encoder = load_h3_image_text_encoder(
+        self.text_encoder = load_h3_text_encoder(
             config.text_encoder_path,
             dtype=config.dtype,
             device=self._load_target(config.text_encoder_path),
+            picture_label=PICTURE_LABEL,
         )
 
         logger.info("Loading H3-Image VAE from %s", self.vae_path)
@@ -172,10 +169,10 @@ class H3ImageModel(PixelModel):
         shapes = [(r.shape[-2], r.shape[-1]) for r in refs]
         self._refs = refs
         self._seed = params.seed
-        self._layout = Layout(cond.cond.shape[1], lat_h, lat_w, shapes)
+        self._layout = Layout.image(cond.cond.shape[1], lat_h, lat_w, shapes)
         self._null_layout = (
             None if cond.null is None
-            else Layout(cond.null.shape[1], lat_h, lat_w, shapes)
+            else Layout.image(cond.null.shape[1], lat_h, lat_w, shapes)
         )
 
         self.dit.pe_embedder.clear()

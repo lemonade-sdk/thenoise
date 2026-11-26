@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 
 from thenoise.controlmap.options import OPTIONS_BY_KIND, add_option_args
+from thenoise.utils.attention import ATTENTION_CHOICES, ATTENTION_HELP
 from thenoise.postprocess.options import PostprocessOptions
 from thenoise.utils.options import add_flags
 
@@ -96,6 +97,7 @@ def _add_solver_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--sampler", metavar="NAME",
                    help="denoising solver (default: the model's)")
     p.add_argument("--seed", type=int)
+    p.add_argument("--attention", choices=list(ATTENTION_CHOICES), help=ATTENTION_HELP)
 
 
 def _add_device_arg(p: argparse.ArgumentParser) -> None:
@@ -174,6 +176,13 @@ def _add_video_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--end-image", metavar="PATH",
                    help="image the clip ends on, for a model that can be told "
                         "where a clip ends; needs --image")
+    p.add_argument("--reference", action="append", default=[], metavar="PATH[@FRAME]",
+                   help="something for the clip to look like rather than the frame it "
+                        "starts or ends on; repeat once per reference. Append "
+                        "@FRAME to anchor it at a frame of the clip, counted from the "
+                        "end when negative; without one it is a reference the clip "
+                        "resembles. Only a model whose video capabilities answer ref2v "
+                        "takes them.")
     p.add_argument("--lora", action="append", default=[], metavar="FILE[:WEIGHT]",
                    help="LoRA for the primary transformer (repeatable)")
     p.add_argument("--lora-low", dest="lora_low", action="append", default=[],

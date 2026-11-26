@@ -27,6 +27,7 @@ DiT checkpoint.
 | `--text-encoder` | `generate` / `edit` / `video` | — | Path to the text encoder checkpoint (`.safetensors`) |
 | `--lora-dir` | no | — | Directory containing LoRA `.safetensors` files |
 | `--device` | no | `cuda` | Inference device (ROCm aliases `cuda` → `hip`) |
+| `--attention` | `generate` / `edit` / `video` / `mesh` | `auto` | How attention is computed: `auto` picks block-sparse or exact at every step, `full` is always exact, `optimized` is block-sparse even where it does not pay off yet. Only a model with block-sparse attention takes `optimized` — `/health` lists what the loaded model answers |
 
 `serve` requires only `--dit`. Any further checkpoint is determined by the loaded
 model, and named by flag if it is missing.
@@ -158,6 +159,7 @@ bars the solver's steps and the written frames as it goes.
 | `--seed` | no | random | Random seed |
 | `--image` | no | — | image the clip starts on |
 | `--end-image` | no | — | image the clip ends on; needs `--image`, and a model that can be told where a clip ends ([FLF2V](models/wan22.md#first-and-last-frame-flf2v)) |
+| `--reference` | no | — | something for the clip to look like rather than a frame it starts or ends on; repeatable. A picture, a clip or a sound — the file is asked which. `path@FRAME` pins it to that frame instead, counted from the end when negative. Needs a model that answers `ref2v` ([references](models/h3-video.md#references)) |
 | `--lora` | no | — | LoRA for the primary transformer; repeatable, `file:weight` |
 | `--lora-low` | no | — | LoRA for the low-noise expert of a `--dit-low` model; a LoRA meant for the whole clip goes to both flags |
 | `--output-format` | no | model default | `mp4` or `webm`; `--out`'s extension answers when this is left out |

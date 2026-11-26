@@ -97,6 +97,23 @@ def test_cli_generate_rejects_removed_types_and_flags(parse):
         parse(base + ["--esrgan", "/models/x.safetensors"])
 
 
+@pytest.mark.parametrize("command", [
+    ("generate", ["--prompt", "a fox"]),
+    ("edit", ["--prompt", "sunlit", "--image", "a.png"]),
+    ("video", ["--prompt", "a fox"]),
+    ("mesh", ["--image", "chair.png"]),
+])
+def test_attention_is_a_flag_of_every_diffused_medium(parse, command):
+    name, extra = command
+    paths = ["--dit", "d.safetensors"] if name == "mesh" else PATHS
+    assert parse([name, *paths, *extra, "--attention", "full"]).attention == "full"
+
+
+def test_attention_refuses_a_word_no_model_answers(parse):
+    with pytest.raises(SystemExit):
+        parse(["generate", *PATHS, "--prompt", "x", "--attention", "magic"])
+
+
 def test_cli_edit_parses_images_size_and_kv_cache(parse):
     args = parse([
         "edit", *PATHS,

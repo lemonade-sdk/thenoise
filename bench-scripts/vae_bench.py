@@ -27,6 +27,11 @@ One case per ``(codec, op, resolution)``:
 * **resolution** — the pixel ladder from ``--res``: 1024x1024, 1536x2048 and 2048x2048
   by default, i.e. the three rungs a real request lands on. Both sides snap up to the
   codec's own compression, so every rung is a shape a model could actually ask for.
+* **frames** — ``--frames``, default ``1``, an axis only the temporal codecs have: a
+  clip codec runs one case per rung per count, and a still codec ignores the axis, so a
+  default run is exactly the table it always printed. A count off the codec's own clip
+  ladder snaps upward and says so. Pixels are counted across the temporal axis, so
+  ``Mpx/s`` and ``GiB/Mpx`` read the same for a clip and for a still.
 
 Out on purpose: SesquiLSR and the pixel upscalers. Their cost is a network *around* a
 codec, and one row that is really two models makes a regression impossible to attribute.
@@ -52,9 +57,12 @@ protocol *and* environment, which the JSON records next to them.
 * ``GiB`` is the allocator's peak *allocated* for that case alone (stats reset after each
   case's warmup) and ``resv`` the peak it had *reserved*: at 2048x2048 a decoder's
   activations are gigabytes wide and the gap between those two columns is fragmentation,
-  which is what actually bites on unified memory. ``Mpx/s`` is the throughput a user
-  feels; ``GiB/Mpx`` is the scale-free one. No FLOP column: PyTorch's flop counter cannot
-  see ``comfy_kitchen::*``, so it would quote a conv codec at a fraction of its work.
+  which is what actually bites on unified memory. ``act`` is ``GiB`` minus the codec's own
+  resident bytes, which is the part the op actually moved: a big codec on a small rung
+  otherwise looks dear per megapixel because its weights are in the numerator. ``Mpx/s`` is
+  the throughput a user feels; ``GiB/Mpx`` is the scale-free one. No FLOP column: PyTorch's
+  flop counter cannot see ``comfy_kitchen::*``, so it would quote a conv codec at a fraction
+  of its work.
 * ``1st`` is the untimed first call: MIOpen picks a conv algorithm per shape there, so
   it is the cold-shape tax a server pays and never a measured number.
 * a case that raises — a 16 GB card will lose the top rung of the ladder — is reported
@@ -95,7 +103,7 @@ import sys
 import time
 import zlib
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Optional
 
 import torch
 
@@ -128,25 +136,27 @@ class Case:
     dtype: torch.dtype     # what the codec turned out to be built in, under ``auto``
     latent: str = ""       # the canonical latent it produces or consumes
     detail: str = ""       # free-form: who loads this codec, what the op stops at
+    weights_gib: float = 0.0   # the module's own bytes: the floor under the peak
 
 
 @dataclass(frozen=True)
 class Fixture:
     model: str
     ops: tuple[str, ...]
-    build: Callable[["Ctx", "Res", str], Case]
+    build: Callable[...]
+    temporal: bool = False   # the op moves a clip, so ``--frames`` is an axis for it
 
 
 FIXTURES: list[Fixture] = []
 
 
-def register(model: str, ops: tuple[str, ...], build) -> None:
-    FIXTURES.append(Fixture(model, ops, build))
+def register(model: str, ops: tuple[str, ...], build, temporal: bool = False) -> None:
+    FIXTURES.append(Fixture(model, ops, build, temporal))
 
 
-def fixture(model: str, ops: tuple[str, ...]):
+def fixture(model: str, ops: tuple[str, ...], temporal: bool = False):
     def deco(fn):
-        register(model, ops, fn)
+        register(model, ops, fn, temporal)
         return fn
     return deco
 
@@ -219,8 +229,8 @@ def new_vae(ctx: Ctx, name: str, cls, *args, **kwargs):
     return vae
 
 
-def seed_inputs(name: str, op: str, res: Res) -> None:
-    torch.manual_seed(seed_of(f"{name}/{op}@{res}"))
+def seed_inputs(name: str, op: str, res: Res, frames: int = 1) -> None:
+    torch.manual_seed(seed_of(f"{name}/{op}@{res}" + (f"@{frames}f" if frames > 1 else "")))
 
 
 def randn(ctx: Ctx, dtype: torch.dtype, *shape) -> torch.Tensor:
@@ -228,10 +238,29 @@ def randn(ctx: Ctx, dtype: torch.dtype, *shape) -> torch.Tensor:
     return torch.randn(*shape, device=ctx.tdev, dtype=torch.float32).to(dtype)
 
 
-def rand_pixels(ctx: Ctx, dtype: torch.dtype, res: Res, channels: int) -> torch.Tensor:
-    """Uniform [-1, 1] noise: what a decoded image is bounded by, both ways."""
-    x = torch.rand(1, channels, res.h, res.w, device=ctx.tdev, dtype=torch.float32)
+def rand_pixels(ctx: Ctx, dtype: torch.dtype, res: Res, channels: int,
+                frames: Optional[int] = None) -> torch.Tensor:
+    """Uniform [-1, 1] noise: what a decoded image is bounded by, both ways.
+
+    ``frames`` adds the temporal axis; left out, the tensor is a still, which is what
+    every still codec is fed.
+    """
+    shape = (1, channels, *((frames,) if frames else ()), res.h, res.w)
+    x = torch.rand(*shape, device=ctx.tdev, dtype=torch.float32)
     return (x * 2.0 - 1.0).to(dtype)
+
+
+def weight_gib(vae) -> float:
+    """What the module tree occupies on the device: the floor under every peak column.
+
+    The scale-free ``GiB/Mpx`` divides that floor by the pixels too, so a big codec at a
+    small rung looks expensive per megapixel for no reason; the ``act`` column subtracts
+    this back out. Parameters and buffers alike, in a plain tree — quantized storage is
+    counted at its logical width, and no fixture here is quantized.
+    """
+    total = sum(p.numel() * p.element_size() for p in vae.parameters())
+    total += sum(b.numel() * b.element_size() for b in vae.buffers())
+    return total / 2**30
 
 
 def vae_case(ctx: Ctx, vae, name: str, res: Res, op: str, note: str = "") -> Case:
@@ -266,7 +295,61 @@ def vae_case(ctx: Ctx, vae, name: str, res: Res, op: str, note: str = "") -> Cas
     detail = f"{vae.pixel_channels}ch px {res}; {note}"
     if op == FEATURES:
         detail += f", stops after upsample 1/{len(vae.decoder.upsamples)}"
-    return Case(run, res.mpx, vae.dtype, latent, detail)
+    return Case(run, res.mpx, vae.dtype, latent, detail, weight_gib(vae))
+
+
+def vae_video_case(ctx: Ctx, vae, name: str, res: Res, frames: int, op: str,
+                   note: str = "") -> Case:
+    """Wire one op of a temporal codec up at ``res`` and ``frames``, as a run calls it.
+
+    Both tensors carry the temporal axis and the latent length comes from the codec's own
+    :class:`~thenoise.vae.h3.TemporalPlan`. A clip opens with one frame and advances
+    ``ratio_t`` at a time, so most counts are reachable and one that is not is snapped
+    upward the way an unaligned resolution is — upward rather than refused, because which
+    reachable length a *request* becomes is the adapter's policy, not this tool's.
+
+    Pixels are counted across the temporal axis, so ``Mpx/s`` and ``GiB/Mpx`` stay
+    per-megapixel-of-video and a clip row reads against a still row on one scale.
+    """
+    from thenoise.vae.h3 import TemporalPlan, snap_frames
+
+    comp = vae.spatial_compression
+    res = res.align(comp)
+    wanted = frames
+    try:
+        plan = TemporalPlan.of_frames(frames, vae.clip_length, vae.token_drop,
+                                      ratio_t=vae.patch_size_t)
+    except ValueError:
+        frames = snap_frames(frames, upward=True, clip_length=vae.clip_length,
+                             token_drop=vae.token_drop, ratio_t=vae.patch_size_t)
+        print(f"  ({wanted} frames is not on this codec's clip ladder: running {frames})",
+              file=sys.stderr)
+        plan = TemporalPlan.of_frames(frames, vae.clip_length, vae.token_drop,
+                                      ratio_t=vae.patch_size_t)
+    frames = plan.frames
+    lh, lw = res.h // comp, res.w // comp
+    seed_inputs(name, op, res, frames)
+    latent = f"{vae.z_dim}x{plan.latent_t}x{lh}x{lw}"
+
+    if op == ENCODE:
+        x = rand_pixels(ctx, vae.dtype, res, vae.pixel_channels, frames)
+
+        def run():
+            return vae.encode_pixels_to_latents(x)
+    elif op == DECODE:
+        x = randn(ctx, vae.dtype, 1, vae.z_dim, plan.latent_t, lh, lw)
+
+        def run():
+            return vae.decode_to_pixels(x)
+    else:
+        raise ValueError(f"unknown op {op!r} for a temporal codec")
+
+    detail = f"{vae.pixel_channels}ch px {res}x{frames}f; {note}"
+    if op == DECODE and plan.latent_t == 1:
+        # Not a still: the codec decodes a lone latent as a clip of copies and keeps the
+        # frame it stands for, so this row costs a clip's worth of decode.
+        detail += ", lone latent decoded as a clip of copies"
+    return Case(run, res.mpx * frames, vae.dtype, latent, detail, weight_gib(vae))
 
 
 # --------------------------------------------------------------------- fixtures
@@ -375,6 +458,29 @@ def h3_image_vae(ctx: Ctx, res: Res, op: str) -> Case:
     return vae_case(ctx, vae, "h3_image", res, op, "24ch/16x rgb, tiled 256px")
 
 
+@fixture("h3_video", BOTH, temporal=True)
+def h3_video_vae(ctx: Ctx, res: Res, op: str, frames: int) -> Case:
+    """The H3 clip codec: a causal conv encoder and a ViT decoder, decoded clip by clip.
+
+    The frame count is the axis worth walking here: each clip re-reads its predecessor's
+    tail and cross-fades it, so a clip's own pixels are what the peak is made of, and the
+    per-megapixel cost at 124 frames is not the 29-frame number times four.
+
+    The same guard as the image codec — ``register_tokens`` and the layer scales are
+    ``torch.empty`` until a load fills them.
+    """
+    from thenoise.vae import AutoencoderKLH3Video
+
+    vae = new_vae(ctx, "h3_video", AutoencoderKLH3Video)
+    with torch.no_grad():
+        vae.decoder.register_tokens.zero_()
+        for block in vae.decoder.transformer_blocks:
+            block.scale1.fill_(0.5)
+            block.scale2.fill_(0.5)
+    return vae_video_case(ctx, vae, "h3_video", res, frames, op,
+                          f"{vae.clip_length}-frame clips, tiled {vae.tile_size}px")
+
+
 # ------------------------------------------------------------------ measurement
 @dataclass
 class Timing:
@@ -425,9 +531,13 @@ def watchlist(results: list[dict], cov_warn: float = 1.0, grow_pct: float = 25.0
     """
     ok = [r for r in results if r["status"] == "ok"]
     noisy = sorted((r for r in ok if r["cov_pct"] > cov_warn), key=lambda r: -r["cov_pct"])
-    series: dict[tuple[str, str], list[dict]] = {}
+    series: dict[str, list[dict]] = {}
     for r in ok:
-        series.setdefault((r["model"], r["op"]), []).append(r)
+        # Frame counts are separate series: cost per megapixel is not flat in frames, so
+        # reading 29f into 124f would report the clip ladder as a regression.
+        frames = r.get("frames", 1)
+        label = f"{r['model']}/{r['op']}" + (f"@{frames}f" if frames > 1 else "")
+        series.setdefault(label, []).append(r)
     growing, cheapening = [], 0
     for key, rows in series.items():
         if len(rows) < 2:
@@ -446,7 +556,7 @@ def watchlist(results: list[dict], cov_warn: float = 1.0, grow_pct: float = 25.0
     print("\nwatchlist")
     for over, key, rows in sorted(growing, key=lambda d: -d[0]):
         track = "  ".join(f"{r['resolution']}:{r['gib_per_mpx']:.2f}" for r in rows)
-        print(f"  {'/'.join(key):26s} ends the ladder +{over:3.0f}% per Mpx  {track} GiB/Mpx")
+        print(f"  {key:26s} ends the ladder +{over:3.0f}% per Mpx  {track} GiB/Mpx")
     if cheapening:
         print(f"  {'':26s} ({cheapening} codec op(s) get {grow_pct:.0f}% cheaper per Mpx along "
               f"the ladder instead — normal, fixed weights over more pixels)")
@@ -501,14 +611,17 @@ def select(models: str) -> list[Fixture]:
     return keep
 
 
-def case_list(fixtures: list[Fixture], ladder: list[Res], ops: tuple[str, ...]):
+def case_list(fixtures: list[Fixture], ladder: list[Res], ops: tuple[str, ...],
+              frames: tuple[int, ...] = (1,)):
     """Canonical order: every codec at one rung, then the next rung, encode first.
 
-    Rungs go up by pixel count, so the ladder reads as one machine getting hotter
-    rather than as three unrelated tables.
+    Rungs go up by pixel count, so the ladder reads as one machine getting hotter rather
+    than as three unrelated tables. The frame axis is inner, so a codec's frames sit
+    together within a rung; and it is an axis only where a codec moves a clip, which is
+    why a still codec appears once per rung however many frames were asked for.
     """
-    return [(f, res, op) for res in ladder for f in fixtures for op in f.ops
-            if op in ops]
+    return [(f, res, op, n) for res in ladder for f in fixtures for op in f.ops
+            if op in ops for n in (frames if f.temporal else (1,))]
 
 
 def main() -> None:
@@ -520,6 +633,9 @@ def main() -> None:
                                      "e.g. flux2,qwen_image21")
     ap.add_argument("--res", default=DEFAULT_RES,
                     help="pixel ladder as WxH (bare N = square), default %(default)s")
+    ap.add_argument("--frames", default="1",
+                    help="frame counts for the temporal codecs, crossed with the ladder "
+                         "(default %(default)s)")
     ap.add_argument("--ops", default=",".join(OPS),
                     help="comma-separated subset of encode,decode,features")
     ap.add_argument("--dtype", default="auto", choices=sorted(DTYPES),
@@ -537,14 +653,21 @@ def main() -> None:
     ladder = sorted((Res.parse(r) for r in args.res.split(",") if r.strip()),
                     key=lambda r: (r.mpx, r.w, r.h))
     ops = tuple(o.strip() for o in args.ops.split(",") if o.strip())
-    if not ladder or any(o not in OPS for o in ops) or args.repeats < 1 or args.iters < 1:
-        raise SystemExit(f"--res must not be empty and --ops must be from {','.join(OPS)}")
+    try:
+        counts = tuple(int(n) for n in args.frames.split(",") if n.strip())
+    except ValueError:
+        raise SystemExit(f"--frames wants frame counts, got {args.frames!r}")
+    if not ladder or not counts or any(n < 1 for n in counts) \
+            or any(o not in OPS for o in ops) or args.repeats < 1 or args.iters < 1:
+        raise SystemExit(f"--res must not be empty, --frames must hold positive counts "
+                         f"and --ops must be from {','.join(OPS)}")
     fixtures = select(args.models) if args.models else list(FIXTURES)
-    cases = case_list(fixtures, ladder, ops)
+    cases = case_list(fixtures, ladder, ops, counts)
     if args.list:
-        print("\n".join(f"{f.model}/{op}@{res}" for f, res, op in cases))
+        print("\n".join(f"{f.model}/{op}@{res}" + (f"@{n}f" if n > 1 else "")
+                        for f, res, op, n in cases))
         print(f"\n{len(cases)} cases: {len(fixtures)} codecs x {len(ladder)} rungs "
-              f"x ops {','.join(ops)}")
+              f"x ops {','.join(ops)}, frame counts {args.frames} on the temporal codecs")
         return
     if not cases:
         raise SystemExit("nothing selected: no listed codec runs the ops you asked for")
@@ -557,20 +680,23 @@ def main() -> None:
     env = env_info(args.device)
     print(f"{env.get('gpu', args.device)} | torch {torch.__version__} | hip {env.get('hip')}")
     asked = "auto (each codec's own compute_dtype)" if args.dtype == "auto" else args.dtype
-    print(f"{asked} | batch 1 | ladder {', '.join(map(str, ladder))} | ops "
+    print(f"{asked} | batch 1 | ladder {', '.join(map(str, ladder))} | frames "
+          f"{', '.join(map(str, counts))} | ops "
           f"{','.join(ops)} | warmup {ctx.warmup} + {ctx.repeats}x{ctx.iters} timed "
           f"| {len(cases)} cases")
 
     results, failed, last_res, case = [], 0, None, None
     started = time.perf_counter()
-    for f, res, op in cases:
-        if res != last_res:
-            print(f"\n=== {res} ({res.mpx:.1f} Mpx) ===")
+    for f, res, op, n in cases:
+        if (res, n) != last_res:
+            print(f"\n=== {res}" + (f" · {n}f" if n > 1 else "")
+                  + f" ({res.mpx * n:.1f} Mpx) ===")
             print(f"  {'codec/op':26s} {'dt':>4s} {'latent':>13s} {'ms':>9s} {'±%':>5s} "
-                  f"{'Mpx/s':>7s} {'GiB/Mpx':>7s} {'GiB':>6s} {'resv':>6s} {'1st':>6s}")
-            last_res = res
+                  f"{'Mpx/s':>7s} {'GiB/Mpx':>7s} {'GiB':>6s} {'act':>6s} {'resv':>6s} {'1st':>6s}")
+            last_res = (res, n)
         label = f"{f.model}/{op}"
-        entry = {"key": f"{label}@{res}", "model": f.model, "op": op,
+        entry = {"key": f"{label}@{res}" + (f"@{n}f" if n > 1 else ""),
+                 "model": f.model, "op": op, "frames": n,
                  "resolution": str(res), "width": res.w, "height": res.h,
                  "pixels": res.w * res.h}
         # The first call of a case is untimed but slow (MIOpen searches a conv
@@ -578,13 +704,15 @@ def main() -> None:
         # progress rather than a hang.
         print(f"  {label:26s}", end="", flush=True)
         try:
-            case = f.build(ctx, res, op)
+            case = (f.build(ctx, res, op, frames=n) if f.temporal
+                    else f.build(ctx, res, op))
             tim = measure(case.run, ctx)
             mpx = case.mpx / (tim.ms / 1000)
             gib_mpx = tim.peak_gib / case.mpx
             print(f" {DTYPE_SLUG[case.dtype]:>4s} {case.latent:>13s} {tim.ms:9.1f} "
                   f"{tim.cov_pct:5.1f} {mpx:7.2f} {gib_mpx:7.2f} "
-                  f"{tim.peak_gib:6.2f} {tim.peak_res_gib:6.2f} {tim.first_s:6.1f}",
+                  f"{tim.peak_gib:6.2f} {max(tim.peak_gib - case.weights_gib, 0.0):6.2f} "
+                  f"{tim.peak_res_gib:6.2f} {tim.first_s:6.1f}",
                   flush=True)
             entry.update({"status": "ok", "latent": case.latent,
                           "dtype": DTYPE_SLUG[case.dtype],
@@ -593,6 +721,8 @@ def main() -> None:
                           "mpx_per_s": round(mpx, 4),
                           "gib_per_mpx": round(gib_mpx, 4),
                           "peak_gib": round(tim.peak_gib, 3),
+                          "weights_gib": round(case.weights_gib, 3),
+                          "act_gib": round(max(tim.peak_gib - case.weights_gib, 0.0), 3),
                           "peak_reserved_gib": round(tim.peak_res_gib, 3),
                           "detail": case.detail})
         except Exception as exc:                                # noqa: BLE001
@@ -621,6 +751,7 @@ def main() -> None:
         "protocol": {"dtype": args.dtype, "batch": 1, "grad": False,
                      "compile": "none (no codec ships one)",
                      "resolutions": [str(r) for r in ladder], "ops": list(ops),
+                    "frames": list(counts),
                      "warmup": ctx.warmup, "iters": ctx.iters, "repeats": ctx.repeats,
                      "order": "pixel count ascending, codecs in registry order, "
                               "encode before decode"},

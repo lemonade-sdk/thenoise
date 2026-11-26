@@ -45,6 +45,7 @@ class MeshPipelineController:
                              f"got {len(spec.images)}")
         resolved = spec.resolve(model.default_prefs)
         check_sampler(resolved.sampler)
+        model.resolve_attention(resolved.attention)
         check_lora_roles(resolved.lora_specs, model.lora_components())
         return resolved
 
@@ -59,7 +60,7 @@ class MeshPipelineController:
             params = MeshSamplingParams(
                 height=0, width=0, steps=spec.steps, seed=spec.seed,
                 guidance_scale=spec.guidance_scale, sampler=spec.sampler,
-                num_latents=spec.latents,
+                attention=spec.attention, num_latents=spec.latents,
             )
             stages = Stages(model, self._cache)
             # A shape has no pixel grid of its own: its token count sizes the reserve.

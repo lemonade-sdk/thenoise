@@ -66,6 +66,19 @@ QWEN3_VL_TOKENIZER_OVERRIDES = {
 }
 QWEN2_5_VL_TOKENIZER_OVERRIDES: dict = {}
 
+#: The tokens the H3 releases add to the Qwen3-VL table, at the ids their tokenizer fixes.
+#: Unregistered, a prompt's caption or lyrics marker arrives as a run of text pieces instead
+#: of the one embedding row it was trained on.
+H3_SPECIAL_TOKENS = {
+    "<d>": 151669,
+    "</d>": 151670,
+    "<|cutoff|>": 151671,
+    "<|lyrics_start|>": 151672,
+    "<|lyrics_end|>": 151673,
+    "<|caption_start|>": 151674,
+    "<|caption_end|>": 151675,
+}
+
 #: The chat and vision marker spellings shared by every multimodal conditioner here.
 #: A processor looks the vision ones up by name on its tokenizer; ``VISION_BLOCK`` is
 #: one reference image as the language model sees it.
@@ -75,19 +88,25 @@ VISION_START = "<|vision_start|>"
 VISION_END = "<|vision_end|>"
 IMAGE_PAD = "<|image_pad|>"
 VISION_BLOCK = VISION_START + IMAGE_PAD + VISION_END
+#: A clip's placeholder, and deliberately not framed: a processor that is given the video's
+#: metadata writes the seconds marker its frames average out and the vision markers around
+#: the pads itself, so framing it here would double the markers.
+VIDEO_PAD = "<|video_pad|>"
 
 #: The label in front of each reference, 1-based, matching how the prompt refers to
 #: them. ``<Picture n>: `` with angle brackets belongs to the video models.
 PICTURE_LABEL = "Picture {}: "
 
 
-def prompt_with_pictures(prompt: str, num_images: int) -> str:
+def prompt_with_pictures(prompt: str, num_images: int,
+                         label: str = PICTURE_LABEL) -> str:
     """The conditioning text: one labelled vision block per reference, then the prompt.
 
     One :data:`VISION_BLOCK` per picture, not one per vision token: the processor is
-    what widens it into the run the vision grid needs.
+    what widens it into the run the vision grid needs. ``label`` is the release's own
+    spelling, which is a format string taking the 1-based picture number.
     """
-    labels = "".join(PICTURE_LABEL.format(i + 1) + VISION_BLOCK
+    labels = "".join(label.format(i + 1) + VISION_BLOCK
                      for i in range(num_images))
     return labels + prompt
 
@@ -149,18 +168,38 @@ def find_tokenizer_dir(text_encoder_path: str, max_depth: int = 3) -> Optional[s
     return None
 
 
+def add_fixed_special_tokens(tokenizer, tokens: dict) -> None:
+    """Register tokens whose ids a release fixed, and refuse when they did not land.
+
+    ``add_special_tokens`` hands out the next free ids in list order, which is the
+    released numbering only while the base table stops where it does. A wrong id here is
+    another token's embedding row at inference, not an error, so it is checked here.
+    """
+    tokenizer.add_special_tokens({"additional_special_tokens": list(tokens)})
+    misplaced = {name: tokenizer.convert_tokens_to_ids(name) for name in tokens
+                 if tokenizer.convert_tokens_to_ids(name) != tokens[name]}
+    if misplaced:
+        raise ValueError(
+            "tokenizer registered these special tokens elsewhere than the released ids: "
+            + ", ".join(f"{name} -> {got} not {tokens[name]}"
+                        for name, got in misplaced.items())
+        )
+
+
 def load_tokenizer(
     tokenizer_dir: str = QWEN25_TOKENIZER_CONFIG_DIR,
     *,
     max_length: Optional[int] = None,
     local_files_only: bool = True,
     overrides: Optional[dict] = None,
+    additional_special_tokens: Optional[dict] = None,
 ):
     """Load a tokenizer from a local directory via HF ``AutoTokenizer``.
 
     ``tokenizer_dir`` must contain ``tokenizer.json`` (``vocab.json``/``merges.txt``
     are embedded in it). ``overrides`` are ``tokenizer_config.json`` fields applied
-    after loading.
+    after loading, and ``additional_special_tokens`` maps a token to the id it must
+    take.
     """
     kwargs = {}
     if max_length is not None:
@@ -171,6 +210,8 @@ def load_tokenizer(
     if overrides:
         for key, value in overrides.items():
             setattr(tokenizer, key, value)
+    if additional_special_tokens:
+        add_fixed_special_tokens(tokenizer, additional_special_tokens)
     return tokenizer
 
 
@@ -347,16 +388,18 @@ def load_qwen35_processor(tokenizer, *, image_processor=None):
         if image_processor is not None
         else Qwen2VLImageProcessor.from_dict(dict(QWEN3_VL_PREPROCESSOR_CONFIG)),
         tokenizer=tokenizer,
-        video_processor=Qwen3VLVideoProcessor(),
+        video_processor=Qwen3VLVideoProcessor(cap_pixels_per_frame=True),
     )
 
 
 def load_qwen3_vl_tokenizer(
-    tokenizer_dir: Optional[str] = None, *, max_length: int, overrides: Optional[dict] = None
+    tokenizer_dir: Optional[str] = None, *, max_length: int, overrides: Optional[dict] = None,
+    additional_special_tokens: Optional[dict] = None,
 ) -> tuple:
     """Load a Qwen3-VL tokenizer + fast processor (the same AutoTokenizer)."""
     tokenizer = load_tokenizer(
-        tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR, max_length=max_length, overrides=overrides
+        tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR, max_length=max_length, overrides=overrides,
+        additional_special_tokens=additional_special_tokens,
     )
     return tokenizer, tokenizer
 
@@ -455,6 +498,7 @@ __all__ = [
     "compute_drop_idx",
     "IM_START",
     "IM_END",
+    "VIDEO_PAD",
     "VISION_START",
     "VISION_END",
     "IMAGE_PAD",
@@ -463,5 +507,7 @@ __all__ = [
     "prompt_with_pictures",
     "QWEN3_06B_TOKENIZER_OVERRIDES",
     "QWEN3_VL_TOKENIZER_OVERRIDES",
+    "H3_SPECIAL_TOKENS",
+    "add_fixed_special_tokens",
     "QWEN2_5_VL_TOKENIZER_OVERRIDES",
 ]

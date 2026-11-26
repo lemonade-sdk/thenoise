@@ -219,7 +219,8 @@ class Runtime:
         if self._model is None:
             return {}
         return {**self._model.CAPABILITIES,
-                "ref_methods": list(self._model.REF_METHODS)}
+                "ref_methods": list(self._model.REF_METHODS),
+                "attention_methods": list(self._model.attention_methods())}
 
     def model_pixel_channels(self) -> int:
         """The loaded model's pixel width (3 = RGB, 4 = RGBA); 3 with no model."""

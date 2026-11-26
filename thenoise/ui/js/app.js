@@ -77,6 +77,7 @@ function applySettings(prefix, meta) {
   if (meta.guidance_scale != null) $(p + 'guidance_scale').value = meta.guidance_scale;
   if (meta.seed != null) $(p + 'seed').value = meta.seed;
   if (meta.sampler) $(p + 'sampler').value = meta.sampler;
+  if (meta.attention) $(p + 'attention').value = meta.attention;
   if (meta.upscale_factor != null) {
     setRange(p + 'upscale_factor', p + 'upscale_factor_val', meta.upscale_factor);
   } else if (meta.upscale === true) {
@@ -184,6 +185,23 @@ function fillSamplers(names) {
   }
 }
 
+// Same for attention: the loaded model answers the question its own way when the field
+// is left out, and a picker with nothing to pick would only earn a refusal.
+function fillAttention(methods) {
+  const words = (methods || []).filter((m) => m !== 'auto');
+  // The picker's first option is the empty one — say nothing and the model's default
+  // stands — so two further words are needed before it is a choice at all.
+  const choice = words.length >= 2;
+  for (const id of ['attention', 'edit_attention', 'video_attention', 'mesh_attention']) {
+    const sel = $(id);
+    if (!sel) continue;
+    const keep = sel.value;
+    fillSelect(sel, ['', ...words], (m) => m || 'auto');
+    sel.value = choice && words.includes(keep) ? keep : '';
+    $(id + '_field').classList.toggle('hidden', !choice);
+  }
+}
+
 // Gate the UI on the loaded model's capabilities, which the pipeline enforces too.
 async function applyModelState() {
   let models = null; // null = /health unreachable: assume a model that can do it all
@@ -241,10 +259,14 @@ async function applyModelState() {
     ? 'the loaded model has only one way with a reference' : '';
   $('video_i2v_field').classList.toggle('hidden', !video?.i2v);
   $('video_flf2v_field').classList.toggle('hidden', !video?.flf2v);
+  // A packing built without anywhere for a reference has no use for one, so the box
+  // goes rather than earning a refusal.
+  $('video_ref2v_field').classList.toggle('hidden', !video?.ref2v);
   const views = (mesh && mesh.mv2d) || 1;
   $('mesh_file').multiple = views > 1;
   $('mesh_views_hint').classList.toggle('hidden', views < 2);
   fillSamplers(samplers);
+  fillAttention(caps.attention_methods);
 }
 applyModelState();
 

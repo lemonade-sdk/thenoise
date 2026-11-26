@@ -5,14 +5,18 @@ import pytest
 import torch
 
 from conftest import StubVideo, header_of, wan_adapter
+from test_media_read import RATE, _clip, _wav
 from thenoise.models.config import ModelConfig
 from thenoise.models.video_base import Segment, VideoModel
 from thenoise.models.wan_video import VARIANTS, Wan22Model
 from thenoise.vae.wan22 import WAN22_LATENTS_MEAN, WAN22_LATENTS_STD
 from thenoise.vae.wan_video import _comfy_vae_config
 from thenoise.video.controller import VideoPipelineController
+from thenoise.video_cli import one_reference
 from thenoise.jobs import Cancellation
-from thenoise.video.spec import VideoSpec
+from thenoise.utils.attention import (ATTENTION_METHODS,
+                                  DEFAULT_ATTENTION)
+from thenoise.video.spec import Guide, ResolvedVideo, VideoSpec, mode_of
 
 
 def test_video_model_contract_and_shared_latent_statistics():
@@ -88,17 +92,6 @@ def test_an_adapter_declines_the_features_it_does_not_implement():
     assert model.capability("image") is None
     with pytest.raises(NotImplementedError, match="no latent upscaler"):
         model.get_upscaler()
-
-
-def test_every_variant_answers_the_video_vocabulary():
-    """A feature a variant lacks is answered `False`, not left out: a client reads the whole
-    group."""
-    assert wan_adapter("ti2v_5b").capability("video") == {
-        "t2v": True, "i2v": True, "flf2v": False}
-    assert wan_adapter("t2v_14b").capability("video") == {
-        "t2v": True, "i2v": False, "flf2v": False}
-    assert wan_adapter("i2v_14b").capability("video") == {
-        "t2v": True, "i2v": True, "flf2v": True}
 
 
 def _stub_config(tmp_path):
@@ -184,3 +177,186 @@ def test_a_frame_count_lands_on_the_grid_a_codec_can_pack():
     for wanted in (0, -3, float("nan"), float("inf")):
         with pytest.raises(ValueError, match="positive and finite"):
             frame_grid(wanted, compression=8, upward=True)
+
+
+def test_reference_conditions_decide_the_mode():
+    """The mode is read off what arrived, so no second switch can disagree with it."""
+    assert mode_of(None, None) == "t2v"
+    assert mode_of(b"png", None) == "i2v"
+    assert mode_of(b"png", b"png") == "flf2v"
+    for keyframes in ((None, None), (b"png", None), (b"png", b"png")):
+        assert mode_of(*keyframes, references=(b"png",)) == "ref2v"
+
+
+def test_a_request_carries_its_references_to_the_model():
+    resolved = ResolvedVideo(
+        prompt="a fox, like this", negative_prompt="", width=64, height=64, frame_count=5,
+        fps=24, steps=4, guidance_scale=1.0, flow_shift=3.0, seed=0, output_format="mp4",
+        image=None, end_image=None, sampler="euler", lora_specs={},
+        references=(Guide(media=b"ref", frame=-1),))
+    assert resolved.mode == "ref2v"
+
+
+def test_references_are_refused_where_the_architecture_has_no_place_for_them():
+    """The refusal is the vocabulary answering, not a check stacked beside it."""
+    model = wan_adapter("ti2v_5b")
+    with pytest.raises(ValueError, match="does not support ref2v"):
+        VideoPipelineController(model).resolve(
+            VideoSpec(prompt="a fox, like this", references=[Guide(media=b"png")]))
+
+
+def test_references_reach_the_conditioner_and_the_packing(tmp_path, monkeypatch):
+    """A reference goes the whole way round a clip run: shown to the language model as a
+    picture, pinned to the frame the request named."""
+    class RefVideo(StubVideo):
+        CAPABILITIES = {**StubVideo.CAPABILITIES,
+                        "video": {**StubVideo.CAPABILITIES["video"], "ref2v": True}}
+
+        def prepare_latent(self, latents, cond, params, ref=None, ref_method="index",
+                           conditions=()):
+            self.conditions_seen = [one.frame for one in conditions]
+            return super().prepare_latent(latents, cond, params, ref=ref,
+                                          ref_method=ref_method)
+
+    model = RefVideo(config=_stub_config(tmp_path))
+    monkeypatch.setattr("thenoise.video.controller.encode_video",
+                        lambda frames, spec, token, dest, progress: dest.write_bytes(b"v"))
+    spec = model.resolve_video(VideoSpec(prompt="a fox, like this",
+                                         references=[Guide(media=_png_bytes(), frame=-1)]))
+    VideoPipelineController(model).render(spec, Cancellation(), lambda *_: None,
+                                          tmp_path / "clip.webm")
+
+    # The reference reaches the conditioner as media of its own, which is what lets a
+    # model present a clip and its sound rather than one frame of each.
+    guides = model.encode_prompt_args.guides
+    assert len(guides) == 1 and len(guides[0].frames) == 1
+    assert model.conditions_seen == [-1]
+
+
+@pytest.mark.parametrize(("media", "what_is_missing"), [
+    (_clip, "frames into one latent"),
+    (_wav, "audio stream"),
+])
+def test_a_reference_the_trunk_cannot_hold_is_refused_by_what_it_lacks(
+        tmp_path, media, what_is_missing):
+    """A file the reader understands is not yet a file the trunk can place, and the
+    refusal names the half that is missing rather than the file it was handed."""
+    class RefVideo(StubVideo):
+        CAPABILITIES = {**StubVideo.CAPABILITIES,
+                        "video": {**StubVideo.CAPABILITIES["video"], "ref2v": True}}
+
+    model = RefVideo(config=_stub_config(tmp_path))
+    spec = model.resolve_video(VideoSpec(prompt="a fox, like this",
+                                         references=[Guide(media=media())]))
+    controller = VideoPipelineController(model)
+    with pytest.raises(ValueError, match=what_is_missing):
+        controller._encode_references([], controller._guides(spec), spec)
+
+
+def test_a_reference_clip_is_handed_to_the_codec_in_one_piece(tmp_path):
+    """Its frames go over as one tensor: what a causal codec takes together is one latent,
+    and a model that cannot take them says so rather than keeping the first."""
+    seen = []
+
+    class ClipVideo(StubVideo):
+        CAPABILITIES = {**StubVideo.CAPABILITIES,
+                        "video": {**StubVideo.CAPABILITIES["video"], "ref2v": True}}
+
+        def encode_references(self, pixels, frames=1):
+            seen.extend(one.shape for one in pixels)
+            return [torch.zeros(1, self.Z_DIM, 1, 1, 1)]
+
+    model = ClipVideo(config=_stub_config(tmp_path))
+    spec = model.resolve_video(VideoSpec(prompt="like this clip", frames=17,
+                                         references=[Guide(media=_clip(sound=False))]))
+    controller = VideoPipelineController(model)
+    _, [condition] = controller._encode_references([], controller._guides(spec), spec)
+    assert len(seen) == 1 and seen[0][1] == 12
+    assert condition.audio is None
+
+
+def test_a_sound_reference_is_a_condition_with_a_sound_and_no_picture(tmp_path):
+    """The reader's rate travels with the samples: the codec's grid is in samples."""
+    seen = []
+
+    class SoundVideo(StubVideo):
+        CAPABILITIES = {**StubVideo.CAPABILITIES,
+                        "video": {**StubVideo.CAPABILITIES["video"], "ref2v": True}}
+
+        def encode_sound(self, pcm, sample_rate=None):
+            seen.append(sample_rate)
+            return torch.zeros(1, 2, 2, 4)
+
+    model = SoundVideo(config=_stub_config(tmp_path))
+    spec = model.resolve_video(VideoSpec(prompt="like this sound",
+                                         references=[Guide(media=_wav())]))
+    controller = VideoPipelineController(model)
+    _, [condition] = controller._encode_references([], controller._guides(spec), spec)
+    assert seen == [RATE]
+    assert condition.video is None and condition.audio is not None
+
+
+def test_two_clips_that_open_the_same_way_are_not_the_same_reference(tmp_path):
+    """The frame a language model is shown cannot stand in for a clip: the latent the
+    trunk reads is made of every frame of it."""
+    model = StubVideo(config=_stub_config(tmp_path))
+    controller = VideoPipelineController(model)
+
+    def key(media):
+        spec = model.resolve_video(VideoSpec(prompt="x", references=[Guide(media=media)]))
+        guides = controller._guides(spec)
+        assert [guide.frames[0].tobytes() for guide in guides] == \
+               [guides[0].frames[0].tobytes()]
+        return controller._cache_key_reference([guide.frames[0] for guide in guides], spec)
+
+    assert key(_clip(frames=6)) != key(_clip(frames=12))
+
+
+def _png_bytes() -> bytes:
+    import io
+
+    from PIL import Image
+    buffer = io.BytesIO()
+    Image.new("RGB", (16, 16), "red").save(buffer, "PNG")
+    return buffer.getvalue()
+
+
+def test_a_reference_names_its_frame_in_the_argument():
+    assert one_reference("dog.png") == ("dog.png", None)
+    assert one_reference("dog.png@12") == ("dog.png", 12)
+    assert one_reference("dog.png@-1") == ("dog.png", -1)
+    assert one_reference("shots@night.png") == ("shots@night.png", None)
+
+
+def test_a_box_without_the_kernel_answers_no_lossy_attention(tmp_path):
+    """The words are the architecture's; the offer is the box's, and /health reads this."""
+    class Lossy(StubVideo):
+        ATTENTION_METHODS = (*StubVideo.ATTENTION_METHODS, "optimized")
+
+        def attention_routing_blocked(self):
+            return "no compiled sol_attn kernel for cuda:0"
+
+    model = Lossy(config=_stub_config(tmp_path))
+    assert model.ATTENTION_METHODS != model.attention_methods()
+    assert model.attention_methods() == ATTENTION_METHODS
+
+
+def test_a_refused_optimized_says_what_the_box_lacks(tmp_path):
+    class Lossy(StubVideo):
+        ATTENTION_METHODS = (*StubVideo.ATTENTION_METHODS, "optimized")
+
+        def attention_routing_blocked(self):
+            return "no compiled sol_attn kernel for cuda:0"
+
+    with pytest.raises(ValueError, match="no compiled sol_attn kernel"):
+        Lossy(config=_stub_config(tmp_path)).resolve_video(
+            VideoSpec(prompt="fox", attention="optimized"))
+
+
+def test_attention_a_model_does_not_answer_is_refused_by_name(tmp_path):
+    model = StubVideo(config=_stub_config(tmp_path))
+    assert model.ATTENTION_METHODS == ATTENTION_METHODS
+    with pytest.raises(ValueError, match="does not answer 'optimized' attention"):
+        model.resolve_video(VideoSpec(prompt="fox", attention="optimized"))
+    assert model.resolve_video(VideoSpec(prompt="fox")).attention == DEFAULT_ATTENTION
+

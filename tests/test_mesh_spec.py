@@ -6,8 +6,10 @@ from thenoise.mesh.spec import (
     DEFAULT_MESH_SCALE, DENSITY_PRESETS, MAX_OCTREE_RESOLUTION, OUTPUT_FORMATS,
     MeshSpec, mode_of,
 )
+from thenoise.utils.attention import DEFAULT_ATTENTION
 
 DEFAULTS = {
+    "attention": DEFAULT_ATTENTION,
     "output_format": "glb",
     "num_latents": 4096,
     "steps": 30,
@@ -100,8 +102,8 @@ def test_the_echo_leaves_the_picture_out():
     assert "image" not in public
     assert public["mode"] == "i2d"
     assert set(public) <= {"mode", "latents", "steps", "guidance_scale", "sampler",
-                           "seed", "output_format", "octree_resolution", "bounds",
-                           "mc_level", "scale", "lora_specs"}
+                           "seed", "attention", "output_format", "octree_resolution",
+                           "bounds", "mc_level", "scale", "lora_specs"}
 
 
 def test_a_request_names_no_loras_unless_asked():

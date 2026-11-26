@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from thenoise.utils.attention import DEFAULT_ATTENTION
 from PIL import Image
 
 from thenoise.__main__ import _QuietReads, _serve, main
@@ -78,7 +79,8 @@ class _FakeVideo:
 
     DEFAULTS = {"negative_prompt": "", "width": 480, "height": 272, "frames": 33,
                 "fps": 16, "steps": 40, "guidance_scale": 4.0, "flow_shift": 12.0,
-                "sampler": "euler", "output_format": "mp4"}
+                "sampler": "euler", "output_format": "mp4",
+                "attention": DEFAULT_ATTENTION}
 
     def __init__(self):
         self.spec = None
@@ -102,6 +104,7 @@ class _FakeShape:
 
     DEFAULTS = {"output_format": "glb", "num_latents": 64,
                 "steps": 12, "guidance_scale": 5.0, "sampler": "euler",
+                "attention": DEFAULT_ATTENTION,
                 "octree_resolution": 64, "bounds": 1.01, "mc_level": 0.0}
 
     def __init__(self):

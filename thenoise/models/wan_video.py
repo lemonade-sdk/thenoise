@@ -18,14 +18,17 @@ from thenoise.dit.wan_video.model import (
     Wan22Params,
     detect_params,
 )
+from thenoise.dit.wan_video.sparse import wan_plan, window_sigmas
 from thenoise.models.base import Conditioning
 from thenoise.models.config import EncodePromptArgs, VideoSamplingParams
 from thenoise.models.pixel_base import expect_latent_width
 from thenoise.models.video_base import Segment, VideoModel
 from thenoise.samplers import Step, sigma_steps
+from thenoise.utils.attention import DEFAULT_ATTENTION
 from thenoise.text_encoders.wan_video import load_wan_text_encoder
 from thenoise.utils.image_tensor import cover_crop
 from thenoise.utils.safetensors import Header
+from thenoise.utils.sol_attention import SolAttention, routing_unavailable
 from thenoise.utils.wan_weights import wan_dit_key
 from thenoise.vae.wan_video import detect_latent_width, load_wan_video_vae, TEMPORAL_COMPRESSION
 from thenoise.video.spec import ResolvedVideo, VideoSpec, frame_grid
@@ -148,6 +151,10 @@ class Wan22Model(VideoModel):
     # denoised at timestep zero, which is what the edit contract calls
     # `index_timestep_zero`.
     DEFAULT_PREFS = {**VideoModel.DEFAULT_PREFS, "ref_method": "index_timestep_zero"}
+    ATTENTION_METHODS = (*VideoModel.ATTENTION_METHODS, "optimized")
+
+    def attention_routing_blocked(self):
+        return routing_unavailable(self.device, self.dtype, self.params.head_dim)
 
     def pref(self, name: str, request_value=None):
         """Which transformer this is decides how a reference enters, so that one
@@ -208,7 +215,7 @@ class Wan22Model(VideoModel):
         self.CAPABILITIES = {**self.CAPABILITIES,
                              "video": {**self.CAPABILITIES["video"],
                                        "i2v": self.variant.i2v,
-                                       "flf2v": self.variant.flf2v}}
+                                       "flf2v": self.variant.flf2v, "ref2v": False}}
         # Both headers are read before either module is built: the clip's latent is the
         # only thing that crosses between them and the normalization table is keyed by
         # its width, so a mismatched `--vae` is refused here rather than mid-run.
@@ -436,6 +443,7 @@ class Wan22Model(VideoModel):
 
     def denoise_step(self, latents, t, cond, guidance_scale: float, i: int) -> torch.Tensor:
         module = self._segment.module
+        method = self._attention
         x = latents.to(module.dtype)
         clip = ClipReference() if self._clip is None else self._clip
         if clip.channels is not None:
@@ -451,15 +459,35 @@ class Wan22Model(VideoModel):
                                   device=x.device, dtype=torch.float32)
         else:
             timestep = clip.timestep_mask * timestep
-        vel = self._velocity(module, x, timestep, cond.cond)
+        sigma = float(t)
+        vel = self._velocity(module, x, timestep, cond.cond,
+                             self._sol(module, x, sigma, method))
         if cond.null is None:
             return vel
-        uncond = self._velocity(module, x, timestep, cond.null)
+        uncond = self._velocity(module, x, timestep, cond.null,
+                                self._sol(module, x, sigma, method))
         return uncond + guidance_scale * (vel - uncond)
 
+    def _sol(self, module, x: torch.Tensor, sigma: float,
+             method: str = DEFAULT_ATTENTION) -> SolAttention | None:
+        """Whether this step's self-attention routes, and with what sinks.
+
+        The patchified geometry is all the trunk's policy needs beside the sigma: the token
+        count decides whether routing is worth its overhead, the tokens in a frame where the
+        first frame's exact range ends. Both come out of the latent shape the step already
+        has, so nothing new is plumbed through the sampler.
+        """
+        pt, ph, pw = module.params.patch_size
+        _, _, t, h, w = x.shape
+        return wan_plan(tokens=(t // pt) * (h // ph) * (w // pw),
+                        tokens_per_frame=(h // ph) * (w // pw), dtype=x.dtype,
+                        head_dim=module.params.head_dim, device=x.device, sigma=sigma,
+                        window=window_sigmas(self.percent_to_sigma), method=method)
+
     @staticmethod
-    def _velocity(module, x, timestep, context) -> torch.Tensor:
-        return module(x, timestep=timestep, encoder_hidden_states=context).float()
+    def _velocity(module, x, timestep, context,
+                  sol: SolAttention | None = None) -> torch.Tensor:
+        return module(x, timestep=timestep, encoder_hidden_states=context, sol=sol).float()
 
     # ------------------------------------------------------------ codec
     def decode_frames(self, latents: torch.Tensor,

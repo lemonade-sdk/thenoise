@@ -12,22 +12,22 @@ import torch
 from safetensors.torch import save_file
 
 from conftest import TINY_HIDDEN, tiny_qwen_config, write_safetensors
-from thenoise.dit.h3_image import sampling
-from thenoise.samplers import sigma_ladder
-from thenoise.dit.kvcache import KVCache
-from thenoise.dit.h3_image.encoder import (
+from thenoise.dit.h3 import sampling
+from thenoise.dit.h3.encoder import (
     _truncate_qwen3_vl,
     layer_count,
     vision_token_tags,
 )
-from thenoise.dit.h3_image.layout import Layout, frame_grid, pad_to_patch
-from thenoise.dit.h3_image.models import COND_TIMESTEP, H3ImageDiT, H3ImageParams, _spans
-from thenoise.dit.h3_image.utils import detect_params, load_h3_image_dit
+from thenoise.dit.h3.checkpoint import H3_IMAGE_SIGNATURE, detect_params, load_h3_image_dit
+from thenoise.dit.h3.image import H3ImageDiT
+from thenoise.dit.h3.layout import COND_TIMESTEP, Layout, frame_grid, pad_to_patch
+from thenoise.dit.h3.trunk import H3Params, _spans
+from thenoise.dit.kvcache import KVCache
+from thenoise.samplers import sigma_ladder
 
 TINY_SIGMAS = (1.0, 0.5, 0.0)
 
-
-def _tiny_params(**over) -> H3ImageParams:
+def _tiny_params(**over) -> H3Params:
     base = dict(
         hidden_size=48,
         num_layers=1,
@@ -43,10 +43,10 @@ def _tiny_params(**over) -> H3ImageParams:
         pdd_steps=2,
         pdd_sigmas=TINY_SIGMAS,
     )
-    return H3ImageParams(**{**base, **over})
+    return H3Params(**{**base, **over})
 
 
-def _tiny_dit(params: H3ImageParams | None = None) -> H3ImageDiT:
+def _tiny_dit(params: H3Params | None = None) -> H3ImageDiT:
     """A built instance with its two empty buffers filled in: unfilled they hold whatever
     the allocator left, usually NaN.
     """
@@ -71,7 +71,7 @@ def test_patchify_round_trips_through_the_head():
     latent = torch.randn(1, 4, 6, 8)
     rows = dit.patchify(latent)
     assert rows.shape == (3 * 4, 4 * 4)  # (h/2 * w/2) rows of C*2*2
-    assert torch.allclose(dit.unpatchify(rows, 6, 8), latent)
+    assert torch.allclose(dit.unpatchify(rows, (6, 8)), latent)
 
 
 def test_patch_rows_are_area_normalised():
@@ -93,55 +93,64 @@ def test_pad_to_patch_repeats_the_edge_and_reports_the_original():
 
 
 def test_layout_segments_cover_the_sequence_in_order():
-    layout = Layout(text_len=4, latent_h=4, latent_w=6, refs=[(2, 4), (4, 4)])
+    layout = Layout.image(text_len=4, latent_h=4, latent_w=6, refs=[(2, 4), (4, 4)])
     kinds = [kind for _, _, kind in layout.segments]
-    assert kinds == ["text", "target", "ref", "ref"]
+    assert kinds == ["text", "video", "ref_img", "ref_img"]
 
     assert layout.segments[0][0] == 0
     for (_, end, _), (start, _, _) in zip(layout.segments, layout.segments[1:]):
         assert end == start
     assert layout.segments[-1][1] == layout.seq_len
-    assert layout.target_span == layout.segments[1][:2]
+    assert layout.video_span == layout.segments[1][:2]
 
     # (2,4) is one row of patches x two; (4,4) is 2x2; the target (4,6) is 2x3.
     assert [end - start for start, end, _ in layout.segments] == [4, 6, 2, 4]
-    assert layout.codec_rows == 12
+    assert layout.video_rows == 12
 
 
 def test_layout_puts_references_one_time_unit_apart():
     """Reference rows sit on the target's grid one time unit earlier."""
-    layout = Layout(text_len=3, latent_h=2, latent_w=2, refs=[(2, 2), (2, 2)])
+    layout = Layout.image(text_len=3, latent_h=2, latent_w=2, refs=[(2, 2), (2, 2)])
     rows = {kind: layout.position_ids[start:stop]
             for start, stop, kind in layout.segments}
     ref_rows = [layout.position_ids[start:stop]
-                for start, stop, kind in layout.segments if kind == "ref"]
+                for start, stop, kind in layout.segments if kind == "ref_img"]
     assert rows["text"][:, 0].tolist() == [0.0, 1.0, 2.0]
     assert torch.equal(rows["text"][:, 1:], torch.zeros(3, 2))
     assert [float(r[:, 0][0]) for r in ref_rows] == [3.0, 4.0]
-    assert rows["target"][:, 0].unique().tolist() == [5.0]
+    assert rows["video"][:, 0].unique().tolist() == [5.0]
 
 
 def test_layout_without_references_is_text_then_target():
-    layout = Layout(text_len=2, latent_h=4, latent_w=4)
-    assert [kind for _, _, kind in layout.segments] == ["text", "target"]
-    assert layout.refs == ()
+    layout = Layout.image(text_len=2, latent_h=4, latent_w=4)
+    assert [kind for _, _, kind in layout.segments] == ["text", "video"]
+    assert layout.audio_span is None
 
 
 def test_modulation_rows_follow_the_step_and_the_tags():
-    layout = Layout(text_len=4, latent_h=2, latent_w=2)
-    assert layout.modulation_rows() == [(0, 4, 1), (4, 5, 0)]  # text tag 1, visual tag 0
+    layout = Layout.image(text_len=4, latent_h=2, latent_w=2)
+    timesteps = layout.timesteps(0.5)
+    assert layout.modulation_rows(timesteps) == [(0, 4, 1), (4, 5, 0)]  # text tag 1, visual 0
 
     tags = torch.tensor([1, 0, 0, 1])
-    assert layout.modulation_rows(tags=tags) == [
+    assert layout.modulation_rows(timesteps, tags) == [
         (0, 1, 1), (1, 3, 0), (3, 4, 1), (4, 5, 0)]
 
 
 def test_a_reference_is_modulated_at_its_own_timestep():
-    """Row 0 is the step's ``t`` (prompt and target) and row 1 ``COND_TIMESTEP``: reading
-    row 0 for both conditions a reference as picture-to-be-cleaned.
+    """The step's ``t`` modulates the prompt and the target; a reference is read at
+    ``COND_TIMESTEP``, which is its own row of the table: reading it at the step's own
+    conditions it as picture-to-be-cleaned.
     """
-    layout = Layout(text_len=3, latent_h=2, latent_w=2, refs=[(2, 2)])
-    assert layout.modulation_rows() == [(0, 3, 1), (3, 4, 0), (4, 5, 3)]
+    layout = Layout.image(text_len=3, latent_h=2, latent_w=2, refs=[(2, 2)])
+    timesteps = layout.timesteps(0.5)
+    assert timesteps.values == (0.5, COND_TIMESTEP)
+    assert timesteps.rows == {"text": 0, "video": 0, "ref_img": 1}
+    assert layout.modulation_rows(timesteps) == [(0, 3, 1), (3, 4, 0), (4, 5, 3)]
+    # At the last step the two coincide, and the table collapses to the one row.
+    timesteps = layout.timesteps(COND_TIMESTEP)
+    assert timesteps.values == (COND_TIMESTEP,)
+    assert set(timesteps.rows.values()) == {0}
 
 
 # ---------------------------------------------------------------- head bank
@@ -153,11 +162,11 @@ def test_pdd_head_bank_uses_one_head_per_interval_of_its_own_schedule():
     weight = final.video_out.weight.reshape(2, -1, final.video_out.weight.shape[1])
     bias = final.video_out.bias.reshape(2, -1)
 
-    head_first = final._bank(1.0, torch.tensor(TINY_SIGMAS))
+    head_first = final._bank(final.video_out, 1.0, torch.tensor(TINY_SIGMAS))
     assert torch.equal(head_first[0], weight[0])
     assert torch.equal(head_first[1], bias[0])
 
-    head_second = final._bank(0.5, torch.tensor(TINY_SIGMAS))
+    head_second = final._bank(final.video_out, 0.5, torch.tensor(TINY_SIGMAS))
     assert torch.allclose(head_second[0], weight[0] + weight[1])
     assert torch.allclose(head_second[1], bias[0] + bias[1])
 
@@ -169,21 +178,21 @@ def test_pdd_head_bank_averages_the_intervals_a_wider_step_spans():
     dit = _tiny_dit()
     final = dit.final_layer
     weight = final.video_out.weight.reshape(2, -1, final.video_out.weight.shape[1])
-    folded = final._bank(1.0, torch.tensor([1.0, 0.0]))
+    folded = final._bank(final.video_out, 1.0, torch.tensor([1.0, 0.0]))
     assert torch.allclose(folded[0], weight[0] + 0.5 * weight[1])
 
 
 def test_head_bank_demands_the_schedule_it_is_stepping_through():
     dit = _tiny_dit()
     with pytest.raises(ValueError, match="needs the sigma schedule"):
-        dit.final_layer._bank(1.0, None)
+        dit.final_layer._bank(dit.final_layer.video_out, 1.0, None)
 
 
 def test_forward_needs_no_schedule_for_a_single_head():
     params = _tiny_params(pdd_steps=1, pdd_sigmas=(1.0, 0.0))
     dit = _tiny_dit(params)
     out = _forward(dit, torch.randn(1, 4, 4, 4), 1.0, torch.randn(1, 3, params.hidden_size),
-                   Layout(3, 4, 4))
+                   Layout.image(3, 4, 4))
     assert out.shape == (1, 4, 4, 4)
 
 
@@ -195,7 +204,7 @@ def test_forward_returns_the_targets_velocity():
     params = dit.params
     latent = torch.randn(1, params.latents_dim, 6, 6)
     context = torch.randn(1, 5, params.hidden_size)
-    out = _forward(dit, latent, 0.75, context, Layout(5, 6, 6),
+    out = _forward(dit, latent, 0.75, context, Layout.image(5, 6, 6),
                    sample_sigmas=torch.tensor(TINY_SIGMAS))
 
     assert out.shape == latent.shape
@@ -207,7 +216,7 @@ def test_forward_cuts_the_padding_back_off_an_odd_latent():
     dit = _tiny_dit()
     params = dit.params
     latent = torch.randn(1, params.latents_dim, 5, 7)
-    layout = Layout(2, 6, 8)  # the padded shape
+    layout = Layout.image(2, 6, 8)  # the padded shape
     out = _forward(dit, latent, 1.0, torch.randn(1, 2, params.hidden_size), layout,
                    sample_sigmas=torch.tensor(TINY_SIGMAS))
     assert out.shape == (1, params.latents_dim, 5, 7)
@@ -216,14 +225,14 @@ def test_forward_cuts_the_padding_back_off_an_odd_latent():
 def test_forward_rejects_a_layout_built_for_another_shape():
     dit = _tiny_dit()
     with pytest.raises(ValueError, match="layout was built for"):
-        dit(torch.randn(1, 4, 6, 6), 1.0, torch.randn(1, 2, 48), Layout(2, 4, 4),
+        dit(torch.randn(1, 4, 6, 6), 1.0, torch.randn(1, 2, 48), Layout.image(2, 4, 4),
             sample_sigmas=torch.tensor(TINY_SIGMAS))
 
 
 def test_forward_demands_the_rope_table_of_its_branch():
     dit = _tiny_dit()
     with pytest.raises(KeyError, match="no entry for"):
-        dit(torch.randn(1, 4, 4, 4), 1.0, torch.randn(1, 3, 48), Layout(3, 4, 4),
+        dit(torch.randn(1, 4, 4, 4), 1.0, torch.randn(1, 3, 48), Layout.image(3, 4, 4),
             sample_sigmas=torch.tensor(TINY_SIGMAS))
 
 
@@ -234,9 +243,9 @@ def test_references_join_the_sequence_without_reaching_the_output():
     context = torch.randn(1, 3, params.hidden_size)
     ref = torch.randn(1, params.latents_dim, 2, 2)
 
-    plain = _forward(dit, latent, 1.0, context, Layout(3, 4, 4),
+    plain = _forward(dit, latent, 1.0, context, Layout.image(3, 4, 4),
                      sample_sigmas=torch.tensor(TINY_SIGMAS))
-    with_ref = _forward(dit, latent, 1.0, context, Layout(3, 4, 4, [(2, 2)]), refs=[ref],
+    with_ref = _forward(dit, latent, 1.0, context, Layout.image(3, 4, 4, [(2, 2)]), refs=[ref],
                         sample_sigmas=torch.tensor(TINY_SIGMAS))
     assert with_ref.shape == plain.shape
     assert not torch.allclose(with_ref, plain)
@@ -252,7 +261,7 @@ def test_kv_cache_freezes_the_references_and_reproduces_the_full_sequence():
     latent = torch.randn(1, params.latents_dim, 4, 4)
     context = torch.randn(1, 3, params.hidden_size)
     ref = torch.randn(1, params.latents_dim, 2, 2)
-    layout = Layout(3, 4, 4, [(2, 2)])
+    layout = Layout.image(3, 4, 4, [(2, 2)])
     dit.prepare_rope(layout, torch.float32)
     sigmas = torch.tensor(TINY_SIGMAS)
 
@@ -276,7 +285,7 @@ def test_kv_cache_holds_every_reference_of_the_run():
     latent = torch.randn(1, params.latents_dim, 4, 4)
     context = torch.randn(1, 3, params.hidden_size)
     refs = [torch.randn(1, params.latents_dim, 2, 2), torch.randn(1, params.latents_dim, 2, 4)]
-    layout = Layout(3, 4, 4, [(2, 2), (2, 4)])
+    layout = Layout.image(3, 4, 4, [(2, 2), (2, 4)])
     dit.prepare_rope(layout, torch.float32)
     sigmas = torch.tensor(TINY_SIGMAS)
 
@@ -378,14 +387,14 @@ def _write_dit(tmp_path, dit, params, sigmas=TINY_SIGMAS) -> str:
 
 def test_detect_params_reads_the_head_bank_and_its_grid(tmp_path):
     dit = _tiny_dit()
-    detected = detect_params(_write_dit(tmp_path, dit, dit.params))
+    detected = detect_params(_write_dit(tmp_path, dit, dit.params), H3_IMAGE_SIGNATURE)
     assert detected == dit.params
 
 
 def test_loader_restores_every_weight(tmp_path):
     dit = _tiny_dit()
     path = _write_dit(tmp_path, dit, dit.params)
-    loaded = load_h3_image_dit(path, detect_params(path), device="cpu", dtype=torch.float32)
+    loaded = load_h3_image_dit(path, detect_params(path, H3_IMAGE_SIGNATURE), device="cpu", dtype=torch.float32)
 
     loaded_state = loaded.state_dict()
     assert loaded_state.keys() == dit.state_dict().keys()
@@ -397,7 +406,7 @@ def test_load_keeps_the_fp32_islands_at_fp32(tmp_path):
     """A BF16 run moves the trunk and leaves the modulation curve and the head bank FP32."""
     dit = _tiny_dit()
     path = _write_dit(tmp_path, dit, dit.params)
-    loaded = load_h3_image_dit(path, detect_params(path), device="cpu", dtype=torch.bfloat16)
+    loaded = load_h3_image_dit(path, detect_params(path, H3_IMAGE_SIGNATURE), device="cpu", dtype=torch.bfloat16)
 
     assert loaded.final_layer.video_out.weight.dtype == torch.float32
     assert loaded.video_patch_proj.weight.dtype == torch.float32
@@ -413,7 +422,7 @@ def test_a_bf16_run_keeps_the_stream_at_bf16(tmp_path):
     """
     dit = _tiny_dit()
     path = _write_dit(tmp_path, dit, dit.params)
-    loaded = load_h3_image_dit(path, detect_params(path), device="cpu", dtype=torch.bfloat16)
+    loaded = load_h3_image_dit(path, detect_params(path, H3_IMAGE_SIGNATURE), device="cpu", dtype=torch.bfloat16)
 
     block = loaded.blocks[0]
     modulation = block.adaln_proj(loaded.time_embedding((0.5, COND_TIMESTEP), torch.device("cpu")))
@@ -432,9 +441,9 @@ def test_a_bf16_edit_run_with_a_cache_stays_at_bf16(tmp_path):
     """
     dit = _tiny_dit()
     path = _write_dit(tmp_path, dit, dit.params)
-    loaded = load_h3_image_dit(path, detect_params(path), device="cpu", dtype=torch.bfloat16)
+    loaded = load_h3_image_dit(path, detect_params(path, H3_IMAGE_SIGNATURE), device="cpu", dtype=torch.bfloat16)
     p = loaded.params
-    layout = Layout(3, 4, 4, [(2, 2)])
+    layout = Layout.image(3, 4, 4, [(2, 2)])
     loaded.prepare_rope(layout, torch.bfloat16)
     latent = torch.randn(1, p.latents_dim, 4, 4, dtype=torch.bfloat16)
     context = torch.randn(1, 3, p.hidden_size, dtype=torch.bfloat16)
@@ -454,7 +463,7 @@ def test_detect_refuses_a_head_bank_that_disagrees_with_its_grid(tmp_path):
     dit.video_patch_proj = torch.nn.Linear(8, 48)  # an 8-wide patch -> a 4-row bank
     path = _write_dit(tmp_path, dit, dit.params, sigmas=(1.0, 0.0))  # ... with 2 points
     with pytest.raises(ValueError, match="head bank is 4 rows"):
-        detect_params(path)
+        detect_params(path, H3_IMAGE_SIGNATURE)
 
 
 def test_detect_defaults_to_one_head_without_the_metadata(tmp_path):
@@ -463,7 +472,7 @@ def test_detect_defaults_to_one_head_without_the_metadata(tmp_path):
     write_safetensors(path, {k.replace("qk_norm.query_norm", "q_norm")
                              .replace("qk_norm.key_norm", "k_norm"): v.contiguous()
                              for k, v in dit.state_dict().items()})
-    assert detect_params(str(path)).pdd_steps == 1
+    assert detect_params(str(path), H3_IMAGE_SIGNATURE).pdd_steps == 1
 
 
 # ------------------------------------------------------------------ schedule
@@ -519,22 +528,72 @@ def test_a_prompt_without_pictures_is_all_text():
 def tiny_conditioner():
     from PIL import Image
 
-    from thenoise.dit.h3_image.encoder import H3ImageTextEncoder
-    from thenoise.utils.text_encoder import (
-        QWEN25_TOKENIZER_CONFIG_DIR,
-        QWEN3_VL_TOKENIZER_OVERRIDES,
-        load_qwen3_vl_processor,
-        load_qwen3_vl_tokenizer,
-    )
+    from thenoise.dit.h3.encoder import H3TextEncoder, h3_tokenizer
+    from thenoise.utils.text_encoder import PICTURE_LABEL, load_qwen3_vl_processor
 
     model = _truncate_qwen3_vl(tiny_qwen_config(), 2).eval().requires_grad_(False)
-    tokenizer, _ = load_qwen3_vl_tokenizer(
-        QWEN25_TOKENIZER_CONFIG_DIR,
-        max_length=4096,
-        overrides=QWEN3_VL_TOKENIZER_OVERRIDES,
-    )
-    encoder = H3ImageTextEncoder(model, tokenizer, load_qwen3_vl_processor(tokenizer))
+    tokenizer = h3_tokenizer()
+    encoder = H3TextEncoder(model, tokenizer, load_qwen3_vl_processor(tokenizer),
+                    picture_label=PICTURE_LABEL)
     return encoder.eval(), Image.new("RGB", (64, 64), "white")
+
+
+LABELS = {"picture": "<Picture {}>: ", "clip": "<Video {}>: ", "sound": "<Audio {}>: "}
+
+
+def presentation(media):
+    from thenoise.dit.h3.encoder import presentation as build
+    return build(media, "a fox", LABELS)
+
+
+def test_a_clip_is_one_block_per_pair_of_frames():
+    """An odd last frame repeats into the last block rather than being shown alone."""
+    from PIL import Image
+
+    from thenoise.dit.h3.encoder import GuideMedia
+    from thenoise.utils.text_encoder import VIDEO_PAD as VIDEO_PAD
+    frames = tuple(Image.new("RGB", (8, 8), shade)
+                   for shade in ("white", "black", "white"))
+    clip = GuideMedia("clip", frames, (0, 12, 24), 24.0, 3)
+    text, images, videos, meta = presentation([clip])
+    assert len(videos) == 2
+    assert [one["frames_indices"] for one in meta] == [[0, 12], [24, 24]]
+    assert text == "<Video 1>: " + VIDEO_PAD * 2 + "a fox"
+    assert images == []
+
+
+def test_the_ordinal_counts_across_keyframes_and_references():
+    """One counter per kind over the whole run, because that is how a prompt names them."""
+    from PIL import Image
+
+    from thenoise.dit.h3.encoder import GuideMedia
+    text, images, videos, meta = presentation([
+        GuideMedia("picture", (Image.new("RGB", (8, 8)),)),
+        GuideMedia("picture", (Image.new("RGB", (8, 8)),)),
+        GuideMedia("sound"),
+    ])
+    assert text.index("<Picture 1>: ") < text.index("<Picture 2>: ") < text.index("<Audio 1>: ")
+    assert len(images) == 2 and videos == [] and meta == []
+
+
+def test_the_conditioner_reads_a_clip_and_a_sound_as_one_prompt(tiny_conditioner):
+    from PIL import Image
+
+    from thenoise.dit.h3.encoder import GuideMedia
+    encoder, picture = tiny_conditioner
+    # The fixture spells conditions the image release does; a clip needs the other one's.
+    encoder.labels.update({"clip": "<Video {}>: ", "sound": "<Audio {}>: "})
+    frames = tuple(Image.new("RGB", (64, 64), shade)
+                   for shade in ("white", "black", "white"))
+    media = [GuideMedia("picture", (picture,)),
+             GuideMedia("clip", frames, (0, 12, 24), 24.0, 3),
+             GuideMedia("sound")]
+    embeds, mask, tags = encoder.encode("a fox", media)
+    assert torch.isfinite(embeds).all() and mask.shape == embeds.shape[:2]
+    assert int((tags == 0).sum()) > 0, "the vision blocks carry the visual tag"
+    # A sound is a label and no vision: the same run without it is shorter by that label.
+    shorter, _, _ = encoder.encode("a fox", media[:2])
+    assert shorter.shape[1] < embeds.shape[1]
 
 
 def test_truncation_sets_the_depth_and_replaces_the_norm():
@@ -578,6 +637,33 @@ def test_the_conditioner_embeds_the_prompt_it_assembled(tiny_conditioner):
 
     again, _, again_tags = encoder.encode("make it red", [picture])
     assert torch.equal(again, embeds) and torch.equal(again_tags, tags)
+
+
+def test_the_releases_own_tokens_reach_the_model_whole(tiny_conditioner):
+    """`<d>` and the caption markers are one id each, at the ids the tokenizer ships.
+
+    Unregistered they are ordinary text, which reads the wrong embedding rows; a prompt
+    is allowed to contain them because the training data does.
+    """
+    from thenoise.utils.text_encoder import H3_SPECIAL_TOKENS
+
+    encoder, _ = tiny_conditioner
+    ids = encoder.processor(text=["<d>hello</d> <|caption_start|> keep <|cutoff|>"],
+                            images=None)["input_ids"][0]
+
+    for name in ("<d>", "</d>", "<|caption_start|>", "<|cutoff|>"):
+        assert ids.count(H3_SPECIAL_TOKENS[name]) == 1, name
+
+
+def test_a_special_token_that_lands_elsewhere_is_refused():
+    """The released ids are only free while the base table stops where it does."""
+    from thenoise.utils.text_encoder import add_fixed_special_tokens, load_tokenizer
+
+    tokenizer = load_tokenizer()
+    add_fixed_special_tokens(tokenizer, {"<nope>": 151669})
+
+    with pytest.raises(ValueError, match="elsewhere than the released ids"):
+        add_fixed_special_tokens(tokenizer, {"<nope>": 151670})
 
 
 def test_an_empty_prompt_is_one_token_not_none(tiny_conditioner):

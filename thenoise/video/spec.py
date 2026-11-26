@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 import math
-import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
+from thenoise.utils.attention import DEFAULT_ATTENTION
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -13,8 +13,8 @@ from thenoise.utils.lora_roles import LoraSpecs, lora_specs_by_role
 
 #: What a request can be checked against before any model exists. A value it leaves unset
 #: arrives from the model instead and is checked after the merge, in `resolve`.
-_Positive = Annotated[int, Field(gt=0)]
-_PositiveFinite = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+from thenoise.utils.spec import (Picture, Positive, PositiveFinite, Seed, prefer,
+                                resolve_seed)
 
 
 def frame_grid(wanted: float, *, compression: int, upward: bool) -> int:
@@ -30,11 +30,36 @@ def frame_grid(wanted: float, *, compression: int, upward: bool) -> int:
     return compression * max(1, math.ceil(cells) if upward else math.floor(cells + 0.5)) + 1
 
 
-def mode_of(image: bytes | None, end_image: bytes | None) -> str:
-    """``t2v``, ``i2v`` or ``flf2v``, from the reference frames a request carries."""
+def mode_of(image: bytes | None, end_image: bytes | None,
+            references: tuple[Guide, ...] = ()) -> str:
+    """``t2v``, ``i2v``, ``flf2v`` or ``ref2v``, from the conditions a request carries.
+
+    References outrank keyframes: a clip given something to look like is a reference run whether
+    or not it also names its first frame. Which architectures have anywhere to put one is the
+    ``ref2v`` capability, so this answers from what arrived rather than from a mode a caller also
+    has to set and keep in agreement.
+    """
+    if references:
+        return "ref2v"
     if image is None:
         return "t2v"
     return "flf2v" if end_image is not None else "i2v"
+
+
+@dataclass(frozen=True)
+class Guide:
+    """One condition the clip is asked to resemble.
+
+    ``media`` is a file's bytes and nothing else: whether it is a picture, a clip or a
+    sound is asked of the bytes, because a client chooses the name and often chooses a
+    wrong one.
+
+    ``frame``, negative counted from the end, anchors it there; without one it is a
+    resemblance and no frame of the clip.
+    """
+
+    media: bytes
+    frame: int | None = None
 
 
 @dataclass(frozen=True)
@@ -58,10 +83,13 @@ class ResolvedVideo:
     #: different set on each; every model has at least the default role to answer for.
     lora_specs: dict[str, list[str]]
     explicit_frames: bool = False
+    #: What the clip is asked to look like, as opposed to the frame it starts or ends on.
+    references: tuple[Guide, ...] = ()
+    attention: str = DEFAULT_ATTENTION
 
     @property
     def mode(self) -> str:
-        return mode_of(self.image, self.end_image)
+        return mode_of(self.image, self.end_image, self.references)
 
     def public(self) -> dict:
         return {
@@ -70,7 +98,7 @@ class ResolvedVideo:
             "duration": self.frame_count / self.fps, "steps": self.steps,
             "guidance_scale": self.guidance_scale, "seed": self.seed,
             "output_format": self.output_format,
-            "sampler": self.sampler,
+            "sampler": self.sampler, "attention": self.attention,
             "lora_specs": self.lora_specs,
         }
 
@@ -89,18 +117,21 @@ class VideoSpec(BaseModel):
 
     prompt: str
     negative_prompt: str | None = None
-    width: _Positive | None = None
-    height: _Positive | None = None
-    frames: _Positive | None = None
-    duration: _PositiveFinite | None = None
-    fps: _Positive | None = None
-    steps: _Positive | None = None
+    width: Positive | None = None
+    height: Positive | None = None
+    frames: Positive | None = None
+    duration: PositiveFinite | None = None
+    fps: Positive | None = None
+    steps: Positive | None = None
     guidance_scale: Annotated[float, Field(ge=0, allow_inf_nan=False)] | None = None
-    flow_shift: _PositiveFinite | None = None
-    seed: int | None = None
+    flow_shift: PositiveFinite | None = None
+    seed: Seed = None
     output_format: Literal["mp4", "webm"] | None = None
-    image: Annotated[bytes, Field(min_length=1)] | None = None
-    end_image: Annotated[bytes, Field(min_length=1)] | None = None
+    image: Picture | None = None
+    end_image: Picture | None = None
+    references: list[Guide] = []
+    #: ``auto``, ``full`` or ``optimized``.
+    attention: str | None = None
     sampler: Annotated[str, Field(min_length=1)] | None = None
     lora_specs: LoraSpecs = None
 
@@ -113,14 +144,7 @@ class VideoSpec(BaseModel):
 
     @property
     def mode(self) -> str:
-        return mode_of(self.image, self.end_image)
-
-    @field_validator("seed")
-    @classmethod
-    def _seed_torch_generator_range(cls, value: int | None) -> int | None:
-        if value is not None and not -(2**63) <= value < 2**64:
-            raise ValueError("seed is outside torch.Generator's supported range")
-        return value
+        return mode_of(self.image, self.end_image, tuple(self.references))
 
     def resolve(self, defaults: Mapping[str, Any]) -> ResolvedVideo:
         """Fill what the request left unset, then merge into one set of numbers.
@@ -128,9 +152,7 @@ class VideoSpec(BaseModel):
         Anything here can have come from a checkpoint marker rather than from the
         request, so it is checked rather than trusted.
         """
-        def pref(key: str):
-            value = getattr(self, key)
-            return defaults[key] if value is None else value
+        pref = prefer(self, defaults)
 
         negative_prompt = pref("negative_prompt")
         if self.end_image is not None and self.image is None:
@@ -154,7 +176,7 @@ class VideoSpec(BaseModel):
                   if self.duration is not None else defaults["frames"])
         if frames < 1:
             raise ValueError("frame count must be positive")
-        seed = secrets.randbits(32) if self.seed is None or self.seed == -1 else self.seed
+        seed = resolve_seed(self.seed)
         return ResolvedVideo(
             prompt=self.prompt, negative_prompt=negative_prompt,
             width=width, height=height, frame_count=frames, fps=fps,
@@ -163,4 +185,5 @@ class VideoSpec(BaseModel):
             output_format=output_format, image=self.image, end_image=self.end_image,
             sampler=sampler, lora_specs=lora_specs_by_role(self.lora_specs),
             explicit_frames=self.frames is not None,
+            references=tuple(self.references), attention=pref("attention"),
         )

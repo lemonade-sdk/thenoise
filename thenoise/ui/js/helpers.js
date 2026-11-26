@@ -455,6 +455,7 @@ const FIELD_LABELS = {
   upscale_factor: 'Upscale factor', upscale_type: 'Upscale type',
   sampler: 'Sampler', lora_specs: 'LoRA',
   mode: 'Mode', frame_count: 'Frames', fps: 'FPS', duration: 'Duration',
+  references: 'References', attention: 'Attention',
   flow_shift: 'Flow shift', output_format: 'Output',
   latents: 'Tokens', octree_resolution: 'Density', bounds: 'Bounds',
   mc_level: 'Cut level', scale: 'Scale',
@@ -570,23 +571,42 @@ function hideResult(imgId, placeholderId) {
   $(placeholderId).style.display = 'block';
 }
 
-// A dropped image as every pane wants it: data URL, bare base64, size; null if it is not one.
-function readImageFile(file) {
+// What a browser says a file is. The server asks the bytes the same question again,
+// because a name and a MIME type are both things a client chose.
+function mediaKind(file) {
+  if (file.type.startsWith('image/')) return 'picture';
+  if (file.type.startsWith('video/')) return 'video';
+  if (file.type.startsWith('audio/')) return 'audio';
+  return 'unknown';
+}
+
+// A dropped file of any kind, as base64. A picture also comes with a preview and its
+// size; anything else arrives as bytes, and the tile that stands in for a preview says
+// what extension it came with.
+function readMediaFile(file) {
   return new Promise(done => {
-    if (!file || !file.type.startsWith('image/')) { done(null); return; }
+    if (!file) { done(null); return; }
     const reader = new FileReader();
     reader.onload = () => {
       const dataUrl = reader.result;
+      const media = { b64: dataUrl.split(',')[1], dataUrl: null, kind: mediaKind(file) };
+      if (media.kind !== 'picture') { done(media); return; }
       const img = new Image();
       img.onload = () => done({
-        dataUrl, b64: dataUrl.split(',')[1],
+        ...media, dataUrl,
         dims: { w: img.naturalWidth, h: img.naturalHeight },
       });
-      img.onerror = () => done(null);
+      img.onerror = () => done(null);   // a file that says image/ and is not one
       img.src = dataUrl;
     };
     reader.readAsDataURL(file);
   });
+}
+
+// A dropped image as every pane wants it: data URL, bare base64, size; null if it is not one.
+function readImageFile(file) {
+  return readMediaFile(file).then(media =>
+    (media && media.dataUrl) ? media : null);
 }
 
 // Show a freshly loaded input image in a single/result split stage.
@@ -600,15 +620,23 @@ function showInputPreview(dataUrl, file, ids) {
   $(ids.dzHint).style.display = 'none';
 }
 
-function addThumb(box, { src, alt, title, cls, onRemove }) {
+function addThumb(box, { src, alt, title, cls, label, onRemove }) {
   const div = document.createElement('div');
   div.className = 'ref-thumb' + (cls ? ' ' + cls : '');
   div.title = title;
-  const img = document.createElement('img');
-  img.className = 'thumb-img';
-  img.src = src;
-  img.alt = alt;
-  div.appendChild(img);
+  if (src) {
+    const img = document.createElement('img');
+    img.className = 'thumb-img';
+    img.src = src;
+    img.alt = alt;
+    div.appendChild(img);
+  } else {
+    // No preview to show for a clip or a sound: the extension is as close as a name gets.
+    const tag = document.createElement('div');
+    tag.className = 'thumb-file';
+    tag.textContent = label || '';
+    div.appendChild(tag);
+  }
   const rm = document.createElement('button');
   rm.className = 'ref-remove';
   rm.textContent = '\u00d7';
@@ -872,6 +900,9 @@ function collectSettings(prefix, extra) {
   addNumbers(body, prefix, ['width', 'height', 'steps', 'seed'], ['guidance_scale']);
   const samplerVal = $(prefix + 'sampler').value;
   if (samplerVal) body.sampler = samplerVal;
+  // Every medium is asked the same question, even one that answers it one way only.
+  const attention = $(prefix + 'attention');
+  if (attention && attention.value) body.attention = attention.value;
   Object.assign(body, extra);
   return body;
 }

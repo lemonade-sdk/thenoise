@@ -25,6 +25,7 @@ from thenoise.controlmap.options import OPTIONS_BY_KIND
 from thenoise.postprocess import POSTPROCESS_NAMES, PostprocessOptions
 from thenoise.runtime import Runtime, Settings
 from thenoise.samplers import SAMPLERS
+from thenoise.utils.attention import ATTENTION_METHODS
 
 
 class FakePipeline:
@@ -127,6 +128,8 @@ def test_health_reports_the_loaded_model():
         "CAPABILITIES": {"image": {"t2i": True, "i2i": True}, "kv_cache": True,
                          "upscale": True, "video": None},
         "REF_METHODS": ("index", "index_timestep_zero", "vision"),
+        "ATTENTION_METHODS": ATTENTION_METHODS,
+        "attention_methods": lambda self: self.ATTENTION_METHODS,
         "pixel_channels": 4,
     })()
     res = _endpoint(create_app(runtime), "/health")()
@@ -139,7 +142,8 @@ def test_health_reports_the_loaded_model():
     assert res["capabilities"] == {"image": {"t2i": True, "i2i": True},
                                    "kv_cache": True, "upscale": True, "video": None,
                                    "ref_methods": ["index", "index_timestep_zero",
-                                                   "vision"]}
+                                                   "vision"],
+                                   "attention_methods": list(ATTENTION_METHODS)}
     # Every solver this build has, whichever model is loaded.
     assert res["samplers"] == sorted(SAMPLERS)
     assert res["pixel_channels"] == 4

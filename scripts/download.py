@@ -37,6 +37,8 @@ Models:
                   https://huggingface.co/Comfy-Org/Fibo-2.0
   h3-image        MiniMax H3-Image (t2i + edit in one DiT)
                   https://huggingface.co/Comfy-Org/MiniMax-H3-Image
+  h3-video        MiniMax H3 video (fl2va: t2v, i2v, first/last frame, with sound)
+                  https://huggingface.co/Comfy-Org/MiniMax-H3
   esrgan          Real-ESRGAN x4 pixel upscaler (optional, for upscaling)
                   https://huggingface.co/Comfy-Org/Real-ESRGAN_repackaged
   controlmaps      Control-map checkpoints: a Depth-Anything-V2 depth model, or the
@@ -74,6 +76,8 @@ Usage:
     python scripts/download.py --model fibo2 --variant dev
     python scripts/download.py --model fibo2 --variant dev --int8-convrot
     python scripts/download.py --model h3-image
+    python scripts/download.py --model h3-video --int8-convrot
+    python scripts/download.py --model h3-video --int8-convrot --include-turbo
     python scripts/download.py --model wan22
     python scripts/download.py --model wan22 --variant base
     python scripts/download.py --model wan22-14b
@@ -394,6 +398,15 @@ def _fibo2_jobs(args: argparse.Namespace) -> list[Artifact]:
 
 
 _H3_REPO = "Comfy-Org/MiniMax-H3-Image"
+_H3_VIDEO_REPO = "Comfy-Org/MiniMax-H3"
+#: lightx2v's turbos, which trail the Comfy-Org repackaging by a few versions.
+_H3_TURBO_REPO = "lightx2v/Minimax-h3-Turbo"
+#: The 768p fl2v turbos that fit a pruned DiT: 208 targets each, all of them attention or
+#: MLP projections. `..._8step_v1.2_768p` is left out on purpose — it also carries 51
+#: `adaln_proj.linear` targets whose input is 2688 wide, the *unpruned* trunk's width, so
+#: there is nothing on a pruned checkpoint for them to attach to.
+_H3_TURBOS = ("minimax_h3_fl2v_turbo_4step_v1.3_768p_comfyui_bf16",
+              "minimax_h3_fl2v_turbo_8step_v1.1_768p_comfyui_bf16")
 
 
 def _h3_image_jobs(args: argparse.Namespace) -> list[Artifact]:
@@ -409,6 +422,30 @@ def _h3_image_jobs(args: argparse.Namespace) -> list[Artifact]:
          "text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors"),
         ("vae", _H3_REPO, "vae/minimax_h3_image_vae_fp16.safetensors"),
     ]
+
+
+def _h3_video_jobs(args: argparse.Namespace) -> list[Artifact]:
+    """MiniMax-H3 video: the pruned fl2va DiT, the Qwen3-VL-32B encoder, and both codecs.
+
+    ``fl2va`` only — ``ref2va`` conditions on reference images through a path this engine
+    does not have yet, so its files would load and not work. The clip codec stays at the
+    published FP16: a quantized codec file needs a load path no codec here has, unlike a
+    quantized DiT. The text encoder is the same file the image release ships, so an
+    existing ``models/h3-image`` copy can be passed to ``--text-encoder`` instead.
+    """
+    suffix = "int8_convrot" if args.int8_convrot else "bf16"
+    jobs = [
+        ("dit", _H3_VIDEO_REPO,
+         f"diffusion_models/minimax_h3_fl2va_pruned_{suffix}.safetensors"),
+        ("text_encoder", _H3_VIDEO_REPO,
+         "text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors"),
+        ("vae", _H3_VIDEO_REPO, "vae/minimax_h3_video_vae_fp16.safetensors"),
+        ("audio_vae", _H3_VIDEO_REPO, "vae/minimax_h3_audio_vae_fp32.safetensors"),
+    ]
+    if args.include_turbo:
+        jobs += [(f"loras/{name}.safetensors", _H3_TURBO_REPO, f"{name}.safetensors")
+                 for name in _H3_TURBOS]
+    return jobs
 
 
 def _esrgan_jobs(args: argparse.Namespace) -> list[Artifact]:
@@ -663,6 +700,11 @@ MODELS: dict[str, ModelSpec] = {
         "MiniMax H3-Image (t2i + edit in one DiT)",
         _h3_image_jobs,
     ),
+    "h3-video": ModelSpec(
+        "h3-video", "./models/h3",
+        "MiniMax H3 video (fl2va: T2V / I2V / FLF2V, with sound)",
+        _h3_video_jobs,
+    ),
     "ltx23": ModelSpec(
         "ltx23", "./models/ltx23",
         "LTX 2.3 Distilled (T2V / I2V + audio; BF16 or INT8 ConvRot)", _ltx23_jobs,
@@ -748,6 +790,8 @@ def _epilog() -> str:
         "  python scripts/download.py --model fibo2",
         "  python scripts/download.py --model fibo2 --variant dev --int8-convrot",
         "  python scripts/download.py --model h3-image",
+        "  python scripts/download.py --model h3-video --int8-convrot",
+        "  python scripts/download.py --model h3-video --include-turbo   # 4- and 8-step",
         "  python scripts/download.py --model ltx23 --int8-convrot",
         "  python scripts/download.py --model ltx25 --int8-convrot",
         "  python scripts/download.py --model ltx25               # BF16",
@@ -802,6 +846,13 @@ def main() -> None:
         help="krea2: also download the RAW (non-turbo) DiT",
     )
     ap.add_argument(
+        "--include-turbo", action="store_true",
+        help=(
+            "h3-video: also download the lightx2v turbo LoRAs for the pruned fl2va DiT "
+            "(4-step and 8-step, trained at 768p; see the model docs for their settings)"
+        ),
+    )
+    ap.add_argument(
         "--small-decoder", action="store_true",
         help=(
             "klein / moss-image: also download BFL's small-decoder Flux.2 VAE, a drop-in "
@@ -837,6 +888,8 @@ def main() -> None:
             )
     if args.include_raw and args.model != "krea2":
         ap.error("--include-raw is only supported by --model krea2")
+    if args.include_turbo and args.model != "h3-video":
+        ap.error("--include-turbo is only supported by --model h3-video")
     if args.small_decoder and args.model not in ("klein", "moss-image"):
         ap.error("--small-decoder is only supported by --model klein, moss-image")
     if (args.image_only or args.edit_only) and args.model not in ("qwen-image", "mage-flow"):

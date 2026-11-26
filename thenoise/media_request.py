@@ -16,13 +16,23 @@ class MediaRequest:
 
     def to_spec(self):
         data = self.model_dump(exclude={"model", *self.MEDIA_FIELDS})
+        data.update(self.decode_media())
+        return self.SPEC(**data)
+
+    def decode_media(self) -> dict:
+        """What the spec is handed for the request's media fields: base64 become bytes.
+
+        A medium whose media is more than a bare picture overrides this and returns that
+        field's spec form itself; the base covers pictures, one or several.
+        """
+        decoded = {}
         for name in self.MEDIA_FIELDS:
             encoded = getattr(self, name)
             if isinstance(encoded, list):
-                data[name] = [verified_picture(name, one) for one in encoded]
+                decoded[name] = [verified_picture(name, one) for one in encoded]
             elif encoded is not None:
-                data[name] = verified_picture(name, encoded)
-        return self.SPEC(**data)
+                decoded[name] = verified_picture(name, encoded)
+        return decoded
 
 
 __all__ = ["MediaRequest"]

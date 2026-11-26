@@ -15,6 +15,8 @@ from thenoise.dit.kvcache import KVCache
 from thenoise.memory import MemoryManager
 from thenoise.models.lora_support import LoRASupport
 from thenoise.utils.device_patches import apply_device_patches
+from thenoise.utils.attention import ATTENTION_METHODS as ATTENTION_WORDS
+from thenoise.utils.attention import DEFAULT_ATTENTION, LOSSY_ATTENTION
 from thenoise.utils.dynamo import apply_recompile_limit
 from thenoise.models.config import EncodePromptArgs, ModelConfig, SamplingParams
 from thenoise.utils.image_tensor import ReferenceSizing, flatten_alpha
@@ -67,6 +69,9 @@ class DiffusionModel(LoRASupport, ABC):
 
     #: Model defaults behind ``pref``; an adapter merges the entries it differs on.
     DEFAULT_PREFS: ClassVar[Dict[str, Any]] = {
+        # Every medium carries the field, whether its trunk has more than one way to
+        # compute attention yet or not: a client asks the same question of all of them.
+        "attention": DEFAULT_ATTENTION,
         "steps": 28,
         # CFG scale; <= 1.0 disables the unconditional forward.
         "guidance_scale": 0.0,
@@ -79,6 +84,11 @@ class DiffusionModel(LoRASupport, ABC):
 
     #: How this model can use a reference picture, best first; empty means none.
     REF_METHODS: ClassVar[Tuple[str, ...]] = ()
+
+    #: What this model answers for ``attention``: the words in
+    #: :data:`thenoise.utils.attention.ATTENTION_METHODS`, plus ``optimized`` where the
+    #: architecture has a lossy path to offer.
+    ATTENTION_METHODS: ClassVar[Tuple[str, ...]] = ATTENTION_WORDS
 
     #: Created by ``start_kv_caches``, dropped by ``end_kv_caches``.
     _kv_caches: Optional[Dict[str, KVCache]] = None
@@ -102,6 +112,17 @@ class DiffusionModel(LoRASupport, ABC):
         return header.identifies(cls.SIGNATURE)
 
     @classmethod
+    def dit_roles(cls, checkpoints: dict[str, Header]) -> dict[str, Header]:
+        """The DiT files among the roles a request named.
+
+        The runtime hands over every role it was given, and a role in
+        :attr:`COMPONENT_ROLES` is a codec or a projection rather than a transformer, so
+        saying anything about DiT files means looking past those.
+        """
+        return {role: header for role, header in checkpoints.items()
+                if role not in cls.COMPONENT_ROLES}
+
+    @classmethod
     def validate_paths(cls, checkpoints: dict[str, Header]) -> None:
         """Reject a set of DiT files this model cannot use, before anything loads.
 
@@ -110,13 +131,13 @@ class DiffusionModel(LoRASupport, ABC):
         need more than the primary checkpoint override this; the role names are theirs,
         so the runtime never has to know them.
         """
-        if len(checkpoints) > 1:
+        if len(cls.dit_roles(checkpoints)) > 1:
             raise ValueError(f"{cls.name} takes one DiT checkpoint")
 
     @classmethod
     def require_same_model(cls, checkpoints: dict[str, Header]) -> None:
         """Refuse an extra DiT file this adapter would not have claimed on its own."""
-        for role, header in checkpoints.items():
+        for role, header in cls.dit_roles(checkpoints).items():
             if role and not cls.detect(header):
                 raise ValueError(
                     f"{header.path} does not match the {cls.SIGNATURE.name} signature: "
@@ -323,6 +344,43 @@ class DiffusionModel(LoRASupport, ABC):
         self._kv_caches = None
 
     # ------------------------------------------------------- LoRA-able components
+    def attention_methods(self) -> Tuple[str, ...]:
+        """The ``attention`` words this model answers on the hardware it is loaded onto.
+
+        :attr:`ATTENTION_METHODS` is the architecture's vocabulary; a lossy path is only
+        worth offering a client when this box can run it.
+        """
+        if "optimized" not in self.ATTENTION_METHODS:
+            return self.ATTENTION_METHODS
+        blocked = self.attention_routing_blocked()
+        return self.ATTENTION_METHODS if blocked is None else tuple(
+            w for w in self.ATTENTION_METHODS if w != LOSSY_ATTENTION)
+
+    def resolve_attention(self, method: str) -> str:
+        """The attention a request asked for, checked against this model and this box.
+
+        The words are the architecture's; whether this box runs the lossy one is only
+        worth asking when the request asked for it.
+        """
+        if method not in self.ATTENTION_METHODS:
+            raise ValueError(
+                f"{self.name} does not answer {method!r} attention; it answers "
+                f"{', '.join(self.ATTENTION_METHODS)}")
+        blocked = (self.attention_routing_blocked()
+                   if method == LOSSY_ATTENTION else None)
+        if blocked is not None:
+            raise ValueError(
+                f"{self.name} cannot run optimized attention here: {blocked}")
+        return method
+
+    def attention_routing_blocked(self) -> Optional[str]:
+        """Why this box cannot run the model's lossy attention path, ``None`` when it can.
+
+        A model that offers ``optimized`` answers this from its own trunk width, which is a
+        checkpoint fact rather than a class one.
+        """
+        return None
+
     def lora_components(self) -> dict[str, torch.nn.Module]:
         """This model's LoRA-able components, by the role a request names them with.
 

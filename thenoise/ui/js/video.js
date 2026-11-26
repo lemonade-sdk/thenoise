@@ -7,7 +7,7 @@ let vOutMeta = null;      // request + server-resolved settings of the current r
 const videoJob = { id: null }; // in flight, for the Cancel button to name
 const VIDEO_PROGRESS = { root: 'v_progress', label: 'v_progress_label', bar: 'v_bar' };
 const VIDEO_MODES = {t2v: 'text-to-video', i2v: 'image-to-video',
-                     flf2v: 'first and last frame'};
+                     flf2v: 'first and last frame', ref2v: 'reference-to-video'};
 
 /* ---------- the frames a clip is pinned by ---------- */
 
@@ -58,9 +58,52 @@ function resetVideoResult() {
   hideResult('v_video', 'vplaceholder');
 }
 
+/* ---------- the pictures a clip is asked to look like ---------- */
+
+// In the order they were picked, which is the order a prompt numbers them in.
+let vRefs = [];
+
+const REF_WORD = { picture: 'Picture', video: 'Video', audio: 'Audio' };
+
+function renderVideoRefs() {
+  const box = $('video_ref_refs');
+  box.innerHTML = '';
+  $('video_ref_dz_hint').style.display = vRefs.length ? 'none' : '';
+  // Ordinals count each kind on its own, which is how a prompt points at one: a clip and
+  // its soundtrack are numbered apart from the pictures beside them.
+  const said = {};
+  vRefs.forEach((ref, i) => {
+    const word = REF_WORD[ref.kind] || 'Reference';
+    said[word] = (said[word] || 0) + 1;
+    addThumb(box, {
+      src: ref.dataUrl, label: fileTag(ref.name), alt: word.toLowerCase() + ' ' + said[word],
+      title: ref.name + ' — <' + word + ' ' + said[word] + '>',
+      onRemove: () => { vRefs.splice(i, 1); renderVideoRefs(); resetVideoResult(); },
+    });
+  });
+}
+
+function fileTag(name) {
+  const ext = name.includes('.') ? name.split('.').pop() : '';
+  return ext ? ext.slice(0, 4).toUpperCase() : 'FILE';
+}
+
+async function addVideoRefs(files) {
+  const picked = [...files];
+  $('video_ref_file').value = ''; // so the same files can be picked again
+  for (const file of picked) {
+    const media = await readMediaFile(file);
+    if (media) vRefs.push({dataUrl: media.dataUrl, b64: media.b64,
+                           kind: media.kind, name: file.name});
+  }
+  renderVideoRefs();
+  resetVideoResult();
+}
+
 bindDropzone('video_dropzone', 'video_file', files => loadVideoFrame('image', files[0]));
 bindDropzone('video_end_dropzone', 'video_end_file',
              files => loadVideoFrame('end_image', files[0]));
+bindDropzone('video_ref_dropzone', 'video_ref_file', addVideoRefs);
 bindSwap('video_swap', 'video_width', 'video_height');
 
 /* ---------- request ---------- */
@@ -82,6 +125,9 @@ function collectVideoSettings() {
   if (lora_specs) body.lora_specs = lora_specs;
   if (vFrames.image.b64) body.image = vFrames.image.b64;
   if (vFrames.end_image.b64) body.end_image = vFrames.end_image.b64;
+  if (vRefs.length) body.references = vRefs.map(r => r.b64);
+  const attention = $('video_attention').value;
+  if (attention) body.attention = attention;
   return body;
 }
 
@@ -117,6 +163,7 @@ function validateVideoInputs() {
 $('video_generate').addEventListener('click', () => {
   if (!validateVideoInputs()) return;
   const body = collectVideoSettings();
+  const refNames = vRefs.map(r => r.name);
   resetVideoResult();
   runQueuedJob({
     job: videoJob,
@@ -132,8 +179,9 @@ $('video_generate').addEventListener('click', () => {
       if (vOutUrl) URL.revokeObjectURL(vOutUrl);
       vOutUrl = URL.createObjectURL(blob);
       // `resolved` has the grid-snapped size and the seed drawn; the frames are dropped.
-      const { image, end_image, ...sent } = body;
-      vOutMeta = { ...sent, model: status.model, ...status.resolved };
+      const { image, end_image, references, ...sent } = body;
+      vOutMeta = { ...sent, references: refNames, model: status.model,
+                   ...status.resolved };
       showVideoResult(vOutUrl);
       vHist.add(vOutUrl, vOutMeta);
     },
@@ -169,6 +217,10 @@ function renderVideoInfo() {
     if (m[key] != null && m[key] !== '') rows.push([FIELD_LABELS[key], m[key], '']);
   }
   if (m.duration != null) rows.push([FIELD_LABELS.duration, Number(m.duration).toFixed(2) + ' s', '']);
+  if (Array.isArray(m.references) && m.references.length) {
+    rows.push([FIELD_LABELS.references, m.references.join(', '), '']);
+  }
+  if (m.attention) rows.push([FIELD_LABELS.attention, m.attention, '']);
   const lora = m.lora_specs;
   const hasLora = Array.isArray(lora) ? lora.length : (lora ? Object.keys(lora).length : 0);
   if (hasLora) rows.push(['LoRA', formatLora(lora), 'prompt']);

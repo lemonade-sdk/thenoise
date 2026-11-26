@@ -56,6 +56,27 @@ def test_resolve_falls_back_to_model_defaults():
     assert r.pixel_scale == 0 and r.pixel_upscaler is None
 
 
+def test_attention_is_answered_for_a_still_as_for_any_medium():
+    """The field is generic even where the trunk has one way with attention."""
+    model = StubModel()
+    controller = _controller(model)
+
+    def resolved(**fields):
+        return controller._resolve_pipeline(GenerateRequest(prompt="p", **fields),
+                                             is_edit=False)
+
+    assert resolved().attention == model.DEFAULT_PREFS["attention"]
+    assert resolved(attention="full").attention == "full"
+    # What ran is what was answered, so the method belongs in the echo too.
+    assert resolved(attention="full").public()["attention"] == "full"
+
+
+def test_a_still_cannot_ask_for_attention_the_model_does_not_answer():
+    with pytest.raises(ValueError, match="does not answer 'optimized'"):
+        _controller()._resolve_pipeline(GenerateRequest(prompt="p", attention="optimized"),
+                                        is_edit=False)
+
+
 def test_resolve_explicit_request_wins_over_defaults():
     r = _controller()._resolve_pipeline(
         _request(width=128, height=64, steps=5, guidance_scale=3.5, sampler="er_sde"),
@@ -198,12 +219,29 @@ def test_changing_sampling_params_reuses_prompt_but_resamples(override):
     assert model.calls["denoise_step"] == 2 + override.get("steps", 2)
 
 
+def test_the_sampling_key_sees_the_attention_method():
+    """Attention is a different function over the same rows, so it cannot share latents."""
+    controller = _controller()
+    model = controller.model
+
+    def key(attention):
+        return controller._cache_key_sampling(
+            ("prompt",), model.DEFAULT_PREFS["width"], model.DEFAULT_PREFS["height"],
+            2, 1, "euler", attention)
+
+    assert key("full") != key("optimized")
+    # The decode key embeds the sampling one, so it moves with it.
+    assert (controller._cache_key_decode(key("full"), False)
+            != controller._cache_key_decode(key("optimized"), False))
+
+
 def test_decode_key_changes_when_refined():
     """The refined path produces a different latent, so it must not share a key."""
     controller = _controller()
     model = controller.model
     sampling_key = controller._cache_key_sampling(
-        ("prompt",), model.DEFAULT_PREFS["width"], model.DEFAULT_PREFS["height"], 2, 1, "euler"
+        ("prompt",), model.DEFAULT_PREFS["width"], model.DEFAULT_PREFS["height"], 2, 1,
+        "euler", model.DEFAULT_PREFS["attention"]
     )
     plain = controller._cache_key_decode(sampling_key, False)
     refined = controller._cache_key_decode(sampling_key, True)

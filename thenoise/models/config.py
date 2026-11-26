@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Optional, Union
 
 from thenoise.mesh.octree import CHUNK
+from thenoise.utils.attention import DEFAULT_ATTENTION
 from thenoise.utils.lora_roles import LoraSpecs
 from thenoise.utils.safetensors import Header, read_header
 
@@ -99,6 +100,9 @@ class EncodePromptArgs:
     negative_prompt: str = ""
     guidance_scale: float = 0.0
     image: Optional[Union[Image.Image, List[Image.Image]]] = None
+    #: The reference conditions as they were read, for a model that presents them to its
+    #: conditioner in its own words rather than as pictures.
+    guides: Sequence[Any] = ()
 
 
 @dataclass
@@ -129,6 +133,8 @@ class GenerateRequest:
     kv_cache: Optional[bool] = None
     # Reference conditioning method for editing (edit only); None = auto.
     ref_method: Optional[str] = None
+    # How attention is computed (``auto`` / ``full`` / ``optimized``); None = auto.
+    attention: Optional[str] = None
 
     def postprocess_options(self) -> PostprocessOptions:
         """The post-decode knobs, as the filter chain wants them."""
@@ -145,6 +151,10 @@ class SamplingParams:
     seed: int
     guidance_scale: float
     sampler: str
+    #: ``auto`` / ``full`` / ``optimized``, as the request asked and the model answered.
+    #: Every medium carries it; a trunk with one way of computing attention simply never
+    #: reads it, and such a model does not offer ``optimized``.
+    attention: str = DEFAULT_ATTENTION
     # Resolved K/V caching preference for this sampling run.
     kv_cache: bool = False
 

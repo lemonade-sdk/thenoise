@@ -16,7 +16,9 @@ from thenoise.memory import MemoryManager
 from thenoise.models.config import VideoSamplingParams
 from thenoise.models.pixel_base import PixelModel
 from thenoise.samplers import Step
+from thenoise.utils.attention import DEFAULT_ATTENTION
 from thenoise.utils.image_tensor import load_image
+from thenoise.utils.media import media_size
 from thenoise.video.spec import ResolvedVideo, VideoSpec
 
 
@@ -33,9 +35,8 @@ class Segment:
     module: torch.nn.Module
     steps: tuple[Step, ...]
     guidance_scale: float
-    #: What the request asked for. ``steps`` says where this span sits in the schedule;
-    #: this says what the latents it walks are a picture of, which a flat latent cannot
-    #: tell a codec whose stream carries more than one modality.
+    #: What the latents this span walks are a picture of: a flat latent cannot tell a
+    #: codec whose stream carries more than one modality.
     params: VideoSamplingParams
 
 
@@ -51,18 +52,37 @@ class Waveform:
     sample_rate: int
 
 
+@dataclass(frozen=True)
+class Condition:
+    """A condition a clip run reads alongside its own frames, already through a codec.
+
+    ``frame``, negative counted from the end, pins it there; without one it keeps the grid
+    it arrived with and takes time ahead of the clip's timeline.
+    """
+
+    video: Optional[torch.Tensor] = None
+    audio: Optional[torch.Tensor] = None
+    frame: Optional[int] = None
+
+
 class VideoModel(PixelModel):
     MEDIUM = "video"
 
     CAPABILITIES = {**PixelModel.CAPABILITIES, "image": None,
-                    "video": {"t2v": False, "i2v": False, "flf2v": False}}
+                    "video": {"t2v": False, "i2v": False, "flf2v": False,
+                                  "ref2v": False}}
 
-    #: Shared video prefs; ``test_video_shared.py`` checks each variant covers them all.
+    #: Whether the architecture has anywhere in its packing for reference conditions,
+    #: which are not the frames a clip starts or ends on. Nothing in a checkpoint says
+    #: which release it is, so this is answered by the architecture, not by a filename.
+
+    #: The prefs every video variant must answer, whatever its own defaults are.
     DEFAULT_PREFS = {**PixelModel.DEFAULT_PREFS,
                      "negative_prompt": "", "output_format": "webm"}
 
-    #: Per-run state the controller sets between steps, never across a swap.
+    #: Per-run state, set between steps and never carried across a component swap.
     _segment: Optional[Segment] = None
+    _attention: str = DEFAULT_ATTENTION
 
     # ------------------------------------------------------------ request
     @property
@@ -77,7 +97,17 @@ class VideoModel(PixelModel):
             width, height = self.size_from_reference(
                 spec.width, spec.height, load_image(io.BytesIO(spec.image)))
             spec = spec.model_copy(update={"width": width, "height": height})
+        elif (spec.width is None and spec.height is None and spec.references
+              and self.capability("video").get("ref2v")):
+            # Nothing keys a size but the first thing the clip was given to look like --
+            # and a reference with no pictures in it keys nothing.
+            seen = next((size for size in (media_size(guide.media)
+                                           for guide in spec.references) if size), None)
+            if seen is not None:
+                width, height = self.size_from_reference(None, None, seen)
+                spec = spec.model_copy(update={"width": width, "height": height})
         resolved = spec.resolve(self.default_prefs)
+        self.resolve_attention(resolved.attention)
         width, height = self.resolve_size(resolved.width, resolved.height)
         if (width, height) != (resolved.width, resolved.height):
             resolved = dataclasses.replace(resolved, width=width, height=height)
@@ -86,11 +116,8 @@ class VideoModel(PixelModel):
     # ------------------------------------------------------------ schedule
     def transition_segment(self, latents: torch.Tensor, previous: Segment,
                            next_segment: Segment, params, token) -> torch.Tensor:
-        """Optional model-specific latent transition between complete segments.
-
-        Called after the previous stage releases its weights and before the next
-        stage is held. Wan's high/low experts share latents unchanged. AV models
-        may use a separate staged spatial upscaler here.
+        """Optional latent transition between complete segments, run after the previous
+        stage releases its weights and before the next is held.
         """
         return latents
 
@@ -99,17 +126,15 @@ class VideoModel(PixelModel):
 
     def segments(self, params, schedule: Sequence[Step],
                  guidance_scale: float) -> list[Segment]:
-        """The schedule split by the component that answers each span.
-
-        The controller stages each segment, switches LoRAs on its module and runs the
-        solver over its steps, so a model with more than one transformer says only where
-        the spans are.
+        """The schedule split by the component that answers each span: a model with more
+        than one transformer says only where the spans are.
         """
         return [Segment("dit", self.dit, tuple(schedule), guidance_scale, params)]
 
     def begin_segment(self, segment: Segment) -> None:
-        """Tell ``denoise_step`` which segment it is inside; called before each one."""
+        """Called before each segment with the one the run is now inside."""
         self._segment = segment
+        self._attention = segment.params.attention
 
     # ------------------------------------------------------------ codec
     def audio_components(self) -> tuple[str, ...]:

@@ -1,11 +1,16 @@
-"""Reading media from a path, and from base64 on the wire."""
+"""Reading media from a path, and from base64 on the wire: pictures, and the clips and
+sounds a reference condition can be."""
 from __future__ import annotations
 
 import base64
 import binascii
 import io
 from pathlib import Path
+from typing import Callable, NamedTuple, Optional, Union
 
+import av
+import numpy as np
+import torch
 from PIL import Image
 
 
@@ -34,4 +39,216 @@ def verified_picture(field: str, encoded: str) -> bytes:
     return data
 
 
-__all__ = ["read_media", "verified_picture"]
+#: How much of a reference file is read: one longer than the clip it conditions is cropped
+#: to it anyway, and the file is whoever sent it, at whatever length they recorded.
+MAX_REFERENCE_SECONDS = 60.0
+
+
+class ReferenceMedia(NamedTuple):
+    """What one reference file turned out to be.
+
+    ``frames`` is a single image for a picture and the clip's own for a video, in the
+    order it plays; ``pcm`` is its sound, if it carried one, at the rate the file
+    carries it rather than the rate whoever reads it wants.
+    """
+
+    kind: str
+    frames: tuple[Image.Image, ...]
+    pcm: Optional[np.ndarray] = None
+    sample_rate: Optional[int] = None
+    fps: Optional[float] = None
+
+
+def media_kind(data: bytes) -> str:
+    """``picture``, ``clip``, ``audio`` or ``unknown``, asked of the bytes.
+
+    A file name is what a client chose, and a picture, a clip and a sound arrive through
+    one field, so the kind has to come from the file. Both readers here look at a header
+    only: PIL before decompressing anything, av at a container's stream list.
+    """
+    try:
+        with Image.open(io.BytesIO(data)):
+            return "picture"
+    except (OSError, Image.DecompressionBombError):
+        pass
+    try:
+        with av.open(io.BytesIO(data)) as container:
+            if container.streams.video:
+                return "clip"
+            if container.streams.audio:
+                return "audio"
+    except (av.FFmpegError, OSError, ValueError):
+        pass
+    return "unknown"
+
+
+def media_size(data: bytes) -> Optional[tuple[int, int]]:
+    """The picture size a file states in its header, or ``None`` for a file with none.
+
+    A reference asked only to name the size of a run needs no decoding: a request that
+    carries a clip would otherwise pull every frame of it through a codec to read the
+    number the stream header already gives.
+    """
+    try:
+        with Image.open(io.BytesIO(data)) as picture:
+            return picture.size
+    except (OSError, Image.DecompressionBombError):
+        pass
+    try:
+        with av.open(io.BytesIO(data)) as container:
+            if container.streams.video:
+                stream = container.streams.video[0]
+                return stream.width, stream.height
+    except (av.FFmpegError, OSError, ValueError):
+        pass
+    return None
+
+
+def verified_media(field: str, encoded: str) -> bytes:
+    """One base64 reference from the wire, checked before a multi-minute job is accepted.
+
+    The header of a picture or of a container is all that is read: whether the bytes are
+    a picture, a clip or a sound is asked of them again when they are decoded, and a
+    client is told about a bad file now rather than after a queue slot.
+    """
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise ValueError(f"{field} must be valid base64 bytes") from e
+    if not data:
+        raise ValueError(f"{field} must not be empty")
+    if media_kind(data) == "unknown":
+        raise ValueError(f"{field} must be a picture, a clip or a sound")
+    return data
+
+
+def read_reference(data: bytes, *, name: str = "reference",
+                   max_seconds: float = MAX_REFERENCE_SECONDS,
+                   max_frames: Optional[int] = None,
+                   fit: Optional[Callable[[Image.Image], Image.Image]] = None
+                   ) -> ReferenceMedia:
+    """One reference file as frames and sound, whatever kind of file it was: the kind is
+    asked of the bytes, since a picture, a clip and a sound arrive through one field. No
+    frame count is snapped here -- which counts the codec runs is the codec's answer.
+
+    ``fit`` is applied frame by frame as the demuxer gives them up, not to the finished
+    list: at its own resolution a clip outweighs the machine asked to hold it.
+    """
+    kind = media_kind(data)
+    if kind == "unknown":
+        raise ValueError(f"{name} is not a picture, a clip or a sound")
+    if kind == "picture":
+        with Image.open(io.BytesIO(data)) as picture:
+            rgb = picture.convert("RGB")
+            return ReferenceMedia("picture", (rgb if fit is None else fit(rgb),))
+
+    try:
+        with av.open(io.BytesIO(data)) as container:
+            frames, fps = _read_frames(container, max_seconds, max_frames, fit)
+            sound, rate = _read_sound(data, max_seconds)
+    except av.FFmpegError as e:
+        raise ValueError(f"{name} cannot be decoded ({e.strerror or e})") from e
+    if not frames and sound is None:
+        raise ValueError(f"{name} is not a picture, a clip or a sound")
+    return ReferenceMedia("clip" if frames else "audio", tuple(frames), sound, rate, fps)
+
+
+def _read_frames(container, max_seconds: float, max_frames: Optional[int],
+                 fit: Optional[Callable[[Image.Image], Image.Image]]
+                 ) -> tuple[list[Image.Image], Optional[float]]:
+    if not container.streams.video:
+        return [], None
+    stream = container.streams.video[0]
+    rate = stream.average_rate or stream.base_rate
+    # A frame with no timestamps never reaches ``frame.time``, so the header's rate
+    # caps the count too.
+    limit = max_frames or (int(max_seconds * float(rate)) if rate else None)
+    frames = []
+    for frame in container.decode(stream):
+        if frame.time is not None and frame.time >= max_seconds:
+            break
+        image = frame.to_image()
+        frames.append(image if fit is None else fit(image))
+        if limit is not None and len(frames) >= limit:
+            break
+    return frames, (float(rate) if rate else None)
+
+
+def _read_sound(data: bytes, max_seconds: float) -> tuple[Optional[np.ndarray],
+                                                          Optional[int]]:
+    """The file's sound as ``[channels, samples]`` float32, at the rate it was recorded.
+
+    A fresh open: the frames have already drained the demuxer.
+    """
+    with av.open(io.BytesIO(data)) as container:
+        if not container.streams.audio:
+            return None, None
+        stream = container.streams.audio[0]
+        limit = int(max_seconds * (stream.rate or 0)) or None
+        resampler = None
+        parts: list[np.ndarray] = []
+        read = 0
+        for frame in container.decode(stream):
+            if resampler is None:
+                resampler = av.AudioResampler(format="fltp", layout=frame.layout,
+                                              rate=frame.sample_rate)
+            parts.extend(moved.to_ndarray() for moved in resampler.resample(frame))
+            read += frame.samples
+            if frame.time is not None and frame.time >= max_seconds:
+                break
+            if limit is not None and read >= limit:
+                break
+        if resampler is not None:
+            parts.extend(moved.to_ndarray() for moved in resampler.resample(None))
+        if not parts:
+            return None, stream.rate
+        return pcm_array(np.concatenate(parts, axis=1)), stream.rate
+
+
+def pcm_array(pcm: Union[torch.Tensor, np.ndarray]) -> np.ndarray:
+    """PCM as ``[channels, samples]`` float32 in ``[-1, 1]``, finite on every lane.
+
+    A model's tensor and a decoder's array mean the same thing, so neither is moved by
+    hand at each call site; a non-finite sample would poison a latent and every frame
+    decoded from it, which is worth refusing where it is still cheap.
+    """
+    if hasattr(pcm, "detach"):
+        pcm = pcm.detach().float().cpu().numpy()
+    samples = np.asarray(pcm, dtype=np.float32)
+    if samples.ndim == 3 and samples.shape[0] == 1:
+        samples = samples[0]
+    if samples.ndim == 1:
+        samples = samples[None, :]
+    if samples.ndim != 2 or samples.shape[0] not in (1, 2) or samples.shape[1] == 0:
+        raise ValueError("audio must be (channels, samples), mono or stereo")
+    if not np.isfinite(samples).all():
+        raise ValueError("audio has non-finite samples")
+    return np.ascontiguousarray(np.clip(samples, -1, 1))
+
+
+def pcm_resample(pcm: Union[torch.Tensor, np.ndarray], src_rate: int, dst_rate: int,
+                 layout: Optional[str] = None) -> np.ndarray:
+    """Move PCM to another rate through libswresample, whole array in and whole array out.
+
+    Sample positions are what a timeline and a latent grid are anchored by, so a resampler
+    that streams would hand back a clock of its own. ``layout`` is the channel count's,
+    unless a caller already named it for the container it is writing.
+    """
+    samples = pcm_array(pcm)
+    if layout is None:
+        layout = "mono" if samples.shape[0] == 1 else "stereo"
+    if src_rate == dst_rate:
+        return samples
+    frame = av.AudioFrame.from_ndarray(samples, format="fltp", layout=layout)
+    frame.sample_rate = src_rate
+    resampler = av.AudioResampler(format="fltp", layout=layout, rate=dst_rate)
+    parts = [moved.to_ndarray()
+             for chunk in (resampler.resample(frame), resampler.resample(None))
+             for moved in chunk]
+    return np.ascontiguousarray(np.concatenate(parts, axis=1))
+
+
+__all__ = ["MAX_REFERENCE_SECONDS", "ReferenceMedia", "media_kind", "media_size",
+           "pcm_array",
+           "pcm_resample", "read_media", "read_reference", "verified_media",
+           "verified_picture"]

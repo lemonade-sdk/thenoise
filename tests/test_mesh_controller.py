@@ -10,7 +10,8 @@ from thenoise.jobs import Cancellation, JobCancelled
 from thenoise.mesh.controller import MeshPipelineController
 from thenoise.mesh.extract import Mesh
 from thenoise.mesh.spec import MeshSpec
-from thenoise.models.base import Conditioning
+from thenoise.models.base import Conditioning, DiffusionModel
+from thenoise.utils.attention import ATTENTION_METHODS
 
 PNG = io.BytesIO()
 Image.new("RGB", (24, 16), (3, 4, 5)).save(PNG, format="PNG")
@@ -21,6 +22,8 @@ Image.new("RGB", (24, 16), (9, 9, 9)).save(OTHER, format="PNG")
 OTHER = OTHER.getvalue()
 
 DEFAULTS = {
+    # The base's own prefs, so a preference added to every medium needs no line here.
+    **DiffusionModel.DEFAULT_PREFS,
     "output_format": "glb",
     "num_latents": 6,
     "steps": 3,
@@ -57,6 +60,9 @@ class FakeMemory:
 class FakeShapeModel:
     name = "fake-shape"
     MEDIUM = "mesh"
+    ATTENTION_METHODS = ATTENTION_METHODS
+    resolve_attention = DiffusionModel.resolve_attention
+    attention_routing_blocked = staticmethod(lambda: None)
     lora_dir = "/loras"
     default_prefs = DEFAULTS
     dtype = torch.float32
