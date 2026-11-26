@@ -1,10 +1,8 @@
 """H3 audiovisual: the trunk as a clip with sound.
 
-Two streams share one sequence — the video lattice and the audio stream, which is a third
-of a second of stereo per row of the former's frames — and both are denoised at once. They
-run at different strengths: the stream's own sigma is the video's re-shifted from a shift
-of twelve to three, so the audio is always further along than the picture, and the caller
-passes both.
+Both streams are denoised in one sequence, at different strengths: an audio sigma is the
+video's re-shifted from twelve to three, so the sound is always further along than the
+picture at the same step.
 """
 from __future__ import annotations
 
@@ -27,11 +25,8 @@ from thenoise.utils.attention import DEFAULT_ATTENTION
 
 
 class H3AVDiT(H3DiT):
-    """The audiovisual DiT: ``[text | keyframes | audio | video]`` in, both velocities out.
-
-    ``context`` is a refined prompt — :meth:`refine_text` runs once per sampling — and the
-    keyframes share the target's spatial grid, one latent frame each, at the frame index
-    the layout pinned them to.
+    """The audiovisual DiT: ``[text | conditions | references | audio | video]`` in, both
+    velocities out. ``context`` is a refined prompt, once per run.
     """
 
     def __init__(self, params: H3Params,
@@ -46,8 +41,8 @@ class H3AVDiT(H3DiT):
     def _keyframe_rows(self, latent: torch.Tensor, seed: int) -> torch.Tensor:
         """A keyframe's patchified rows, noise-augmented to the conditioned timestep.
 
-        The RNG stream restarts for every keyframe on purpose: a second one must not
-        inherit the draws the first consumed.
+        The RNG stream restarts per keyframe: one must not inherit the draws the last
+        consumed.
         """
         padded, _ = pad_to_patch(latent.to(torch.float32), self.params.patch_size)
         rows = self.patchify(padded)
@@ -70,13 +65,11 @@ class H3AVDiT(H3DiT):
         sample_sigmas: Optional[torch.Tensor] = None,
         rope: str = "cond", attention: str = DEFAULT_ATTENTION,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """One forward pass; the video velocity ``[1, C, T, H, W]`` and the audio's
-        ``[1, audio_dim, 2, frames]``.
+        """One forward pass, both velocities out.
 
-        Both latents are the streams' own, at their own sigmas: whatever the solver
-        carries between steps is its business, not the network's. ``sigma`` and
-        ``audio_sigma`` set the two modulation levels; ``keyframes`` are encoded latents
-        in :class:`Layout` order.
+        The latents are the streams' own at their own sigmas — whatever the solver carries
+        between steps is its business, not the network's — and the encoded conditions come
+        back in :class:`Layout` order.
         """
         device = latent.device
         dtype = context.dtype
@@ -115,8 +108,8 @@ class H3AVDiT(H3DiT):
                 h[:, start:stop] = source[off:off + (stop - start)]
                 taken[stream] = off + (stop - start)
 
-        # The curve is read at the run's distinct timesteps: the step's two, plus the
-        # pinned one whenever a keyframe is present.
+        # Read at the run's distinct timesteps: the step's two, plus the pinned one when
+        # there is a condition to hold.
         t_emb = self.time_embedding(timesteps.values, device)
         cos, sin = self.pe_embedder[rope]
         mark_token_axis(h, dim=1)

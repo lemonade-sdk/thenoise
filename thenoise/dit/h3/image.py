@@ -1,10 +1,8 @@
 """H3-Image: the trunk as a still-image model.
 
-Two things make it the image model rather than the trunk: an output head with one row per
+What makes it the image model rather than the trunk is an output head with one row per
 interval of the sigma grid the checkpoint was distilled on, which is what makes it a
-four-step model, and a packing of ``[text | target | references]`` whose reference rows
-are conditioned rather than denoised — last, so a run's K/V cache can freeze them as a
-suffix.
+four-step model.
 """
 from __future__ import annotations
 
@@ -34,8 +32,8 @@ class H3ImageDiT(H3DiT):
                     seed: int) -> torch.Tensor:
         """Patchified rows in packing order: the target, then the references.
 
-        Each reference restarts the RNG stream on purpose: a second one must not
-        inherit the draws the first consumed.
+        The RNG stream restarts per reference: one must not inherit the draws the last
+        consumed.
         """
         rows = [self.patchify(target.to(torch.float32))]
         for ref in refs:
@@ -60,16 +58,13 @@ class H3ImageDiT(H3DiT):
         rope: str = "cond",
         kv: Optional[KVCache] = None,
     ) -> torch.Tensor:
-        """One forward pass; returns the target's velocity, ``[1, C, H, W]``.
+        """One forward pass, the target's velocity out, padding cut back off the result.
 
-        ``latent`` is repeat-padded to a whole patch, the padding cut back off the
-        result; ``refs`` are the reference latents in :class:`Layout` order and ``tags``
-        the text encoder's per-token modality tags; ``sample_sigmas`` is the schedule
-        being stepped through, which a head bank of more than one row requires.
+        ``sample_sigmas`` is the schedule being stepped through, which a head bank of more
+        than one row requires.
 
-        A cached run walks the whole sequence once, then runs its leading rows reading
-        the references back from the buffers — the only rows whose K/V is step-invariant
-        (:data:`COND_TIMESTEP`).
+        A cached run walks the whole sequence once, then runs only its leading rows: the
+        conditioned ones are the only K/V that is step-invariant.
         """
         device = latent.device
         dtype = context.dtype
@@ -104,9 +99,8 @@ class H3ImageDiT(H3DiT):
                     h[:, start:stop] = patched[codec:codec + n]
                     codec += n
 
-        # The distinct timesteps are known analytically, so the curve is read at exactly
-        # those points: this step's for the prompt and target, the pinned one for the
-        # references — one row rather than two at the last step, where they coincide.
+        # Read at the run's distinct timesteps: this step's for the prompt and target, the
+        # pinned one for the references — one row where the two coincide.
         t_emb = self.time_embedding(timesteps.values, device)
         kv_shape = (1, self.params.num_heads, layout.seq_len, self.params.head_dim)
         mark_token_axis(h, dim=1)

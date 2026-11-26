@@ -1,14 +1,13 @@
 """Which H3 a checkpoint is, and the architecture it states.
 
-Both variants are the same trunk under the same names, so one geometry read answers both
-and takes the ``Signature`` the calling adapter declares: a file cannot be measured by a
+Both variants are the same trunk under the same names, so one geometry read answers both,
+against the ``Signature`` the calling adapter declares: a file cannot be measured by a
 loader that would then refuse to build it.
 
-One difference is not expressible as a name test. The unpruned checkpoints embed the
-timestep with a sinusoidal MLP and modulate with matrices as wide as that embedding,
-where this trunk reads a curve stored in the file and projects onto it — about 26 GB of
-the bf16 file, and the reason only the pruned release loads here. That is said out loud,
-because "missing 'adaln_t_table'" would not tell anyone which file to download.
+One difference is not a name test. The unpruned checkpoints embed the timestep with a
+sinusoidal MLP and modulate with matrices as wide as that embedding, where this trunk reads
+a curve stored in the file — which is why only the pruned release loads here, and it is
+said out loud because "missing 'adaln_t_table'" does not name a file to download.
 """
 from __future__ import annotations
 
@@ -45,9 +44,9 @@ _CORE_KEYS = (
     "blocks.0.mlp.fc2.weight",
 )
 
-#: The audio stream's two names: the projection in, and the head out. A file carrying
-#: either is the audiovisual model, which the image loader must refuse rather than
-#: half-load — the trunk would run without ever touching the second stream.
+#: The audio stream's two names: the projection in, the head out. A file carrying either
+#: is the audiovisual model: the image loader must refuse it rather than half-load a trunk
+#: that would never touch the second stream.
 _AUDIO_KEYS = ("audio_patch_proj.weight", "final_layer.audio_out.weight")
 
 H3_IMAGE_SIGNATURE = Signature(
@@ -61,11 +60,10 @@ H3_AV_SIGNATURE = Signature("H3 video DiT", keys=(*_CORE_KEYS, *_AUDIO_KEYS))
 #: What an unpruned checkpoint embeds its timestep with, instead of the curve.
 _UNPRUNED = "time_embedder.proj_in.weight"
 
-#: The layers the model builds in FP32 whatever the run's dtype, because rounding them is
-#: a quality regression rather than a rounding error. A file that stores one of them
-#: quantized cannot fill it: the packed layouts live in ``QuantizedLinear``, and these are
-#: ``Fp32Linear`` and a curve buffer. A lower floating dtype is fine — half to full is
-#: exact — which is what the release does with the adaLN matrices.
+#: Built in FP32 whatever the run's dtype: rounding these is a quality regression, not a
+#: rounding error. So a file storing one of them quantized cannot fill it — the packed
+#: layouts live in ``QuantizedLinear``, these are ``Fp32Linear`` and a curve buffer. A
+#: lower float dtype is fine, and the release uses one for the adaLN matrices.
 _FP32_ISLANDS = ("video_patch_proj.weight", "adaln_t_table",
                  "final_layer.video_out.weight", *_AUDIO_KEYS)
 _STORES_F32 = ("F32", "F64", "F16", "BF16")
@@ -74,10 +72,9 @@ _STORES_F32 = ("F32", "F64", "F16", "BF16")
 def detect_params(checkpoint: Union[str, Header], signature: Signature) -> H3Params:
     """Read the architecture, the head-bank rows and its sigma grid out of a file.
 
-    The head count is a shape and the sigma grid is only in the file's ``config``
-    metadata, and the two have to agree; everything else the model needs to be built is a
-    shape too. A file with no metadata — every pruned video checkpoint — therefore reads
-    as one head over the plain two-point grid, which is the flow schedule's own endpoints.
+    Head count is a shape, the sigma grid is only in ``config`` metadata, and the two must
+    agree. A file with no metadata — every pruned video checkpoint — reads as one head over
+    the plain two-point grid, the flow schedule's own endpoints.
     """
     header = as_header(checkpoint)
     if _UNPRUNED in header.shapes:
@@ -135,10 +132,8 @@ def detect_params(checkpoint: Union[str, Header], signature: Signature) -> H3Par
 def _require_storable_islands(header: Header) -> None:
     """Refuse a file that stores an FP32 island in a packed layout.
 
-    The pruned ``w6a8`` release does exactly this to ``final_layer.video_out``: 6-bit
-    codes plus group scales where the model wants a calibrated FP32 head. Reading it as
-    though it were full precision would widen nothing and quantize the output head twice
-    over, so it is named instead.
+    The pruned ``w6a8`` release does this to ``final_layer.video_out``. Reading such a
+    tensor as full precision widens nothing and quantizes the head twice over.
     """
     for name in _FP32_ISLANDS:
         dtype = header.dtypes.get(name)
@@ -153,9 +148,8 @@ def _require_storable_islands(header: Header) -> None:
 def _audio_dim(header: Header):
     """The audio stream's row width, or ``None`` for a file without one.
 
-    The stream's two names state it twice — as the channels its projection takes and as
-    the channels its head emits — and a file that disagrees between them describes a
-    model this trunk cannot wire.
+    Its two names state it twice, and a file that disagrees between them describes a model
+    this trunk cannot wire.
     """
     patch = header.shapes.get("audio_patch_proj.weight")
     if patch is None:
@@ -176,12 +170,7 @@ def load_h3_av_dit(
     device,
     dtype: torch.dtype,
 ) -> H3AVDiT:
-    """The audiovisual DiT, built and loaded the way :func:`load_h3_image_dit` builds its own.
-
-    The two differ only in the class, which is the whole of the difference between the
-    releases: the audio stream's projection and second head are what the file carries and
-    the audiovisual trunk wires.
-    """
+    """The audiovisual DiT: the image build plus the audio stream's projection and head."""
     model = build_dit(
         lambda: H3AVDiT(params, compute_dtype=dtype),
         checkpoint,
@@ -202,10 +191,9 @@ def load_h3_image_dit(
 ) -> H3ImageDiT:
     """Build the image DiT on meta from the checkpoint's own geometry, then load its weights.
 
-    The file is read with its own dtypes (``dtype=None``) and only then moved to
-    ``dtype``: that move is where the FP32 islands pin themselves and quantized weights
-    stay quantized, where casting the state dict would round the modulation factors.
-    ``attn.q_norm`` / ``attn.k_norm`` are remapped by ``qk_norm_key_map``.
+    Weights are read with their own dtypes and moved to ``dtype`` afterwards: that move is
+    where FP32 islands pin and quantized weights stay quantized, where casting the state
+    dict would round the modulation factors. ``qk_norm_key_map`` remaps the q/k norms.
     """
     model = build_dit(
         lambda: H3ImageDiT(params, compute_dtype=dtype),

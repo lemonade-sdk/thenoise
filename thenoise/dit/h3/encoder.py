@@ -1,10 +1,9 @@
-"""The H3-Image conditioner — Qwen3-VL-32B truncated to 50 layers, no final norm.
+"""The H3-Image conditioner — Qwen3-VL-32B truncated, no final norm.
 
-Two constraints of the release shape it. The prompt carries no chat wrapper: the model
-was trained on raw text with labelled vision blocks spliced in, so a system or user turn
-moves the conditioning off its distribution — and with no prefix to drop, every token is
-conditioning. And the cut took the final RMSNorm with it: the DiT reads raw layer output,
-where an RMSNorm would fix a magnitude the DiT uses.
+No chat wrapper: the model was trained on raw text with labelled vision blocks spliced in,
+so a system or user turn moves the conditioning off its distribution — and with no prefix
+to drop, every token is conditioning. The cut took the final RMSNorm with it: the DiT reads
+raw layer output, where a norm would fix a magnitude the DiT uses.
 """
 from __future__ import annotations
 
@@ -45,10 +44,10 @@ PAD_TOKEN_ID = QWEN3_VL_32B_H3_CONFIG["text_config"]["bos_token_id"]
 
 def vision_token_tags(input_ids: torch.Tensor, image_pad_id: int = IMAGE_PAD_ID
                       ) -> Tensor:
-    """Per-token modality tags: 0 across each vision block, 1 everywhere else.
+    """Per-token modality tags: 0 across each vision block, 1 elsewhere.
 
-    Each run of ``image_pad`` is widened by one token on either side: the markers
-    framing a picture describe the picture, and the DiT modulates them visually.
+    Each run of ``image_pad`` is widened by one token either side: the markers framing a
+    picture describe the picture.
     """
     ids = input_ids.view(-1).tolist()
     tags = [TAG_TEXT] * len(ids)
@@ -68,8 +67,8 @@ def vision_token_tags(input_ids: torch.Tensor, image_pad_id: int = IMAGE_PAD_ID
 def _truncate_qwen3_vl(config, layers: int) -> nn.Module:
     """A Qwen3-VL with ``layers`` decoder layers and no final norm.
 
-    The depth is a property of the released file, not of the vendored config, and the
-    norm is replaced rather than deleted because the language model's forward calls it.
+    The depth is a property of the released file, not of the vendored config. The norm is
+    replaced rather than deleted because the language model's forward calls it.
     """
     config.text_config.num_hidden_layers = layers
     model = Qwen3VLForConditionalGeneration._from_config(config)
@@ -101,8 +100,8 @@ VISION_SHORT_EDGE = 1024
 class H3TextEncoder(nn.Module):
     """Qwen3-VL-32B conditioner: ``(prompt, images) -> (embeds, mask, tags)``.
 
-    Both H3 releases train on the same weights and the same splice-a-labelled-vision-block
-    presentation; ``picture_label`` is the one place they spell it differently.
+    Both releases share the weights and the spliced-vision presentation; ``picture_label``
+    is where they spell it differently.
     """
 
     def __init__(self, qwen: nn.Module, tokenizer, processor, picture_label: str) -> None:
@@ -167,8 +166,8 @@ class H3TextEncoder(nn.Module):
 def h3_tokenizer(tokenizer_dir: Optional[str] = None):
     """The conditioner's tokenizer: the shared Qwen3-VL table plus the release's own tokens.
 
-    A checkpoint's own ``tokenizer/`` directory wins when it ships one; the vendored
-    table is the fallback and is where the extra ids have to be registered by hand.
+    A checkpoint's own ``tokenizer/`` wins when it ships one; the vendored table is the
+    fallback, and is where the extra ids are registered by hand.
     """
     tokenizer, _ = load_qwen3_vl_tokenizer(
         tokenizer_dir or QWEN25_TOKENIZER_CONFIG_DIR,
