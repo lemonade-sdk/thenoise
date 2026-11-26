@@ -66,10 +66,9 @@ QWEN3_VL_TOKENIZER_OVERRIDES = {
 }
 QWEN2_5_VL_TOKENIZER_OVERRIDES: dict = {}
 
-#: The tokens the H3 releases add to the Qwen3-VL table, at the ids their tokenizer
-#: fixes. Both releases read them: unregistered, a prompt's caption or lyrics marker
-#: arrives as a run of text pieces instead of the one embedding row it was trained on —
-#: and the released table already has those rows, 151936 of them.
+#: The tokens the H3 releases add to the Qwen3-VL table, at the ids their tokenizer fixes.
+#: Unregistered, a prompt's caption or lyrics marker arrives as a run of text pieces instead
+#: of the one embedding row it was trained on.
 H3_SPECIAL_TOKENS = {
     "<d>": 151669,
     "</d>": 151670,

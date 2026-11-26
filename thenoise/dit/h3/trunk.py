@@ -1,8 +1,7 @@
 """The H3 trunk: a packed transformer, shared by the image and the audiovisual model.
 
 The time embedding is a curve stored in the checkpoint and read between its rows, so it
-stays FP32. What a variant adds on top of this trunk is the streams it wires and the
-packing its forward runs over: see :mod:`.image` and :mod:`.av`.
+stays FP32.
 """
 from __future__ import annotations
 
@@ -111,9 +110,8 @@ class Attention(nn.Module):
         batch, rows, _ = x.shape
         inner = self.heads * self.head_dim
         q, k, v = self.qkv_proj(x).split(inner, dim=-1)
-        # Token-major first, because that is what the fused projection already is: the
-        # sparse kernel reads it as it stands, and dense transposes to head-major and
-        # copies, which is what it did before the kernel existed.
+        # Token-major first: that is what the fused projection already is, so the sparse
+        # kernel reads it as it stands and only dense pays the transpose.
         q, k, v = (t.view(batch, rows, self.heads, self.head_dim) for t in (q, k, v))
         cos, sin = rope if rope is not None else (None, None)
         if sol is None:
@@ -249,9 +247,8 @@ class FinalLayer(nn.Module):
     """The output heads, one per stream: ``video_out`` for the lattice, ``audio_out`` for
     the stream the checkpoint has one of.
 
-    Both heads are the checkpoint's FP32 island, and a step-distilled checkpoint stores
-    one head per interval of ``pdd_sigmas`` — row 0 complete, every later row an offset
-    from it — which is what makes H3-Image a four-step model.
+    Both heads are the checkpoint's FP32 island, and a step-distilled checkpoint stores one
+    head per interval of ``pdd_sigmas``: row 0 complete, every later row an offset from it.
     """
 
     def __init__(self, params: H3Params, compute_dtype: Optional[torch.dtype] = None):
