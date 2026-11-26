@@ -29,6 +29,8 @@ Start the server with [`serve`](cli.md#serve-a-model-over-http) and TheNoise exp
 | `POST` | `/edit` | Edit an image from an instruction (image + prompt → edited image); requires an editing-capable model |
 | `POST` | `/video` | Generate a video synchronously, returning MP4 or WebM bytes |
 | `POST` | `/mesh` | Generate a shape synchronously, returning GLB, OBJ or STL bytes |
+| `GET` | `/shapes` | List the kept shapes a request can name to cut one again (requires a shape model) |
+| `GET` | `/finish` | Describe a shape's post-cut knobs, in the order their filters run (requires a shape model) |
 | `POST` | `/jobs/text2image` | Queue a generation (202) |
 | `POST` | `/jobs/edit` | Queue an edit (202) |
 | `POST` | `/jobs/video` | Queue a video generation (202) |
@@ -200,7 +202,8 @@ one refuses the second picture.
 | `bounds` | number | Half-width of the sampled volume, in latent units |
 | `mc_level` | number | The field value the surface is cut at |
 | `scale` | number | Multiply the written coordinates; no mesh format carries a unit |
-| `floaters` | number | Drop pieces smaller than this fraction of the shape's widest part; `0` keeps everything |
+| `from_shape` | string | Job id of a kept shape, re-cut instead of sampled; use it instead of `image` |
+| `floaters` | number | Drop pieces spreading less than this fraction of the widest piece; `0` keeps everything |
 | `triangles` | number | Keep this fraction of the surface detail |
 | `smooth` | number | Ease out the roughness the cut leaves, holding creases |
 | `lora_specs` | string[] \| object | Optional LoRAs, as `name:weight`, looked up in `--lora-dir` |
@@ -213,6 +216,23 @@ curl -fS http://127.0.0.1:8000/mesh -H 'content-type: application/json' \
   -d "{\"image\": \"$(base64 -w0 chair.png)\", \"octree_resolution\": 192}" \
   -o chair.glb
 ```
+
+### Cutting a kept shape again
+
+The server keeps the latents behind the ten newest shapes, and `from_shape` names one by its
+job id: the run re-cuts that shape at whatever grid, level, scale or post-cut settings the
+request carries, without the picture, the conditioning or the sampling. `GET /shapes` answers
+the ids still available, newest first.
+
+```bash
+curl -fS http://127.0.0.1:8000/mesh -H 'content-type: application/json' \
+  -d '{"from_shape": "job_2f9c4a7d1b8e4c07a5d6e3f219b8c7d5", "octree_resolution": 512}' \
+  -o chair_fine.glb
+```
+
+`image` and `from_shape` are alternatives — a request carrying both is refused, since the shape
+already has its picture — and a shape sampled by another model is refused by name. What is kept
+lasts until the server stops.
 
 ## `GET /health`
 

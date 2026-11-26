@@ -12,7 +12,7 @@ class MeshFinishOptions:
     """What a request asks of a shape once its surface has been cut."""
     floaters: float = option(
         0.0, label="Clean up junk", ge=0.0, le=1.0, step=0.01,
-        help="throw away pieces of the shape smaller than this fraction of its widest part; "
+        help="throw away pieces spreading less than this fraction of the widest piece; "
              "0 keeps everything",
         filter="floaters", stage=FINISH)
 
@@ -24,7 +24,7 @@ class MeshFinishOptions:
 
     smooth: float = option(
         0.0, label="Smooth the surface", ge=0.0, le=1.0, step=0.01,
-        help="ease out the roughness a cut leaves, corners and all, on whatever the detail "
+        help="ease out the roughness a cut leaves, holding creases, on whatever the detail "
              "level has left by then",
         filter="smooth", stage=FINISH)
 

@@ -8,11 +8,11 @@ a reference photo and writes it as `.glb`, `.obj` or `.stl`. A picture is the wh
 - **One checkpoint** does the whole job (`--dit`): transformer, image conditioner and shape
   codec in a single 6.9 GB file
 - Built-in defaults: **30 steps, guidance 5.0**, euler, a 384³ surface cut
-- One picture per shape; a second is refused rather than quietly ignored
-- Geometry only — positions and shading directions, no texture, no UV layout, no material.
-  The paint half of Hunyuan3D 2.1 is a branch of its own rather than a knob on this one, so a
-  shape arrives grey and gets its colour wherever you open it
+- One picture per shape
+- Geometry only - positions and shading directions, no texture, no UV layout, no material.
 - Meshes come back closed and facing outward, so a slicer can take them as they are
+- Meshes shading directions travel in the file, so a shape opens smooth rather than faceted
+- **Cleaned up after the cut** - clean the model, reduce triangles, smoothing.
 
 > Commands below assume a dev checkout (`./thenoise.sh`, `.venv/bin/python`).
 > On a [portable bundle](../setup.md) use `./bin/thenoise` and `./bin/python3` instead.
@@ -28,7 +28,8 @@ a reference photo and writes it as `.glb`, `.obj` or `.stl`. A picture is the wh
 | Sizes | the shape fills the volume it is sampled from; `--scale` sets the units |
 | Text encoder | — |
 | Editing | — |
-| Output | `.glb`, `.obj` or `.stl`, no material |
+| Output | `.glb`, `.obj` or `.stl`, shading directions included, no material |
+| Post-processing | clean-up, level of detail, smoothing — each off until asked for |
 | Default settings | 4096 tokens, 30 steps, guidance 5.0, euler, 384³ |
 
 ## Checkpoints
@@ -59,3 +60,28 @@ Serve over HTTP with the web UI (open <http://localhost:8000/>):
 ./thenoise.sh serve --dit ./models/hunyuan3d-2.1/hunyuan_3d_v2.1.safetensors
 ```
 
+## After the cut
+
+Nothing is trimmed on the way out: the default 384³ cut of one real subject left 4.3 million
+triangles and a 102 MB `.glb`. Three settings — clean-up, level of detail and smoothing — let
+you change that afterwards.
+
+```bash
+./thenoise.sh mesh \
+  --dit ./models/hunyuan3d-2.1/hunyuan_3d_v2.1.safetensors \
+  --image chair.png --out chair.glb --floaters 0.05 --triangles 0.25 --smooth 0.4
+```
+
+- `--floaters 0.05` throws away every piece spreading less than 5 % as wide as the biggest
+  one: the specks and shells a cut sometimes leaves hanging on. `0` — the default — keeps
+  everything, which is what you want while judging the shape itself.
+- `--triangles 0.25` keeps a quarter of the triangles, and roughly a quarter of the file: 25 MB
+  rather than 102. Enough for a preview, and usually enough for a print.
+- `--smooth 0.4` eases out the bumpiness a cut leaves. Corners are held, so a hard edge stays
+  hard instead of rounding off.
+
+A face too thin to be drawn is left out of the file rather than written invisible, so what a
+viewer shows is what a slicer gets.
+
+For every flag (views, grid, level, scale, clean-up, LoRAs, containers), see the
+[CLI reference](../cli.md) and the [HTTP API reference](../api.md).
