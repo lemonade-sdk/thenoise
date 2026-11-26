@@ -1,5 +1,7 @@
 import logging
 import torch
+from torch import Tensor
+
 from ..extract import Mesh
 
 logger = logging.getLogger(__name__)
@@ -11,7 +13,7 @@ def drop_islands(mesh: Mesh, size: float) -> Mesh:
     if size <= 0.0 or mesh.is_empty:
         return mesh
 
-    labels = _components(mesh.faces, mesh.vertices.shape[0])
+    labels = _labels(mesh.faces, mesh.vertices.shape[0])
     roots = torch.unique(labels)
     where = torch.searchsorted(roots, labels)
     piece = where[mesh.faces[:, 0]]
@@ -32,6 +34,33 @@ def drop_islands(mesh: Mesh, size: float) -> Mesh:
                     round(100 * float(reach[~wanted].max()) / farthest),
                     100 * float(area[~wanted[piece]].sum()) / float(area.sum()))
     return mesh.select(wanted[where], wanted[piece])
+
+
+def _labels(faces: Tensor, vertices: int) -> Tensor:
+    """One label per vertex, shared by everything reachable along an edge.
+
+    comfy-kitchen's kernel is exact but registered on hip and cuda only - there is no
+    eager backend - so the host keeps a loop of its own rather than losing
+    ``--device cpu`` and every test in the suite.
+    """
+    if faces.is_cuda:
+        return _kernel_labels(faces, vertices)
+    return _components(faces, vertices)
+
+
+def _kernel_labels(faces: Tensor, vertices: int) -> Tensor:
+    from comfy_kitchen import connected_components
+
+    return connected_components(_pairs(faces), vertices)
+
+
+def _pairs(faces: Tensor) -> Tensor:
+    """Every edge once per face that owns it, lowered to int32: feeding the kernel the
+    distinct edges measured slower and heavier than feeding it the duplicates."""
+    corner = torch.stack((faces[:, [0, 1]], faces[:, [1, 2]],
+                          faces[:, [2, 0]])).reshape(-1, 2)
+    return torch.stack((corner.min(dim=1).values, corner.max(dim=1).values), 1)\
+        .to(torch.int32).contiguous()
 
 
 #: One edge crossed per round, so a spiked cut needs the hand merge rather than more rounds.

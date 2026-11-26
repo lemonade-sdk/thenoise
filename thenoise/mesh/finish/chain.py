@@ -40,11 +40,15 @@ def _asked(spec, ask: Ask):
 
 
 def finish_mesh(mesh, options, check: Callable[[], None], progress: Callable[..., None]):
-    """What the request asked of the cut, in declared order; the mesh itself if nothing."""
-    host = mesh if mesh.vertices.device.type == "cpu" else mesh.cpu()
+    """What the request asked of the cut, in declared order; the mesh itself if nothing.
+
+    Every filter works where the mesh already is. The reducer is the one that needs the
+    host, and it takes it for itself, so nothing here is handed over wholesale - which is
+    what left the piece rule and the relaxation running on the CPU beside a free GPU.
+    """
     stages = filter_specs(FINISH)
     ask = Ask(check=check)
-    return apply_chain(host, options, stages,
+    return apply_chain(mesh, options, stages,
                        {spec.name: _asked(spec, ask) for spec in stages}, DEFAULTS,
                        check=check,
                        on_filter=lambda _spec: progress(FINISH))

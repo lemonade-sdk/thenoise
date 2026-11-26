@@ -7,6 +7,7 @@ rather than in a file somebody tries to print.
 import math
 import subprocess
 import sys
+import types
 
 import numpy as np
 import pytest
@@ -230,6 +231,63 @@ def test_the_round_budget_costs_the_partition_nothing(monkeypatch):
     monkeypatch.setattr(cleanup, "ROUNDS", 1)
     assert pieces(drop_islands(with_piece, share)) == 1
     assert len(drop_islands(with_piece, share).faces) == len(shape.faces)
+
+
+def test_the_pairs_handed_to_the_kernel_are_exactly_the_mesh_edges():
+    """One pair per face per edge, undirected, in int32. The kernel is fed the duplicates
+    because they measured faster than a deduplicated list, so the list still has to say
+    nothing more and nothing less than the surface."""
+    cut = sphere_cut(32)
+    pairs = cleanup._pairs(cut.faces)
+
+    assert pairs.dtype == torch.int32
+    assert pairs.shape == (3 * len(cut.faces), 2)
+    truth = set()
+    for a, b, c in cut.faces.tolist():
+        truth.update({(min(a, b), max(a, b)), (min(b, c), max(b, c)), (min(c, a), max(c, a))})
+    assert {(int(a), int(b)) for a, b in pairs.tolist()} == truth
+    assert int(pairs.max()) == int(cut.faces.max())
+
+
+def test_the_kernel_is_handed_the_graph_the_rounds_read(monkeypatch):
+    """The accelerator answers through a kernel no test host can run, so a union-find stands
+    in over the very pairs we would send: the pieces it finds have to be the pieces the
+    rounds find, compared per vertex on the smallest vertex its piece reaches."""
+    shape, junk = sphere_cut(48), tetra()
+    with_piece = beside_the_shape(shape, junk)
+    nodes = len(with_piece.vertices)
+
+    def answer(edges, num_nodes):
+        assert edges.dtype == torch.int32 and edges.shape[1] == 2
+        parent = list(range(num_nodes))
+
+        def find(one):
+            while parent[one] != one:
+                parent[one] = parent[parent[one]]
+                one = parent[one]
+            return one
+
+        for a, b in edges.tolist():
+            parent[max(find(a), find(b))] = min(find(a), find(b))
+        return torch.tensor([find(one) for one in range(num_nodes)], dtype=torch.long,
+                            device=edges.device)
+
+    kernel = types.ModuleType("comfy_kitchen")
+    kernel.connected_components = answer
+    monkeypatch.setitem(sys.modules, "comfy_kitchen", kernel)
+
+    rounds = cleanup._components(with_piece.faces, nodes)
+    assert pieces(with_piece) == int(torch.unique(rounds).numel()) == 2
+    assert torch.equal(_reaches(rounds), _reaches(cleanup._kernel_labels(with_piece.faces,
+                                                                        nodes)))
+
+
+def _reaches(labels: torch.Tensor) -> torch.Tensor:
+    """Per vertex the smallest vertex its piece reaches: the footing two labelings can be
+    compared on, since a merge is free to have kept either label."""
+    lowest = labels.new_full((labels.numel(),), labels.numel())
+    lowest.scatter_reduce_(0, labels, torch.arange(labels.numel()), reduce="amin")
+    return lowest[labels]
 
 
 # ------------------------------------------------------------- the reduction
