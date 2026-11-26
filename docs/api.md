@@ -200,6 +200,9 @@ one refuses the second picture.
 | `bounds` | number | Half-width of the sampled volume, in latent units |
 | `mc_level` | number | The field value the surface is cut at |
 | `scale` | number | Multiply the written coordinates; no mesh format carries a unit |
+| `floaters` | number | Drop pieces smaller than this fraction of the shape's widest part; `0` keeps everything |
+| `triangles` | number | Keep this fraction of the surface detail |
+| `smooth` | number | Ease out the roughness the cut leaves, holding creases |
 | `lora_specs` | string[] \| object | Optional LoRAs, as `name:weight`, looked up in `--lora-dir` |
 | `output_format` | string | `glb`, `obj` or `stl` (model default when omitted) |
 

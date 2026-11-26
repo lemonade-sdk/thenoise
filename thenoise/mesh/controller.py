@@ -124,10 +124,10 @@ class MeshPipelineController:
             )
             logger.info("Cut: %d triangles; finish %s", mesh.faces.shape[0], spec.finish)
             mesh = finish_mesh(mesh.scaled(spec.scale), spec.finish, token.check,
-                               progress, spec.smooth_spots)
-            write_mesh(mesh, output, spec.output_format)
+                               progress)
+            drawn = write_mesh(mesh, output, spec.output_format)
             logger.info("Mesh: %d vertices, %d triangles written at resolution %d",
-                        mesh.vertices.shape[0], mesh.faces.shape[0],
+                        drawn.vertices.shape[0], drawn.faces.shape[0],
                         spec.octree_resolution)
         return how
 

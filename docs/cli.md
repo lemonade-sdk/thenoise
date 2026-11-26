@@ -190,6 +190,9 @@ flag.
 | `--bounds` | no | model default | Half-width of the sampled volume, in latent units |
 | `--mc-level` | no | model default (`1/512`) | The field value the surface is cut at |
 | `--scale` | no | `1.0` | Multiply the written coordinates: a mesh carries no unit, so a print sizes itself here |
+| `--floaters` | no | `0.0` | Throw away pieces of the shape smaller than this fraction of its widest part; `0` keeps everything |
+| `--triangles` | no | `1.0` | Keep this fraction of the surface detail; less gives a smaller file and a coarser shape |
+| `--smooth` | no | `0.0` | Ease out the roughness the cut leaves, on whatever the detail level left; corners are held, so a hard edge stays hard |
 | `--lora` | no | — | LoRA for the shape transformer; repeatable, `file:weight` |
 | `--output-format` | no | model default | `glb`, `obj` or `stl`; `--out`'s extension answers when this is left out |
 | `--out` | no | `out.glb` | Output mesh path; with no extension, the container the mesh was written in |

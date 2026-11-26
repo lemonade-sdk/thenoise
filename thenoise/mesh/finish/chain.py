@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Callable, Dict
 
@@ -16,9 +15,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Ask:
-    """What a filter is asked with, beyond its knobs: how to stop, and where it was painted."""
+    """What a filter is asked with, beyond its knobs: how to stop."""
     check: Callable[[], None]
-    spots: tuple[tuple[float, float, float, float], ...] = ()
 
 
 def _floaters(mesh, ask: Ask, *, floaters: float):
@@ -33,7 +31,7 @@ def _simplify(mesh, ask: Ask, *, triangles: float):
 
 def _smooth(mesh, ask: Ask, *, smooth: float):
     from .smooth import relax_surface
-    return relax_surface(mesh, smooth, ask.check, ask.spots)
+    return relax_surface(mesh, smooth, ask.check)
 
 FILTERS: Dict[str, Callable] = {"floaters": _floaters, "simplify": _simplify,
                                 "smooth": _smooth}
@@ -52,15 +50,14 @@ def _reported(spec, ask: Ask):
     return run
 
 
-def finish_mesh(mesh, options, check: Callable[[], None], progress: Callable[..., None],
-                spots: Sequence[Sequence[float]] = ()):
+def finish_mesh(mesh, options, check: Callable[[], None], progress: Callable[..., None]):
     """What the request asked of the cut, in declared order; the mesh itself if nothing."""
     device = mesh.vertices.device
     host = mesh if device.type == "cpu" else mesh.cpu()
     if device.type != "cpu":
         release_device_memory(device)
     stages = filter_specs(FINISH)
-    ask = Ask(check=check, spots=tuple(tuple(one) for one in spots))
+    ask = Ask(check=check)
     return apply_chain(host, options, stages,
                        {spec.name: _reported(spec, ask) for spec in stages}, DEFAULTS,
                        check=check,

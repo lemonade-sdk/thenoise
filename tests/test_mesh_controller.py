@@ -10,6 +10,7 @@ from thenoise.jobs import Cancellation, JobCancelled
 from thenoise.mesh.controller import MeshPipelineController, _sampling_bytes
 from thenoise.mesh.memory import volume_bytes
 from thenoise.mesh.extract import Mesh
+from thenoise.mesh.finish.chain import finish_mesh
 from thenoise.mesh.spec import MeshSpec
 from thenoise.models.base import Conditioning, DiffusionModel
 from thenoise.utils.attention import ATTENTION_METHODS
@@ -294,8 +295,10 @@ def test_the_file_carries_the_finished_mesh_not_the_cut(tmp_path):
     controller.render(resolved, Cancellation(), lambda stage, *rest: seen.append(stage), out)
 
     shape_faces = len(model.cut.faces) - 4
+    finished = finish_mesh(model.cut, resolved.finish, (lambda: None), (lambda _stage: None))
+    assert finished.faces.shape[0] == max(4, round(shape_faces * 0.5))
     written_vertices, written_faces = _obj_counts(out)
-    assert written_faces == max(4, round(shape_faces * 0.5))
+    assert written_faces == finished.without_degenerate().faces.shape[0]
     assert written_vertices < len(model.cut.vertices)
     assert [one for one in seen if one == "finish"] == ["finish", "finish"]
 

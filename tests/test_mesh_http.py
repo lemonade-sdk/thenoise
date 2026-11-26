@@ -10,6 +10,8 @@ from test_mesh_controller import DEFAULTS, FakeShapeModel
 
 from thenoise.jobs import JobQueue
 from thenoise.mesh.controller import MeshPipelineController
+from thenoise.mesh.finish.chain import finish_mesh
+from thenoise.mesh.finish.options import MeshFinishOptions
 from thenoise.mesh.http import install_mesh_routes
 from thenoise.mesh.service import mesh_planner
 from thenoise.mesh.shapes import ShapeStore
@@ -72,7 +74,10 @@ def test_the_finish_knobs_a_pane_sends_reach_the_written_file(tmp_path):
             written = client.get(f"/jobs/{ident}/content").text.count("f ")
     finally:
         queue.close()
-    assert written == max(4, round((len(_CUT.faces) - 4) * 0.5))
+    finished = finish_mesh(_CUT, MeshFinishOptions(floaters=0.15, triangles=0.5),
+                           (lambda: None), (lambda _stage: None))
+    assert finished.faces.shape[0] == max(4, round((len(_CUT.faces) - 4) * 0.5))
+    assert written == finished.without_degenerate().faces.shape[0]
 
 
 def test_the_wire_knows_the_finish_knobs_it_offers(tmp_path):

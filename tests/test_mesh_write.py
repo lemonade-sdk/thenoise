@@ -128,15 +128,31 @@ def test_a_surface_of_only_faceless_triangles_is_refused(tmp_path):
         write_glb(flat, tmp_path / "flat.glb")
 
 
-def test_a_thin_triangle_is_written_because_it_still_carries_surface(tmp_path):
-    """A sliver is ugly and the reducer leaves them by the thousand; only a face with no
-    area at all is a hole. Cutting by relative size ate 18% of a real cut once."""
-    path = tmp_path / "sliver.obj"
-    write_obj(Mesh(vertices=torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0],
-                                          [0.0, 1.0, 0.0], [0.5, 0.0004, 0.0]]),
-                   faces=torch.tensor([[0, 1, 2], [1, 3, 0]])), path)
+def test_a_thin_triangle_is_written_when_it_still_covers_ground(tmp_path):
+    """A face is judged by its shape and never by its size, which is how a facet of something
+    flat survives: cutting by relative area once ate 18% of a real cut."""
+    path = tmp_path / "facet.obj"
+    write_obj(_flat(apex=0.5), path)
     text = path.read_text()
     assert text.count("\nf ") == 2
+
+
+def test_a_needle_is_not_written_though_it_has_area(tmp_path):
+    """Thinner than about a third of a degree, and its normal is a coin flip: a reader calls
+    that degenerate data, so the face goes and the point only it needed goes with it."""
+    path = tmp_path / "needle.obj"
+    write_obj(_flat(apex=0.0004), path)
+    text = path.read_text()
+    assert text.count("\nf ") == 1
+    assert len([one for one in text.splitlines() if one.startswith("v ")]) == 3
+
+
+def _flat(apex: float) -> Mesh:
+    """A wide triangle and one stretched along its base to ``apex`` tall, both in the same
+    plane: the pair the reducer leaves behind, at whatever scale the shape was written."""
+    return Mesh(vertices=torch.tensor([[0.0, 0.0, 0.0], [8.0, 0.0, 0.0],
+                                       [0.0, 8.0, 0.0], [0.5, apex, 0.0]]),
+                faces=torch.tensor([[0, 1, 2], [1, 3, 0]]))
 
 
 def test_normals_smooth_a_sphere_toward_the_shape_it_was_cut_from(tmp_path):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import struct
 from pathlib import Path
 
@@ -14,6 +15,8 @@ GLB_MAGIC = 0x46546C67
 _GLTF_POSITION_TARGET = 34962
 _GLTF_INDEX_TARGET = 34963
 
+logger = logging.getLogger(__name__)
+
 _SPAN = 1 << 20
 
 
@@ -23,17 +26,20 @@ def _spans(count: int):
 
 
 def _host(mesh: Mesh) -> Mesh:
-    """Every writer starts here: a glTF header cannot carry a ``NaN`` position and no reader
-    wants a triangle with no area."""
+    """Every writer starts here: a glTF header cannot carry a ``NaN`` position, and no reader
+    wants a face it cannot draw."""
     if not bool(torch.isfinite(mesh.vertices).all()):
         raise ValueError("the sampled field left a position that is not a number")
     local = mesh.cpu().without_degenerate()
     if local.is_empty:
         raise ValueError("every triangle was faceless: there is no surface to write")
+    if local.faces.shape[0] != mesh.faces.shape[0]:
+        logger.info("write: %d of %d triangles have no shape to draw and were left out",
+                    mesh.faces.shape[0] - local.faces.shape[0], mesh.faces.shape[0])
     return local
 
 
-def write_obj(mesh: Mesh, path: str | Path) -> None:
+def write_obj(mesh: Mesh, path: str | Path) -> Mesh:
     """``v`` and ``vn`` lines then ``f v//vn`` lines, 1-based as OBJ counts."""
     if mesh.is_empty:
         raise ValueError("there is no mesh to write")
@@ -50,9 +56,10 @@ def write_obj(mesh: Mesh, path: str | Path) -> None:
         for low, high in _spans(len(corners)):
             text.write("".join(f"f {a}//{a} {b}//{b} {c}//{c}\n"
                                for a, b, c in corners[low:high]))
+    return local
 
 
-def write_glb(mesh: Mesh, path: str | Path) -> None:
+def write_glb(mesh: Mesh, path: str | Path) -> Mesh:
     """One mesh, one primitive, no materials; glTF demands a POSITION min and max."""
     if mesh.is_empty:
         raise ValueError("there is no mesh to write")
@@ -103,12 +110,13 @@ def write_glb(mesh: Mesh, path: str | Path) -> None:
         for low, high in _spans(indices.shape[0]):
             out.write(indices[low:high].numpy().tobytes())
         out.write(b"\0" * body_pad)
+    return local
 
 
 _STL_DTYPE = np.dtype([("normal", "<f4", 3), ("vertices", "<f4", 9), ("attributes", "<u2")])
 
 
-def write_stl(mesh: Mesh, path: str | Path) -> None:
+def write_stl(mesh: Mesh, path: str | Path) -> Mesh:
     """Binary STL: independent triangles with their own normals, which is what a cut is.
     Units are whatever the model's space means to whoever opens it."""
     if mesh.is_empty:
@@ -128,20 +136,25 @@ def write_stl(mesh: Mesh, path: str | Path) -> None:
                                  .clamp(min=1e-12)).numpy()
             records["vertices"] = corners.reshape(-1, 9).numpy()
             records.tofile(out)
+    return local
 
 
-def write_mesh(mesh: Mesh, path: str | Path, output_format: str | None = None) -> None:
-    """The mesh in ``output_format``, or in the format ``path``'s extension promises."""
+def write_mesh(mesh: Mesh, path: str | Path,
+               output_format: str | None = None) -> Mesh:
+    """The mesh in ``output_format``, or in the format ``path``'s extension promises.
+
+    What comes back is what landed in the file, which is the mesh less the faces no reader can
+    draw.
+    """
     if output_format is None:
         output_format = Path(path).suffix[1:].lower()
     if output_format == "glb":
-        write_glb(mesh, path)
-    elif output_format == "obj":
-        write_obj(mesh, path)
-    elif output_format == "stl":
-        write_stl(mesh, path)
-    else:
-        raise ValueError(f"no mesh writer for {output_format!r}")
+        return write_glb(mesh, path)
+    if output_format == "obj":
+        return write_obj(mesh, path)
+    if output_format == "stl":
+        return write_stl(mesh, path)
+    raise ValueError(f"no mesh writer for {output_format!r}")
 
 
 __all__ = ["Mesh", "write_glb", "write_mesh", "write_obj", "write_stl"]

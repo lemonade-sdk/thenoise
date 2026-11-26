@@ -98,38 +98,6 @@ def test_the_seed_is_inside_torchs_range():
         MeshSpec(seed=2**64)
 
 
-def test_painted_spots_travel_with_the_request_and_come_back_counted():
-    """The pane paints as many spots as the brush stroked; the echo only says how much arrived."""
-    resolved = resolve(smooth=0.5, smooth_spots=[[0.1, 0.2, 0.3, 0.05], [0.0, 0.1, 0.2, 0.1]])
-    assert resolved.smooth_spots == ((0.1, 0.2, 0.3, 0.05), (0.0, 0.1, 0.2, 0.1))
-    assert resolved.public()["smooth_spots"] == 2
-    assert resolve().smooth_spots == ()
-
-
-def test_spots_that_smooth_nothing_are_refused():
-    with pytest.raises(ValueError, match="smooth"):
-        resolve(smooth_spots=[[0.0, 0.0, 0.0, 0.1]])
-
-
-@pytest.mark.parametrize("spot", [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, -0.1],
-                                  [0.0, 0.0, float("nan"), 0.1], [0.0, 0.0, 0.0, 1e9],
-                                  [0.0, 0.0, 0.0]])
-def test_a_spot_is_a_place_and_a_size(spot):
-    from pydantic import ValidationError
-
-    with pytest.raises(ValidationError):
-        MeshSpec(smooth=1.0, smooth_spots=[spot])
-
-
-def test_too_many_spots_are_refused():
-    from pydantic import ValidationError
-
-    from thenoise.mesh.finish.smooth import SPOT_LIMIT
-
-    with pytest.raises(ValidationError, match="spots"):
-        MeshSpec(smooth=1.0, smooth_spots=[[0.0, 0.0, 0.0, 0.1]] * (SPOT_LIMIT + 1))
-
-
 def test_the_echo_leaves_the_picture_out():
     public = resolve(image=b"png").public()
     assert "image" not in public
@@ -137,7 +105,7 @@ def test_the_echo_leaves_the_picture_out():
     assert set(public) <= {"mode", "from_shape", "latents", "steps", "guidance_scale",
                            "sampler", "seed", "attention", "output_format",
                            "octree_resolution", "bounds", "mc_level", "scale", "lora_specs",
-                           "finish", "smooth_spots"}
+                           "finish"}
     # The knobs travel back as the run resolved them, which is how a pane tells a knob that
     # arrived from one that its browser dropped on the floor.
     assert public["finish"] == FINISH_DEFAULTS

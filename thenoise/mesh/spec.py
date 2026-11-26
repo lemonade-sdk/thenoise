@@ -9,7 +9,6 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, create_model, field_validator
 
 from thenoise.mesh.finish.options import MeshFinishOptions, options_from
-from thenoise.mesh.finish.smooth import SPOT_LIMIT, SPOT_RADIUS_LIMIT
 from thenoise.utils.lora_roles import LoraSpecs, lora_specs_by_role
 from thenoise.utils.options import wire_fields
 
@@ -96,7 +95,6 @@ class ResolvedMesh:
     scale: float
     lora_specs: dict[str, list[str]]
     finish: MeshFinishOptions
-    smooth_spots: tuple[tuple[float, float, float, float], ...]
 
     @property
     def mode(self) -> str:
@@ -113,7 +111,6 @@ class ResolvedMesh:
             "octree_resolution": self.octree_resolution, "bounds": self.bounds,
             "mc_level": self.mc_level, "scale": self.scale,
             "lora_specs": self.lora_specs, "finish": asdict(self.finish),
-            "smooth_spots": len(self.smooth_spots),
         }
 
 
@@ -137,7 +134,6 @@ class _MeshBody(BaseModel):
     mc_level: Annotated[float, Field(allow_inf_nan=False)] | None = None
     scale: PositiveFinite | None = None
     lora_specs: LoraSpecs = None
-    smooth_spots: list[tuple[float, float, float, float]] | None = None
 
     @property
     def images(self) -> tuple[bytes, ...]:
@@ -150,21 +146,6 @@ class _MeshBody(BaseModel):
     def mode(self) -> str:
         return mode_of(self.images)
 
-    @field_validator("smooth_spots")
-    @classmethod
-    def _spots_are_places(cls, value):
-        if value is None:
-            return None
-        if len(value) > SPOT_LIMIT:
-            raise ValueError(f"smooth_spots holds at most {SPOT_LIMIT} spots, "
-                             f"got {len(value)}")
-        for x, y, z, radius in value:
-            if not all(math.isfinite(one) for one in (x, y, z, radius)):
-                raise ValueError("smooth_spots wants finite x, y, z and radius")
-            if not 0.0 < radius <= SPOT_RADIUS_LIMIT:
-                raise ValueError(f"a spot's radius must be within {SPOT_RADIUS_LIMIT}, "
-                                 f"got {radius}")
-        return [tuple(one) for one in value]
 
     def resolve(self, defaults: Mapping[str, Any]) -> ResolvedMesh:
         """Fill what the request left unset from the model's defaults, then check."""
@@ -197,8 +178,6 @@ class _MeshBody(BaseModel):
             raise ValueError("sampler must not be empty")
         if output_format not in OUTPUT_FORMATS:
             raise ValueError(f"output_format must be one of {', '.join(OUTPUT_FORMATS)}")
-        if self.smooth_spots and options_from(self).smooth <= 0.0:
-            raise ValueError("smooth_spots says where to smooth; send smooth above zero with it")
         return ResolvedMesh(
             images=self.images, from_shape=self.from_shape,
             latents=latents, steps=steps,
@@ -208,7 +187,6 @@ class _MeshBody(BaseModel):
             bounds=bounds, mc_level=mc_level, scale=scale,
             lora_specs=lora_specs_by_role(self.lora_specs),
             finish=options_from(self),
-            smooth_spots=tuple(tuple(one) for one in (self.smooth_spots or ())),
         )
 
 

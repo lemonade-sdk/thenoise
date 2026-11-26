@@ -9,7 +9,9 @@ from torch import Tensor
 from .octree import CORNERS, SdfVolume
 
 NORMAL_CREASE_DEGREES = 40.0
-DEGENERATE_AREA = 1e-16
+#: The thinnest face worth writing: one scores 1 as an equilateral and 0 as a line, so this
+#: is about a third of a degree at its sharpest corner, wherever on the shape it sits.
+SLIVER_QUALITY = 0.01
 
 _CREASE_LIMIT = math.cos(math.radians(NORMAL_CREASE_DEGREES))
 
@@ -106,12 +108,15 @@ class Mesh:
                 * torch.linalg.cross(triangles[:, 1], triangles[:, 2])).sum() / 6.0
 
     def without_degenerate(self) -> "Mesh":
-        """The mesh with faceless triangles cut, which readers refuse or misprint."""
-        corners = self.vertices[self.faces]
-        twice_area = torch.linalg.cross(corners[:, 1] - corners[:, 0],
-                                        corners[:, 2] - corners[:, 0]).norm(dim=-1)
-        across = (self.vertices.amax(dim=0) - self.vertices.amin(dim=0)).square().sum()
-        keep_faces = twice_area > across * DEGENERATE_AREA
+        """The mesh without the faces no reader can draw: the faceless ones, and the needles
+        whose normal is a coin flip, which is what a reader calls degenerate data.
+
+        Thinness is measured by the shape of a face, never its size: a threshold on area alone
+        once cut a fifth of a real cut. What falls below it carries a hundredth of a percent of
+        the surface where it appears, so the holes it leaves are smaller than the noise they
+        were drawn through.
+        """
+        keep_faces = _face_quality(self.vertices[self.faces]) > SLIVER_QUALITY
         used = torch.zeros(self.vertices.shape[0], dtype=torch.bool,
                            device=self.faces.device)
         used[self.faces[keep_faces]] = True
@@ -142,6 +147,20 @@ class Mesh:
         faced.index_add_(0, corner, (unit.unsqueeze(1) * weight).reshape(-1, 3))
         faced = torch.where(faced.square().sum(dim=-1, keepdim=True) > 0.0, faced, seed)
         return faced / faced.norm(dim=-1, keepdim=True).clamp(min=1e-20)
+
+
+def _face_quality(corners: Tensor) -> Tensor:
+    """How near an equilateral every face is: one for an equilateral, zero for a line.
+
+    Both halves are squared lengths, so the score does not care what units the shape is in.
+    """
+    there = corners[:, 1] - corners[:, 0]
+    on = corners[:, 2] - corners[:, 1]
+    back = corners[:, 0] - corners[:, 2]
+    twice_area = torch.linalg.cross(there, -back).norm(dim=-1)
+    squares = (there.square().sum(dim=-1) + on.square().sum(dim=-1)
+               + back.square().sum(dim=-1))
+    return 2 * math.sqrt(3.0) * twice_area / squares.clamp(min=1e-30)
 
 
 def empty_mesh(device=None) -> Mesh:

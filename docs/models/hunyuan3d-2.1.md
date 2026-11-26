@@ -9,7 +9,9 @@ a reference photo and writes it as `.glb`, `.obj` or `.stl`. A picture is the wh
   codec in a single 6.9 GB file
 - Built-in defaults: **30 steps, guidance 5.0**, euler, a 384³ surface cut
 - One picture per shape; a second is refused rather than quietly ignored
-- Geometry only
+- Geometry only — positions and shading directions, no texture, no UV layout, no material.
+  The paint half of Hunyuan3D 2.1 is a branch of its own rather than a knob on this one, so a
+  shape arrives grey and gets its colour wherever you open it
 - Meshes come back closed and facing outward, so a slicer can take them as they are
 
 > Commands below assume a dev checkout (`./thenoise.sh`, `.venv/bin/python`).
