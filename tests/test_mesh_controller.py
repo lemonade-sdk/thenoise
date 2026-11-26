@@ -313,3 +313,56 @@ def test_loras_without_a_directory_to_read_them_from_are_refused():
     with pytest.raises(ValueError, match="--lora-dir"):
         controller.render(resolved, Cancellation(), lambda *a: None,
                           Path("/tmp/mesh-lora.glb"))
+
+
+def renders(model, *requests):
+    """One controller over several requests, which is the only way a cache shows at all.
+
+    A request without a seed draws one before the key is built, so none would ever hit.
+    """
+    controller = MeshPipelineController(model)
+    for count, one in enumerate(requests):
+        resolved = controller.resolve(MeshSpec(**{**picture(), "seed": 1, **one}))
+        controller.render(resolved, Cancellation(), lambda *a: None,
+                          Path(f"/tmp/thenoise-mesh-cache-{count}"
+                               f".{resolved.output_format}"))
+    return model.events
+
+
+def test_a_shape_asked_for_twice_is_neither_conditional_nor_cut_again():
+    model = FakeShapeModel()
+    events = renders(model, {}, {})
+    assert events.count("encode") == events.count("step") == events.count("decode") == 1
+
+
+def test_a_finer_grid_cuts_again_from_the_latents_it_already_has():
+    model = FakeShapeModel()
+    events = renders(model, {}, {"octree_resolution": 32})
+    assert events.count("step") == 1, "the solver's work does not depend on the grid"
+    assert [one.octree_resolution for one in model.decode_params] == [16, 32]
+
+
+@pytest.mark.parametrize("knob", [{"bounds": 0.5}, {"mc_level": 0.1}])
+def test_another_volume_or_isovalue_is_another_cut(knob):
+    """Both change which points the codec queries: the band is searched around the level."""
+    model = FakeShapeModel()
+    events = renders(model, {}, knob)
+    assert events.count("decode") == 2
+    assert events.count("step") == 1
+
+
+def test_the_scale_the_finish_and_the_format_leave_the_cut_alone():
+    """Nothing downstream of the surface reaches back into it."""
+    model = FakeShapeModel()
+    events = renders(model, {}, {"scale": 2.0}, {"triangles": 0.5},
+                     {"floaters": 0.05}, {"output_format": "obj"})
+    assert events.count("decode") == 1
+    assert events.count("step") == 1
+
+
+def test_a_request_naming_another_attention_method_inherits_no_latents():
+    """A routed attention is a different function over the same rows, so it is keyed."""
+    model = FakeShapeModel()
+    events = renders(model, {}, {"attention": "full"})
+    assert events.count("step") == 2
+    assert events.count("decode") == 2

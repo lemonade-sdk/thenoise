@@ -93,11 +93,14 @@ class MeshPipelineController:
             token.check()
 
             progress("cutting")
+            # A cut hit implies a sampling hit: the cut key carries the sampling key.
             mesh = stages.run(
                 model.decode_mesh, x,
                 MeshDecodeParams(octree_resolution=spec.octree_resolution,
                                  bounds=spec.bounds, mc_level=spec.mc_level),
                 resident=("codec",), pixels=work,
+                cache="decode",
+                key=(*key, spec.octree_resolution, spec.bounds, spec.mc_level),
             )
             cut = mesh.faces.shape[0]
             mesh = finish_mesh(mesh.scaled(spec.scale), spec.finish, token.check,
@@ -114,11 +117,11 @@ class MeshPipelineController:
 
     @classmethod
     def _sampling_key(cls, spec: ResolvedMesh) -> tuple:
-        """Another seed, sampler, LoRA or token count is another shape, so all four are keyed."""
+        """Another seed, sampler, attention method, LoRA or token count is another shape."""
         worn = tuple(sorted((role, tuple(files))
                             for role, files in spec.lora_specs.items()))
         return (*cls._cache_key(spec), spec.seed, spec.steps, spec.sampler,
-                spec.latents, worn)
+                spec.attention, spec.latents, worn)
 
     def _denoise(self, latents, cond, params, spec: ResolvedMesh, token: Cancellation,
                  progress):

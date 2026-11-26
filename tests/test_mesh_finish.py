@@ -316,6 +316,20 @@ def test_keeping_everything_hands_back_the_very_mesh():
     assert reduce_to(cut, 1.0) is cut
 
 
+def test_a_tetrahedron_is_the_least_a_closed_shape_can_be():
+    """Every collapse opens it, so the smallest closed piece is handed back whole."""
+    cut = tetra()
+    assert reduce_to(cut, 0.01) is cut
+
+
+@pytest.mark.parametrize("keep", [0.9, 0.95, 0.99])
+def test_a_fraction_that_rounds_up_to_the_cut_still_asks_for_less(keep):
+    """Eight triangles and a fraction near one round back to eight, which is refused."""
+    cut = beside_the_shape(tetra(), tetra((4.0, 4.0, 4.0)))
+    reduced = reduce_to(cut, keep)
+    assert 0 < len(reduced.faces) <= len(cut.faces)
+
+
 def test_the_mesh_comes_back_the_kind_the_cut_was():
     """The library works in float64 on the host; the writers see what they saw before."""
     cut = sphere_cut(32)

@@ -586,20 +586,10 @@ with urllib.request.urlopen(req) as r:
 ## Caching
 
 Pipeline stages cache their output, keyed by the request fields that affect them,
-so a request repeated verbatim — same prompt, guidance, size, steps, seed and
-sampler — is served from the cache: identical bytes, a fraction of the time, no
-resampling. A request that omits `seed` (or passes `-1`) draws a fresh seed
-before the key is built and so never hits it; when timing repeated requests, vary
-the seed or prompt.
-
-A video run caches its two encode stages and not the clip: repeating a request
-over the same reference image skips the codec, and one that changes only the
-prompt skips the text encoder as well. A changed image costs the text encoder
-too.
-
-A shape run caches its conditioning and its sampling, so the same picture with
-the same settings is cut again without resampling; changing the grid, the
-finish or the scale only costs the cut.
+so a request repeated verbatim is served from the cache: identical bytes, a fraction 
+of the time, no resampling. A request that omits `seed` (or passes `-1`) draws a
+fresh seed before the key is built and so never hits it; when timing repeated 
+requests, vary the seed or prompt.
 
 ## Error semantics
 
