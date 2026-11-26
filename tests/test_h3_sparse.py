@@ -9,7 +9,7 @@ the same way from a table shaped for the other order.
 """
 from __future__ import annotations
 
-from types import SimpleNamespace
+from typing import Optional
 
 import pytest
 import torch
@@ -18,7 +18,6 @@ import thenoise.dit.h3.av as av
 import thenoise.dit.h3.trunk as trunk
 import thenoise.utils.sol_attention as sol
 from test_dit_h3_av import _av_dit, _av_layout, _run
-from test_dit_h3_image import TINY_SIGMAS, _forward, _tiny_dit
 from thenoise.dit.h3.layout import Layout
 from thenoise.dit.h3.sparse import SolAttention, sol_plan, sol_sinks, window_sigmas
 from thenoise.utils.sol_attention import (BLOCK, DTYPES, HEAD_DIM, MIN_TOKENS, TAU,

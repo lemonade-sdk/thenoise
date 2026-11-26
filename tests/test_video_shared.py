@@ -246,6 +246,31 @@ def test_a_reference_names_its_frame_in_the_argument():
     assert one_reference("shots@night.png") == ("shots@night.png", None)
 
 
+def test_a_box_without_the_kernel_answers_no_lossy_attention(tmp_path):
+    """The words are the architecture's; the offer is the box's, and /health reads this."""
+    class Lossy(StubVideo):
+        ATTENTION_METHODS = (*StubVideo.ATTENTION_METHODS, "optimized")
+
+        def attention_routing_blocked(self):
+            return "no compiled sol_attn kernel for cuda:0"
+
+    model = Lossy(config=_stub_config(tmp_path))
+    assert model.ATTENTION_METHODS != model.attention_methods()
+    assert model.attention_methods() == ATTENTION_METHODS
+
+
+def test_a_refused_optimized_says_what_the_box_lacks(tmp_path):
+    class Lossy(StubVideo):
+        ATTENTION_METHODS = (*StubVideo.ATTENTION_METHODS, "optimized")
+
+        def attention_routing_blocked(self):
+            return "no compiled sol_attn kernel for cuda:0"
+
+    with pytest.raises(ValueError, match="no compiled sol_attn kernel"):
+        Lossy(config=_stub_config(tmp_path)).resolve_video(
+            VideoSpec(prompt="fox", attention="optimized"))
+
+
 def test_attention_a_model_does_not_answer_is_refused_by_name(tmp_path):
     model = StubVideo(config=_stub_config(tmp_path))
     assert model.ATTENTION_METHODS == ATTENTION_METHODS
