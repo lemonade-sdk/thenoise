@@ -7,12 +7,12 @@ import torch
 from conftest import StubVideo, header_of, wan_adapter
 from thenoise.models.config import ModelConfig
 from thenoise.models.video_base import Segment, VideoModel
-from thenoise.video_cli import one_reference
 from thenoise.models.h3_video import H3VideoModel
 from thenoise.models.wan_video import VARIANTS, Wan22Model
 from thenoise.vae.wan22 import WAN22_LATENTS_MEAN, WAN22_LATENTS_STD
 from thenoise.vae.wan_video import _comfy_vae_config
 from thenoise.video.controller import VideoPipelineController
+from thenoise.video_cli import one_reference
 from thenoise.jobs import Cancellation
 from thenoise.video.spec import Guide, ResolvedVideo, VideoSpec, mode_of
 
@@ -201,6 +201,41 @@ def test_references_are_refused_where_the_architecture_has_no_place_for_them():
     with pytest.raises(ValueError, match="does not support ref2v"):
         VideoPipelineController(model).resolve(
             VideoSpec(prompt="a fox, like this", references=[Guide(pixels=b"png")]))
+
+
+def test_references_reach_the_conditioner_and_the_packing(tmp_path, monkeypatch):
+    """A reference goes the whole way round a clip run: shown to the language model as a
+    picture, pinned to the frame the request named."""
+    class RefVideo(StubVideo):
+        CAPABILITIES = {**StubVideo.CAPABILITIES,
+                        "video": {**StubVideo.CAPABILITIES["video"], "ref2v": True}}
+
+        def prepare_latent(self, latents, cond, params, ref=None, ref_method="index",
+                           guides=()):
+            self.guides_seen = [frame for _latent, frame in guides]
+            return super().prepare_latent(latents, cond, params, ref=ref,
+                                          ref_method=ref_method)
+
+    model = RefVideo(config=_stub_config(tmp_path))
+    monkeypatch.setattr("thenoise.video.controller.encode_video",
+                        lambda frames, spec, token, dest, progress: dest.write_bytes(b"v"))
+    spec = model.resolve_video(VideoSpec(prompt="a fox, like this",
+                                         references=[Guide(pixels=_png_bytes(), frame=-1)]))
+    VideoPipelineController(model).render(spec, Cancellation(), lambda *_: None,
+                                          tmp_path / "clip.webm")
+
+    pictures = model.encode_prompt_args.image
+    assert pictures is not None and len(pictures) == 1
+    assert model.guides_seen == [-1]
+
+
+def _png_bytes() -> bytes:
+    import io
+
+    from PIL import Image
+    buffer = io.BytesIO()
+    Image.new("RGB", (16, 16), "red").save(buffer, "PNG")
+    return buffer.getvalue()
 
 
 def test_a_reference_names_its_frame_in_the_argument():

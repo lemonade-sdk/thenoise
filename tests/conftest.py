@@ -1029,6 +1029,7 @@ class StubVideo(VideoModel):
 
     def encode_prompt(self, args):
         self.calls["encode_prompt"] += 1
+        self.encode_prompt_args = args
         return Conditioning(cond=torch.zeros(1, 2, 4),
                             null=torch.zeros(1, 2, 4) if args.guidance_scale > 1 else None)
 
