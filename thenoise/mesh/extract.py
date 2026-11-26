@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
 from torch import Tensor
 
 from .octree import CORNERS, SdfVolume
+
+NORMAL_CREASE_DEGREES = 40.0
+DEGENERATE_AREA = 1e-16
+
+_CREASE_LIMIT = math.cos(math.radians(NORMAL_CREASE_DEGREES))
 
 #: The Kuhn split as CORNERS indices (4i + 2j + k); neighbouring cubes share every face diagonal.
 TETRAHEDRA = torch.tensor([[0, 4, 6, 7], [0, 4, 5, 7], [0, 2, 6, 7],
@@ -102,10 +108,10 @@ class Mesh:
     def without_degenerate(self) -> "Mesh":
         """The mesh with faceless triangles cut, which readers refuse or misprint."""
         corners = self.vertices[self.faces]
-        area2 = torch.linalg.cross(corners[:, 1] - corners[:, 0],
-                                   corners[:, 2] - corners[:, 0]).square().sum(dim=-1)
+        twice_area = torch.linalg.cross(corners[:, 1] - corners[:, 0],
+                                        corners[:, 2] - corners[:, 0]).norm(dim=-1)
         across = (self.vertices.amax(dim=0) - self.vertices.amin(dim=0)).square().sum()
-        keep_faces = area2 > across * DEGENERATE_AREA
+        keep_faces = twice_area > across * DEGENERATE_AREA
         used = torch.zeros(self.vertices.shape[0], dtype=torch.bool,
                            device=self.faces.device)
         used[self.faces[keep_faces]] = True
@@ -114,27 +120,28 @@ class Mesh:
         return self.select(used, keep_faces)
 
     def smooth_normals(self) -> Tensor:
-        """The direction every point faces: its own face and its neighbours' averaged,
-        counting only those within :data:`NORMAL_CREASE_DEGREES` so a hard edge stays hard.
+        """The direction every point faces: the normals of the faces around it, averaged over
+        those within :data:`NORMAL_CREASE_DEGREES` of its widest one, so a hard edge stays hard.
         """
         corners = self.vertices[self.faces]
         span = torch.linalg.cross(corners[:, 1] - corners[:, 0],
                                   corners[:, 2] - corners[:, 0])
         worth = span.norm(dim=-1)
         unit = span / worth.clamp(min=1e-20).unsqueeze(-1)
-        flat = self._gather(unit, worth.unsqueeze(1), torch.ones_like(worth.unsqueeze(1)))
-        inside = (unit.unsqueeze(1) * flat[self.faces]).sum(dim=-1) >= _CREASE_LIMIT
-        turned = self._gather(unit, worth.unsqueeze(1) * inside.to(worth.dtype),
-                              flat[self.faces])
-        return torch.where(turned.square().sum(dim=-1, keepdim=True) > 0.0,
-                           turned, flat[self.faces].amax(dim=1)).renorm(2, 1, 1.0)
-
-    def _gather(self, unit: Tensor, weight: Tensor, away: Tensor) -> Tensor:
-        """Every face's weighted normal added to each point it touches, then away."""
-        total = away.clone()
-        total.index_add_(0, self.faces.reshape(-1),
-                         (unit.unsqueeze(1) * weight).reshape(-1, 3))
-        return total
+        corner = self.faces.reshape(-1)
+        lightest_first = torch.argsort(worth.repeat_interleave(3))
+        widest = torch.full((self.vertices.shape[0],), -1, dtype=torch.long,
+                            device=self.faces.device)
+        widest.scatter_reduce_(0, corner[lightest_first],
+                               torch.arange(lightest_first.shape[0], device=corner.device),
+                               reduce="amax", include_self=False)
+        seed = unit[lightest_first[widest.clamp(min=0)] // 3]
+        inside = (unit.unsqueeze(1) * seed[self.faces]).sum(dim=-1) >= _CREASE_LIMIT
+        weight = (worth.unsqueeze(1) * inside.to(worth.dtype)).unsqueeze(-1)
+        faced = torch.zeros_like(self.vertices)
+        faced.index_add_(0, corner, (unit.unsqueeze(1) * weight).reshape(-1, 3))
+        faced = torch.where(faced.square().sum(dim=-1, keepdim=True) > 0.0, faced, seed)
+        return faced / faced.norm(dim=-1, keepdim=True).clamp(min=1e-20)
 
 
 def empty_mesh(device=None) -> Mesh:

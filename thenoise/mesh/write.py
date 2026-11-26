@@ -23,24 +23,33 @@ def _spans(count: int):
 
 
 def _host(mesh: Mesh) -> Mesh:
-    """Every writer starts here, and a glTF header cannot carry a ``NaN`` position."""
+    """Every writer starts here: a glTF header cannot carry a ``NaN`` position and no reader
+    wants a triangle with no area."""
     if not bool(torch.isfinite(mesh.vertices).all()):
         raise ValueError("the sampled field left a position that is not a number")
-    return mesh.cpu()
+    local = mesh.cpu().without_degenerate()
+    if local.is_empty:
+        raise ValueError("every triangle was faceless: there is no surface to write")
+    return local
 
 
 def write_obj(mesh: Mesh, path: str | Path) -> None:
-    """``v`` lines then ``f`` lines, 1-based as OBJ counts."""
+    """``v`` and ``vn`` lines then ``f v//vn`` lines, 1-based as OBJ counts."""
     if mesh.is_empty:
         raise ValueError("there is no mesh to write")
     local = _host(mesh)
+    normals = local.smooth_normals()
+    corners = (local.faces + 1).tolist()
     with open(path, "w", encoding="utf-8") as text:
         for low, high in _spans(local.vertices.shape[0]):
             text.write("".join(f"v {x:.6f} {y:.6f} {z:.6f}\n"
                                for x, y, z in local.vertices[low:high].tolist()))
-        for low, high in _spans(local.faces.shape[0]):
-            text.write("".join(f"f {a + 1} {b + 1} {c + 1}\n"
-                               for a, b, c in local.faces[low:high].tolist()))
+        for low, high in _spans(normals.shape[0]):
+            text.write("".join(f"vn {x:.6f} {y:.6f} {z:.6f}\n"
+                               for x, y, z in normals[low:high].tolist()))
+        for low, high in _spans(len(corners)):
+            text.write("".join(f"f {a}//{a} {b}//{b} {c}//{c}\n"
+                               for a, b, c in corners[low:high]))
 
 
 def write_glb(mesh: Mesh, path: str | Path) -> None:
@@ -49,8 +58,9 @@ def write_glb(mesh: Mesh, path: str | Path) -> None:
         raise ValueError("there is no mesh to write")
     local = _host(mesh)
     positions = local.vertices.to(torch.float32).contiguous()
+    normals = local.smooth_normals().to(torch.float32).contiguous()
     indices = local.faces.to(torch.int32).contiguous().reshape(-1)
-    body = positions.numel() * 4 + indices.numel() * 4
+    body = (positions.numel() + normals.numel() + indices.numel()) * 4
     bounds = positions.amin(dim=0).tolist()
     ceiling = positions.amax(dim=0).tolist()
     document = {
@@ -58,18 +68,23 @@ def write_glb(mesh: Mesh, path: str | Path) -> None:
         "scene": 0,
         "scenes": [{"nodes": [0]}],
         "nodes": [{"mesh": 0}],
-        "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1}]}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1},
+                                    "indices": 2}]}],
         "buffers": [{"byteLength": body}],
         "bufferViews": [
             {"buffer": 0, "byteOffset": 0, "byteLength": positions.numel() * 4,
              "target": _GLTF_POSITION_TARGET},
             {"buffer": 0, "byteOffset": positions.numel() * 4,
+             "byteLength": normals.numel() * 4, "target": _GLTF_POSITION_TARGET},
+            {"buffer": 0, "byteOffset": (positions.numel() + normals.numel()) * 4,
              "byteLength": indices.numel() * 4, "target": _GLTF_INDEX_TARGET},
         ],
         "accessors": [
             {"bufferView": 0, "componentType": 5126, "count": positions.shape[0],
              "type": "VEC3", "min": bounds, "max": ceiling},
-            {"bufferView": 1, "componentType": 5125, "count": indices.shape[0],
+            {"bufferView": 1, "componentType": 5126, "count": normals.shape[0],
+             "type": "VEC3"},
+            {"bufferView": 2, "componentType": 5125, "count": indices.shape[0],
              "type": "SCALAR"},
         ],
     }
@@ -82,8 +97,9 @@ def write_glb(mesh: Mesh, path: str | Path) -> None:
         out.write(struct.pack("<II", len(head) + head_pad, 0x4E4F534A) + head
                   + b" " * head_pad)
         out.write(struct.pack("<II", body + body_pad, 0x004E4942))
-        for low, high in _spans(positions.shape[0]):
-            out.write(positions[low:high].numpy().tobytes())
+        for one in (positions, normals):
+            for low, high in _spans(one.shape[0]):
+                out.write(one[low:high].numpy().tobytes())
         for low, high in _spans(indices.shape[0]):
             out.write(indices[low:high].numpy().tobytes())
         out.write(b"\0" * body_pad)

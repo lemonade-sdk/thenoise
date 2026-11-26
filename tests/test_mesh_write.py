@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import torch
 
-from thenoise.mesh.extract import Mesh, empty_mesh
+from thenoise.mesh.extract import Mesh, NORMAL_CREASE_DEGREES, empty_mesh
 from thenoise.mesh.write import write_glb, write_mesh, write_obj, write_stl
 
 
@@ -18,9 +18,10 @@ def triangle() -> Mesh:
 def test_obj_counts_from_one(tmp_path):
     path = tmp_path / "mesh.obj"
     write_obj(triangle(), path)
-    lines = path.read_text().split()
-    assert lines[:3] == ["v", "0.000000", "0.000000"]
-    assert lines[-4:] == ["f", "1", "2", "3"]
+    rows = [line.split() for line in path.read_text().splitlines()]
+    assert rows[0] == ["v", "0.000000", "0.000000", "0.000000"]
+    assert rows[3] == ["vn", "0.000000", "0.000000", "1.000000"]
+    assert rows[-1] == ["f", "1//1", "2//2", "3//3"]
 
 
 def test_glb_is_a_binary_glTF_of_positions_and_triangles(tmp_path):
@@ -37,13 +38,16 @@ def test_glb_is_a_binary_glTF_of_positions_and_triangles(tmp_path):
     bin_length, bin_type = struct.unpack("<II", raw[bin_offset:bin_offset + 8])
     assert bin_type == 0x004E4942
     assert bin_offset + 8 + bin_length <= total
-    assert document["meshes"][0]["primitives"][0]["attributes"] == {"POSITION": 0}
+    assert document["meshes"][0]["primitives"][0]["attributes"] == {"POSITION": 0, "NORMAL": 1}
     assert document["accessors"][0]["type"] == "VEC3"
     assert document["accessors"][0]["count"] == 3
+    assert document["accessors"][1]["type"] == "VEC3"
     assert document["accessors"][1]["count"] == 3
+    assert document["accessors"][2]["count"] == 3
     positions = raw[bin_offset + 8:bin_offset + 8 + 36]
     assert struct.unpack("<3f", positions[:12]) == (0.0, 0.0, 0.0)
-    assert struct.unpack("<I", raw[bin_offset + 8 + 36:bin_offset + 8 + 40]) == (0,)
+    assert struct.unpack("<3f", raw[bin_offset + 8 + 36:bin_offset + 8 + 48]) == (0.0, 0.0, 1.0)
+    assert struct.unpack("<I", raw[bin_offset + 8 + 72:bin_offset + 8 + 76]) == (0,)
 
 
 def test_glb_promises_the_positions_extent_because_the_format_demands_it(tmp_path):
@@ -107,12 +111,79 @@ def test_stl_normals_follow_the_winding(tmp_path):
     assert ((records["normal"] * away).sum(axis=1) > 0.9).all()
 
 
-def test_a_degenerate_triangle_gets_no_normal_rather_than_a_nan(tmp_path):
-    path = tmp_path / "flat.stl"
+def test_a_faceless_triangle_is_not_written_at_all(tmp_path):
+    """A triangle with no area is a spike or a hole to whoever opens the file, and the
+    reducer leaves a few thousand of them behind."""
+    path = tmp_path / "spike.stl"
     write_stl(Mesh(vertices=torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0],
-                                          [2.0, 0.0, 0.0]]),
-                   faces=torch.tensor([[0, 1, 2]])), path)
-    assert struct.unpack("<3f", path.read_bytes()[84:96]) == (0.0, 0.0, 0.0)
+                                          [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]]),
+                   faces=torch.tensor([[0, 1, 2], [0, 1, 3]])), path)
+    assert struct.unpack("<I", path.read_bytes()[80:84]) == (1,)
+
+
+def test_a_surface_of_only_faceless_triangles_is_refused(tmp_path):
+    flat = Mesh(vertices=torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]),
+                faces=torch.tensor([[0, 1, 2]]))
+    with pytest.raises(ValueError, match="faceless"):
+        write_glb(flat, tmp_path / "flat.glb")
+
+
+def test_a_thin_triangle_is_written_because_it_still_carries_surface(tmp_path):
+    """A sliver is ugly and the reducer leaves them by the thousand; only a face with no
+    area at all is a hole. Cutting by relative size ate 18% of a real cut once."""
+    path = tmp_path / "sliver.obj"
+    write_obj(Mesh(vertices=torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0],
+                                          [0.0, 1.0, 0.0], [0.5, 0.0004, 0.0]]),
+                   faces=torch.tensor([[0, 1, 2], [1, 3, 0]])), path)
+    text = path.read_text()
+    assert text.count("\nf ") == 2
+
+
+def test_normals_smooth_a_sphere_toward_the_shape_it_was_cut_from(tmp_path):
+    from thenoise.mesh.extract import extract_surface
+    from thenoise.mesh.octree import sample_sdf
+
+    sphere = extract_surface(sample_sdf(lambda p: p.norm(dim=-1) - 0.4, 48,
+                                        device="cpu", start=8))
+    normals = sphere.smooth_normals()
+    away = sphere.vertices / sphere.vertices.norm(dim=-1, keepdim=True)
+    angle = torch.rad2deg(torch.acos((normals * away).sum(dim=-1).clamp(-1.0, 1.0)))
+    assert normals.norm(dim=-1).min() > 0.999999
+    assert float(angle.median()) < 2.0
+    assert float(angle.max()) < NORMAL_CREASE_DEGREES
+
+
+def test_normals_do_not_average_across_a_fold():
+    """A bisector on every point of a hard edge is what rounds a shape into a pebble."""
+    fold = Mesh(vertices=torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, -1.0, 0.0],
+                                       [1.0, -1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 1.0]]),
+                faces=torch.tensor([[0, 2, 3], [0, 3, 1], [0, 1, 4], [1, 5, 4]]))
+    normals = fold.smooth_normals()
+    side = torch.linalg.cross(fold.vertices[2] - fold.vertices[0],
+                              fold.vertices[3] - fold.vertices[0])
+    up = torch.linalg.cross(fold.vertices[1] - fold.vertices[0],
+                            fold.vertices[4] - fold.vertices[0])
+    side, up = side / side.norm(), up / up.norm()
+    assert torch.allclose(normals[2], side, atol=1e-6)
+    assert torch.allclose(normals[4], up, atol=1e-6)
+    for crease in (0, 1):
+        against = torch.stack([(normals[crease] * side).sum(), (normals[crease] * up).sum()])
+        assert against.abs().max() > 0.99, "the crease point got a bisector"
+
+
+def test_every_written_normal_is_a_direction(tmp_path):
+    from thenoise.mesh.extract import extract_surface
+    from thenoise.mesh.octree import sample_sdf
+
+    rough = extract_surface(sample_sdf(lambda p: p.norm(dim=-1) - 0.4, 24,
+                                       device="cpu", start=8))
+    drawn = torch.Generator().manual_seed(4)
+    rough = Mesh(rough.vertices + torch.randn(rough.vertices.shape, generator=drawn) * 0.02,
+                 rough.faces)
+    write_glb(rough, tmp_path / "rough.glb")
+    lengths = rough.smooth_normals().norm(dim=-1)
+    assert torch.isfinite(lengths).all()
+    assert float(lengths.min()) > 0.999999
 
 
 def test_stl_is_written_by_the_extension_too(tmp_path):
