@@ -84,10 +84,8 @@ class MeshPipelineController:
                 for role, component in model.lora_components().items():
                     model.switch_loras(spec.lora_specs.get(role), component, role)
 
-            key = self._sampling_key(spec)
             # A sampling hit implies a prompt hit: the sampling key carries it.
-            if self._cache.hit("sampling", key):
-                logger.info("Reusing the latents this server still holds, nothing resampled")
+            key = self._sampling_key(spec)
             x = stages.run(self._denoise, latents, model.fuse_text(cond), params, spec,
                            token, progress, resident=("dit",), pixels=work,
                            prepare=wear_loras,
@@ -101,13 +99,12 @@ class MeshPipelineController:
                                  bounds=spec.bounds, mc_level=spec.mc_level),
                 resident=("codec",), pixels=work,
             )
-            logger.info("Cut: %d triangles; finish %s", mesh.faces.shape[0], spec.finish)
+            cut = mesh.faces.shape[0]
             mesh = finish_mesh(mesh.scaled(spec.scale), spec.finish, token.check,
                                progress)
             drawn = write_mesh(mesh, output, spec.output_format)
-            logger.info("Mesh: %d vertices, %d triangles written at resolution %d",
-                        drawn.vertices.shape[0], drawn.faces.shape[0],
-                        spec.octree_resolution)
+            logger.info("shape: %d triangles cut, %d written (%s)",
+                        cut, drawn.faces.shape[0], spec.finish)
 
     @staticmethod
     def _cache_key(spec: ResolvedMesh) -> tuple:

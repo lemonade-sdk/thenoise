@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-import logging
-import time
 from dataclasses import dataclass
 from typing import Callable, Dict
 
 from thenoise.utils.options import apply_chain
 
 from .options import DEFAULTS, FINISH, filter_specs
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -35,16 +31,10 @@ def _smooth(mesh, ask: Ask, *, smooth: float):
 FILTERS: Dict[str, Callable] = {"floaters": _floaters, "simplify": _simplify,
                                 "smooth": _smooth}
 
-def _reported(spec, ask: Ask):
-    """A filter that says what it was handed, and what it gave back."""
+def _asked(spec, ask: Ask):
+    """A filter with the run's stop signal already in hand."""
     def run(carrier, **knobs):
-        before = carrier.faces.shape[0]
-        logger.info("finishing %s over %d triangles", spec.name, before)
-        started = time.monotonic()
-        kept = FILTERS[spec.name](carrier, ask, **knobs)
-        logger.info("finishing %s: %d -> %d triangles in %.1fs", spec.name, before,
-                    kept.faces.shape[0], time.monotonic() - started)
-        return kept
+        return FILTERS[spec.name](carrier, ask, **knobs)
 
     return run
 
@@ -55,7 +45,7 @@ def finish_mesh(mesh, options, check: Callable[[], None], progress: Callable[...
     stages = filter_specs(FINISH)
     ask = Ask(check=check)
     return apply_chain(host, options, stages,
-                       {spec.name: _reported(spec, ask) for spec in stages}, DEFAULTS,
+                       {spec.name: _asked(spec, ask) for spec in stages}, DEFAULTS,
                        check=check,
                        on_filter=lambda _spec: progress(FINISH))
 

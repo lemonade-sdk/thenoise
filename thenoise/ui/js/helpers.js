@@ -818,8 +818,10 @@ async function runQueuedJob({ job, submit, body, btn, cancelBtn, overlay,
       cancelBtn.disabled = false;
       setProgress(progress, { stage: 'queued' });
       const status = await pollJob(job.id, (p) => setProgress(progress, p));
-      if (status.status === 'canceled') return { state: 'error', text: 'canceled' };
-      if (status.status !== 'completed') throw new Error(status.error || status.status);
+      if (status.status === 'canceled') return { state: 'error', text: STAGE_WORDS.canceled };
+      if (status.status !== 'completed') {
+        throw new Error(status.error || STAGE_WORDS[status.status] || status.status);
+      }
       const res = await fetchOrGone('/jobs/' + job.id + '/content', undefined, PATIENCE);
       if (!res.ok) throw new Error('downloading the result failed: ' + await errorMessage(res));
       await onArtifact(await res.blob(), status);

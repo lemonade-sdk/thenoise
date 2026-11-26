@@ -30,10 +30,6 @@ _CACHE_NAME = re.compile(r"(?:sync_|job_)[0-9a-f]{32}\.\w+\Z")
 Progress = Callable[[str, int, int], None]
 
 
-#: What an artifact is called, and therefore what a medium may treat as its own.
-JOB_ID_PREFIX = "job_"
-
-
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -173,11 +169,6 @@ class JobQueue:
         self._worker: Optional[threading.Thread] = None
         self._closed = False
 
-    @property
-    def root(self) -> Path:
-        """Where artifacts live, so a medium can keep its own beside them."""
-        return self._root
-
     def render_sync(self, plan: JobPlan) -> Path:
         """Render directly, without queueing; the HTTP response removes the output."""
         with self._lock:
@@ -199,7 +190,7 @@ class JobQueue:
             if len(self._queued) >= self._queue_limit:
                 raise OverflowError("job queue is full")
             self._prune()
-            job_id = JOB_ID_PREFIX + uuid.uuid4().hex
+            job_id = "job_" + uuid.uuid4().hex
             job = _Job(job_id, plan.kind, plan.model, dict(plan.public),
                        plan.payload, plan.render,
                        self._root / (job_id + plan.suffix))
@@ -261,7 +252,8 @@ class JobQueue:
         job.status = status
         job.stage = status
         job.completed_at = _now()
-        # A payload can be megabytes: drop it when the renderer ends, not when the record does.
+        # A reference image or clip input can be megabytes; do not retain it for the
+        # whole history window after the renderer (or a queued cancellation) ends.
         job.payload = None
         logger.info("%s job %s %s%s", job.kind, job.id, status,
                     f" ({job.target})" if status == "completed" else "")

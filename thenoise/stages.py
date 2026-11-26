@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import logging
 from typing import Any, Callable, Optional, Sequence
 
 from thenoise.utils.pipeline_cache import PipelineCache
-
-logger = logging.getLogger(__name__)
 
 
 class Stages:
@@ -20,7 +17,6 @@ class Stages:
             prepare: Optional[Callable[[], None]] = None, **kwargs) -> Any:
         """``work(*args)`` with ``resident`` held, cached under ``cache`` when named."""
         if cache is not None and self._cache.hit(cache, key):
-            logger.info("%s stage reused: nothing recomputed", cache)
             return self._cache.get(cache)
         with self._model.memory.stage(*resident, pixels=pixels) as stage:
             if prepare is not None:

@@ -5,7 +5,6 @@ extractor, so a filter that quietly opened the surface or ate the shape shows up
 rather than in a file somebody tries to print.
 """
 import math
-import re
 import subprocess
 import sys
 
@@ -145,22 +144,6 @@ def test_every_filter_runs_and_the_declared_order_is_kept(monkeypatch):
                 (observer := _NothingAsked()).check, observer.progress)
     assert seen == ["floaters", "simplify", "smooth"]
     assert observer.stages == ["finish"] * 3
-
-
-def test_a_chain_that_never_returns_still_names_the_filter_it_entered(caplog):
-    """The one piece of evidence a hung job leaves is the last line it wrote, so each filter
-    says what it was handed before it starts, not only what it gave back when it finishes."""
-    cut, keep = sphere_cut(32), MeshFinishOptions(floaters=0.01, triangles=0.5)
-    with caplog.at_level("INFO", logger="thenoise.mesh.finish.chain"):
-        finish_mesh(cut, keep, (observer := _NothingAsked()).check, observer.progress)
-    lines = [record.getMessage() for record in caplog.records]
-    faces = len(cut.faces)
-    assert [line for line in lines if line.endswith("triangles")] == [
-        f"finishing floaters over {faces} triangles",
-        f"finishing simplify over {faces} triangles"]
-    assert [line.split(" in ")[0] for line in lines if " triangles in " in line] == [
-        f"finishing floaters: {faces} -> {faces} triangles",
-        f"finishing simplify: {faces} -> {round(faces * keep.triangles)} triangles"]
 
 
 # ---------------------------------------------------------------- floaters
@@ -412,21 +395,6 @@ def test_a_canceled_request_stops_at_the_next_round():
     with pytest.raises(Stopped):
         relax_surface(sphere_cut(64), 1.0, ticker)
     assert ticker.calls == 3
-
-
-def test_the_log_says_what_the_smoothing_actually_did(caplog):
-    """Whether the knob did anything is invisible in a flat-shaded preview, so the line carries
-    the roughness before and after, the work it was worth and what it refused to touch."""
-    wobbling = roughen(sphere_cut(32))
-    with caplog.at_level("INFO", logger="thenoise.mesh.finish.smooth"):
-        relax_surface(wobbling, 0.4, _nothing_asked)
-    said = [one.getMessage() for one in caplog.records
-            if one.getMessage().startswith("smooth:")][-1]
-    rough, smoother = (float(one) for one in
-                       re.search(r"wobble (\S+) -> (\S+)", said).groups())
-    assert smoother < rough
-    assert f"{math.ceil(0.4 * MAX_ROUNDS)} rounds" in said
-    assert "volume " in said
 
 
 # ---------------------------------------------------------------- the request

@@ -6,7 +6,8 @@ logger = logging.getLogger(__name__)
 
 
 def drop_islands(mesh: Mesh, size: float) -> Mesh:
-    """Every piece of ``mesh`` reaching at least ``size`` as far as the widest; 1 keeps that one."""
+    """Every piece of ``mesh`` reaching at least ``size`` as far as the widest; 1 keeps
+    that one."""
     if size <= 0.0 or mesh.is_empty:
         return mesh
 
@@ -30,9 +31,6 @@ def drop_islands(mesh: Mesh, size: float) -> Mesh:
                     int((~wanted).sum()), len(roots), round(100 * size),
                     round(100 * float(reach[~wanted].max()) / farthest),
                     100 * float(area[~wanted[piece]].sum()) / float(area.sum()))
-    else:
-        logger.info("floaters: %d pieces, all reaching %d%% of the widest",
-                    len(roots), round(100 * size))
     return mesh.select(wanted[where], wanted[piece])
 
 
@@ -55,7 +53,8 @@ def _components(faces: torch.Tensor, vertices: int) -> torch.Tensor:
 
 
 def _settled_by_hand(label: torch.Tensor, faces: torch.Tensor) -> torch.Tensor:
-    """Merge the labels the rounds left disagreeing, in the number of pieces rather than vertices."""
+    """Merge the labels the rounds left disagreeing, in the number of pieces rather than
+    vertices."""
     a, b, c = (label[faces[:, i]] for i in (0, 1, 2))
     joined = faces[(a != b) | (b != c) | (c != a)]
     x, y, z = (label[joined[:, i]] for i in (0, 1, 2))
