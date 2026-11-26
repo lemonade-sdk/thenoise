@@ -17,6 +17,7 @@ from test_dit_h3_av import _av_params, av_state
 from test_vae_h3_audio import TINY as AUDIO_GEOMETRY, _fill as fill_audio
 from test_vae_h3_video import _fill as fill_video
 from thenoise.dit.h3 import H3AVDiT
+from thenoise.models.video_base import Condition
 from thenoise.models.config import ModelConfig, VideoSamplingParams
 from thenoise.models.h3_image import H3ImageModel
 from thenoise.models.h3_video import (
@@ -177,47 +178,87 @@ def test_a_keyframe_is_never_written_into_the_clip(model):
     assert torch.equal(out, latents), "a keyframe is a row of its own, not an overwrite"
 
 
-def test_a_reference_is_pinned_like_a_keyframe_on_the_same_frame(model):
-    """A keyframe and a reference differ in which frame, not in how they are pinned."""
+def test_an_anchored_condition_is_pinned_like_a_keyframe_on_the_same_frame(model):
+    """A guide and a keyframe differ in which frame, not in how they are pinned."""
     params = _params(frames=22)
     streams = model._streams(params)
     frame = torch.ones(1, 24, 1, *streams.video[2:])
 
-    def positions(**kwargs):
+    def pinned(**kwargs):
         model.prepare_latent(model.init_latents(params), _conditioning(), params,
                              ref_method="index_timestep_zero", **kwargs)
         return model._layout
 
-    def pinned_time(layout):
-        start, stop, kind = layout.segments[1]
-        assert kind == "cond"
-        return layout.position_ids[start:stop, 0]
+    def cond_time(layout):
+        first = layout.segments[1]
+        assert first[2] == "cond"
+        return layout.position_ids[first[0]:first[1], 0]
 
-    keyframe = positions(ref=[frame])
+    keyframe = pinned(ref=[frame])
     assert [kind for _, _, kind in keyframe.segments] == [
         "text", "cond", "audio", "video"]
-    assert torch.equal(pinned_time(keyframe), pinned_time(positions(guides=[(frame, 0)])))
-    assert torch.equal(pinned_time(positions(guides=[(frame, -1)])),
-                       pinned_time(positions(guides=[(frame, params.frames - 1)])))
-    assert not torch.equal(pinned_time(positions(guides=[(frame, 12)])),
-                           pinned_time(keyframe))
-    with pytest.raises(ValueError, match="outside a 22-frame clip"):
-        positions(guides=[(frame, 22)])
+    assert torch.equal(cond_time(keyframe),
+                       cond_time(pinned(conditions=[Condition(frame, frame=0)])))
+    assert torch.equal(cond_time(pinned(conditions=[Condition(frame, frame=-1)])),
+                       cond_time(pinned(conditions=[Condition(frame,
+                                                               frame=params.frames - 1)])))
+    with pytest.raises(ValueError, match="outside a 22-frame clip|does not fit a 22-frame"):
+        pinned(conditions=[Condition(frame, frame=22)])
 
 
-def test_a_reference_alone_is_a_condition_not_a_keyframe(model):
-    params = _params()
+def test_a_guide_clip_holds_several_frames_and_has_to_fit_in_the_clip(model):
+    params = _params(frames=22)
     streams = model._streams(params)
-    frame = torch.ones(1, 24, 1, *streams.video[2:])
+    rows = (streams.video[2] // 2) * (streams.video[3] // 2)
+    clip = torch.ones(1, 24, 2, *streams.video[2:])
+
     model.prepare_latent(model.init_latents(params), _conditioning(), params,
-                         guides=[(frame, 0), (frame, 1)],
-                         ref_method="index_timestep_zero")
-    assert [kind for _, _, kind in model._layout.segments] == [
-        "text", "cond", "cond", "audio", "video"]
-    assert len(model._keyframes) == 2
-    with pytest.raises(ValueError, match="reads a condition at the conditioned timestep"):
+                         ref_method="index_timestep_zero",
+                         conditions=[Condition(clip, frame=5)])
+    first, last, kind = model._layout.segments[1]
+    assert (kind, last - first) == ("cond", 2 * rows)
+    with pytest.raises(ValueError, match="does not fit a 22-frame clip"):
         model.prepare_latent(model.init_latents(params), _conditioning(), params,
-                             guides=[(frame, 0)], ref_method="index")
+                             ref_method="index_timestep_zero",
+                             conditions=[Condition(clip, frame=params.frames - 2)])
+
+
+def test_a_reference_is_packed_ahead_of_the_clip_it_conditions(model):
+    """A reference is no frame of the clip, so it takes time of its own before it."""
+    params = _params(frames=22)
+    streams = model._streams(params)
+    one = torch.ones(1, 24, 1, *streams.video[2:])
+
+    def layout_of(*conditions):
+        model.prepare_latent(model.init_latents(params), _conditioning(), params,
+                             ref_method="index_timestep_zero", conditions=list(conditions))
+        return model._layout
+
+    plain = layout_of()
+    reference = layout_of(Condition(video=one))
+    assert [kind for _, _, kind in reference.segments] == [
+        "text", "ref_img", "audio", "video"]
+    assert len(reference.position_ids) == len(plain.position_ids) + (
+        (streams.video[2] // 2) * (streams.video[3] // 2))
+    # One unit of the time axis for the picture, and the clip starts behind it.
+    def video_time(layout):
+        return float(layout.position_ids[layout.segments[-1][0], 0])
+
+    assert video_time(reference) - video_time(plain) == pytest.approx(1.0)
+    # A reference keeps the grid it arrived with, not the clip's.
+    small = layout_of(Condition(video=torch.ones(1, 24, 1, 2, 4)))
+    assert small.segments[1][1] - small.segments[1][0] == 2
+
+
+def test_an_audio_condition_is_refused_for_the_reason_it_is_one(model):
+    params = _params(frames=22)
+    streams = model._streams(params)
+    with pytest.raises(NotImplementedError, match="audio codec loaded with its encoder"):
+        model.prepare_latent(model.init_latents(params), _conditioning(), params,
+                             ref_method="index_timestep_zero",
+                             conditions=[Condition(torch.ones(1, 24, 1, *streams.video[2:]),
+                                                   audio=torch.zeros(1, 32, 2, 3),
+                                                   frame=0)])
 
 
 def test_the_second_branch_gets_its_own_packing(model):

@@ -211,8 +211,8 @@ def test_references_reach_the_conditioner_and_the_packing(tmp_path, monkeypatch)
                         "video": {**StubVideo.CAPABILITIES["video"], "ref2v": True}}
 
         def prepare_latent(self, latents, cond, params, ref=None, ref_method="index",
-                           guides=()):
-            self.guides_seen = [frame for _latent, frame in guides]
+                           conditions=()):
+            self.conditions_seen = [one.frame for one in conditions]
             return super().prepare_latent(latents, cond, params, ref=ref,
                                           ref_method=ref_method)
 
@@ -226,7 +226,7 @@ def test_references_reach_the_conditioner_and_the_packing(tmp_path, monkeypatch)
 
     pictures = model.encode_prompt_args.image
     assert pictures is not None and len(pictures) == 1
-    assert model.guides_seen == [-1]
+    assert model.conditions_seen == [-1]
 
 
 def _png_bytes() -> bytes:
@@ -239,10 +239,10 @@ def _png_bytes() -> bytes:
 
 
 def test_a_reference_names_its_frame_in_the_argument():
-    assert one_reference("dog.png") == ("dog.png", 0)
+    assert one_reference("dog.png") == ("dog.png", None)
     assert one_reference("dog.png@12") == ("dog.png", 12)
     assert one_reference("dog.png@-1") == ("dog.png", -1)
-    assert one_reference("shots@night.png") == ("shots@night.png", 0)
+    assert one_reference("shots@night.png") == ("shots@night.png", None)
 
 
 def test_only_h3_answers_ref2v():

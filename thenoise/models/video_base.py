@@ -51,6 +51,21 @@ class Waveform:
     sample_rate: int
 
 
+@dataclass(frozen=True)
+class Condition:
+    """A condition a clip run reads alongside its own frames, already through a codec.
+
+    ``frame`` pins it to a pixel frame of the clip, negative counted from the end. Without
+    one it is something the clip is only asked to resemble: it keeps the grid it arrived
+    with instead of the clip's, and takes time ahead of the clip's timeline rather than a
+    place within it.
+    """
+
+    video: Optional[torch.Tensor] = None
+    audio: Optional[torch.Tensor] = None
+    frame: Optional[int] = None
+
+
 class VideoModel(PixelModel):
     MEDIUM = "video"
 

@@ -21,8 +21,44 @@ import torch
 #: One reference picture's latent shape, the only kind the image model accepts.
 RefShape = Tuple[int, int]
 
-#: A keyframe, as the pixel-frame index it is pinned to; it shares the target's grid.
-Keyframe = int
+class Keyframe(NamedTuple):
+    """A condition pinned to a pixel frame of the clip, on the target's own grid.
+
+    ``latent_t`` latent frames and ``audio_t`` audio latent frames, both read at that
+    pixel frame's time coordinate: a keyframe has one of each, a guide clip has several
+    video frames, and an audio guide has video none at all.
+    """
+
+    frame: int
+    latent_t: int = 1
+    audio_t: int = 0
+
+
+class Reference(NamedTuple):
+    """A condition the clip is asked to resemble, which is not a frame of the clip.
+
+    A reference is packed ahead of the target timeline and keeps its own spatial grid --
+    the released pipeline sizes it to the generation's area or to a 2048px short edge, not
+    to the canvas -- so it occupies rope time units of its own and moves the whole target
+    ahead of them. ``kind`` decides which rows it contributes; a video and its soundtrack
+    are one reference, because they share a cursor and the presentation names them next to
+    each other.
+    """
+
+    kind: str
+    latent_t: int = 0
+    latent_h: int = 0
+    latent_w: int = 0
+    audio_t: int = 0
+
+
+def ref_span(ref: Reference) -> float:
+    """The rope time units one reference occupies ahead of the target streams."""
+    if ref.kind == "image":
+        return 1.0
+    if ref.kind == "audio":
+        return float(ref.audio_t)
+    return max(float(ref.audio_t), sum(time_spans(ref.latent_t)))
 
 #: Latent cells per DiT token: one frame, a 2x2 spatial block.
 PATCH_SIZE = (1, 2, 2)
@@ -214,30 +250,59 @@ class Layout:
     @classmethod
     def av(cls, text_len: int, latent_t: int, latent_h: int, latent_w: int,
            audio_t: int, keyframes: Sequence[Keyframe] = (),
-           references: Sequence[Keyframe] = ()) -> "Layout":
-        """``[text | conditions | audio | video]`` — the released audiovisual packing.
+           refs: Sequence[Reference] = ()) -> "Layout":
+        """``[text | conditions | references | audio | video]`` — the released packing.
 
-        Both targets share the spatial grid, so a condition is one latent frame of it and
-        the audio's width coordinates are that grid's extremes. Both sequences hold pixel
-        frame indices — the first frame is 0, the last is however many frames the clip
-        runs — counted from the target timeline's origin.
+        A keyframe given as a bare integer is one frame of the target's grid; a
+        :class:`Keyframe` adds the frames of a guide clip and the audio of an audio guide.
+        A reference given as a :class:`Reference` keeps its own grid.
 
-        A keyframe and a reference are pinned the same way and share the ``cond`` kind, so
-        the network sees one run of conditions and takes their latents in this order:
-        keyframes first, then references. Splitting them here is the caller's record of
-        which is which, not a fourth thing the DiT has to know.
+        A keyframe is anchored *inside* the clip's timeline, at a pixel frame of it; a
+        reference is packed *ahead* of that timeline, so the clip and everything anchored
+        in it start after the references' spans. Both conditions and references are read at
+        the conditioned timestep and never denoised.
+
+        Conditions come first in the rows, then references, which is the order the trunk
+        takes their latents in.
         """
         frame, w_axis = frame_grid(latent_h, latent_w)
-        cursor = float(text_len)
+        w_low, w_high = float(w_axis[0]), float(w_axis[-1])
+        # A bare pixel-frame index is the common case: one frame, no audio.
+        keyframes = [k if isinstance(k, Keyframe) else Keyframe(k) for k in keyframes]
+        # The target timeline's origin, and every anchor within it, sits behind the
+        # references: they are not frames of this clip and take time units of their own.
+        origin = float(text_len) + sum(ref_span(ref) for ref in refs)
         packing = _Packing(text_len)
-        for index in (*keyframes, *references):
-            packing.add("cond", frame.shape[0],
-                        _frame_rows(frame, cursor + FRAME_RESCALE * index))
+
+        for pinned in keyframes:
+            anchor = origin + FRAME_RESCALE * pinned.frame
+            if pinned.latent_t:
+                packing.add("cond", pinned.latent_t * frame.shape[0],
+                            _video_grid(pinned.latent_t, frame, anchor))
+            if pinned.audio_t:
+                packing.add("cond_audio", pinned.audio_t * 2,
+                            _audio_grid(pinned.audio_t, anchor, w_low, w_high))
+
+        cursor = float(text_len)
+        for ref in refs:
+            # A video's soundtrack packs immediately before its frames at the same cursor,
+            # so the two read as one moment of one reference.
+            if ref.audio_t and ref.kind != "image":
+                ref_w = frame_grid(ref.latent_h, ref.latent_w)[1] if ref.kind != "audio" else w_axis
+                packing.add("ref_audio", ref.audio_t * 2, _audio_grid(
+                    ref.audio_t, cursor, float(ref_w[0]), float(ref_w[-1])))
+            if ref.kind == "image":
+                ref_frame = frame_grid(ref.latent_h, ref.latent_w)[0]
+                packing.add("ref_img", ref_frame.shape[0], _frame_rows(ref_frame, cursor))
+            elif ref.kind in ("video", "video_audio"):
+                ref_frame = frame_grid(ref.latent_h, ref.latent_w)[0]
+                packing.add("ref_img", ref.latent_t * ref_frame.shape[0],
+                            _video_grid(ref.latent_t, ref_frame, cursor))
+            cursor += ref_span(ref)
+
         if audio_t:
-            packing.add("audio", audio_t * 2,
-                        _audio_grid(audio_t, cursor, float(w_axis[0]), float(w_axis[-1])))
-        packing.add("video", latent_t * frame.shape[0],
-                    _video_grid(latent_t, frame, cursor))
+            packing.add("audio", audio_t * 2, _audio_grid(audio_t, origin, w_low, w_high))
+        packing.add("video", latent_t * frame.shape[0], _video_grid(latent_t, frame, origin))
         return cls(text_len, (latent_t, latent_h, latent_w), packing)
 
     def timesteps(self, video: float, audio: Optional[float] = None) -> Timesteps:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from .one_shot import check_solver, container_of, render_one
 from .utils.lora_roles import DEFAULT_LORA_ROLE
@@ -24,17 +25,17 @@ def _summary(resolved) -> str:
             f"seed {resolved.seed}")
 
 
-def one_reference(value: str) -> tuple[str, int]:
-    """``PATH`` or ``PATH@FRAME``, the frame being the one the reference belongs to.
+def one_reference(value: str) -> tuple[str, Optional[int]]:
+    """``PATH`` or ``PATH@FRAME``: what the clip should resemble, and where it belongs.
 
-    The frame travels with the path because a reference is meaningless without it: the
-    packing pins it to a frame of the clip. A trailing ``@`` that is not a number stays
-    part of the path, since paths are allowed to contain one.
+    Without a frame the picture is a reference the clip is asked to look like. With one --
+    negative counted from the clip's end -- it is anchored at that frame instead. A
+    trailing ``@`` that is not a number stays part of the path, since paths may hold one.
     """
     path, sep, tail = value.rpartition("@")
     if sep and (tail.lstrip("-").isdigit() and tail != "-"):
         return path, int(tail)
-    return value, 0
+    return value, None
 
 
 def run_video(args) -> None:

@@ -15,6 +15,8 @@ import logging
 from pathlib import Path
 from typing import Callable, Optional
 
+from thenoise.models.video_base import Condition
+
 import torch
 from PIL import Image
 from tqdm import tqdm
@@ -183,8 +185,7 @@ class VideoPipelineController:
                     if x is None:
                         # Only an adapter that takes reference conditions is asked
                         # for them, so the ones without them keep their own signature.
-                        pinned = ({"guides": [(latent, frame) for latent, (_, frame)
-                                              in zip(ref[1], guides)]} if ref[1] else {})
+                        pinned = {"conditions": ref[1]} if ref[1] else {}
                         x = model.prepare_latent(
                             latents, cond, params, ref=ref[0] or None,
                             ref_method=model.pref("ref_method"), **pinned,
@@ -230,14 +231,15 @@ class VideoPipelineController:
         logger.info("Video saved: %s", output)
 
     def _encode_references(self, images: list[Image.Image],
-                           guides: list[tuple[Image.Image, int]],
+                           guides: list[tuple[Image.Image, Optional[int]]],
                            spec: ResolvedVideo) -> tuple[list[torch.Tensor],
-                                                         list[torch.Tensor]]:
+                                                         list[Condition]]:
         """The clip's frames and its reference conditions, fitted to its canvas and put
         through the codec.
 
         Kept apart on the way out because the packing records which pinned row is which,
-        and a reference is fitted by a different rule than a keyframe on purpose.
+        and a reference is fitted by a different rule than a keyframe on purpose. Each
+        keeps the frame it was anchored at, or none at all.
         """
         model = self.model
 
@@ -247,8 +249,10 @@ class VideoPipelineController:
                  for f in fit(pictures, (spec.width, spec.height))],
                 frames=spec.frame_count)
 
-        return (encoded(images, model.fit_references) if images else [],
-                encoded([image for image, _ in guides], model.fit_guides) if guides else [])
+        conditions = [Condition(video=latent, frame=frame) for latent, (_, frame)
+                      in zip(encoded([image for image, _ in guides], model.fit_guides),
+                             guides)] if guides else []
+        return (encoded(images, model.fit_references) if images else [], conditions)
 
     def _denoise(self, x, segment, cond, params, token: Cancellation, progress,
                  done: int, total: int):

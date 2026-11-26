@@ -27,9 +27,12 @@ from typing import TYPE_CHECKING, Iterator, List, Optional, Sequence, Tuple
 import torch
 
 from thenoise.dit.h3 import (
+    FRAME_PER_TOKEN,
     H3_AV_SIGNATURE,
     H3Params,
+    Keyframe,
     Layout,
+    Reference,
     detect_params,
     load_h3_av_dit,
 )
@@ -42,7 +45,7 @@ from thenoise.models.config import (
     SamplingParams,
     VideoSamplingParams,
 )
-from thenoise.models.video_base import VideoModel, Waveform
+from thenoise.models.video_base import Condition, VideoModel, Waveform
 from thenoise.samplers import Step
 from thenoise.utils.image_tensor import cover_crop, resize_to_short_edge
 from thenoise.utils.safetensors import Header
@@ -305,48 +308,60 @@ class H3VideoModel(VideoModel):
         params: VideoSamplingParams,
         ref: Optional[List[torch.Tensor]] = None,
         ref_method: str = "index",
-        guides: Sequence[Tuple[torch.Tensor, int]] = (),
+        conditions: Sequence[Condition] = (),
     ) -> torch.Tensor:
         """Build the packing this run steps through; the latent itself is untouched.
 
-        The conditions become rows of the same lattice at their frame indices, so they shift
-        the target's coordinates ahead of them without ever being denoised themselves.
-        ``guides`` pairs each reference latent with the clip frame it belongs to, negative
-        counted from the end.
+        ``conditions`` are what the request asked the clip to resemble, already through the
+        codec: anchored at one of its frames, or -- with no frame -- packed ahead of the
+        clip's timeline on the grid they arrived with.
         """
         keyframes = _as_list(ref)
-        if (keyframes or guides) and ref_method != "index_timestep_zero":
+        if (keyframes or conditions) and ref_method != "index_timestep_zero":
             raise ValueError(
                 "H3 video reads a condition at the conditioned timestep and never "
                 f"denoises it; '{ref_method}' describes overwriting a frame of the clip"
             )
         dev = torch.device(self.device)
         streams = self._streams(params)
-        # A keyframe sits on the clip's own timeline: the first frame opens it, the last
-        # closes it, and a lone one is the opening frame. A reference sits where the request
-        # put it.
-        anchors = [0, params.frames - 1][:len(keyframes)]
-        conditions = list(keyframes)
-        for latent, index in guides:
-            frame = index if index >= 0 else params.frames + index
-            if not 0 <= frame < params.frames:
+        # A keyframe is a frame of the clip itself: the first opens it, the last closes it,
+        # and a lone one is the opening frame.
+        pinned = [Keyframe(index) for index in [0, params.frames - 1][:len(keyframes)]]
+        ahead: List[Reference] = []
+        for one in conditions:
+            if one.audio is not None:
+                raise NotImplementedError(
+                    "an audio condition needs the audio codec loaded with its encoder -- "
+                    "this engine drops it to save a fifth of a gigabyte -- and condition "
+                    "rows in the trunk's audio stream, which it does not have")
+            if one.video is None:
+                raise ValueError("a condition with nothing in it conditions nothing")
+            latent_t, latent_h, latent_w = one.video.shape[2:]
+            if one.frame is None:
+                ahead.append(Reference(kind="image" if latent_t == 1 else "video",
+                                       latent_t=latent_t, latent_h=latent_h,
+                                       latent_w=latent_w))
+                continue
+            frame = one.frame if one.frame >= 0 else params.frames + one.frame
+            # The condition's own length in pixel frames, by the decode plan the clip
+            # follows: an anchor near the end must leave room for all of them.
+            length = sum(FRAME_PER_TOKEN[k % len(FRAME_PER_TOKEN)] for k in range(latent_t))
+            if not 0 <= frame < params.frames or frame + length > params.frames:
                 raise ValueError(
-                    f"reference frame {index} falls outside a {params.frames}-frame clip")
-            anchors.append(frame)
-            conditions.append(latent)
-        pinned = anchors[len(keyframes):]
+                    f"a {length}-frame condition anchored at frame {one.frame} does not fit "
+                    f"a {params.frames}-frame clip")
+            pinned.append(Keyframe(frame=frame, latent_t=latent_t))
         self._streams_ = streams
         self._shift = float(params.flow_shift)
         self._seed = params.seed
-        self._keyframes = [k.to(dev, self.dtype) for k in conditions]
+        self._keyframes = [k.to(dev, self.dtype) for k in
+                           [*keyframes, *[one.video for one in conditions]]]
         self._layout = Layout.av(cond.cond.shape[1], *streams.video[1:],
-                                 audio_t=streams.audio[2], keyframes=anchors[:len(keyframes)],
-                                 references=pinned)
+                                 audio_t=streams.audio[2], keyframes=pinned, refs=ahead)
         self._null_layout = (
             None if cond.null is None
             else Layout.av(cond.null.shape[1], *streams.video[1:],
-                           audio_t=streams.audio[2], keyframes=anchors[:len(keyframes)],
-                           references=pinned)
+                           audio_t=streams.audio[2], keyframes=pinned, refs=ahead)
         )
         self.dit.pe_embedder.clear()
         self.dit.prepare_rope(self._layout, self.dtype)

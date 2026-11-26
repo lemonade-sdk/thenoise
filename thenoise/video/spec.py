@@ -48,14 +48,15 @@ def mode_of(image: bytes | None, end_image: bytes | None,
 
 @dataclass(frozen=True)
 class Guide:
-    """One reference condition: the picture, and the clip frame it belongs to.
+    """One condition the clip is asked to resemble, and where it belongs.
 
-    ``frame`` may be negative, counted from the clip's end, which is how a request names
-    the last frame without knowing the frame count yet.
+    No ``frame`` means a reference: the clip should look like it, without it being any
+    frame of the clip. A ``frame`` -- negative counted from the end, which is how a request
+    names the last one without knowing the frame count yet -- anchors it there instead.
     """
 
     pixels: bytes
-    frame: int = 0
+    frame: int | None = None
 
 
 @dataclass(frozen=True)
