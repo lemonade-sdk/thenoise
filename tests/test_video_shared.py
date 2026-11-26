@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from conftest import StubVideo, header_of, wan_adapter
+from test_media_read import _clip, _wav
 from thenoise.models.config import ModelConfig
 from thenoise.models.video_base import Segment, VideoModel
 from thenoise.models.wan_video import VARIANTS, Wan22Model
@@ -192,7 +193,7 @@ def test_a_request_carries_its_references_to_the_model():
         prompt="a fox, like this", negative_prompt="", width=64, height=64, frame_count=5,
         fps=24, steps=4, guidance_scale=1.0, flow_shift=3.0, seed=0, output_format="mp4",
         image=None, end_image=None, sampler="euler", lora_specs={},
-        references=(Guide(pixels=b"ref", frame=-1),))
+        references=(Guide(media=b"ref", frame=-1),))
     assert resolved.mode == "ref2v"
 
 
@@ -201,7 +202,7 @@ def test_references_are_refused_where_the_architecture_has_no_place_for_them():
     model = wan_adapter("ti2v_5b")
     with pytest.raises(ValueError, match="does not support ref2v"):
         VideoPipelineController(model).resolve(
-            VideoSpec(prompt="a fox, like this", references=[Guide(pixels=b"png")]))
+            VideoSpec(prompt="a fox, like this", references=[Guide(media=b"png")]))
 
 
 def test_references_reach_the_conditioner_and_the_packing(tmp_path, monkeypatch):
@@ -221,13 +222,33 @@ def test_references_reach_the_conditioner_and_the_packing(tmp_path, monkeypatch)
     monkeypatch.setattr("thenoise.video.controller.encode_video",
                         lambda frames, spec, token, dest, progress: dest.write_bytes(b"v"))
     spec = model.resolve_video(VideoSpec(prompt="a fox, like this",
-                                         references=[Guide(pixels=_png_bytes(), frame=-1)]))
+                                         references=[Guide(media=_png_bytes(), frame=-1)]))
     VideoPipelineController(model).render(spec, Cancellation(), lambda *_: None,
                                           tmp_path / "clip.webm")
 
     pictures = model.encode_prompt_args.image
     assert pictures is not None and len(pictures) == 1
     assert model.conditions_seen == [-1]
+
+
+@pytest.mark.parametrize(("media", "what_is_missing"), [
+    (_clip, "frames into one latent"),
+    (_wav, "audio stream"),
+])
+def test_a_reference_the_trunk_cannot_hold_is_refused_by_what_it_lacks(
+        tmp_path, media, what_is_missing):
+    """A file the reader understands is not yet a file the trunk can place, and the
+    refusal names the half that is missing rather than the file it was handed."""
+    class RefVideo(StubVideo):
+        CAPABILITIES = {**StubVideo.CAPABILITIES,
+                        "video": {**StubVideo.CAPABILITIES["video"], "ref2v": True}}
+
+    model = RefVideo(config=_stub_config(tmp_path))
+    spec = model.resolve_video(VideoSpec(prompt="a fox, like this",
+                                         references=[Guide(media=media())]))
+    controller = VideoPipelineController(model)
+    with pytest.raises(ValueError, match=what_is_missing):
+        controller._encode_references([], controller._guides(spec), spec)
 
 
 def _png_bytes() -> bytes:

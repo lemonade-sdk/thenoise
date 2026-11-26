@@ -60,6 +60,51 @@ class ReferenceMedia(NamedTuple):
     fps: Optional[float] = None
 
 
+def media_kind(data: bytes) -> str:
+    """``picture``, ``clip``, ``audio`` or ``unknown``, asked of the bytes.
+
+    A file name is what a client chose, and a picture, a clip and a sound arrive through
+    one field, so the kind has to come from the file. Both readers here look at a header
+    only: PIL before decompressing anything, av at a container's stream list.
+    """
+    try:
+        with Image.open(io.BytesIO(data)):
+            return "picture"
+    except (OSError, Image.DecompressionBombError):
+        pass
+    try:
+        with av.open(io.BytesIO(data)) as container:
+            if container.streams.video:
+                return "clip"
+            if container.streams.audio:
+                return "audio"
+    except (av.FFmpegError, OSError, ValueError):
+        pass
+    return "unknown"
+
+
+def media_size(data: bytes) -> Optional[tuple[int, int]]:
+    """The picture size a file states in its header, or ``None`` for a file with none.
+
+    A reference asked only to name the size of a run needs no decoding: a request that
+    carries a clip would otherwise pull every frame of it through a codec to read the
+    number the stream header already gives.
+    """
+    try:
+        with Image.open(io.BytesIO(data)) as picture:
+            return picture.size
+    except (OSError, Image.DecompressionBombError):
+        pass
+    try:
+        with av.open(io.BytesIO(data)) as container:
+            if container.streams.video:
+                stream = container.streams.video[0]
+                return stream.width, stream.height
+    except (av.FFmpegError, OSError, ValueError):
+        pass
+    return None
+
+
 def verified_media(field: str, encoded: str) -> bytes:
     """One base64 reference from the wire, checked before a multi-minute job is accepted.
 
@@ -73,18 +118,9 @@ def verified_media(field: str, encoded: str) -> bytes:
         raise ValueError(f"{field} must be valid base64 bytes") from e
     if not data:
         raise ValueError(f"{field} must not be empty")
-    try:
-        with Image.open(io.BytesIO(data)):
-            return data
-    except (OSError, Image.DecompressionBombError):
-        pass
-    try:
-        with av.open(io.BytesIO(data)) as container:
-            if container.streams.video or container.streams.audio:
-                return data
-    except (av.FFmpegError, OSError, ValueError):
-        pass
-    raise ValueError(f"{field} must be a picture, a clip or a sound")
+    if media_kind(data) == "unknown":
+        raise ValueError(f"{field} must be a picture, a clip or a sound")
+    return data
 
 
 def read_reference(data: bytes, *, name: str = "reference",
@@ -96,21 +132,21 @@ def read_reference(data: bytes, *, name: str = "reference",
     count is snapped here: what shape a reference takes is the model's answer and which
     counts the codec runs is the codec's.
     """
-    try:
+    kind = media_kind(data)
+    if kind == "unknown":
+        raise ValueError(f"{name} is not a picture, a clip or a sound")
+    if kind == "picture":
         with Image.open(io.BytesIO(data)) as picture:
             return ReferenceMedia("picture", (picture.convert("RGB"),))
-    except (OSError, Image.DecompressionBombError):
-        pass
 
     try:
         with av.open(io.BytesIO(data)) as container:
             frames, fps = _read_frames(container, max_seconds)
             sound, rate = _read_sound(data, max_seconds)
     except av.FFmpegError as e:
-        raise ValueError(f"{name} is not a picture, a clip or a sound ({e.strerror or e})"
-                         ) from e
+        raise ValueError(f"{name} cannot be decoded ({e.strerror or e})") from e
     if not frames and sound is None:
-        raise ValueError(f"{name} carries no video or audio stream")
+        raise ValueError(f"{name} is not a picture, a clip or a sound")
     return ReferenceMedia("clip" if frames else "audio", tuple(frames), sound, rate, fps)
 
 
@@ -193,4 +229,7 @@ def pcm_resample(pcm: Union[torch.Tensor, np.ndarray], src_rate: int, dst_rate: 
     return np.ascontiguousarray(np.concatenate(parts, axis=1))
 
 
-__all__ = ["pcm_array", "pcm_resample", "read_media", "verified_picture"]
+__all__ = ["MAX_REFERENCE_SECONDS", "ReferenceMedia", "media_kind", "media_size",
+           "pcm_array",
+           "pcm_resample", "read_media", "read_reference", "verified_media",
+           "verified_picture"]

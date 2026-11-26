@@ -27,6 +27,7 @@ from thenoise.models.config import EncodePromptArgs, VideoSamplingParams
 from thenoise.samplers import check_sampler, create_sampler
 from thenoise.stages import Stages
 from thenoise.utils.image_tensor import load_image, pil_to_pixels, pixels_to_pil
+from thenoise.utils.media import ReferenceMedia, read_reference
 from thenoise.utils.lora_roles import check_lora_roles
 from thenoise.utils.pipeline_cache import PipelineCache, content_digest
 from thenoise.video.container import encode_video
@@ -87,9 +88,15 @@ class VideoPipelineController:
                 for data in (spec.image, spec.end_image) if data is not None]
 
     @staticmethod
-    def _guides(spec: ResolvedVideo) -> list[tuple[Image.Image, int]]:
-        """The reference conditions, each with the frame of the clip it belongs to."""
-        return [(load_image(io.BytesIO(g.pixels)), g.frame) for g in spec.references]
+    def _guides(spec: ResolvedVideo) -> list[ReferenceMedia]:
+        """The reference conditions, each read from whatever kind of file it arrived as.
+
+        Reading stops where the clip ends: nothing longer than the run has anywhere to go,
+        and a file is whoever sent it, at whatever length they recorded.
+        """
+        return [read_reference(guide.media, name=f"reference {index}",
+                               max_seconds=spec.frame_count / spec.fps)
+                for index, guide in enumerate(spec.references, 1)]
 
     # ------------------------------------------------------------ render
     def render(self, spec: ResolvedVideo, token: Cancellation,
@@ -122,11 +129,13 @@ class VideoPipelineController:
             )
             images = self._reference_images(spec)
             guides = self._guides(spec)
+            # What the text encoder is shown: a reference clip is one picture to it, for
+            # as long as the presentation of a clip and its sound is unwritten.
+            posters = [media.frames[0] for media in guides if media.frames]
             ref_key = None
             if images or guides:
-                ref_key = (self._cache_key_reference(
-                    [*images, *[image for image, _ in guides]], spec),
-                    tuple(frame for _, frame in guides))
+                ref_key = (self._cache_key_reference([*images, *posters], spec),
+                           tuple(guide.frame for guide in spec.references))
             prompt_key = self._cache_key_prompt(spec, ref_key)
             stages = Stages(model, self._cache)
 
@@ -144,10 +153,10 @@ class VideoPipelineController:
                 model.encode_prompt,
                 EncodePromptArgs(prompt=spec.prompt, negative_prompt=spec.negative_prompt,
                                  guidance_scale=spec.guidance_scale,
-                                 image=[*images, *[image for image, _ in guides]] or None),
+                                 image=[*images, *posters] or None),
                 resident=("text_encoder",),
                 pixels=max(pixels, sum(image.width * image.height
-                                       for image in [*images, *[i for i, _ in guides]])),
+                                       for image in [*images, *posters])),
                 cache="prompt", key=prompt_key)
             token.check()
 
@@ -230,15 +239,17 @@ class VideoPipelineController:
         logger.info("Video saved: %s", output)
 
     def _encode_references(self, images: list[Image.Image],
-                           guides: list[tuple[Image.Image, Optional[int]]],
+                           guides: list[ReferenceMedia],
                            spec: ResolvedVideo) -> tuple[list[torch.Tensor],
                                                          list[Condition]]:
-        """The clip's frames and its reference conditions, fitted to its canvas and put
-        through the codec.
+        """The clip's frames and its reference conditions, fitted and put through the codec.
 
         Kept apart on the way out because the packing records which pinned row is which,
         and a reference is fitted by a different rule than a keyframe on purpose. Each
         keeps the frame it was anchored at, or none at all.
+
+        Each reference is fitted on its own: two of them need not share a shape, since
+        neither is cropped and each keeps a grid of its own in the trunk.
         """
         model = self.model
 
@@ -248,9 +259,17 @@ class VideoPipelineController:
                  for f in fit(pictures, (spec.width, spec.height))],
                 frames=spec.frame_count)
 
-        conditions = [Condition(video=latent, frame=frame) for latent, (_, frame)
-                      in zip(encoded([image for image, _ in guides], model.fit_guides),
-                             guides)] if guides else []
+        conditions = []
+        for media, guide in zip(guides, spec.references):
+            if len(media.frames) > 1:
+                raise ValueError(
+                    f"a reference clip of {len(media.frames)} frames needs the codec to "
+                    "put a clip's frames into one latent, which it does not do yet")
+            if media.pcm is not None:
+                raise ValueError("a reference's sound needs condition rows in the "
+                                 "trunk's audio stream, which it does not pack yet")
+            conditions.append(Condition(video=encoded(media.frames, model.fit_guides)[0],
+                                        frame=guide.frame))
         return (encoded(images, model.fit_references) if images else [], conditions)
 
     def _denoise(self, x, segment, cond, params, token: Cancellation, progress,

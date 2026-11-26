@@ -168,9 +168,20 @@ def test_a_clip_that_ends_on_a_frame_of_its_own(tmp_path):
 def test_references_carry_their_frame_on_the_wire():
     spec = VideoRequest(prompt="a fox, like this",
                         references=[_b64_png("red"),
-                                    {"image": _b64_png("blue"), "frame": -1}]).to_spec()
+                                    {"media": _b64_png("blue"), "frame": -1}]).to_spec()
     assert [guide.frame for guide in spec.references] == [None, -1]
-    assert all(guide.pixels[:8] == b"\x89PNG\r\n\x1a\n" for guide in spec.references)
+    assert all(guide.media[:8] == b"\x89PNG\r\n\x1a\n" for guide in spec.references)
+
+
+def test_a_reference_field_carries_a_clip_as_readily_as_a_picture():
+    """The kind is asked of the bytes, so the wire has no kind to get wrong."""
+    from test_media_read import _clip
+    from thenoise.utils.media import read_reference
+
+    spec = VideoRequest(prompt="a fox, like this", references=[
+        {"media": base64.b64encode(_clip(frames=6)).decode(), "frame": 2}]).to_spec()
+    assert spec.references[0].frame == 2
+    assert read_reference(spec.references[0].media).kind == "clip"
 
 
 def test_references_are_refused_by_a_model_without_the_answer(tmp_path):

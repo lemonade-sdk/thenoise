@@ -75,13 +75,20 @@ curl -sS http://127.0.0.1:8000/video -H 'content-type: application/json' \
 ```
 
 Name them in the prompt to say which is which: `<Picture 1>`, `<Picture 2>`, numbered in the
-order they were sent. An item may also be `{"image": ..., "frame": n}`, which pins that
-picture to a frame of the clip — the frame it should match — with a negative `frame` counting
-back from the last one. Sent that way, it is an anchor rather than a resemblance.
+order they were sent. An item may also be `{"media": ..., "frame": n}`, which pins it to a
+frame of the clip — the frame it should match — with a negative `frame` counting back from
+the last one. Sent that way, it is an anchor rather than a resemblance.
 
-A short clip or a piece of audio as a reference is not taken yet, and a request that asks
-for one is refused rather than ignored. Every other video model refuses references outright:
-`GET /health` shows whether the loaded one answers `ref2v`.
+A reference is **resized and never cropped**: it keeps the shape it arrived in and occupies a
+grid of its own ahead of the clip, with the canvas deciding only how much area that grid may
+cover, floored onto whole latent cells and never enlarged. A keyframe is different in this
+respect — it *is* a frame of the clip, so it is cover-cropped to it. Name no width or height
+and the first reference's aspect sizes the run, the way a first keyframe does.
+
+A short clip or a piece of audio is read — its frames and its sound come with it — but is not
+placed yet, and a request that asks for one is refused with what the trunk lacks rather than
+ignored. Every other video model refuses references outright: `GET /health` shows whether the
+loaded one answers `ref2v`.
 
 ## Frames and canvas
 

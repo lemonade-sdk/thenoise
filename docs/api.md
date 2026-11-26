@@ -113,7 +113,7 @@ defaults when optional fields are omitted.
 | `model` | string | Optional loaded model name, checked if provided |
 | `image` | string | Optional base64-encoded first frame (I2V; omit for T2V) |
 | `end_image` | string | Optional base64-encoded last frame (FLF2V; needs `image`) |
-| `references` | array | Optional pictures the clip should look like without being frames of it. Each item is base64, or `{"image": ..., "frame": n}` to make it the frame at `n` instead (negative counts back from the last). Needs `video.ref2v` |
+| `references` | array | Optional things the clip should look like without being frames of it. Each item is base64, or `{"media": ..., "frame": n}` to pin it to the frame at `n` instead (negative counts back from the last). A file is asked what it is — picture, clip or sound — so there is no kind to declare. Needs `video.ref2v` |
 | `attention` | string | `auto` (default), `full` or `optimized` — how attention is computed. See [`attention_methods`](#get-health) |
 | `negative_prompt` | string | Optional negative text prompt |
 | `width`, `height` | integer | Video dimensions |

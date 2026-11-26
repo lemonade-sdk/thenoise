@@ -18,6 +18,7 @@ from thenoise.models.pixel_base import PixelModel
 from thenoise.samplers import Step
 from thenoise.utils.attention import DEFAULT_ATTENTION
 from thenoise.utils.image_tensor import load_image
+from thenoise.utils.media import media_size
 from thenoise.video.spec import ResolvedVideo, VideoSpec
 
 
@@ -98,10 +99,13 @@ class VideoModel(PixelModel):
             spec = spec.model_copy(update={"width": width, "height": height})
         elif (spec.width is None and spec.height is None and spec.references
               and self.capability("video").get("ref2v")):
-            # Nothing keys a size but the first thing the clip was given to look like.
-            width, height = self.size_from_reference(
-                None, None, load_image(io.BytesIO(spec.references[0].pixels)))
-            spec = spec.model_copy(update={"width": width, "height": height})
+            # Nothing keys a size but the first thing the clip was given to look like --
+            # and a reference with no pictures in it keys nothing.
+            seen = next((size for size in (media_size(guide.media)
+                                           for guide in spec.references) if size), None)
+            if seen is not None:
+                width, height = self.size_from_reference(None, None, seen)
+                spec = spec.model_copy(update={"width": width, "height": height})
         resolved = spec.resolve(self.default_prefs)
         if resolved.attention not in self.ATTENTION_METHODS:
             raise ValueError(

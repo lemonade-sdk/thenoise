@@ -309,7 +309,7 @@ def test_a_keyframe_is_still_the_canvas_it_opens():
 
 def test_a_reference_run_that_names_no_size_borrows_the_first_pictures_aspect():
     resolved = H3VideoModel.resolve_video(
-        _canvas(), VideoSpec(prompt="a clip", references=[Guide(pixels=_png(600, 1200))]))
+        _canvas(), VideoSpec(prompt="a clip", references=[Guide(media=_png(600, 1200))]))
     assert abs(resolved.width / resolved.height - 0.5) < 0.02
     assert (resolved.width, resolved.height) != (1344, 768)
 
@@ -317,7 +317,7 @@ def test_a_reference_run_that_names_no_size_borrows_the_first_pictures_aspect():
 def test_a_named_size_outranks_the_first_reference():
     resolved = H3VideoModel.resolve_video(
         _canvas(), VideoSpec(prompt="a clip", width=1024, height=576,
-                             references=[Guide(pixels=_png(600, 1200))]))
+                             references=[Guide(media=_png(600, 1200))]))
     assert (resolved.width, resolved.height) == (1024, 576)
 
 

@@ -51,11 +51,15 @@ def mode_of(image: bytes | None, end_image: bytes | None,
 class Guide:
     """One condition the clip is asked to resemble.
 
+    ``media`` is a file's bytes and nothing else: whether it is a picture, a clip or a
+    sound is asked of the bytes, because a client chooses the name and often chooses a
+    wrong one.
+
     ``frame``, negative counted from the end, anchors it there; without one it is a
     resemblance and no frame of the clip.
     """
 
-    pixels: bytes
+    media: bytes
     frame: int | None = None
 
 

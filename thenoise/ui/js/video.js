@@ -63,23 +63,38 @@ function resetVideoResult() {
 // In the order they were picked, which is the order a prompt numbers them in.
 let vRefs = [];
 
+const REF_WORD = { picture: 'Picture', video: 'Video', audio: 'Audio' };
+
 function renderVideoRefs() {
   const box = $('video_ref_refs');
   box.innerHTML = '';
   $('video_ref_dz_hint').style.display = vRefs.length ? 'none' : '';
-  vRefs.forEach((ref, i) => addThumb(box, {
-    src: ref.dataUrl, alt: 'reference ' + (i + 1),
-    title: ref.name + ' — <Picture ' + (i + 1) + '>',
-    onRemove: () => { vRefs.splice(i, 1); renderVideoRefs(); resetVideoResult(); },
-  }));
+  // Ordinals count each kind on its own, which is how a prompt points at one: a clip and
+  // its soundtrack are numbered apart from the pictures beside them.
+  const said = {};
+  vRefs.forEach((ref, i) => {
+    const word = REF_WORD[ref.kind] || 'Reference';
+    said[word] = (said[word] || 0) + 1;
+    addThumb(box, {
+      src: ref.dataUrl, label: fileTag(ref.name), alt: word.toLowerCase() + ' ' + said[word],
+      title: ref.name + ' — <' + word + ' ' + said[word] + '>',
+      onRemove: () => { vRefs.splice(i, 1); renderVideoRefs(); resetVideoResult(); },
+    });
+  });
+}
+
+function fileTag(name) {
+  const ext = name.includes('.') ? name.split('.').pop() : '';
+  return ext ? ext.slice(0, 4).toUpperCase() : 'FILE';
 }
 
 async function addVideoRefs(files) {
   const picked = [...files];
-  $('video_ref_file').value = ''; // so the same pictures can be picked again
+  $('video_ref_file').value = ''; // so the same files can be picked again
   for (const file of picked) {
-    const image = await readImageFile(file);
-    if (image) vRefs.push({dataUrl: image.dataUrl, b64: image.b64, name: file.name});
+    const media = await readMediaFile(file);
+    if (media) vRefs.push({dataUrl: media.dataUrl, b64: media.b64,
+                           kind: media.kind, name: file.name});
   }
   renderVideoRefs();
   resetVideoResult();

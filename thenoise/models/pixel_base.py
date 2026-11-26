@@ -56,9 +56,12 @@ class PixelModel(DiffusionModel):
         """What a request named, or the reference's size when it named neither.
 
         `default_edit_size` is what turns the reference into this model's answer.
+        ``reference`` is a decoded image, or the ``(width, height)`` a file's header
+        stated -- which is all a run needs from a reference that only names a size.
         """
         if width is None and height is None:
-            return self.default_edit_size(*reference.size)
+            return self.default_edit_size(*(reference.size if hasattr(reference, "size")
+                                            else reference))
         return width, height
 
     # ------------------------------------------------------------ editing
