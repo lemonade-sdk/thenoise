@@ -28,6 +28,7 @@ from comfy_kitchen.tensor import (
     w4a8_int8_linear,
 )
 
+from thenoise.utils.device import int_mm_supported
 from thenoise.utils.layout import LAYOUT_PENALTY
 from thenoise.utils.loader import restore_quantized_layer
 from thenoise.utils.lora import LoraFactors, LoraMode
@@ -360,6 +361,8 @@ class QuantizedLinear(nn.Module):
         under ``torch.compile`` rather than building the wrong graph.
         """
         params = weight.params
+        if weight.layout_cls is TensorWiseINT8Layout and not int_mm_supported(x.device):
+            return F.linear(x, weight.dequantize(), bias)
         if weight.layout_cls not in _LINEAR_OPS or getattr(params, "transposed", False):
             return F.linear(x, weight, bias)
         if weight.layout_cls is AsymW4A8Int8Layout:
