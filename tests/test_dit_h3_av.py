@@ -188,8 +188,11 @@ from thenoise.dit.h3.layout import (
     COND_TIMESTEP,
     FRAME_PER_TOKEN,
     FRAME_RESCALE,
+    Keyframe,
     Layout,
+    Reference,
     frame_grid,
+    ref_span,
     time_spans,
 )
 from thenoise.dit.h3.trunk import pack_audio, unpack_audio
@@ -255,6 +258,28 @@ def test_av_packing_is_the_released_order():
     assert lay.audio_span == (29, 35)
     assert lay.video_rows == 12 * 2 + 4 * 12  # both keyframes and the target
     assert lay.audio_rows == 2 * 3
+
+
+def test_a_sound_is_packed_ahead_of_the_picture_it_belongs_to():
+    lay = Layout.av(text_len=5, latent_t=2, latent_h=2, latent_w=2, audio_t=2,
+                    keyframes=[Keyframe(frame=0, audio_t=3)])
+    assert lay.segments == [(0, 5, "text"), (5, 11, "cond_audio"), (11, 12, "cond"),
+                            (12, 16, "audio"), (16, 18, "video")]
+    assert lay.audio_rows == (3 + 2) * 2
+    # Both channels of each audio frame, on the anchor the picture is read at.
+    rows = lay.position_ids
+    assert rows[5:11, 0].tolist() == [5.0, 6.0, 7.0, 5.0, 6.0, 7.0]
+    assert rows[5, 0] == rows[11, 0]
+
+
+def test_a_reference_takes_the_longer_of_its_picture_and_its_sound():
+    picture = Reference(kind="image", latent_t=1, latent_h=2, latent_w=2)
+    assert ref_span(picture) == 1.0
+    assert ref_span(picture._replace(audio_t=3)) == 3.0
+    clip = Reference(kind="video", latent_t=2, latent_h=2, latent_w=2)
+    assert ref_span(clip) == sum(time_spans(2))
+    assert ref_span(clip._replace(audio_t=9)) == 9.0
+    assert ref_span(Reference(kind="audio", audio_t=4)) == 4.0
 
 
 def test_a_keyframe_is_pinned_to_the_pixel_frame_it_represents():

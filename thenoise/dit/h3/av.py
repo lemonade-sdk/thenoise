@@ -60,6 +60,7 @@ class H3AVDiT(H3DiT):
         context: torch.Tensor,
         layout: Layout,
         keyframes: Sequence[torch.Tensor] = (),
+        audio_conditions: Sequence[torch.Tensor] = (),
         tags: Optional[torch.Tensor] = None,
         seed: int = 0,
         sample_sigmas: Optional[torch.Tensor] = None,
@@ -88,7 +89,12 @@ class H3AVDiT(H3DiT):
         if keyframes:
             video_rows = torch.cat([*[self._keyframe_rows(k, seed) for k in keyframes],
                                     video_rows])
-        audio_rows = pack_audio(audio.to(torch.float32))
+        # A condition's sound is packed as it was encoded: ComfyUI mixes a *visual*
+        # condition's rows toward their conditioned timestep with noise and leaves an audio
+        # one's alone, its timestep being 1.0 leaving nothing to mix in.
+        audio_rows = torch.cat([*[pack_audio(one.to(torch.float32))
+                                  for one in audio_conditions],
+                                pack_audio(audio.to(torch.float32))])
         if audio_rows.shape[0] != layout.audio_rows:
             raise ValueError(
                 f"layout was built for {layout.audio_rows} audio rows, got "

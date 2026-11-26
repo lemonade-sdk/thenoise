@@ -19,29 +19,44 @@ RefShape = Tuple[int, int]
 
 class Keyframe(NamedTuple):
     """A condition pinned to a pixel frame of the clip, on the target's own grid: so many
-    latent frames, all read at that frame's time coordinate.
+    latent frames, all read at that frame's time coordinate, and so many audio frames of
+    its own packed just ahead of them at the same anchor.
     """
 
     frame: int
     latent_t: int = 1
+    audio_t: int = 0
 
 
 class Reference(NamedTuple):
     """A condition the clip is asked to resemble, which is not a frame of the clip.
 
     Packed ahead of the target timeline on the grid it arrived with, so it takes rope time
-    units of its own and moves the whole target ahead of them.
+    units of its own and moves the whole target ahead of them. ``kind`` is what it carries
+    -- ``image``, ``video``, ``audio``, or a clip and its sound together, the soundtrack
+    packed just ahead of the picture it belongs to.
     """
 
     kind: str
     latent_t: int = 0
     latent_h: int = 0
     latent_w: int = 0
+    audio_t: int = 0
 
 
 def ref_span(ref: Reference) -> float:
-    """The rope time units one reference occupies ahead of the target streams."""
-    return 1.0 if ref.kind == "image" else sum(time_spans(ref.latent_t))
+    """The rope time units one reference occupies ahead of the target streams.
+
+    A clip and its sound share one span rather than taking turns on the time axis, and the
+    longer of the two is where the next reference starts.
+    """
+    if ref.kind == "audio":
+        ahead = 0.0
+    elif ref.kind == "image":
+        ahead = 1.0
+    else:
+        ahead = sum(time_spans(ref.latent_t))
+    return max(ahead, float(ref.audio_t))
 
 #: Latent cells per DiT token: one frame, a 2x2 spatial block.
 PATCH_SIZE = (1, 2, 2)
@@ -238,6 +253,10 @@ class Layout:
         Conditions take the target's grid, references their own. Both are read at the
         conditioned timestep, never denoised, and the latents come back in row order:
         conditions, then references.
+
+        A condition that carries a sound gets its rows immediately ahead of the picture they
+        belong to, on the same anchor: the two are one condition read at one time, and the
+        span it takes is whichever of them is longer.
         """
         frame, w_axis = frame_grid(latent_h, latent_w)
         w_low, w_high = float(w_axis[0]), float(w_axis[-1])
@@ -248,17 +267,25 @@ class Layout:
 
         for pinned in keyframes:
             anchor = origin + FRAME_RESCALE * pinned.frame
+            if pinned.audio_t:
+                packing.add("cond_audio", pinned.audio_t * 2,
+                            _audio_grid(pinned.audio_t, anchor, w_low, w_high))
             packing.add("cond", pinned.latent_t * frame.shape[0],
                         _video_grid(pinned.latent_t, frame, anchor))
 
         cursor = float(text_len)
         for ref in refs:
-            ref_frame = frame_grid(ref.latent_h, ref.latent_w)[0]
-            if ref.kind == "image":
-                packing.add("ref_img", ref_frame.shape[0], _frame_rows(ref_frame, cursor))
-            else:
-                packing.add("ref_img", ref.latent_t * ref_frame.shape[0],
-                            _video_grid(ref.latent_t, ref_frame, cursor))
+            if ref.audio_t:
+                packing.add("ref_audio", ref.audio_t * 2,
+                            _audio_grid(ref.audio_t, cursor, w_low, w_high))
+            if ref.latent_t:
+                ref_frame = frame_grid(ref.latent_h, ref.latent_w)[0]
+                if ref.kind == "image":
+                    packing.add("ref_img", ref_frame.shape[0],
+                                _frame_rows(ref_frame, cursor))
+                else:
+                    packing.add("ref_img", ref.latent_t * ref_frame.shape[0],
+                                _video_grid(ref.latent_t, ref_frame, cursor))
             cursor += ref_span(ref)
 
         if audio_t:

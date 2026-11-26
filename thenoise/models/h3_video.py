@@ -26,6 +26,7 @@ from thenoise.dit.h3 import (
     load_h3_av_dit,
 )
 from thenoise.dit.h3 import sampling as h3_sampling
+from thenoise.dit.h3.layout import FRAME_RESCALE
 from thenoise.dit.h3.encoder import VIDEO_PICTURE_LABEL, VISION_SHORT_EDGE, load_h3_text_encoder
 from thenoise.models.base import Conditioning
 from thenoise.models.config import (
@@ -292,6 +293,24 @@ class H3VideoModel(VideoModel):
         )
 
     # ------------------------------------------------------------ the run
+    def _guide_sound(self, latent: torch.Tensor, frame: Optional[int],
+                     frames: int, target_t: int) -> torch.Tensor:
+        """A condition's sound, cut to the room the clip's audio timeline has for it.
+
+        An anchored soundtrack sits inside the clip's own stretch of the time axis, so it
+        ends where the clip does; one whose anchor leaves no whole audio frame is a sound
+        this run cannot place. A condition with no frame keeps all of itself, because it
+        moves the target ahead of it rather than into it.
+        """
+        if frame is None:
+            return latent
+        room = math.floor(target_t - FRAME_RESCALE * frame)
+        if room < 1:
+            raise ValueError(
+                f"a sound anchored at frame {frame} has no room left in the {target_t} "
+                f"audio frames of a {frames}-frame clip")
+        return latent[..., :min(latent.shape[-1], room)]
+
     def _streams(self, params: VideoSamplingParams) -> _Streams:
         """The two latent shapes a request of this length and size implies."""
         video_t = TemporalPlan.of_frames(params.frames).latent_t
@@ -325,7 +344,8 @@ class H3VideoModel(VideoModel):
         """Build the packing this run steps through; the latent itself is untouched.
 
         ``conditions`` have been through the codec already, each with the frame it is
-        anchored at or with none.
+        anchored at or with none, and each carrying a picture, a sound, or the two of them
+        as one condition.
         """
         keyframes = _as_list(ref)
         if (keyframes or conditions) and ref_method != "index_timestep_zero":
@@ -338,22 +358,33 @@ class H3VideoModel(VideoModel):
         # A keyframe is a frame of the clip itself: the first opens it, the last closes it,
         # and a lone one is the opening frame.
         pinned = [Keyframe(index) for index in [0, params.frames - 1][:len(keyframes)]]
+        # Each stream is read off its own cursor, in its own segment order: the trunk's
+        # rows go pinned conditions first and the ones ahead of the timeline after them.
         ahead: List[Reference] = []
+        video_rows = [*keyframes]
+        sound_rows: List[torch.Tensor] = []
+        ahead_video: List[torch.Tensor] = []
+        ahead_sound: List[torch.Tensor] = []
         for one in conditions:
-            if one.audio is not None:
-                raise NotImplementedError(
-                    "an audio condition needs the audio codec loaded with its encoder -- "
-                    "this engine drops it to save a fifth of a gigabyte -- and condition "
-                    "rows in the trunk's audio stream, which it does not have")
-            if one.video is None:
+            if one.video is None and one.audio is None:
                 raise ValueError("a condition with nothing in it conditions nothing")
-            latent_t, latent_h, latent_w = one.video.shape[2:]
+            frame = (None if one.frame is None
+                     else one.frame if one.frame >= 0 else params.frames + one.frame)
+            sound = (self._guide_sound(one.audio, frame, params.frames, streams.audio[2])
+                     if one.audio is not None else None)
+            audio_t = 0 if sound is None else sound.shape[3]
+            latent_t, latent_h, latent_w = (one.video.shape[2:] if one.video is not None
+                                            else (0, 0, 0))
             if one.frame is None:
-                ahead.append(Reference(kind="image" if latent_t == 1 else "video",
+                ahead.append(Reference(kind=("audio" if one.video is None
+                                             else "image" if latent_t == 1 else "video"),
                                        latent_t=latent_t, latent_h=latent_h,
-                                       latent_w=latent_w))
+                                       latent_w=latent_w, audio_t=audio_t))
+                if one.video is not None:
+                    ahead_video.append(one.video)
+                if sound is not None:
+                    ahead_sound.append(sound)
                 continue
-            frame = one.frame if one.frame >= 0 else params.frames + one.frame
             # The condition's own length in pixel frames, by the decode plan the clip
             # follows: an anchor near the end must leave room for all of them.
             length = pixel_frames(latent_t)
@@ -361,12 +392,17 @@ class H3VideoModel(VideoModel):
                 raise ValueError(
                     f"a {length}-frame condition anchored at frame {one.frame} does not fit "
                     f"a {params.frames}-frame clip")
-            pinned.append(Keyframe(frame=frame, latent_t=latent_t))
+            pinned.append(Keyframe(frame=frame, latent_t=latent_t, audio_t=audio_t))
+            if one.video is not None:
+                video_rows.append(one.video)
+            if sound is not None:
+                sound_rows.append(sound)
         self._streams_ = streams
         self._shift = float(params.flow_shift)
         self._seed = params.seed
-        self._keyframes = [k.to(dev, self.dtype) for k in
-                           [*keyframes, *[one.video for one in conditions]]]
+        self._keyframes = [one.to(dev, self.dtype) for one in [*video_rows, *ahead_video]]
+        self._condition_audio = [one.to(dev, self.dtype)
+                                 for one in [*sound_rows, *ahead_sound]]
         self._layout = Layout.av(cond.cond.shape[1], *streams.video[1:],
                                  audio_t=streams.audio[2], keyframes=pinned, refs=ahead)
         self._null_layout = (
@@ -424,7 +460,8 @@ class H3VideoModel(VideoModel):
         video_velocity, audio_velocity = self.dit(
             video.to(device, self.dtype), own.to(device, self.dtype),
             sigma, h3_sampling.audio_sigma(sigma, shift=self._shift),
-            context, layout, self._keyframes, tags=tags, seed=self._seed,
+            context, layout, self._keyframes, audio_conditions=self._condition_audio,
+            tags=tags, seed=self._seed,
             sample_sigmas=self._sample_sigmas, rope=rope, attention=self._attention,
         )
         # The audio's velocity comes back in its own variable; the pack carries a scaled
@@ -486,6 +523,7 @@ class H3VideoModel(VideoModel):
         self._shift = float(self.DEFAULT_PREFS["flow_shift"])
         self._seed = 0
         self._keyframes: List[torch.Tensor] = []
+        self._condition_audio: List[torch.Tensor] = []
         self._layout: Optional[Layout] = None
         self._null_layout: Optional[Layout] = None
         self._sample_sigmas = None

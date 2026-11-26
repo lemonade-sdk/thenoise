@@ -8,6 +8,8 @@ so a step is the real packing, the real rope and the real shift maps — only sm
 from __future__ import annotations
 
 import io
+import math
+
 import pytest
 import thenoise.models.h3_video as h3_video_module
 import torch
@@ -348,15 +350,79 @@ def test_a_named_size_outranks_the_first_reference():
     assert (resolved.width, resolved.height) == (1024, 576)
 
 
-def test_an_audio_condition_is_refused_for_the_reason_it_is_one(model):
+def test_a_conditions_sound_is_packed_ahead_of_its_picture(model):
+    """One condition read at one anchor: the sound's rows, then the picture's own."""
     params = _params(frames=22)
     streams = model._streams(params)
-    with pytest.raises(NotImplementedError, match="audio codec loaded with its encoder"):
-        model.prepare_latent(model.init_latents(params), _conditioning(), params,
-                             ref_method="index_timestep_zero",
-                             conditions=[Condition(torch.ones(1, 24, 1, *streams.video[2:]),
-                                                   audio=torch.zeros(1, 32, 2, 3),
-                                                   frame=0)])
+    model.prepare_latent(model.init_latents(params), _conditioning(), params,
+                         ref_method="index_timestep_zero",
+                         conditions=[Condition(torch.ones(1, 24, 1, *streams.video[2:]),
+                                               audio=torch.zeros(1, 32, 2, 3),
+                                               frame=0)])
+    kinds = [kind for _, _, kind in model._layout.segments]
+    assert kinds.index("cond_audio") + 1 == kinds.index("cond")
+    assert model._layout.audio_rows == (3 + streams.audio[2]) * 2
+    rows = model._layout.position_ids
+    start = model._layout.segments[kinds.index("cond_audio")][0]
+    end = model._layout.segments[kinds.index("cond")][0]
+    assert rows[start, 0] == rows[end, 0]
+
+
+def test_a_sound_alone_is_a_condition_of_rows_of_its_own(model):
+    model.prepare_latent(model.init_latents(_params(frames=22)), _conditioning(),
+                         _params(frames=22), ref_method="index_timestep_zero",
+                         conditions=[Condition(audio=torch.zeros(1, 32, 2, 4))])
+    kinds = [kind for _, _, kind in model._layout.segments]
+    assert "ref_audio" in kinds and "ref_img" not in kinds
+
+
+def test_an_anchored_sound_is_cut_to_the_room_the_clip_has(model):
+    """The soundtrack sits inside the clip's own stretch of the time axis, so it ends
+    where the clip does."""
+    params = _params(frames=22)
+    target_t = model._streams(params).audio[2]
+    cut = model._guide_sound(torch.zeros(1, 32, 2, target_t + 4), 3, params.frames,
+                             target_t)
+    assert cut.shape[3] == math.floor(target_t - 5 / 3 * 3)
+
+
+def test_a_sound_anchored_past_the_end_of_the_sound_is_refused(model):
+    """A 22-frame clip asked for 48 fps has eighteen audio frames, and frame 21 is past
+    all of them: the run cannot place the sound rather than run it off the timeline."""
+    params = _params(frames=22, fps=48)
+    with pytest.raises(ValueError, match="no room left"):
+        model._guide_sound(torch.zeros(1, 32, 2, 4), 21, params.frames,
+                           model._streams(params).audio[2])
+
+
+def test_the_conditions_are_read_in_the_order_the_packing_places_them(model):
+    """One cursor per stream, so a guide asked for first and placed last must not be
+    handed the rows of the condition the packing puts first."""
+    params = _params(frames=22)
+    shape = (1, 24, 1, *model._streams(params).video[2:])
+    ahead, pinned = torch.ones(shape), torch.zeros(shape)
+    model.prepare_latent(model.init_latents(params), _conditioning(), params,
+                         ref_method="index_timestep_zero",
+                         conditions=[Condition(video=ahead),
+                                     Condition(video=pinned, frame=0)])
+    assert len(model._keyframes) == 2
+    assert torch.equal(model._keyframes[0], pinned)
+    assert torch.equal(model._keyframes[1], ahead)
+
+
+def test_a_run_with_a_sound_condition_steps_over_the_wider_packing(model):
+    """The rows the layout counts are the rows the forward packs, or the shape check in
+    the trunk is the one that says so."""
+    params = _params(frames=5)
+    streams = model._streams(params)
+    cond = _conditioning()
+    latents = model.prepare_latent(
+        model.init_latents(params), cond, params, ref_method="index_timestep_zero",
+        conditions=[Condition(video=torch.zeros(1, 24, 1, *streams.video[2:]),
+                              audio=torch.zeros(1, 32, 2, 2), frame=0)])
+    model.begin_sampling(model.schedule(params))
+    stepped = model.denoise_step(latents, torch.tensor(0.5), cond, 1.0, 0)
+    assert torch.isfinite(stepped).all()
 
 
 def test_the_second_branch_gets_its_own_packing(model):
