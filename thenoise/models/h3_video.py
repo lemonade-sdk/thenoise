@@ -542,10 +542,8 @@ class H3VideoModel(VideoModel):
 def presented(images, guides) -> List[GuideMedia]:
     """What the conditioner is shown, in the order the release presents it.
 
-    The pictures first -- a clip's own frames, then a picture reference -- then each
-    reference clip with its soundtrack's label ahead of it, then a standalone sound on its
-    own. Ordinals count per kind across the whole run, so a first frame and a picture
-    reference are ``<Picture 1>`` and ``<Picture 2>``, the way a prompt would name them.
+    Pictures first -- a clip's own frames, then a picture reference -- then each reference
+    clip with its soundtrack's label ahead of it, then a standalone sound.
     """
     items = [GuideMedia("picture", (_vision(image),)) for image in _as_list(images)]
     guides = list(guides)
@@ -565,10 +563,8 @@ def presented(images, guides) -> List[GuideMedia]:
 def clip_vision(media) -> GuideMedia:
     """A reference clip at two frames a second, each tagged with the frame it came from.
 
-    The index and the source rate are what the seconds marker the processor writes over
-    each block is computed from, so they travel with the frames rather than being implied
-    by how many there are. A file that states no rate is read at the sampling rate, which
-    is the assumption the sampling itself was made under.
+    A file that states no rate is read at the sampling rate, which is the assumption the
+    sampling itself was made under.
     """
     rate = media.fps or VISION_FRAMES_PER_SECOND
     shown = max(1, int(len(media.frames) * VISION_FRAMES_PER_SECOND / rate))

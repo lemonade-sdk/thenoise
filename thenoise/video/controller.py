@@ -273,9 +273,7 @@ class VideoPipelineController:
             fitted = media.frames
             picture = None
             if fitted:
-                # One entry with its frames along one axis, because what a codec takes
-                # together comes back as one latent -- and one that cannot take them says
-                # so there rather than dropping every frame but the first.
+                # Frames along one axis: what a codec takes together is one latent.
                 pixels = [pil_to_pixels(image, model.pixel_channels) for image in fitted]
                 one = pixels[0] if len(pixels) == 1 else torch.stack(pixels, dim=1)
                 picture = model.encode_references([one], frames=spec.frame_count)[0]

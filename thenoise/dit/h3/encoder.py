@@ -90,9 +90,8 @@ def layer_count(path: str) -> int:
     return layers
 
 
-#: How the audiovisual release labels a picture condition in the conditioning text,
-#: numbered across however many the request carried. The image release spells the same
-#: thing without the brackets.
+#: How the audiovisual release labels a picture condition. The image release spells the
+#: same thing without the brackets.
 VIDEO_PICTURE_LABEL = "<Picture {}>: "
 
 #: How the audiovisual release labels a clip and a sound condition. A sound earns its label
@@ -100,20 +99,17 @@ VIDEO_PICTURE_LABEL = "<Picture {}>: "
 VIDEO_CLIP_LABEL = "<Video {}>: "
 VIDEO_SOUND_LABEL = "<Audio {}>: "
 
-#: How many frames a second the language model is shown of a reference clip. Its vision
-#: blocks take a pair each, and what a clip brings to a conditioning is its shapes and its
-#: sound rather than every frame of it.
+#: How many frames a second the language model is shown of a reference clip: its vision
+#: blocks take a pair each.
 VISION_FRAMES_PER_SECOND = 2.0
 
 
 class GuideMedia(NamedTuple):
     """One condition as the conditioner is asked to read it.
 
-    ``kind`` is ``picture``, ``clip`` or ``sound``. A picture carries one frame; a clip
-    carries the frames it is shown, in the order they play, with the source frame each came
-    from and the source's rate -- those two are what the seconds marker each block is
-    labelled with is computed from, so they travel with the frames rather than being
-    implied by how many there are. A sound carries nothing.
+    ``kind`` is ``picture``, ``clip`` or ``sound``. A picture carries one frame and a sound
+    none; a clip carries the frames it is shown with the source frame each came from and the
+    source's rate, which is what each block's seconds marker is computed from.
     """
 
     kind: str
@@ -127,12 +123,10 @@ def presentation(items: Sequence[GuideMedia], prompt: str,
                  labels: dict) -> Tuple[str, list, list, list]:
     """The conditioning text for a run's conditions, and the frames to go with it.
 
-    Ordinals count per kind across the whole run in request order, which is how the prompt
-    refers to them: a first frame and two picture references are ``<Picture 1>`` through
-    ``<Picture 3>``. A clip is one placeholder per pair of frames and nothing else, because
-    the processor writes the seconds marker its pair averages out and the vision markers
-    around the pads itself -- the marker the release trains with, an odd last frame
-    repeated to fill the patch. A sound is its label alone.
+    Ordinals count per kind across the whole run, in request order. A clip is one
+    placeholder per pair of frames and nothing else: the processor writes the seconds marker
+    and the vision framing around the pads, an odd last frame repeated to fill the patch. A
+    sound is its label alone.
     """
     seen = dict.fromkeys(labels, 0)
     text: list[str] = []
