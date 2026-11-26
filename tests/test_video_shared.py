@@ -226,8 +226,10 @@ def test_references_reach_the_conditioner_and_the_packing(tmp_path, monkeypatch)
     VideoPipelineController(model).render(spec, Cancellation(), lambda *_: None,
                                           tmp_path / "clip.webm")
 
-    pictures = model.encode_prompt_args.image
-    assert pictures is not None and len(pictures) == 1
+    # The reference reaches the conditioner as media of its own, which is what lets a
+    # model present a clip and its sound rather than one frame of each.
+    guides = model.encode_prompt_args.guides
+    assert len(guides) == 1 and len(guides[0].frames) == 1
     assert model.conditions_seen == [-1]
 
 

@@ -160,7 +160,7 @@ class VideoPipelineController:
                 model.encode_prompt,
                 EncodePromptArgs(prompt=spec.prompt, negative_prompt=spec.negative_prompt,
                                  guidance_scale=spec.guidance_scale,
-                                 image=[*images, *posters] or None),
+                                 image=images or None, guides=guides),
                 resident=("text_encoder",),
                 pixels=max(pixels, sum(image.width * image.height
                                        for image in [*images, *posters])),

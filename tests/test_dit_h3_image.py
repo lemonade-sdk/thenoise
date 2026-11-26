@@ -538,6 +538,64 @@ def tiny_conditioner():
     return encoder.eval(), Image.new("RGB", (64, 64), "white")
 
 
+LABELS = {"picture": "<Picture {}>: ", "clip": "<Video {}>: ", "sound": "<Audio {}>: "}
+
+
+def presentation(media):
+    from thenoise.dit.h3.encoder import presentation as build
+    return build(media, "a fox", LABELS)
+
+
+def test_a_clip_is_one_block_per_pair_of_frames():
+    """An odd last frame repeats into the last block rather than being shown alone."""
+    from PIL import Image
+
+    from thenoise.dit.h3.encoder import GuideMedia
+    from thenoise.utils.text_encoder import VIDEO_PAD as VIDEO_PAD
+    frames = tuple(Image.new("RGB", (8, 8), shade)
+                   for shade in ("white", "black", "white"))
+    clip = GuideMedia("clip", frames, (0, 12, 24), 24.0, 3)
+    text, images, videos, meta = presentation([clip])
+    assert len(videos) == 2
+    assert [one["frames_indices"] for one in meta] == [[0, 12], [24, 24]]
+    assert text == "<Video 1>: " + VIDEO_PAD * 2 + "a fox"
+    assert images == []
+
+
+def test_the_ordinal_counts_across_keyframes_and_references():
+    """One counter per kind over the whole run, because that is how a prompt names them."""
+    from PIL import Image
+
+    from thenoise.dit.h3.encoder import GuideMedia
+    text, images, videos, meta = presentation([
+        GuideMedia("picture", (Image.new("RGB", (8, 8)),)),
+        GuideMedia("picture", (Image.new("RGB", (8, 8)),)),
+        GuideMedia("sound"),
+    ])
+    assert text.index("<Picture 1>: ") < text.index("<Picture 2>: ") < text.index("<Audio 1>: ")
+    assert len(images) == 2 and videos == [] and meta == []
+
+
+def test_the_conditioner_reads_a_clip_and_a_sound_as_one_prompt(tiny_conditioner):
+    from PIL import Image
+
+    from thenoise.dit.h3.encoder import GuideMedia
+    encoder, picture = tiny_conditioner
+    # The fixture spells conditions the image release does; a clip needs the other one's.
+    encoder.labels.update({"clip": "<Video {}>: ", "sound": "<Audio {}>: "})
+    frames = tuple(Image.new("RGB", (64, 64), shade)
+                   for shade in ("white", "black", "white"))
+    media = [GuideMedia("picture", (picture,)),
+             GuideMedia("clip", frames, (0, 12, 24), 24.0, 3),
+             GuideMedia("sound")]
+    embeds, mask, tags = encoder.encode("a fox", media)
+    assert torch.isfinite(embeds).all() and mask.shape == embeds.shape[:2]
+    assert int((tags == 0).sum()) > 0, "the vision blocks carry the visual tag"
+    # A sound is a label and no vision: the same run without it is shorter by that label.
+    shorter, _, _ = encoder.encode("a fox", media[:2])
+    assert shorter.shape[1] < embeds.shape[1]
+
+
 def test_truncation_sets_the_depth_and_replaces_the_norm():
     """The released file is a 32B cut to 50 layers, and the final RMSNorm went with the cut."""
     config = tiny_qwen_config()

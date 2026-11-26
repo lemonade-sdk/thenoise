@@ -27,7 +27,15 @@ from thenoise.dit.h3 import (
 )
 from thenoise.dit.h3 import sampling as h3_sampling
 from thenoise.dit.h3.layout import FRAME_RESCALE
-from thenoise.dit.h3.encoder import VIDEO_PICTURE_LABEL, VISION_SHORT_EDGE, load_h3_text_encoder
+from thenoise.dit.h3.encoder import (
+    GuideMedia,
+    VISION_FRAMES_PER_SECOND,
+    VISION_SHORT_EDGE,
+    VIDEO_CLIP_LABEL,
+    VIDEO_PICTURE_LABEL,
+    VIDEO_SOUND_LABEL,
+    load_h3_text_encoder,
+)
 from thenoise.models.base import Conditioning
 from thenoise.models.config import (
     EncodePromptArgs,
@@ -176,7 +184,8 @@ class H3VideoModel(VideoModel):
             config.text_encoder_path,
             dtype=config.dtype,
             device=self._load_target(config.text_encoder_path),
-            picture_label=VIDEO_PICTURE_LABEL,
+            picture_label=VIDEO_PICTURE_LABEL, clip_label=VIDEO_CLIP_LABEL,
+            sound_label=VIDEO_SOUND_LABEL,
         )
 
         self.memory.register("dit", self.dit)
@@ -263,17 +272,16 @@ class H3VideoModel(VideoModel):
 
     # ------------------------------------------------------------ conditioning
     def encode_prompt(self, args: EncodePromptArgs) -> H3VideoConditioning:
-        """Prompt and pictures through the language model, as raw conditioning.
+        """Prompt and conditions through the language model, as raw conditioning.
 
-        The negative branch sees the same pictures: a keyframe is not something to steer
+        The negative branch sees the same conditions: a keyframe is not something to steer
         away from.
         """
-        images = [resize_to_short_edge(img, VISION_SHORT_EDGE, align=CANVAS_MULTIPLE)
-                  for img in _as_list(args.image)]
-        cond, cond_mask, tags = self.text_encoder(args.prompt, images)
+        media = presented(args.image, args.guides)
+        cond, cond_mask, tags = self.text_encoder(args.prompt, media)
         null = null_mask = null_tags = None
         if args.guidance_scale > 1.0:
-            null, null_mask, null_tags = self.text_encoder(args.negative_prompt, images)
+            null, null_mask, null_tags = self.text_encoder(args.negative_prompt, media)
         return H3VideoConditioning(
             cond=cond, cond_mask=cond_mask, null=null, null_mask=null_mask,
             tags=tags, null_tags=null_tags,
@@ -533,6 +541,53 @@ class H3VideoModel(VideoModel):
 
     def _clear_weights(self) -> None:
         self.dit = self.vae = self.audio_vae = self.text_encoder = None
+
+
+def presented(images, guides) -> List[GuideMedia]:
+    """What the conditioner is shown, in the order the release presents it.
+
+    The pictures first -- a clip's own frames, then a picture reference -- then each
+    reference clip with its soundtrack's label ahead of it, then a standalone sound on its
+    own. Ordinals count per kind across the whole run, so a first frame and a picture
+    reference are ``<Picture 1>`` and ``<Picture 2>``, the way a prompt would name them.
+    """
+    items = [GuideMedia("picture", (_vision(image),)) for image in _as_list(images)]
+    guides = list(guides)
+    items += [GuideMedia("picture", (_vision(media.frames[0]),))
+              for media in guides if len(media.frames) == 1]
+    for media in guides:
+        if len(media.frames) <= 1:
+            continue
+        if media.pcm is not None:
+            items.append(GuideMedia("sound"))
+        items.append(clip_vision(media))
+    items += [GuideMedia("sound") for media in guides
+              if not media.frames and media.pcm is not None]
+    return items
+
+
+def clip_vision(media) -> GuideMedia:
+    """A reference clip at two frames a second, each tagged with the frame it came from.
+
+    The index and the source rate are what the seconds marker the processor writes over
+    each block is computed from, so they travel with the frames rather than being implied
+    by how many there are. A file that states no rate is read at the sampling rate, which
+    is the assumption the sampling itself was made under.
+    """
+    rate = media.fps or VISION_FRAMES_PER_SECOND
+    shown = max(1, int(len(media.frames) * VISION_FRAMES_PER_SECOND / rate))
+    indices = tuple(round(index * rate / VISION_FRAMES_PER_SECOND)
+                    for index in range(shown))
+    return GuideMedia("clip",
+                      tuple(_vision(media.frames[min(index, len(media.frames) - 1)])
+                            for index in indices),
+                      indices, rate, len(media.frames))
+
+
+def _vision(image):
+    """The copy the vision tower is worth showing it: 32 pixels per token is coarser than
+    the DiT's own, so a bigger picture buys detail the conditioning cannot carry."""
+    return resize_to_short_edge(image, VISION_SHORT_EDGE, align=CANVAS_MULTIPLE)
 
 
 def guide_clip(frames: int) -> int:

@@ -88,6 +88,10 @@ VISION_START = "<|vision_start|>"
 VISION_END = "<|vision_end|>"
 IMAGE_PAD = "<|image_pad|>"
 VISION_BLOCK = VISION_START + IMAGE_PAD + VISION_END
+#: A clip's placeholder, and deliberately not framed: a processor that is given the video's
+#: metadata writes the seconds marker its frames average out and the vision markers around
+#: the pads itself, so framing it here would double the markers.
+VIDEO_PAD = "<|video_pad|>"
 
 #: The label in front of each reference, 1-based, matching how the prompt refers to
 #: them. ``<Picture n>: `` with angle brackets belongs to the video models.
@@ -494,6 +498,7 @@ __all__ = [
     "compute_drop_idx",
     "IM_START",
     "IM_END",
+    "VIDEO_PAD",
     "VISION_START",
     "VISION_END",
     "IMAGE_PAD",

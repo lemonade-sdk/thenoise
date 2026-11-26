@@ -100,6 +100,9 @@ class EncodePromptArgs:
     negative_prompt: str = ""
     guidance_scale: float = 0.0
     image: Optional[Union[Image.Image, List[Image.Image]]] = None
+    #: The reference conditions as they were read, for a model that presents them to its
+    #: conditioner in its own words rather than as pictures.
+    guides: Sequence[Any] = ()
 
 
 @dataclass

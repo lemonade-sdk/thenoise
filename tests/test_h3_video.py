@@ -10,6 +10,7 @@ from __future__ import annotations
 import io
 import math
 
+import numpy as np
 import pytest
 import thenoise.models.h3_video as h3_video_module
 import torch
@@ -90,6 +91,27 @@ def _prepare(model, params, cond=None, refs=()):
 
 
 # --- what a request becomes ---------------------------------------------------
+
+
+def test_a_reference_clip_is_shown_at_two_frames_a_second():
+    """The source indices travel with the frames: they are what the seconds marker is of."""
+    from thenoise.utils.media import ReferenceMedia
+    frames = tuple(Image.new("RGB", (64, 64)) for _ in range(72))  # three seconds at 24
+    item = h3_video_module.clip_vision(ReferenceMedia("clip", frames, fps=24.0))
+    assert len(item.frames) == 6
+    assert item.indices == (0, 12, 24, 36, 48, 60)
+    assert item.fps == 24.0
+
+
+def test_the_conditioner_is_shown_pictures_then_each_clip_with_its_sound():
+    from thenoise.utils.media import ReferenceMedia
+    picture = Image.new("RGB", (64, 64))
+    clip = tuple(Image.new("RGB", (64, 64)) for _ in range(24))
+    guides = [ReferenceMedia("clip", clip, pcm=np.zeros((1, 3200), "float32")),
+              ReferenceMedia("picture", (picture,)),
+              ReferenceMedia("audio", (), pcm=np.zeros((1, 3200), "float32"))]
+    kinds = [one.kind for one in h3_video_module.presented(None, guides)]
+    assert kinds == ["picture", "sound", "clip", "sound"]
 
 
 def test_a_request_becomes_two_latent_shapes(model):
