@@ -14,6 +14,7 @@ import av
 import numpy as np
 
 from thenoise.jobs import Cancellation
+from thenoise.utils.media import pcm_array, pcm_resample
 from .spec import ResolvedVideo
 
 #: The audio codec each container carries, the rate its encoder is opened at, and the
@@ -24,47 +25,21 @@ from .spec import ResolvedVideo
 AUDIO_CODECS = {"mp4": ("aac", None, 1024), "webm": ("libopus", 48000, 960)}
 
 
-def _resample(samples, src_rate: int, dst_rate: int, layout: str) -> np.ndarray:
-    """Move PCM to the rate a container's codec opens at, through libswresample.
-
-    Whole array in, whole array out: the caller needs sample positions to pad and trim
-    against, which a frame-at-a-time resampler would hand back with its own clock.
-    """
-    frame = av.AudioFrame.from_ndarray(samples, format="fltp", layout=layout)
-    frame.sample_rate = src_rate
-    resampler = av.AudioResampler(format="fltp", layout=layout, rate=dst_rate)
-    parts = [moved.to_ndarray()
-             for chunk in (resampler.resample(frame), resampler.resample(None))
-             for moved in chunk]
-    return np.ascontiguousarray(np.concatenate(parts, axis=1))
-
-
-def _prepare_audio(audio, sample_rate, np):
+def _prepare_audio(audio, sample_rate):
     if not isinstance(sample_rate, int) or not 8000 <= sample_rate <= 192000:
         raise ValueError("audio sample rate must be between 8000 and 192000 Hz")
-    if hasattr(audio, "detach"):
-        audio = audio.detach().float().cpu().numpy()
-    samples = np.asarray(audio, dtype=np.float32)
-    if samples.ndim == 3 and samples.shape[0] == 1:
-        samples = samples[0]
-    if samples.ndim == 1:
-        samples = samples[None, :]
-    if samples.ndim != 2 or samples.shape[0] not in (1, 2) or samples.shape[1] == 0:
-        raise ValueError("audio must be (channels, samples), mono or stereo")
-    if not np.isfinite(samples).all():
-        raise ValueError("generated audio has non-finite samples")
-    return np.ascontiguousarray(np.clip(samples, -1, 1))
+    return pcm_array(audio)
 
 
 def encode_video(frames: Iterable, spec: ResolvedVideo, token: Cancellation, out: Path,
                  progress, *, audio=None, sample_rate: int | None = None) -> None:
-    samples = _prepare_audio(audio, sample_rate, np) if audio is not None else None
+    samples = _prepare_audio(audio, sample_rate) if audio is not None else None
     audio_codec, audio_rate, audio_frame = AUDIO_CODECS[spec.output_format]
     layout = ""
     if samples is not None:
         layout = "mono" if samples.shape[0] == 1 else "stereo"
         if audio_rate and sample_rate != audio_rate:
-            samples = _resample(samples, sample_rate, audio_rate, layout)
+            samples = pcm_resample(samples, sample_rate, audio_rate, layout)
             sample_rate = audio_rate
         # Pad/trim the generated audio to the requested video timeline.
         wanted = round(spec.frame_count * sample_rate / spec.fps)

@@ -8,7 +8,8 @@ import av
 import numpy as np
 import pytest
 
-from thenoise.video.container import AUDIO_CODECS, _resample, encode_video
+from thenoise.utils.media import pcm_resample
+from thenoise.video.container import AUDIO_CODECS, encode_video
 from thenoise.jobs import Cancellation, JobCancelled
 from thenoise.video.spec import OUTPUT_FORMATS, VideoSpec
 from conftest import wan_prefs
@@ -162,7 +163,7 @@ def test_moving_audio_to_another_rate_keeps_it_on_the_clock():
     click = np.zeros((2, n), dtype=np.float32)
     click[:, n // 2] = 1.0
 
-    moved = _resample(click, 32000, 48000, "stereo")
+    moved = pcm_resample(click, 32000, 48000)
 
     assert moved.shape == (2, n * 3 // 2)
     assert int(np.argmax(moved[0])) == n // 2 * 3 // 2

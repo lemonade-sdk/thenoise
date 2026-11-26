@@ -4,8 +4,9 @@ Ported from ComfyUI's ``comfy/ldm/minimax/audio_vae.py`` with its module tree �
 checkpoint key names — verbatim; only the ops differ. The released file already has its
 weight-norm parametrizations folded into plain weights.
 
-Only the vocoder half is built: a clip's sound is decoded, never re-encoded, so
-:func:`load_h3_audio_vae` drops the encoder's tensors instead of holding them.
+Both halves are built: a clip's sound is decoded, and a sound a clip is asked to keep is
+encoded. The encoder is mono and reads one channel at a time, the vocoder is mono too, and
+the two stereo lanes are folded into the batch on the way in and out.
 
 The latent is ``[B, 32, 2, T]`` — 32 channels over 2 stereo lanes at 40 frames per second.
 """
@@ -19,7 +20,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+import numpy as np
+
 from thenoise.utils.loader import load_codec
+from thenoise.utils.media import pcm_resample
 from thenoise.utils.safetensors import Header, Signature
 from thenoise.utils.setup_logging import setup_logging
 
@@ -36,6 +40,8 @@ LATENT_CHANNELS = 32
 LATENT_DIM = 2048
 ENCODER_DIM = 64
 ENCODER_RATES = (2, 4, 4, 5, 5)
+#: Heads the encoder's posterior attention runs over its 2048-wide frames.
+ATTN_HEADS = 8
 DECODER_DIM = 1024
 UPSAMPLE_RATES = (5, 5, 2, 2, 2, 2, 2)
 UPSAMPLE_KERNELS = (9, 9, 4, 4, 4, 4, 4)
@@ -49,10 +55,6 @@ LATENTS_PER_SECOND = SAMPLE_RATE // SAMPLES_PER_LATENT
 
 #: Kaiser-windowed sinc width for the anti-aliased activations.
 RESAMPLING_KERNEL = 12
-
-#: The encoder-side tensors a decode never reads, dropped at load rather than built.
-ENCODER_PREFIXES = ("encoder.", "pre_block.", "mean_proj.", "logs_proj.")
-
 
 # --------------------------------------------------------------------- activations
 
@@ -176,6 +178,148 @@ class Activation1d(nn.Module):
         return self.downsample(self.act(self.upsample(x)))
 
 
+# --------------------------------------------------------------------- encoder
+
+
+class Snake1d(nn.Module):
+    """Snake with one parameter per channel, which is what the encoder side trains."""
+
+    def __init__(self, channels: int):
+        super().__init__()
+        self.alpha = nn.Parameter(torch.empty(1, channels, 1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        alpha = self.alpha.to(x)
+        return snake(x, alpha, alpha)
+
+
+class ResidualUnit(nn.Module):
+    """Two activations and a dilated conv, then the shortcut, trimmed to match."""
+
+    def __init__(self, channels: int, dilation: int = 1):
+        super().__init__()
+        pad = (7 - 1) * dilation // 2
+        self.block = nn.Sequential(
+            Snake1d(channels),
+            nn.Conv1d(channels, channels, kernel_size=7, dilation=dilation, padding=pad),
+            Snake1d(channels),
+            nn.Conv1d(channels, channels, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = self.block(x)
+        pad = (x.shape[-1] - y.shape[-1]) // 2
+        if pad:
+            x = x[..., pad:-pad]
+        return y.add_(x)
+
+
+class EncoderBlock(nn.Module):
+    """Three residual units at the entering width, then a strided conv to the next."""
+
+    def __init__(self, channels: int, stride: int):
+        super().__init__()
+        half = channels // 2
+        self.block = nn.Sequential(
+            ResidualUnit(half, dilation=1),
+            ResidualUnit(half, dilation=3),
+            ResidualUnit(half, dilation=9),
+            Snake1d(half),
+            nn.Conv1d(half, channels, kernel_size=2 * stride, stride=stride,
+                      padding=math.ceil(stride / 2)),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.block(x)
+
+
+class Encoder(nn.Module):
+    """Samples to the encoder's feature frame: one channel in, ``latent_dim`` out.
+
+    Mono by construction -- the stereo lanes are folded into the batch upstream, which is
+    the same trick the vocoder plays on the way out.
+    """
+
+    def __init__(self, d_model: int = ENCODER_DIM, strides=ENCODER_RATES,
+                 d_latent: int = LATENT_DIM):
+        super().__init__()
+        block = [nn.Conv1d(1, d_model, kernel_size=7, padding=3)]
+        for stride in strides:
+            d_model *= 2
+            block.append(EncoderBlock(d_model, stride=stride))
+        block += [Snake1d(d_model), nn.Conv1d(d_model, d_latent, kernel_size=3, padding=1)]
+        self.block = nn.Sequential(*block)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.block(x)
+
+
+# ------------------------------------------------------- encoder posterior head
+
+
+class GeGluMlp(nn.Module):
+    """GELU-gated MLP: two projections to the hidden width, one back."""
+
+    def __init__(self, in_features: int, hidden_features: int):
+        super().__init__()
+        self.norm = nn.LayerNorm(in_features)
+        self.w0 = nn.Linear(in_features, hidden_features)
+        self.w1 = nn.Linear(in_features, hidden_features)
+        self.w2 = nn.Linear(hidden_features, in_features)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.norm(x)
+        gate = F.gelu(self.w0(x), approximate="tanh")
+        return self.w2(gate.mul_(self.w1(x)))
+
+
+class CausalAttention(nn.Module):
+    """One causal attention over the latent frames, collapsed to ``out_dim``.
+
+    The heads are averaged and the result pooled along the *head* axis to the posterior
+    width, which is what the checkpoint's shapes say it does: ``out_dim`` is narrower than
+    the head axis, so the pool is a projection and not a downsample in time.
+    """
+
+    def __init__(self, in_dim: int, out_dim: int, num_heads: int):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = in_dim // num_heads
+        self.out_dim = out_dim
+        self.qkv = nn.Linear(in_dim, in_dim * 3, bias=False)
+        self.q_bias = nn.Parameter(torch.empty(in_dim))
+        self.v_bias = nn.Parameter(torch.empty(in_dim))
+        self.register_buffer("zero_k_bias", torch.empty(in_dim))
+        self.proj = nn.Linear(out_dim, out_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch, rows, channels = x.shape
+        bias = torch.cat((self.q_bias, self.zero_k_bias.to(x), self.v_bias))
+        qkv = F.linear(x, self.qkv.weight, bias.to(x))
+        qkv = qkv.reshape(batch, rows, 3, self.num_heads, self.head_dim)
+        q, k, v = qkv.permute(2, 0, 3, 1, 4)
+        seen = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        pooled = F.adaptive_avg_pool1d(seen.mean(dim=1), self.out_dim)
+        return self.proj(pooled)
+
+
+class AttnProjection(nn.Module):
+    """The encoder's head: attention and a strided linear both reading 2048-wide frames."""
+
+    def __init__(self, in_dim: int, out_dim: int, num_heads: int, mlp_ratio: int = 2):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(in_dim)
+        self.attn = CausalAttention(in_dim, out_dim, num_heads)
+        self.proj = nn.Linear(in_dim, out_dim)
+        self.norm3 = nn.LayerNorm(in_dim)
+        self.norm2 = nn.LayerNorm(out_dim)
+        self.mlp = GeGluMlp(out_dim, int(out_dim * mlp_ratio))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.proj(self.norm3(x)).add_(self.attn(self.norm1(x)))
+        return x.add_(self.mlp(self.norm2(x)))
+
+
 # --------------------------------------------------------------------- BigVGAN
 
 
@@ -288,9 +432,16 @@ class AutoencoderKLH3Audio(nn.Module):
                  decoder_dim: int = DECODER_DIM, upsample_rates=UPSAMPLE_RATES,
                  upsample_kernel_sizes=UPSAMPLE_KERNELS,
                  resblock_kernel_sizes=RESBLOCK_KERNELS,
-                 resblock_dilation_sizes=RESBLOCK_DILATIONS):
+                 resblock_dilation_sizes=RESBLOCK_DILATIONS,
+                 encoder_dim: int = ENCODER_DIM, encoder_rates=ENCODER_RATES,
+                 attn_heads: int = ATTN_HEADS):
         super().__init__()
         self.stereo_lanes = STEREO_LANES
+        self.encoder = Encoder(encoder_dim, tuple(encoder_rates), latent_dim)
+        self.pre_block = AttnProjection(latent_dim, latent_channels, attn_heads)
+        self.mean_proj = nn.Conv1d(latent_channels, latent_channels, 1)
+        # Trained, and never sampled: encode answers the posterior mean.
+        self.logs_proj = nn.Conv1d(latent_channels, latent_channels, 1)
         self.dec_in_proj = nn.Conv1d(latent_channels, latent_dim, 1)
         self.decoder = BigVGAN(num_mels=latent_dim, upsample_initial_channel=decoder_dim,
                                upsample_rates=upsample_rates,
@@ -332,6 +483,32 @@ class AutoencoderKLH3Audio(nn.Module):
         samples = self.decoder(self.dec_in_proj(z))
         return samples.reshape(batch, lanes, -1)
 
+    def encode_to_latents(self, pcm, sample_rate: Optional[int] = None) -> torch.Tensor:
+        """Samples in ``[-1, 1]`` -> the normalized canonical latent ``[B, 32, 2, T]``.
+
+        The posterior *mean*: the checkpoint trains a spread that inference never samples,
+        so a condition's latent does not move with the run's seed. Mono arrives as two equal
+        lanes, and any other sample rate is moved here -- a latent frame is 800 samples at
+        32 kHz, so the rate is part of the geometry rather than a preference.
+
+        The tail is right-padded to a whole latent frame, so ``T`` is the ceiling of what
+        was handed over.
+        """
+        samples = pcm_resample(pcm, SAMPLE_RATE if sample_rate is None else sample_rate,
+                               self.sample_rate)
+        if samples.shape[0] == 1:
+            samples = np.repeat(samples, self.stereo_lanes, axis=0)
+        x = torch.from_numpy(samples)[None].to(self.device, self.dtype)
+        batch, lanes, length = x.shape
+        frames = -(-length // self.samples_per_latent)
+        x = F.pad(x, (0, frames * self.samples_per_latent - length))
+        x = x.reshape(batch * lanes, 1, -1)
+        x = self.pre_block(self.encoder(x).transpose(1, 2)).transpose(1, 2)
+        z = self.mean_proj(x)
+        z = ((z - self.latents_mean.view(1, -1, 1).to(z))
+             / self.latents_std.view(1, -1, 1).to(z))
+        return z.reshape(batch, lanes, self.z_dim, frames).permute(0, 2, 1, 3)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.decode_to_pcm(x)
 
@@ -361,12 +538,28 @@ def _audio_geometry(header: Header) -> dict:
         raise ValueError(f"{header.path}: 'dec_in_proj.weight' is missing "
                          "(not an H3 audio VAE?)")
 
+    claimed_rate = int(meta.get("sample_rate", SAMPLE_RATE))
+    if claimed_rate != SAMPLE_RATE:
+        raise ValueError(
+            f"{header.path}: a codec that samples at {claimed_rate} Hz would fill a latent "
+            f"frame with {claimed_rate * SAMPLES_PER_LATENT // SAMPLE_RATE} samples of "
+            f"sound, and {LATENTS_PER_SECOND} latents per second is the video's clock"
+        )
+
     geometry = {
         "latent_channels": int(meta.get("latent_channels", dec_in[1])),
         "latent_dim": int(kwargs.get("latent_dim", dec_in[0])),
         "decoder_dim": int(kwargs.get("decoder_dim", DECODER_DIM)),
         "upsample_rates": tuple(kwargs.get("decoder_rates", UPSAMPLE_RATES)),
+        "encoder_dim": int(kwargs.get("encoder_dim", ENCODER_DIM)),
+        "encoder_rates": tuple(kwargs.get("encoder_rates", ENCODER_RATES)),
     }
+    if math.prod(geometry["encoder_rates"]) != SAMPLES_PER_LATENT:
+        raise ValueError(
+            f"{header.path}: encoder rates {geometry['encoder_rates']} squash to "
+            f"{math.prod(geometry['encoder_rates'])} samples per latent frame, not the "
+            f"{SAMPLES_PER_LATENT} the vocoder restores"
+        )
     if math.prod(geometry["upsample_rates"]) != SAMPLES_PER_LATENT:
         raise ValueError(
             f"{header.path}: decoder rates {geometry['upsample_rates']} restore "
@@ -376,12 +569,6 @@ def _audio_geometry(header: Header) -> dict:
         )
     geometry["upsample_kernel_sizes"] = UPSAMPLE_KERNELS
     return geometry
-
-
-def _audio_state(state_dict: dict, model: torch.nn.Module) -> dict:
-    """Drop the encoder half, which this module does not build."""
-    return {k: v for k, v in state_dict.items()
-            if not k.startswith(ENCODER_PREFIXES)}
 
 
 def load_h3_audio_vae(
@@ -406,7 +593,6 @@ def load_h3_audio_vae(
                       what="H3 audio VAE",
                       signature=H3_AUDIO_SIGNATURE,
                       construct=construct,
-                      state_map=_audio_state,
                       dtype=dtype)
 
 

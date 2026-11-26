@@ -1,6 +1,6 @@
-"""The H3 audio codec at a reduced vocoder width: the latent geometry the release
-implies, Snake, the alias-free round trip, stereo lanes, decode shape and clamping, the
-module tree the checkpoint's names are read into, and the loader dropping the encoder.
+"""The H3 audio codec at a reduced width: the latent geometry the release implies, Snake,
+the alias-free round trip, stereo lanes, decode shape and clamping, encoding a sound back
+to a latent, the module tree the checkpoint's names are read into, and both halves loading.
 """
 from __future__ import annotations
 
@@ -13,31 +13,39 @@ import torch
 from conftest import write_safetensors
 from thenoise.vae import AutoencoderKLH3Audio, load_h3_audio_vae
 from thenoise.vae.h3_audio import (
-    ENCODER_PREFIXES, ENCODER_RATES, LATENTS_PER_SECOND, RESBLOCK_DILATIONS,
+    ENCODER_RATES, LATENTS_PER_SECOND, RESBLOCK_DILATIONS,
     RESBLOCK_KERNELS, SAMPLE_RATE, SAMPLES_PER_LATENT, UPSAMPLE_KERNELS, UPSAMPLE_RATES,
-    AMPBlock1, Activation1d, SnakeBeta, kaiser_sinc_filter1d, snake,
+    AMPBlock1, Activation1d, AttnProjection, CausalAttention, Encoder, Snake1d, SnakeBeta,
+    kaiser_sinc_filter1d, snake,
 )
 
 #: Narrow, but with the released rates: 800 samples per latent frame is what the latent
 #: grid and the sample rate both promise, so a test vocoder that kept the rates cannot
 #: escape them either.
-TINY = dict(decoder_dim=256, upsample_rates=UPSAMPLE_RATES,
+TINY = dict(encoder_dim=2, decoder_dim=256, upsample_rates=UPSAMPLE_RATES,
             upsample_kernel_sizes=UPSAMPLE_KERNELS,
             resblock_kernel_sizes=RESBLOCK_KERNELS,
             resblock_dilation_sizes=RESBLOCK_DILATIONS)
 TINY_METADATA = {"minimax_h3_audio_vae": json.dumps(
-    {"kwargs": {"decoder_dim": 256, "latent_dim": 2048,
+    {"kwargs": {"decoder_dim": 256, "latent_dim": 2048, "encoder_dim": 2,
+                "encoder_rates": list(ENCODER_RATES),
                 "decoder_rates": list(UPSAMPLE_RATES)}})}
 
 
 def _fill(module: torch.nn.Module) -> torch.nn.Module:
-    """Snake's alpha and beta are ``torch.empty`` until a checkpoint fills them, and they
-    go through an ``exp``: unfilled, they are inf rather than a small wrong number."""
+    """The checkpoint-supplied parameters the modules leave ``torch.empty``: Snake's,
+    which go through an ``exp``, and the attention biases. Unfilled they are garbage, not
+    small wrong numbers."""
     with torch.no_grad():
         for child in module.modules():
-            if isinstance(child, SnakeBeta):
+            if isinstance(child, (SnakeBeta, Snake1d)):
                 child.alpha.zero_()
+            if isinstance(child, SnakeBeta):
                 child.beta.zero_()
+            if isinstance(child, CausalAttention):
+                child.q_bias.zero_()
+                child.v_bias.zero_()
+                child.zero_k_bias.zero_()
     return module
 
 
@@ -154,6 +162,64 @@ def test_decode_refuses_a_latent_that_is_not_audio(tiny_vae, shape):
         tiny_vae.decode_to_pcm(torch.zeros(shape))
 
 
+# --- encoding a sound ---------------------------------------------------------
+
+
+def _tone(frames: int, *, samples: int = SAMPLES_PER_LATENT, channels: int = 2,
+          rate: int = SAMPLE_RATE) -> torch.Tensor:
+    """Whole latent frames of a 440 Hz tone: the posterior head reads layer norms, so a
+    silent or constant input has no variance to normalize."""
+    step = torch.arange(frames * samples, dtype=torch.float32)
+    wave = torch.sin(step * (2 * math.pi * 440.0 / rate))
+    return wave.view(1, 1, -1).repeat(channels, 1, 1)[0]
+
+
+def test_a_sound_becomes_one_latent_frame_per_800_samples(tiny_vae):
+    assert tiny_vae.encode_to_latents(_tone(4)).shape == (1, 32, 2, 4)
+
+
+def test_a_tail_shorter_than_a_frame_still_occupies_one(tiny_vae):
+    short = _tone(2)[..., :1200]
+    assert tiny_vae.encode_to_latents(short).shape == (1, 32, 2, 2)
+
+
+def test_a_mono_source_arrives_as_two_equal_lanes(tiny_vae):
+    mono = _tone(2, channels=1)
+    z = tiny_vae.encode_to_latents(mono)
+    assert z.shape == (1, 32, 2, 2)
+    assert torch.equal(z[0, :, 0], z[0, :, 1])
+
+
+def test_a_source_at_another_rate_is_moved_to_the_codecs(tiny_vae):
+    """A latent frame is 800 samples *at 32 kHz*, so a 48 kHz clip's own sample count
+    says nothing about how many frames of sound it is."""
+    from thenoise.utils.media import pcm_resample
+
+    pcm = _tone(3, rate=48000)
+    at_source = tiny_vae.encode_to_latents(pcm, sample_rate=48000)
+    by_hand = tiny_vae.encode_to_latents(
+        pcm_resample(pcm, 48000, SAMPLE_RATE), sample_rate=SAMPLE_RATE)
+    assert at_source.shape == by_hand.shape == (1, 32, 2, 2)
+
+
+def test_encoding_a_sound_never_samples_the_posterior(tiny_vae):
+    """The checkpoint trains logs_proj and inference ignores it, so a condition's latent
+    is the same whatever the run drew."""
+    pcm = _tone(2)
+    torch.manual_seed(1)
+    first = tiny_vae.encode_to_latents(pcm)
+    torch.manual_seed(9999)
+    assert torch.equal(first, tiny_vae.encode_to_latents(pcm))
+
+
+def test_an_encoded_sound_decodes_to_the_length_it_came_in_as(tiny_vae):
+    pcm = _tone(3)
+    z = tiny_vae.encode_to_latents(pcm)
+    out = tiny_vae.decode_to_pcm(z)
+    assert out.shape == (1, 2, 3 * SAMPLES_PER_LATENT)
+    assert torch.isfinite(out).all()
+
+
 def test_the_checkpoint_naming_survives_the_module_tree(tiny_vae):
     """The names below are the ones the released file uses. A module attribute renamed is
     a whole activation stack that fails to load, so they are pinned here."""
@@ -166,29 +232,58 @@ def test_the_checkpoint_naming_survives_the_module_tree(tiny_vae):
                  "decoder.resblocks.0.activations.0.downsample.lowpass.filter",
                  "decoder.activation_post.act.beta",
                  "decoder.activation_post.downsample.lowpass.filter",
-                 "decoder.conv_post.weight", "latents_mean", "latents_std"):
+                 "decoder.conv_post.weight", "latents_mean", "latents_std",
+                 # encoder side
+                 "encoder.block.0.weight",
+                 "encoder.block.1.block.0.block.0.alpha",
+                 "encoder.block.1.block.0.block.1.weight",
+                 "encoder.block.1.block.0.block.3.weight",
+                 "encoder.block.1.block.4.weight",
+                 "pre_block.norm1.weight", "pre_block.proj.weight",
+                 "pre_block.attn.qkv.weight", "pre_block.attn.q_bias",
+                 "pre_block.attn.zero_k_bias", "pre_block.attn.proj.weight",
+                 "pre_block.mlp.norm.weight", "pre_block.mlp.w0.weight",
+                 "mean_proj.weight", "logs_proj.weight"):
         assert name in names, name
-    assert not any(k.startswith(ENCODER_PREFIXES) for k in names)
+    # The posterior head is 32 wide in and out, and the attention reads the 2048 frames.
+    assert tiny_vae.mean_proj.weight.shape == (32, 32, 1)
+    assert tiny_vae.pre_block.attn.qkv.weight.shape[1] == 2048
 
 
 # --- loader -------------------------------------------------------------------
 
 
-def test_loader_reads_the_vocoder_and_drops_the_encoder(tmp_path, tiny_vae):
-    tensors = dict(tiny_vae.state_dict())
-    for i in range(3):
-        tensors[f"encoder.block.{i}.weight"] = torch.zeros(4, 4, 1)
-        tensors[f"pre_block.mlp.w{i}.weight"] = torch.zeros(4, 4)
-    tensors["mean_proj.weight"] = torch.zeros(32, 32, 1)
-    tensors["logs_proj.weight"] = torch.zeros(32, 32, 1)
-    path = write_safetensors(tmp_path / "h3-audio-vae.safetensors", tensors,
-                             metadata=TINY_METADATA)
+def test_loader_reads_both_halves_of_the_codec(tmp_path, tiny_vae):
+    path = write_safetensors(tmp_path / "h3-audio-vae.safetensors",
+                             dict(tiny_vae.state_dict()), metadata=TINY_METADATA)
 
     loaded = load_h3_audio_vae(path, device="cpu")
 
     assert loaded.dtype == AutoencoderKLH3Audio.compute_dtype == torch.float32
-    assert not any(k.startswith(ENCODER_PREFIXES) for k in loaded.state_dict())
+    assert set(loaded.state_dict()) == set(tiny_vae.state_dict())
     assert loaded.decode_output_length(3) == tiny_vae.decode_output_length(3)
+
+
+def test_loader_refuses_a_codec_whose_encoder_squashes_too_far(tmp_path, tiny_vae):
+    path = write_safetensors(
+        tmp_path / "audio.safetensors", dict(tiny_vae.state_dict()),
+        metadata={"minimax_h3_audio_vae": json.dumps(
+            {"kwargs": {"decoder_dim": 256, "latent_dim": 2048,
+                        "decoder_rates": list(UPSAMPLE_RATES),
+                        "encoder_rates": [2, 2, 2]}})})
+    with pytest.raises(ValueError, match="encoder rates"):
+        load_h3_audio_vae(path, device="cpu")
+
+
+def test_loader_refuses_a_codec_at_another_sample_rate(tmp_path, tiny_vae):
+    """The latent grid is spoken for by the video, so a codec sampling somewhere else
+    would put a different amount of sound in every frame."""
+    meta = json.loads(TINY_METADATA["minimax_h3_audio_vae"])
+    meta["sample_rate"] = 44100
+    path = write_safetensors(tmp_path / "audio.safetensors", dict(tiny_vae.state_dict()),
+                             metadata={"minimax_h3_audio_vae": json.dumps(meta)})
+    with pytest.raises(ValueError, match="44100"):
+        load_h3_audio_vae(path, device="cpu")
 
 
 def test_loader_refuses_a_codec_whose_rates_disagree(tmp_path, tiny_vae, monkeypatch):
