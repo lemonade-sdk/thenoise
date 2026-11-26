@@ -88,3 +88,41 @@ def test_bf16_attention_fallback_never_overflows_fp16(pre_ampere):
     hq, hk, hv, _ = attention._memory_efficient_dtype(q, k, v)
     assert all(torch.isfinite(t).all() for t in (hq, hk, hv))
     assert torch.tensor(attention._FP16_MAX, dtype=torch.bfloat16).item() == attention._FP16_MAX
+
+
+def test_mask_untouched_without_fallback(monkeypatch):
+    seen = {}
+
+    def sdpa(q, k, v, attn_mask=None, dropout_p=0.0):
+        seen["mask"] = attn_mask
+        return torch.zeros_like(q)
+
+    monkeypatch.setattr(attention.F, "scaled_dot_product_attention", sdpa)
+    q = torch.randn(1, 2, 64, 32).to(torch.bfloat16)
+    mask = torch.zeros(1, 1, 64, 64, dtype=torch.float32)
+    attention.attention([q, q, q], attn_params=attention.AttentionParams(attention_mask=mask))
+    assert seen["mask"] is mask                      # same object, same dtype and precision
+
+
+def test_fallback_mask_keeps_meaning(pre_ampere):
+    q, k, v = _long_bf16(3)
+    mask = torch.zeros(1, 1, 4096, 4096, dtype=torch.float32)
+    mask[..., 2048:] = float("-inf")
+    mask[..., 1024:2048] = -1e30
+    got = attention.attention([q, k, v], attn_params=attention.AttentionParams(attention_mask=mask))
+    want = F.scaled_dot_product_attention(q.float(), k.float(), v.float(), attn_mask=mask)
+    want = want.transpose(1, 2).reshape(1, 4096, -1)
+    assert torch.isfinite(got.float()).all()
+    torch.testing.assert_close(got.float(), want, atol=2e-2, rtol=2e-2)
+
+
+def test_no_shape_guard_when_fallback_off(monkeypatch):
+    """Where the fallback is off (ROCm, Ampere+), the sequence length is never read."""
+    class Q:
+        dtype = torch.bfloat16
+        is_cuda = False
+        @property
+        def shape(self):
+            raise AssertionError("shape read")
+    q = Q()
+    assert attention._memory_efficient_dtype(q, q, q) == (q, q, q, None)

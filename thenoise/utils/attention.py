@@ -197,8 +197,17 @@ def _bf16_needs_fp16(q: torch.Tensor) -> bool:
     return _cuda_capability(q.device.index or 0) < (8, 0)
 
 
+def _fp16_mask(mask: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    """An additive mask for the fp16 fallback: SDPA wants it in the query's dtype.
+    Out-of-range values saturate to the fp16 limit (still a full mask); -inf is kept."""
+    if mask is None or not mask.is_floating_point() or mask.dtype is torch.float16:
+        return mask
+    finite = mask.clamp(-_FP16_MAX, _FP16_MAX).to(torch.float16)
+    return torch.where(torch.isneginf(mask), float("-inf"), finite).to(torch.float16)
+
+
 def _memory_efficient_dtype(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
-    if q.shape[-2] * k.shape[-2] < _LONG or not _bf16_needs_fp16(q):
+    if not _bf16_needs_fp16(q) or q.shape[-2] * k.shape[-2] < _LONG:
         return q, k, v, None
     half = [t.clamp(-_FP16_MAX, _FP16_MAX).to(torch.float16) for t in (q, k, v)]
     return (*half, torch.bfloat16)
@@ -265,8 +274,8 @@ def attention(
 
     q, k, v, out_dtype = _memory_efficient_dtype(q, k, v)
     mask = attn_params.attention_mask
-    if mask is not None and mask.is_floating_point() and mask.dtype != q.dtype:
-        mask = mask.to(q.dtype)
+    if out_dtype is not None:
+        mask = _fp16_mask(mask)
     x = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=drop_rate)
     if out_dtype is not None:
         x = x.to(out_dtype)
