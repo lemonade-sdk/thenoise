@@ -158,6 +158,8 @@ bars the solver's steps and the written frames as it goes.
 | `--seed` | no | random | Random seed |
 | `--image` | no | — | image the clip starts on |
 | `--end-image` | no | — | image the clip ends on; needs `--image`, and a model that can be told where a clip ends ([FLF2V](models/wan22.md#first-and-last-frame-flf2v)) |
+| `--reference` | no | — | something for the clip to look like rather than a frame it starts or ends on; repeatable. `path@FRAME` pins it to that frame instead, counted from the end when negative. Needs a model that answers `ref2v` ([references](models/h3-video.md#references)) |
+| `--attention` | no | `auto` | `auto` lets the model decide, `full` is exact attention, `optimized` is the model's faster route where it has one; `/health` lists the words the loaded model answers |
 | `--lora` | no | — | LoRA for the primary transformer; repeatable, `file:weight` |
 | `--lora-low` | no | — | LoRA for the low-noise expert of a `--dit-low` model; a LoRA meant for the whole clip goes to both flags |
 | `--output-format` | no | model default | `mp4` or `webm`; `--out`'s extension answers when this is left out |

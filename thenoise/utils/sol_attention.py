@@ -38,11 +38,10 @@ DTYPES = (torch.bfloat16, torch.float16)
 #: One token per query block routes individually; 256 is the kernel's maximum.
 TOKEN_AUG_MAX = 256
 
-#: Below this many tokens a call is not worth routing: dense is faster. The kernel's
-#: crossover moves with head width — which every 128-wide trunk in this catalog shares —
-#: rather than with what a model generates, so they share this number until one measures a
-#: different one. On gfx1151 the kernel already wins at 1.3 k tokens, by 2 ms, which is not
-#: worth an opinion about.
+#: Below this many tokens a call is not worth routing: dense is faster. The crossover moves
+#: with head width — which every 128-wide trunk in this catalog shares — rather than with what
+#: a model generates, so they share this number until one measures a different one. A request
+#: for ``optimized`` attention is not held by it.
 MIN_TOKENS = 12288
 
 

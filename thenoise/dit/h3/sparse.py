@@ -5,11 +5,9 @@ The generic half — the kernel's rules, its operand order, what a threshold kep
 packing can say which rows are conditioning, and the family rules, because only this model
 knows what routing did to its own output.
 
-It is on whenever it applies and there is no request for it. Which route a call took follows
-from the constants below, so that is debug traffic; what a run measured -- the fraction of
-key blocks the kernel kept -- is the one thing reported, by
-:mod:`thenoise.utils.sol_attention`. If device testing turns up a failure the answer is a
-per-request knob added then, not a hatch installed now.
+A request can ask for this and be refused by the rules below; which route a call took is debug
+traffic, and what a run measured -- the fraction of key blocks the kernel kept -- is the one
+thing reported, by :mod:`thenoise.utils.sol_attention`.
 """
 
 from __future__ import annotations
@@ -29,16 +27,14 @@ from thenoise.utils.sol_attention import (BLOCK, TOKEN_AUG_MAX, SolAttention, av
 #: see :func:`thenoise.utils.sol_attention.routing_stats`.
 TAU = 1.3
 #: Percents of the schedule inside which routing is used; the earliest steps stay dense,
-#: where the run decides its structure. The reference defaults to 0.2; the practice in the
-#: literature (SVG2, carried by later work) is 0.3, which on a 4-step run is the whole run.
+#: where the run decides its structure.
 WINDOW = (0.2, 1.0)
-#: Stills do not route. Routed at 16,384 tokens (a 4096x4096 canvas) H3-Image degraded
-#: visibly and badly, and the mechanism is consistent with that: the threshold is fitted to
-#: proxy rows that look near-Gaussian, which is what video scores look like and a smooth
-#: spatial field does not — on smooth operands it keeps only the always-exact diagonal and
-#: stops responding to tau at all. Revisit with a kept-fraction readout from a real image
-#: run, not with a different tau.
-STILL_HELD_DENSE = "a still: routing measured visibly degrading at 16,384 tokens"
+#: Stills do not route. Routed, H3-Image degrades visibly and badly, and the mechanism fits:
+#: the threshold is fitted to proxy rows that look near-Gaussian, which is what video scores
+#: look like and a smooth spatial field does not. On smooth operands routing keeps only the
+#: always-exact diagonal and stops responding to tau, so this is not fixable with a different
+#: tau — it wants a kept-fraction readout from a real image run first.
+STILL_HELD_DENSE = "a still: routing degrades it"
 
 
 def sol_sinks(layout, *, audio_rows_dense: bool = True

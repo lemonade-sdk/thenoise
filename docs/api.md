@@ -113,6 +113,8 @@ defaults when optional fields are omitted.
 | `model` | string | Optional loaded model name, checked if provided |
 | `image` | string | Optional base64-encoded first frame (I2V; omit for T2V) |
 | `end_image` | string | Optional base64-encoded last frame (FLF2V; needs `image`) |
+| `references` | array | Optional pictures the clip is asked to resemble: each item base64, or `{"image": ..., "frame": n}` to pin it to a frame (negative counts from the end). Needs a model answering `ref2v` |
+| `attention` | string | `auto`, `full` or `optimized`; `GET /health` reports the `attention_methods` the loaded model answers |
 | `negative_prompt` | string | Optional negative text prompt |
 | `width`, `height` | integer | Video dimensions |
 | `frames` | integer | Desired frame count |

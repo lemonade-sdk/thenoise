@@ -23,9 +23,7 @@ from thenoise.utils.sol_attention import (BLOCK, TOKEN_AUG_MAX, SolAttention, av
 #: :func:`thenoise.utils.sol_attention.routing_stats` for the readout of that.
 TAU = 1.3
 #: Percents of the schedule inside which routing is used; the steps before it stay dense,
-#: being where a clip decides its structure. The reference ships 0.2; the practice in the
-#: literature is 0.3. Wan's own defaults are 12 steps for T2V and 40 for the I2V pair, so
-#: this is 2 and 8 steps respectively.
+#: being where a clip decides its structure.
 WINDOW = (0.2, 1.0)
 
 

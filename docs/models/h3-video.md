@@ -1,8 +1,9 @@
-# MiniMax-H3 Video (fl2va)
+# MiniMax-H3 Video
 
 Video with synchronized sound from a text prompt, a starting image, or the two frames a
 clip runs between — the `fl2va` release, which answers `t2v`, `i2v` and `flf2v` from one
-checkpoint. Use the normal `/video` or `/jobs/video` endpoints. Picture and sound come out
+checkpoint. The `ref2va` release answers those three as well and takes [reference
+conditions](#references) on top. Use the normal `/video` or `/jobs/video` endpoints. Picture and sound come out
 of the same run: the transformer holds both streams in one pack, so a clip's audio is
 generated rather than fitted afterwards. Sound lands in `mp4` as AAC and in `webm` as Opus.
 
@@ -58,6 +59,29 @@ frame decides the size when the request names none. Neither is pasted into the o
 enters the run as conditioning at a fixed timestep, and what you see at the ends is the
 model's own rendering of them, which is what makes a last frame possible in a checkpoint that
 was never an FLF2V build.
+
+### References
+
+The `ref2va` release takes pictures the clip is asked to look like. They are not frames of
+the clip — it starts and ends wherever the prompt takes it — so `image` and `references`
+answer different questions and can be used together.
+
+```sh
+curl -sS http://127.0.0.1:8000/video -H 'content-type: application/json' \
+  -d "{\"prompt\":\"<Picture 1> trotting through a garden, late afternoon\",
+       \"references\":[\"$(base64 -w0 dog.png)\"],
+       \"width\":1344,\"height\":768,\"frames\":124,\"steps\":20,
+       \"guidance_scale\":1,\"output_format\":\"mp4\"}" -o dog.mp4
+```
+
+Name them in the prompt to say which is which: `<Picture 1>`, `<Picture 2>`, numbered in the
+order they were sent. An item may also be `{"image": ..., "frame": n}`, which pins that
+picture to a frame of the clip — the frame it should match — with a negative `frame` counting
+back from the last one. Sent that way, it is an anchor rather than a resemblance.
+
+A short clip or a piece of audio as a reference is not taken yet, and a request that asks
+for one is refused rather than ignored. Every other video model refuses references outright:
+`GET /health` shows whether the loaded one answers `ref2v`.
 
 ## Frames and canvas
 

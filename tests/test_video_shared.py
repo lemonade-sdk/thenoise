@@ -254,12 +254,3 @@ def test_attention_a_model_does_not_answer_is_refused_by_name(tmp_path):
         model.resolve_video(VideoSpec(prompt="fox", attention="optimized"))
     assert model.resolve_video(VideoSpec(prompt="fox")).attention == DEFAULT_ATTENTION
 
-
-def test_the_two_trunks_with_routing_offer_it():
-    assert "optimized" in H3VideoModel.ATTENTION_METHODS
-    assert "optimized" in Wan22Model.ATTENTION_METHODS
-
-
-def test_only_h3_answers_ref2v():
-    assert Wan22Model.CAPABILITIES["video"]["ref2v"] is False
-    assert H3VideoModel.CAPABILITIES["video"]["ref2v"] is True

@@ -64,10 +64,8 @@ def ref_span(ref: Reference) -> float:
 PATCH_SIZE = (1, 2, 2)
 
 #: The codec's decode plan: five latent frames cover seventeen pixel frames. The video VAE
-#: derives the same schedule from its own clip length — `clip_length − (chunk−1)·ratio_t`
-#: for the first of each group, `ratio_t` for the rest — and `tests/test_vae_h3_video.py`
-#: ties the two, since stating it once would mean the DiT importing a module that carries a
-#: 5 GB codec.
+#: derives the same schedule from its own geometry and a test ties the two, since sharing one
+#: constant would mean the DiT importing the module that carries the codec.
 FRAME_PER_TOKEN = (1, 4, 4, 4, 4)
 
 #: Rope time units per pixel frame. The time axis runs in audio latent frames — forty a

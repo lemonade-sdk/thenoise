@@ -7,10 +7,9 @@ import torch
 import torch.nn.functional as F
 from typing import Optional, Union
 
-#: How a request may ask for attention to be computed. ``full`` is exact attention, which
-#: nobody has to trust; ``optimized`` is whatever lossy acceleration the architecture has --
-#: block routing today -- so a model offers it only where one exists to be asked for. An
-#: unset request means :data:`DEFAULT_ATTENTION`.
+#: How a request may ask for attention to be computed. ``optimized`` is whatever lossy
+#: acceleration the architecture has -- block routing today -- so a model offers it only where
+#: one exists; the rest are :data:`ATTENTION_METHODS`.
 ATTENTION_METHODS = ("auto", "full")
 DEFAULT_ATTENTION = ATTENTION_METHODS[0]
 
