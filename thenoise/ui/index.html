@@ -503,45 +503,47 @@
     </div>
     <div class="ref-thumbs" id="mesh_refs"></div>
     <div class="hint hidden" id="mesh_views_hint">Views of one shape: front, left, back, right.</div>
-    <button class="hint hidden" id="mesh_shape_clear" type="button"></button>
+    <button class="hint hidden" id="mesh_shape_clear" type="button">start a new shape</button>
     <div class="hint hidden" id="mesh_shape_note"></div>
   </div>
 
 
   <div class="divider"></div>
 
-  <div class="label">Shape</div>
-  <div class="group">
-    <div class="row">
-      <div class="field">
-        <label class="label" for="mesh_latents">Detail level</label>
-        <select id="mesh_latents">
-          <option value="">auto</option>
-        </select>
+  <div id="mesh_shape_knobs">
+    <div class="label">Shape</div>
+    <div class="group">
+      <div class="row">
+        <div class="field">
+          <label class="label" for="mesh_latents">Detail level</label>
+          <select id="mesh_latents">
+            <option value="">auto</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="label" for="mesh_steps">Steps</label>
+          <input type="number" id="mesh_steps" placeholder="auto" min="1">
+        </div>
       </div>
-      <div class="field">
-        <label class="label" for="mesh_steps">Steps</label>
-        <input type="number" id="mesh_steps" placeholder="auto" min="1">
-      </div>
-    </div>
 
-    <div class="row">
-      <div class="field">
-        <label class="label" for="mesh_guidance_scale">Guidance</label>
-        <input type="number" id="mesh_guidance_scale" step="0.1" placeholder="auto" min="0">
+      <div class="row">
+        <div class="field">
+          <label class="label" for="mesh_guidance_scale">Guidance</label>
+          <input type="number" id="mesh_guidance_scale" step="0.1" placeholder="auto" min="0">
+        </div>
+        <div class="field">
+          <label class="label" for="mesh_sampler">Sampler</label>
+          <select id="mesh_sampler">
+            <option value="">auto</option>
+          </select>
+        </div>
       </div>
-      <div class="field">
-        <label class="label" for="mesh_sampler">Sampler</label>
-        <select id="mesh_sampler">
-          <option value="">auto</option>
-        </select>
-      </div>
-    </div>
 
-    <div class="field">
-      <label class="label" for="mesh_seed">Seed</label>
-      <input type="number" id="mesh_seed" placeholder="random" min="0">
-    </div>
+      <div class="field">
+        <label class="label" for="mesh_seed">Seed</label>
+        <input type="number" id="mesh_seed" placeholder="random" min="0">
+      </div>
+  </div>
   </div>
 
   <div class="divider"></div>

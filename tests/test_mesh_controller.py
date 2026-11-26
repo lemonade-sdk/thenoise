@@ -297,8 +297,7 @@ def test_the_file_carries_the_finished_mesh_not_the_cut(tmp_path):
     written_vertices, written_faces = _obj_counts(out)
     assert written_faces == max(4, round(shape_faces * 0.5))
     assert written_vertices < len(model.cut.vertices)
-    assert [one for one in seen if one.startswith("finishing")] == [
-        "finishing: floaters", "finishing: simplify"]
+    assert [one for one in seen if one == "finish"] == ["finish", "finish"]
 
 
 def test_a_named_shape_lora_reaches_the_transformer_that_can_wear_it():

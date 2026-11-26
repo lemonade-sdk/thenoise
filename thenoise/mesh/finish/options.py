@@ -15,15 +15,15 @@ class MeshFinishOptions:
     """What a request asks of a shape once its surface has been cut."""
 
     floaters: float = option(
-        0.0, label="Drop floaters", ge=0.0, le=1.0, step=0.01,
-        help="discard pieces reaching less than this fraction across the whole shape; the "
-             "widest piece reaches all of it, so 0.15 keeps anything spanning a sixth as far",
+        0.0, label="Clean up junk", ge=0.0, le=1.0, step=0.01,
+        help="throw away pieces of the shape smaller than this fraction of its widest part; "
+             "0 keeps everything",
         filter="floaters", stage=FINISH)
 
     triangles: float = option(
-        1.0, label="Triangles", ge=0.001, le=1.0, step=0.01, ui_min=0.01,
-        help="keep this fraction of the triangles the surface was cut with; the shape "
-             "keeps its detail where it has any and loses it where it is flat",
+        1.0, label="Level of detail", ge=0.001, le=1.0, step=0.01, ui_min=0.01,
+        help="keep this fraction of the surface detail; less gives a smaller file and a "
+             "coarser shape",
         filter="simplify", stage=FINISH)
 
     def __post_init__(self) -> None:

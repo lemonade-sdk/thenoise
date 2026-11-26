@@ -13,9 +13,10 @@ let meshShown = 0;
 
 const meshJob = { id: null };
 const MESH_PROGRESS = { root: 'mesh_progress', label: 'mesh_progress_label', bar: 'mesh_bar',
-  labels: { conditioning: 'reading the image', sampling: 'shaping', finish: 'tidying up' } };
+  labels: { conditioning: 'reading the image', sampling: 'shaping' } };
 const MESH_MODES = {i2d: 'image-to-shape', mv2d: 'views-to-shape', t2d: 'text-to-shape',
                     shape: 'cut again from a kept shape'};
+const MESH_SOLVED = ['latents', 'steps', 'seed', 'guidance_scale', 'sampler'];
 const MESH_FORMATS = { glb: 'model/gltf-binary', obj: 'text/plain', stl: 'model/stl' };
 const MESH_MAX_VIEWS = 4;
 const meshViews = [];   // {b64, dataUrl, name}, in view order
@@ -120,24 +121,27 @@ function applyMeshSettings(meta) {
 }
 
 function describeMeshSource() {
-  const clear = $('mesh_shape_clear');
-  clear.textContent = meshSource
-    ? 'cutting #' + meshSource.slice(4, 10) + ' again \u2014 click to shape a new one' : '';
-  clear.classList.toggle('hidden', !meshSource);
   const note = $('mesh_shape_note');
-  note.textContent = !meshGone ? ''
-    : meshViews.length
-      ? 'its latents are gone \u2014 its images are back in the box, so this samples again'
-      : 'shape #' + meshGone.slice(4, 10) + ' is not on the server: only the newest 10 are '
-        + 'kept, and nothing survives a restart';
-  note.classList.toggle('hidden', !meshGone);
+  note.textContent = meshSource
+    ? 'this cuts a shape you already made \u2014 nothing new is drawn'
+    : meshGone
+      ? (meshViews.length
+         ? 'that shape is gone from the server \u2014 its pictures are back, so this draws a new one'
+         : 'that shape is gone from the server \u2014 add a picture to draw a new one')
+      : '';
+  note.classList.toggle('hidden', !note.textContent);
+  // The only way back to a new shape while a kept one is chosen, because the box takes none.
+  $('mesh_shape_clear').classList.toggle('hidden', !meshSource);
   $('mesh_dropzone').inert = !!meshSource;   // inert covers the hidden input inside it
+
+  const shaping = $('mesh_shape_knobs');
+  shaping.inert = !!meshSource;
+  shaping.classList.toggle('muted', !!meshSource);
 }
 
 async function loadMeshShapes() {
   const listing = await fetchJSON('/shapes');
-  // A failed fetch is not an answer: the verdict stays whatever it was, rather than every
-  // shape in the strip being declared lost by a hiccup.
+  
   if (listing && Array.isArray(listing.shapes)) meshKept = new Set(listing.shapes);
 }
 
@@ -154,9 +158,14 @@ function collectMeshSettings() {
   }
   const lora_specs = parseLora($('mesh_lora_specs').value);
   if (lora_specs) body.lora_specs = lora_specs;
-  if (meshSource) body.from_shape = meshSource;
-  else body.image = meshViews.length === 1 ? meshViews[0].b64
-                                           : meshViews.map(view => view.b64);
+  if (meshSource) {
+    body.from_shape = meshSource;
+    
+    for (const key of MESH_SOLVED) delete body[key];
+  } else {
+    body.image = meshViews.length === 1 ? meshViews[0].b64
+                                        : meshViews.map(view => view.b64);
+  }
   return { ...body, ...collectKnobs('finish', 'mesh_') };
 }
 
@@ -169,6 +178,8 @@ function validateMeshInputs() {
       ? 'a shape needs an image \u2014 or pick one from History to cut it again'
       : 'a shape needs an image');
   }
+  
+  if (meshSource) return true;
   const check = (fields, ok, message) => {
     for (const f of fields) {
       const v = $('mesh_' + f).value;
@@ -200,8 +211,6 @@ function resetMeshResult() {
   $('meshplaceholder').style.display = '';
 }
 
-// Resolves to a still of the drawn shape, or to nothing when there was nothing to draw: the
-// strip wants one, whoever is merely looking does not.
 function showMeshResult(blob) {
   $('meshplaceholder').style.display = 'none';
   $('mesh_out').style.display = 'flex';
@@ -281,8 +290,11 @@ function renderMeshInfo() {
   const rows = [];
   if (m.model) rows.push(['Model', m.model, '']);
   if (m.mode) rows.push([FIELD_LABELS.mode, MESH_MODES[m.mode] || m.mode, '']);
+  
+  const ignored = m.mode === 'shape' ? MESH_SOLVED : [];
   for (const key of ['latents', 'steps', 'guidance_scale', 'sampler', 'octree_resolution',
                      'bounds', 'mc_level', 'scale', 'seed', 'output_format']) {
+    if (ignored.includes(key)) continue;
     if (m[key] != null && m[key] !== '') {
       rows.push([FIELD_LABELS[key], knobLabel(key, m[key]), '']);
     }

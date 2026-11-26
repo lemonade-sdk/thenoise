@@ -773,7 +773,7 @@ const STAGE_WORDS = {
   queued: 'in line', loading: 'starting', conditioning: 'understanding the request',
   sampling: 'working', cutting: 'cutting the surface', decoding: 'finishing the pixels',
   encoding: 'writing the frames', upscaling: 'upscaling', postprocessing: 'polishing',
-  finish: 'cleaning up', completed: 'done', canceled: 'canceled', failed: 'failed',
+  finish: 'tidying up', completed: 'done', canceled: 'canceled', failed: 'failed',
 };
 
 const sleep = (ms) => new Promise(done => setTimeout(done, ms));

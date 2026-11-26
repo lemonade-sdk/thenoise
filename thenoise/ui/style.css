@@ -437,6 +437,10 @@ button.hint {
   cursor: default;
 }
 
+.sidebar .muted {
+  opacity: .45;
+}
+
 .sidebar textarea {
   resize: vertical;
   min-height: 42px;

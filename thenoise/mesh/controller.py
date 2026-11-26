@@ -78,8 +78,7 @@ class MeshPipelineController:
 
             if saved is not None:
                 x = saved
-                how = (f"cut from the latents {spec.from_shape} left behind; no image, "
-                       f"no conditioning, no sampling")
+                how = "only the surface was cut again, from a shape you made earlier"
             else:
                 progress("conditioning")
                 cond = stages.run(
@@ -108,10 +107,9 @@ class MeshPipelineController:
                                reserve=_sampling_bytes(spec.latents),
                                prepare=wear_loras,
                                cache="sampling", key=key)
-                how = ("cut from the latents this server still holds; nothing conditioned, "
-                       "nothing sampled" if again else
-                       f"{params.num_latents} latents sampled in "
-                       f"{time.perf_counter() - began:.1f} s")
+                how = ("only the surface was cut again, from a shape this server still held"
+                       if again else
+                       f"shaped in {time.perf_counter() - began:.1f} s")
             if shapes is not None:
                 # Even a re-cut keeps what it cut: an entry the pane offers must stay cuttable.
                 shapes.save(output.stem, x, model.name)

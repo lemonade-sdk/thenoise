@@ -58,7 +58,7 @@ def test_naming_a_shape_cuts_it_again_without_picture_or_solver(tmp_path):
     assert "step" not in model.events
     assert torch.equal(model.cut_from[0], kept)
     assert target.exists()
-    assert "job_alpha left behind" in how
+    assert "cut again" in how and "shaped" not in how
 
 
 def test_a_recut_keeps_what_it_cut_so_the_chain_continues(tmp_path):
@@ -121,14 +121,14 @@ def test_the_same_image_and_seed_are_sampled_once(tmp_path):
                              tmp_path / "job_16.glb", store)
     solved = model.events.count("step")
     assert solved > 0
-    assert "sampled in" in said
+    assert "shaped in" in said
 
     again = controller.render(first, Cancellation(), lambda *_: None,
                               tmp_path / "job_32.glb", store)
     assert model.events.count("encode") == 1
     assert model.events.count("step") == solved, "the second cut reuses the sampled shape"
     assert model.events.count("decode") == 2
-    assert "nothing sampled" in again, "a tenth of a second has to say why it was quick"
+    assert "only the surface" in again, "a tenth of a second has to say why it was quick"
 
     other = controller.resolve(MeshSpec(**_spec(image=PNG, seed=8)))
     controller.render(other, Cancellation(), lambda *_: None,
@@ -157,4 +157,4 @@ def test_a_recut_still_finishes_and_writes_what_the_request_asked_for(tmp_path):
     _, target, how = _render(model, tmp_path, name="job_stl", output_format="stl",
                         from_shape="job_alpha", octree_resolution=8, scale=2.0)
     assert target.read_bytes().startswith(b"thenoise"), "the request's format, not the default"
-    assert "left behind" in how
+    assert "cut again" in how

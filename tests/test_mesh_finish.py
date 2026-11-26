@@ -107,7 +107,7 @@ def test_the_knobs_a_filter_reads_are_the_ones_it_declared():
 
 def test_no_knob_asks_for_anything_by_default():
     assert OFF == {"floaters": 0.0, "triangles": 1.0}
-    assert options_schema(MeshFinishOptions)[0]["label"] == "Drop floaters"
+    assert options_schema(MeshFinishOptions)[0]["label"] == "Clean up junk"
 
 
 def test_a_knob_outside_its_own_range_is_refused_by_name():
@@ -130,10 +130,10 @@ def test_the_pane_is_told_the_words_the_bounds_and_the_defaults():
     described = {entry["name"]: entry for entry in options_schema(MeshFinishOptions)}
     # 0.001 stays the floor a request may ask for; 0.01 is where the slider starts, so that
     # its steps land on 1.0 instead of stopping at 0.991.
-    assert described["triangles"] == {"name": "triangles", "label": "Triangles",
+    assert described["triangles"] == {"name": "triangles", "label": "Level of detail",
                                       "type": "number", "default": 1.0, "min": 0.001,
                                       "ui_min": 0.01, "max": 1.0, "step": 0.01}
-    assert described["floaters"] == {"name": "floaters", "label": "Drop floaters",
+    assert described["floaters"] == {"name": "floaters", "label": "Clean up junk",
                                      "type": "number", "default": 0.0, "min": 0.0,
                                      "max": 1.0, "step": 0.01}
 
@@ -163,7 +163,9 @@ def test_both_filters_run_and_the_declared_order_is_kept(monkeypatch):
     finish_mesh(cut, MeshFinishOptions(floaters=0.01, triangles=0.5),
                 (observer := _NothingAsked()).check, observer.progress)
     assert seen == ["floaters", "simplify"]
-    assert observer.stages == ["finishing: floaters", "finishing: simplify"]
+    # The stage word says only that finishing is running; which filter it was, and how long it
+    # took, is what the log is for.
+    assert observer.stages == ["finish", "finish"]
 
 
 def test_a_chain_that_never_returns_still_names_the_filter_it_entered(caplog):

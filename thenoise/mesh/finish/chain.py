@@ -56,7 +56,7 @@ def finish_mesh(mesh, options, check: Callable[[], None],
     return apply_chain(host, options, stages,
                        {spec.name: _reported(spec) for spec in stages}, DEFAULTS,
                        check=check,
-                       on_filter=lambda spec: progress(f"finishing: {spec.name}"))
+                       on_filter=lambda _spec: progress(FINISH))
 
 
 __all__ = ["FILTERS", "finish_mesh"]
