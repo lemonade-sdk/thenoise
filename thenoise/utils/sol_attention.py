@@ -53,7 +53,7 @@ class SolAttention:
 
 def available(device) -> bool:
     """Whether a compiled sol kernel exists for this device."""
-    return bool(sol_attn_is_available(device))
+    return bool(sol_attn_is_available(torch.device(device)))
 
 
 @lru_cache(maxsize=8)
