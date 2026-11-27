@@ -29,6 +29,9 @@ INT8-ConvRot, @ 8 steps, CFG 1:
 
 *Generated:*
 
+[I2V](https://github.com/user-attachments/assets/3d705c15-0f7b-4952-b0ba-ba083cab8c3f)
+
+[T2V](https://github.com/user-attachments/assets/a37ed7af-3ada-43b4-ae79-6e9388fbd00d)
 
 ## Download
 
