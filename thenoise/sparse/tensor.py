@@ -22,6 +22,9 @@ class SparseTensor:
             raise ValueError(f"coordinates are [M, 4], got {tuple(coords.shape)}")
         if feats.shape[0] != coords.shape[0]:
             raise ValueError(f"{feats.shape[0]} features on {coords.shape[0]} voxels")
+        if coords.device != feats.device:
+            raise ValueError(f"coordinates are on {coords.device} and features on "
+                             f"{feats.device}; a lattice lives on one device")
         if len(shape) != 4:
             raise ValueError(f"shape is (batch, width, height, depth), got {tuple(shape)}")
         self.feats = feats

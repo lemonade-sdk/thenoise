@@ -56,10 +56,10 @@ class SparseChannel2Spatial(nn.Module):
 
     def plan(self, x: SparseTensor, subdivision: Optional[torch.Tensor] = None
              ) -> Tuple[SparseTensor, torch.Tensor]:
-        """The finer lattice, and the coarser voxel each of its cells came from.
+        """The finer lattice, and the parent split row each of its cells came from.
 
-        A residual climbing through the refinement gathers along that index rather than
-        finding its parent by coordinate again and hoping the two agree.
+        An index into ``x.feats.reshape(M, factor**3, -1)``: a residual climbing through the
+        refinement gathers along it rather than finding its parent by coordinate again.
         """
         factor = self.factor
         voxels, channels = x.feats.shape
@@ -81,8 +81,9 @@ class SparseChannel2Spatial(nn.Module):
         coords = x.coords[parent]
         coords[:, 1:] = coords[:, 1:] * factor + offsets[child]
         grid = (x.shape[0], x.shape[1] * factor, x.shape[2] * factor, x.shape[3] * factor)
-        feats = x.feats.reshape(voxels, factor ** 3, per_cell)[parent, child]
-        return SparseTensor(feats, coords, grid), parent
+        source = parent * factor ** 3 + child
+        feats = x.feats.reshape(voxels * factor ** 3, per_cell)[source]
+        return SparseTensor(feats, coords, grid), source
 
     def forward(self, x: SparseTensor, subdivision: Optional[torch.Tensor] = None
                 ) -> SparseTensor:
@@ -125,38 +126,5 @@ class SparseSpatial2Channel(nn.Module):
         return SparseTensor(feats.reshape(unique.numel(), -1), parent[first], grid)
 
 
-class SparseResBlockC2S3d(nn.Module):
-    """A residual block ending in a refinement, its own head deciding which cells survive.
-
-    The residual walks up along the plan's parent indices, and a cell carries
-    ``channels // factor**3`` after the refinement: neither is a knob.
-    """
-
-    def __init__(self, channels: int, factor: int = 2, groups: int = 32,
-                 eps: float = 1e-6) -> None:
-        super().__init__()
-        if channels % factor ** 3:
-            raise ValueError(f"{channels} channels do not split into {factor ** 3} cells")
-        out_channels = channels // factor ** 3
-        self.factor = factor
-        self.subdivision = SubmanifoldConv3d(channels, factor ** 3, 3, bias=False)
-        self.up = SparseChannel2Spatial(factor)
-        self.conv1 = SubmanifoldConv3d(out_channels, out_channels, 3, bias=False)
-        self.conv2 = SubmanifoldConv3d(out_channels, out_channels, 3)
-        self.norm = nn.GroupNorm(groups if out_channels % groups == 0 else 1, out_channels,
-                                 eps=eps)
-        self.act = nn.SiLU()
-        self.skip = nn.Identity() if out_channels == channels else \
-            SubmanifoldConv3d(channels, out_channels, 1, bias=False)
-
-    def forward(self, x: SparseTensor) -> SparseTensor:
-        born, parent = self.up.plan(x, (self.subdivision(x).feats > 0))
-        out = self.conv1(born)
-        out = out.replace(self.act(self.norm(out.feats)))
-        out = self.conv2(out)
-        carried = self.skip(x).feats[parent]
-        return out.replace(out.feats + carried)
-
-
-__all__ = ["SparseChannel2Spatial", "SparseResBlockC2S3d", "SparseSpatial2Channel",
+__all__ = ["SparseChannel2Spatial", "SparseSpatial2Channel",
            "child_offsets", "pixel_shuffle_3d", "pixel_unshuffle_3d"]

@@ -61,24 +61,6 @@ def submanifold_conv(feats: torch.Tensor, neighbor: torch.Tensor,
     return out
 
 
-class SubmanifoldConvNeXtBlock3d(nn.Module):
-    """Conv, normalise, activate, conv, with the input added back."""
-
-    def __init__(self, channels: int, dilation: int = 1, groups: int = 32,
-                 eps: float = 1e-6) -> None:
-        super().__init__()
-        self.conv1 = SubmanifoldConv3d(channels, channels, 3, dilation=dilation, bias=False)
-        self.conv2 = SubmanifoldConv3d(channels, channels, 3, dilation=dilation)
-        self.norm = nn.GroupNorm(groups, channels, eps=eps) if channels % groups == 0 \
-            else nn.GroupNorm(1, channels, eps=eps)
-        self.act = nn.SiLU()
-
-    def forward(self, x: SparseTensor) -> SparseTensor:
-        out = self.conv1(x)
-        out = out.replace(self.act(self.norm(out.feats)))
-        return out.replace(x.feats + self.conv2(out).feats)
-
-
 def sparse_mean_pool3d(x: SparseTensor, size: int = 2
                        ) -> Tuple[SparseTensor, torch.Tensor]:
     """Coarsen by ``size``, averaging the voxels in each new cell.
@@ -111,5 +93,5 @@ def sparse_upsample3d_nearest(feats: torch.Tensor, pool_index: torch.Tensor) -> 
     return feats[pool_index.long()]
 
 
-__all__ = ["SubmanifoldConv3d", "SubmanifoldConvNeXtBlock3d", "sparse_mean_pool3d",
+__all__ = ["SubmanifoldConv3d", "sparse_mean_pool3d",
            "sparse_upsample3d_nearest", "submanifold_conv"]

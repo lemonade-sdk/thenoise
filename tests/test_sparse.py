@@ -2,9 +2,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from thenoise.sparse import (HashMap, SparseChannel2Spatial, SparseResBlockC2S3d,
-                             SparseSpatial2Channel, SparseTensor, SubmanifoldConv3d,
-                             SubmanifoldConvNeXtBlock3d, child_offsets, flat_keys,
+from thenoise.sparse import (HashMap, SparseChannel2Spatial, SparseSpatial2Channel,
+                             SparseTensor, SubmanifoldConv3d, child_offsets, flat_keys,
                              kernel_offsets, maps as sparse_maps, pixel_shuffle_3d,
                              pixel_unshuffle_3d, sparse_mean_pool3d,
                              sparse_upsample3d_nearest)
@@ -43,6 +42,12 @@ def sorted_rows(coords: torch.Tensor) -> torch.Tensor:
     """Rows in cell order, so two lattices can be compared without minding their row order."""
     key = ((coords[:, 0] * 64 + coords[:, 1]) * 64 + coords[:, 2]) * 64 + coords[:, 3]
     return coords[torch.argsort(key)]
+
+
+def test_a_lattice_does_not_live_on_two_devices():
+    with pytest.raises(ValueError, match="one device"):
+        SparseTensor(torch.empty(len(lattice(1)), 2, device="meta"),
+                     lattice(1).coords, GRID)
 
 
 def test_a_coordinate_is_one_number_once_the_grid_is_fixed():
@@ -194,19 +199,13 @@ def test_pixel_shuffle_and_unshuffle_round_trip():
     assert torch.equal(pixel_shuffle_3d(pixel_unshuffle_3d(dense, 2), 2), dense)
 
 
-def test_a_convnext_block_runs_on_a_lattice():
+def test_a_refinement_hands_back_the_parent_split_row_it_used():
     x = full_lattice(16)
-    out = SubmanifoldConvNeXtBlock3d(16, groups=8).eval()(x)
-    assert out.feats.shape == x.feats.shape and torch.isfinite(out.feats).all()
-    assert torch.equal(out.coords, x.coords)
-
-
-def test_a_refinement_block_widens_the_lattice_and_carries_its_residual():
-    x = full_lattice(16)
-    up = SparseResBlockC2S3d(16, factor=2, groups=2).eval()(x)
-    assert up.shape == (1, x.shape[1] * 2, x.shape[2] * 2, x.shape[3] * 2)
-    assert up.feats.shape[1] == 2 and up.feats.shape[0] <= len(x) * 8
-    assert torch.isfinite(up.feats).all()
+    born, source = SparseChannel2Spatial(2).plan(x)
+    split = x.feats.reshape(len(x) * 8, -1)
+    assert torch.equal(born.feats, split[source])
+    assert born.shape == (1, x.shape[1] * 2, x.shape[2] * 2, x.shape[3] * 2)
+    assert len(born) == len(x) * 8
 
 
 def test_a_lattice_round_trips_through_a_dense_grid():

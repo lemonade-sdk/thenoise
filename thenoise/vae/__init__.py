@@ -28,6 +28,8 @@ from .h3 import (
     load_h3_video_vae,
 )
 from .wan22 import AutoencoderKLWan22, load_wan22_vae
+from .trellis2 import (SlatDecoder, dual_grid_fields, load_trellis2_shape_vae,
+                load_trellis2_texture_vae)
 from .wan_video import AutoencoderKLWanVideo, load_wan_video_vae
 
 __all__ = [
@@ -52,4 +54,8 @@ __all__ = [
     "load_wan22_vae",
     "AutoencoderKLWanVideo",
     "load_wan_video_vae",
+    "SlatDecoder",
+    "dual_grid_fields",
+    "load_trellis2_shape_vae",
+    "load_trellis2_texture_vae",
 ]
