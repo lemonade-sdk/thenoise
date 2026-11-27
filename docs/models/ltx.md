@@ -22,8 +22,8 @@ Opus in `webm`. Size rounds down to multiples of **64 px**, frame count up to th
 
 INT8-ConvRot, @ 8 steps, CFG 1:
 
-- Generate 832×480, 5s clip: **~ 42.3 s**
-- Generate 1344×768, 5s clip: **~ 120.2 s**
+- Generate 832×480, 5s clip: **~42.3 s**
+- Generate 1344×768, 5s clip: **~120.2 s**
 
 ## Examples
 

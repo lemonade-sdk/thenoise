@@ -21,8 +21,8 @@ to the clip's length.
 
 BF16 + [6-steps Pika LoRA](https://huggingface.co/Kijai/MiniMax-H3_comfy/tree/main/loras/Pika), @ 6 steps, CFG 1:
 
-- Generate 832x480, 5s clip: **~ 194.5 s**
-- Generate 1344x768, 5s clip: **~ 565.8 s**
+- Generate 832x480, 5s clip: **~194.5 s**
+- Generate 1344x768, 5s clip: **~565.8 s**
 
 ## Examples
 

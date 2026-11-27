@@ -70,14 +70,14 @@ model repainting the picture it was given. Ask for it with `ref_method: vision`.
 
 ### Video models
 
-| Model | Text-to-video | Image-to-video | First/last frame | Details |
+| Model | Text-to-video | Image-to-video | Reference | Details |
 |---|---|---|---|---|
 | **Wan 2.2 TI2V-5B** | ✓ | ✓ | — | [wan22](docs/models/wan22.md#ti2v-5b) |
 | **Wan 2.2 T2V-A14B**, one expert per half of the schedule | ✓ | — | — | [wan22](docs/models/wan22.md#t2v-a14b-two-experts) |
-| **Wan 2.2 I2V-A14B**, the same experts at 36 input channels | — | ✓ | ✓ | [wan22](docs/models/wan22.md#i2v-a14b) |
-| **LTX 2.3 Distilled**, audiovisual generation | ✓ | ✓ | ✓ | [ltx](docs/models/ltx.md) |
-| **LTX 2.5 Distilled**, audiovisual generation | ✓ | ✓ | ✓ | [ltx](docs/models/ltx.md) |
-| **MiniMax-H3 Video**, one transformer holding picture and sound | ✓ | ✓ | ✓ | [h3-video](docs/models/h3-video.md) |
+| **Wan 2.2 I2V-A14B**, the same experts at 36 input channels | — | ✓ | — | [wan22](docs/models/wan22.md#i2v-a14b) |
+| **LTX 2.3 Distilled**, audiovisual generation | ✓ | ✓ | — | [ltx](docs/models/ltx.md) |
+| **LTX 2.5 Distilled**, audiovisual generation | ✓ | ✓ | — | [ltx](docs/models/ltx.md) |
+| **MiniMax-H3 Video**, one transformer holding picture and sound | ✓ | ✓ | audio, video, image | [h3-video](docs/models/h3-video.md) |
 
 ### Mesh models
 
@@ -143,11 +143,6 @@ seconds per image - per 33-frame clip in the video table - on a Strix Halo
 | Wan 2.2 I2V-A14B (two experts) · BF16 · 4 steps | 161.7s | 731.4s |
 | LTX 2.5 Distilled · INT8-ConvRot · 8 steps + 3 refine steps | 42.3s | 120.2s |
 | MiniMax-H3 Video · BF16 + [6-steps Pika LoRA](https://huggingface.co/Kijai/MiniMax-H3_comfy/tree/main/loras/Pika) · 6 steps | 194.5s | 565.8s |
-
-<small>CFG 1.0 at each release's own flow shift. A request lands on the model's own grid,
-so 832x480 is 832x448 on LTX (64 px cells) and 33 frames is H3's 39-frame rung - it has no
-33. The other releases (Wan 2.2 TI2V-5B and T2V-A14B, LTX 2.5) are the same request on
-their own files.</small>
 
 <small>TheNoise 0.11.0, Strix Halo (gfx1151, 128 GB unified)</small>
 
