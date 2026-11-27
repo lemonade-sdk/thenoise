@@ -101,8 +101,8 @@ it is a good fit when:
 
 TheNoise is tuned for the hardware it runs on, and its performance is quite
 similar to ComfyUI's - and sometimes even better. The numbers below are
-seconds per image on a Strix Halo (gfx1151, 128 GB unified), measured after
-a warmup run.
+seconds per image - per 33-frame clip in the video table - on a Strix Halo
+(gfx1151, 128 GB unified), measured after a warmup run.
 
 *Text to image (generation):*
 
@@ -135,6 +135,19 @@ a warmup run.
 | Flux 3 Klein · INT8-Convrot · 15 steps | 41.8s | — *(no KV cache)* |
 | Fibo 2.0 Turbo Edit · INT8-ConvRot · 4 steps | 15.5s | 20.6s |
 | H3-Image · INT8-ConvRot · 4 steps | 15s | 11.5s |
+
+*Image to video, 5s clip:*
+
+| Model & settings | 832x480 | 1344x768 |
+|---|---|---|
+| Wan 2.2 I2V-A14B (two experts) · BF16 · 4 steps | 161.7s | 731.4s |
+| LTX 2.5 Distilled · INT8-ConvRot · 8 steps + 3 refine steps | 42.3s | 120.2s |
+| MiniMax-H3 Video · BF16 + [6-steps Pika LoRA](https://huggingface.co/Kijai/MiniMax-H3_comfy/tree/main/loras/Pika) · 6 steps | 194.5s | 565.8s |
+
+<small>CFG 1.0 at each release's own flow shift. A request lands on the model's own grid,
+so 832x480 is 832x448 on LTX (64 px cells) and 33 frames is H3's 39-frame rung - it has no
+33. The other releases (Wan 2.2 TI2V-5B and T2V-A14B, LTX 2.5) are the same request on
+their own files.</small>
 
 <small>TheNoise 0.11.0, Strix Halo (gfx1151, 128 GB unified)</small>
 

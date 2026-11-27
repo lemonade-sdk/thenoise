@@ -30,8 +30,8 @@ temporal grid, with no fixed maximum frame count.
 
 I2V-A14B, BF16, @ 4 steps, CFG 1, flow shift 5:
 
-- Generate 832x480: **~161.7 s**
-- Generate 1344x768: **~731.4 s**
+- Generate 832x480, 5s clip: **~161.7 s**
+- Generate 1344x768, 5s clip: **~731.4 s**
 
 
 ## TI2V-5B
@@ -45,7 +45,6 @@ the same model and the same request: `--image` selects one,
 ### Download
 
 ```bash
-uv pip install -e ".[scripts]"
 .venv/bin/python scripts/download.py --model wan22
 ```
 
