@@ -9,8 +9,10 @@ ComfyUI-repackaged weights (``Comfy-Org/Real-ESRGAN_repackaged`` /
 the *original-ESRGAN* ``nn.Sequential`` naming (``model.*``) are remapped on load,
 and ``detect_esrgan_scheme`` tells the two apart from the safetensors header.
 
-Weights are kept in fp32: bf16's ~7-bit mantissa degrades super-resolution detail,
-and the model is small enough that fp32 is cheap.
+The net runs in fp16 (``COMPUTE_DTYPE``): its convolutions are the whole cost of an
+upscale, so their precision is the knob worth turning, and fp16's 10-bit mantissa
+still resolves finer than the 8 bits an image is delivered in. bf16 is not the same
+trade -- its ~7 bits are what visibly degrades super-resolution detail.
 
 Original copyright/license notice follows.
 """
@@ -36,6 +38,9 @@ from thenoise.utils.safetensors import (
     read_header,
     strip_wrap_prefixes,
 )
+
+#: What the net is loaded and run at. See the module docstring for why not fp32/bf16.
+COMPUTE_DTYPE = torch.float16
 
 
 class ResidualDenseBlock(nn.Module):
@@ -122,6 +127,11 @@ class RRDBNet(nn.Module):
         self.conv_last = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
         self.lrelu = nn.LeakyReLU(negative_slope=0.2, inplace=True)
 
+    @property
+    def dtype(self) -> torch.dtype:
+        """What the net computes at; callers cast their pixels to match."""
+        return self.conv_first.weight.dtype
+
     def forward(self, x: Tensor) -> Tensor:
         feat = _pixel_unshuffle(x, 2) if self.scale == 2 else x
         feat = self.conv_first(feat)
@@ -143,7 +153,7 @@ class RRDBNet(nn.Module):
         ``tile_size`` region of the output is kept, so tiles stitch without
         blending; RRDB's large receptive field is what the pad has to cover.
         Inputs smaller than ``tile_size`` run as a single exact tile.
-        Returns ``[B, C, H*s, W*s]``.
+        Returns ``[B, C, H*s, W*s]`` at :attr:`dtype`, so the input must be at it too.
         """
         scale = self.scale
         b, c, h, w = img.shape
@@ -156,7 +166,8 @@ class RRDBNet(nn.Module):
             img = F.pad(img, (0, pad_w, 0, pad_h))
             h, w = h + pad_h, w + pad_w
 
-        out = torch.zeros((b, c, h * scale, w * scale), device=img.device, dtype=img.dtype)
+        out = torch.zeros((b, c, h * scale, w * scale), device=img.device,
+                          dtype=self.dtype)
 
         for y in range(0, h, tile_size):
             for x in range(0, w, tile_size):
@@ -257,10 +268,13 @@ def load_esrgan(path: str, device: Union[str, torch.device]) -> tuple[RRDBNet, i
     """Load a Real-ESRGAN model from a safetensors file.
 
     Both weight namings are supported (see :func:`detect_esrgan_scheme`) and the
-    scale is auto-detected. Returns ``(model, scale)`` in fp32.
+    scale is auto-detected. The file's own format decides nothing: the weights are
+    read straight into ``COMPUTE_DTYPE``. Returns ``(model, scale)``.
     """
     header = read_header(path)
-    state_dict = strip_wrap_prefixes(load_safetensors(path, device="cpu"))
+    state_dict = strip_wrap_prefixes(
+        load_safetensors(path, device="cpu", dtype=COMPUTE_DTYPE)
+    )
     if detect_esrgan_scheme(header) == "original":
         state_dict = _remap_original_esrgan(state_dict)
     scale = detect_esrgan_scale(header)
@@ -271,4 +285,5 @@ def load_esrgan(path: str, device: Union[str, torch.device]) -> tuple[RRDBNet, i
     return model, scale
 
 
-__all__ = ["RRDBNet", "load_esrgan", "detect_esrgan_scale", "detect_esrgan_scheme"]
+__all__ = ["RRDBNet", "COMPUTE_DTYPE", "load_esrgan", "detect_esrgan_scale",
+           "detect_esrgan_scheme"]

@@ -124,8 +124,8 @@ class PixelUpscalerManager:
             rgb = rgb * a + _WHITE * (1.0 - a)
 
         x = (rgb.unsqueeze(0) + 1.0) / 2.0  # [-1, 1] -> [0, 1]
-        out = model.forward_tiled(x)
-        out = (out * 2.0 - 1.0)[0]  # [0, 1] -> [-1, 1], batch axis gone
+        out = model.forward_tiled(x.to(model.dtype))
+        out = (out * 2.0 - 1.0)[0].to(pixels.dtype)  # [0, 1] -> [-1, 1], batch axis gone
 
         if alpha is not None:
             out = torch.cat(

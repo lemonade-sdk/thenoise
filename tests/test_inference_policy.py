@@ -142,6 +142,8 @@ def test_pixel_upscale_endpoint_is_its_own_boundary(monkeypatch, tmp_path):
     seen: list[bool] = []
 
     class _FakeUpscaler:
+        dtype = torch.float32
+
         def forward_tiled(self, x):
             seen.append(torch.is_grad_enabled())
             return torch.zeros(

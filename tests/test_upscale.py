@@ -243,7 +243,8 @@ def test_switch_pixel_upscaler_keeps_last_used(tmp_path, monkeypatch):
 class _FakeUpscaler:
     """A stand-in for the strictly-3-channel Real-ESRGAN model (2x, nearest)."""
 
-    def __init__(self):
+    def __init__(self, dtype: torch.dtype = torch.float32):
+        self.dtype = dtype
         self.seen = []
 
     def forward_tiled(self, x):
@@ -301,6 +302,16 @@ def test_apply_leaves_an_rgb_input_alone():
     assert out.shape == (3, 4, 4)
 
 
+def test_apply_runs_the_net_at_its_own_dtype_and_hands_back_the_pipelines():
+    from thenoise.upscale.esrgan import COMPUTE_DTYPE
+
+    fake = _FakeUpscaler(dtype=COMPUTE_DTYPE)
+    out = _manager_with(fake).apply("esrgan", torch.zeros(3, 2, 2), 2)
+
+    assert fake.seen[0].dtype == COMPUTE_DTYPE
+    assert out.dtype == torch.float32
+
+
 def test_forward_tiled_pads_odd_dimensions():
     """Odd-dimension inputs (non-divisible edge tiles) must not crash.
 
@@ -324,3 +335,14 @@ def test_forward_tiled_pads_odd_dimensions():
         padded = F.pad(x, (0, (-w) % scale, 0, (-h) % scale))
         ref = model.forward_tiled(padded, tile_size=8, tile_pad=2)
         assert torch.allclose(out, ref[:, :, : h * scale, : w * scale], atol=1e-5)
+
+
+def test_forward_tiled_returns_at_the_nets_dtype():
+    """The output buffer follows the weights, not the incoming pixels."""
+    from thenoise.upscale.esrgan import COMPUTE_DTYPE, RRDBNet
+
+    model = RRDBNet(scale=4, num_feat=8, num_block=1, num_grow_ch=4)
+    model.to(COMPUTE_DTYPE).eval().requires_grad_(False)
+    out = model.forward_tiled(torch.rand(1, 3, 6, 6, dtype=COMPUTE_DTYPE))
+
+    assert out.dtype == COMPUTE_DTYPE
