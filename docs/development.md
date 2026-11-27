@@ -58,7 +58,13 @@ that without needing any model weights yet:
 ```
 
 This is the slow step - it downloads several GB of ROCm PyTorch wheels.
-Subsequent runs skip the torch install (detected via `import torch`).
+Subsequent runs skip the torch install (detected via `import torch`) and skip the
+project install unless `pyproject.toml` changed or the venv no longer satisfies
+it. To force one:
+
+```bash
+rm .venv/.thenoise-requirements
+```
 
 By default the script autodetects the GPU's architecture. Override with the
 `GFX_ARCH` environment variable if needed:

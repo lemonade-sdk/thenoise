@@ -28,11 +28,30 @@ import sys
 MODERN_UV_VERSION = "uv 0.12.11 (7ce44e8b3 2026-07-14 x86_64-unknown-linux-gnu)"
 
 
-def wheel(python, backend, broken_tv=False):
-    lib = Path(subprocess.check_output(
+def site_lib(python):
+    return Path(subprocess.check_output(
         [python, "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
         text=True,
     ).strip())
+
+
+def editable_project(lib: Path) -> str:
+    # The path this venv holds as an editable thenoise, or '' for none.
+    for marker in sorted(lib.glob("thenoise-*.dist-info/FAKE_EDITABLE")):
+        return marker.read_text().strip()
+    return ""
+
+
+def install_editable(python, project: Path):
+    info = site_lib(python) / "thenoise-0.1.0.dist-info"
+    info.mkdir(exist_ok=True)
+    (info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: thenoise\nVersion: 0.1.0\n")
+    (info / "FAKE_EDITABLE").write_text(str(project))
+
+
+def wheel(python, backend, broken_tv=False):
+    lib = site_lib(python)
     hip = repr("10.1" if backend == "rocm" else None)
     cuda = repr("13.2" if backend == "cuda" else None)
     torch_version = {
@@ -49,6 +68,9 @@ def wheel(python, backend, broken_tv=False):
         ("torch", torch_version, f'''
 import os
 from types import SimpleNamespace
+_log = os.environ.get("FAKE_IMPORT_LOG")
+if _log:
+    open(_log, "a").write("import\\n")
 __version__ = "{torch_version}"
 version = SimpleNamespace(hip={hip}, cuda={cuda})
 cuda = SimpleNamespace(is_available=lambda: os.environ.get("FAKE_GPU_AVAILABLE", "yes") == "yes")
@@ -89,6 +111,31 @@ elif args[:2] == ["pip", "install"]:
     if "-e" in args and os.environ.get("FAKE_UV_CONFLICT") == "yes":
         print("forced dependency conflict", file=sys.stderr)
         sys.exit(42)
+    if "-e" in args:
+        install_editable(python, Path(args[args.index("-e") + 1]).resolve())
+elif args[:2] == ["pip", "freeze"]:
+    lib = site_lib(args[args.index("--python") + 1])
+    project = editable_project(lib)
+    rows = []
+    for info in sorted(lib.glob("*.dist-info")):
+        name, _, version = info.name[: -len(".dist-info")].rpartition("-")
+        rows.append(f"-e file://{project}" if name == "thenoise" and project
+                    else f"{name}=={version}")
+    print("\n".join(rows))
+elif args[:2] == ["pip", "check"]:
+    if os.environ.get("FAKE_UV_CHECK_FAILS") == "yes":
+        print("The package `thenoise` requires `pillow`, but it's not installed",
+              file=sys.stderr)
+        sys.exit(1)
+elif args[:2] == ["pip", "show"]:
+    lib = site_lib(args[args.index("--python") + 1])
+    project = editable_project(lib)
+    if not (lib / "thenoise-0.1.0.dist-info").exists():
+        sys.exit(1)
+    print("Name: thenoise")
+    print("Version: 0.1.0")
+    if project:
+        print(f"Editable project location: {project}")
 else:
     raise ValueError(args)
 """
@@ -108,6 +155,10 @@ def sandbox(tmp_path: Path):
     project.mkdir()
     (project / "thenoise.sh").write_bytes(SCRIPT.read_bytes())
     (project / "thenoise_cuda.sh").write_bytes(CUDA_SCRIPT.read_bytes())
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "thenoise"\nversion = "0.1.0"\n'
+        'dependencies = ["pillow"]\n'
+    )
     package = project / "thenoise"
     package.mkdir()
     (package / "__init__.py").write_text("")
@@ -161,6 +212,13 @@ def lines(log: Path):
     return log.read_text().splitlines()
 
 
+def installs(log: Path):
+    """The uv calls that could install something; the metadata queries are not them."""
+    if not log.exists():
+        return []
+    return [x for x in lines(log) if x.startswith("pip install")]
+
+
 def host_has_amd_gpu() -> bool:
     """True when the kernel reports a real gfx target, as the bootstrap probes it."""
     import glob
@@ -196,17 +254,59 @@ def test_fresh_rocm_keeps_amd_wheels(sandbox):
     result = run(GFX_ARCH="gfx1151")
     check_run(result)
     assert any("torch[device-gfx1151]==2.14.0+rocm10.1.0rc2" in x for x in lines(log))
-    assert any("torch==2.14.0+rocm10.1.0rc2" in x and "-e" in x for x in lines(log))
     assert_targeted(log, project)
 
 
-def test_second_run_does_not_reinstall_torch(sandbox):
+def test_second_run_installs_nothing(sandbox):
     _, _, log, _, run, _ = sandbox
     check_run(run(GFX_ARCH="gfx1151"))
     log.write_text("")
     check_run(run(GFX_ARCH="gfx1151"))
-    assert len(lines(log)) == 1
-    assert "-e" in lines(log)[0]
+    assert installs(log) == []
+
+
+def test_a_reinstall_that_changes_nothing_does_not_reimport_torch(sandbox):
+    """Re-importing torch to re-verify a wheel the install left alone cost ~2 s."""
+    project, _, log, _, run, _ = sandbox
+    imports = log.parent / "imports.log"
+    check_run(run(GFX_ARCH="gfx1151", FAKE_IMPORT_LOG=str(imports)))
+    imports.write_text("")
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "thenoise"\nversion = "0.1.0"\n'
+        'dependencies = ["pillow", "einops"]\n'
+    )
+    check_run(run(GFX_ARCH="gfx1151", FAKE_IMPORT_LOG=str(imports)))
+    assert any("-e" in x for x in installs(log))
+    assert len(imports.read_text().splitlines()) == 1
+
+
+def test_a_pyproject_change_reinstalls_the_project(sandbox):
+    project, _, log, _, run, _ = sandbox
+    check_run(run(GFX_ARCH="gfx1151"))
+    (project / "pyproject.toml").write_text(
+        '[project]\nname = "thenoise"\nversion = "0.1.0"\n'
+        'dependencies = ["pillow", "einops"]\n'
+    )
+    log.write_text("")
+    check_run(run(GFX_ARCH="gfx1151"))
+    assert any("-e" in x for x in installs(log))
+
+
+@pytest.mark.parametrize("disagreement", ["foreign_thenoise", "unsatisfied_requirement"])
+def test_a_valid_stamp_never_skips_an_install_the_venv_disagrees_with(
+        sandbox, disagreement):
+    project, _, log, _, run, _ = sandbox
+    check_run(run(GFX_ARCH="gfx1151"))
+    extra = {}
+    if disagreement == "foreign_thenoise":
+        marker = next((project / ".venv").glob(
+            "lib/python*/site-packages/thenoise-*.dist-info/FAKE_EDITABLE"))
+        marker.write_text("/somewhere/else")
+    else:
+        extra["FAKE_UV_CHECK_FAILS"] = "yes"
+    log.write_text("")
+    check_run(run(GFX_ARCH="gfx1151", **extra))
+    assert any("-e" in x for x in installs(log))
 
 
 def rocm_install_line(log: Path) -> str:
@@ -251,9 +351,12 @@ def test_preinstalled_cuda_remains_untouched(sandbox):
     project, _, log, _, run, make_venv = sandbox
     wheel_in(make_venv(), "cuda")
     check_run(run(GFX_ARCH=""))
-    assert len(lines(log)) == 1
-    assert "torch==2.14.0+cu132" in lines(log)[0]
-    assert "torchvision==0.29.0+cu132" in lines(log)[0]
+    assert not any("torch[device-" in x for x in lines(log))
+    # The project install is pinned to the GPU wheel already there, so resolving
+    # its requirements cannot quietly swap the backend under the venv.
+    assert len(installs(log)) == 1
+    assert "torch==2.14.0+cu132" in installs(log)[0]
+    assert "torchvision==0.29.0+cu132" in installs(log)[0]
     assert_targeted(log, project)
 
 
@@ -261,7 +364,7 @@ def test_preinstalled_rocm_remains_untouched(sandbox):
     _, _, log, _, run, make_venv = sandbox
     wheel_in(make_venv(), "rocm")
     check_run(run(GFX_ARCH="gfx1151"))
-    assert len(lines(log)) == 1
+    assert not any("torch[device-" in x for x in lines(log))
 
 
 def test_preinstalled_cpu_is_repaired(sandbox):
@@ -374,7 +477,7 @@ def test_dual_gpu_interactive_can_choose_cuda(sandbox):
     assert any("https://download.pytorch.org/whl/cu132" in x for x in lines(log))
     log.write_text("")
     check_run(run(GFX_ARCH="gfx1151"))
-    assert len(lines(log)) == 1  # does not prompt/switch or reinstall torch on a later launch
+    assert installs(log) == []  # no prompt, no backend switch, no install
 
 
 def test_dual_gpu_interactive_default_no(sandbox):

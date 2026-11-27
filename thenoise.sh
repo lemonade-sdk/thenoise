@@ -218,22 +218,62 @@ if [ "$available" != "yes" ]; then
   exit 1
 fi
 
-# Explicitly target our venv even if the caller activated another venv.
-# The exact installed versions are constraints for the project resolver: if a
-# new dependency conflicts, fail instead of silently switching GPU backends.
-uv pip install --python "$VENV_DIR/bin/python" -e "$PROJECT_DIR" \
-  "torch==$torch_version" "torchvision==$torchvision_version"
-
-# Catch dependency changes or imports which break the GPU wheel after install.
-post_install="$(probe_torch)" || {
-  echo "Error: PyTorch/torchvision was broken by the project dependency install." >&2
-  exit 1
+file_digest() {
+  local out
+  out="$(sha256sum "$1" 2>/dev/null)" || out="$(shasum -a 256 "$1" 2>/dev/null)" || return 1
+  printf '%s\n' "${out%% *}"
 }
-if [ "$post_install" != "$installed" ]; then
-  echo "Error: PyTorch/torchvision changed during the project dependency install." >&2
-  echo "Before: $installed" >&2
-  echo "After:  $post_install" >&2
-  exit 1
+
+# This project as an editable install here, by resolved path: a checkout reached
+# through a symlink is the same project.
+project_installed() {
+  local shown
+  shown="$(uv pip show --python "$VENV_DIR/bin/python" thenoise 2>/dev/null |
+           sed -n 's/^Editable project location: //p')"
+  [ -n "$shown" ] &&
+    [ "$(cd "$shown" 2>/dev/null && pwd -P)" = "$(cd "$PROJECT_DIR" && pwd -P)" ]
+}
+
+# Re-installing the project means building its metadata. The stamp says
+# pyproject.toml has not moved since the last install and the uv queries say the
+# venv still matches it; a question they cannot answer takes the install path.
+REQUIREMENTS_STAMP="$VENV_DIR/.thenoise-requirements"
+requirements_now="$(file_digest "$PROJECT_DIR/pyproject.toml" || true)"
+if [ -n "$requirements_now" ] &&
+   [ "$(cat "$REQUIREMENTS_STAMP" 2>/dev/null)" = "$requirements_now" ] &&
+   project_installed &&
+   uv pip check --python "$VENV_DIR/bin/python" >/dev/null 2>&1; then
+  install_project=no
+else
+  install_project=yes
+fi
+
+if [ "$install_project" = yes ]; then
+  before="$(uv pip freeze --python "$VENV_DIR/bin/python" 2>/dev/null || true)"
+  # Explicitly target our venv even if the caller activated another venv. The
+  # exact installed versions are constraints for the project resolver: if a new
+  # dependency conflicts, fail instead of silently switching GPU backends.
+  uv pip install --python "$VENV_DIR/bin/python" -e "$PROJECT_DIR" \
+    "torch==$torch_version" "torchvision==$torchvision_version"
+  after="$(uv pip freeze --python "$VENV_DIR/bin/python" 2>/dev/null || true)"
+
+  # The GPU wheel can only have been broken by something the install moved.
+  if [ -z "$before" ] || [ -z "$after" ] || [ "$before" != "$after" ]; then
+    post_install="$(probe_torch)" || {
+      echo "Error: PyTorch/torchvision was broken by the project dependency install." >&2
+      exit 1
+    }
+    if [ "$post_install" != "$installed" ]; then
+      echo "Error: PyTorch/torchvision changed during the project dependency install." >&2
+      echo "Before: $installed" >&2
+      echo "After:  $post_install" >&2
+      exit 1
+    fi
+  fi
+
+  if [ -n "$requirements_now" ]; then
+    printf '%s\n' "$requirements_now" > "$REQUIREMENTS_STAMP" 2>/dev/null || true
+  fi
 fi
 
 # ---- 5. Set ROCm-specific environment variables ---------------------------
