@@ -74,20 +74,21 @@ COMPILE_MIN_CAPABILITY = (7, 0)
 
 
 @torch.compiler.assume_constant_result
-def _capability(index: int) -> tuple:
-    return torch.cuda.get_device_capability(index)
+def nvidia_capability(device: Union[str, torch.device]) -> Optional[tuple[int, int]]:
+    """NVIDIA compute capability; None for other backends or an unavailable device."""
+    dev = torch.device(device)
+    if torch.version.hip or dev.type != "cuda" or not torch.cuda.is_available():
+        return None
+    return torch.cuda.get_device_capability(dev)
 
 
 def int_mm_supported(device: torch.device) -> bool:
-    """Whether ``torch._int_mm`` runs on ``device``."""
-    if device.type != "cuda" or torch.version.hip:
-        return True
-    return _capability(device.index or 0) >= INT_MM_MIN_CAPABILITY
+    """Whether to keep the existing INT8 path; only older NVIDIA needs a fallback."""
+    cap = nvidia_capability(device)
+    return not (cap is not None and cap < INT_MM_MIN_CAPABILITY)
 
 
 def compile_supported(device: Union[str, torch.device]) -> bool:
     """False when ``device`` is an NVIDIA GPU too old for Triton."""
-    dev = torch.device(device)
-    if dev.type != "cuda" or not torch.cuda.is_available() or torch.version.hip:
-        return True
-    return torch.cuda.get_device_capability(dev.index or 0) >= COMPILE_MIN_CAPABILITY
+    cap = nvidia_capability(device)
+    return not (cap is not None and cap < COMPILE_MIN_CAPABILITY)

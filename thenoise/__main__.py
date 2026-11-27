@@ -75,7 +75,8 @@ def _eager_without_triton(device: str) -> None:
 
 def main(argv=None) -> None:
     args = build_parser().parse_args(argv)
-    _eager_without_triton(getattr(args, "device", "cuda") or "cuda")
+    if args.command in {"serve", "generate", "edit", "video", "mesh"}:
+        _eager_without_triton(args.device or "cuda")
     if args.command == "serve":
         _serve(args)
     elif args.command == "generate":

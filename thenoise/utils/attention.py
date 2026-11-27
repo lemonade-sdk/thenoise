@@ -7,6 +7,8 @@ import torch
 import torch.nn.functional as F
 from typing import Optional, Union
 
+from thenoise.utils.device import nvidia_capability
+
 
 @dataclass
 class AttentionParams:
@@ -183,27 +185,23 @@ def eager_attention(
 # materializes the full score matrix, so long bf16 sequences run in fp16 there.
 # Largest bf16 value that fp16 can hold (65504 itself rounds up to 65536 in bf16).
 _FP16_MAX = 65280.0
+# Score-matrix elements (q_len * k_len): below this, the math kernel is cheaper
+# than converting all three inputs to fp16.
 _LONG = 1 << 24
 
 
-@torch.compiler.assume_constant_result
-def _cuda_capability(index: int) -> tuple[int, int]:
-    return torch.cuda.get_device_capability(index)
-
-
 def _bf16_needs_fp16(q: torch.Tensor) -> bool:
-    if q.dtype is not torch.bfloat16 or not q.is_cuda or torch.version.hip:
+    if q.dtype is not torch.bfloat16 or not q.is_cuda:
         return False
-    return _cuda_capability(q.device.index or 0) < (8, 0)
+    cap = nvidia_capability(q.device)
+    return cap is not None and cap < (8, 0)
 
 
 def _fp16_mask(mask: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
-    """An additive mask for the fp16 fallback: SDPA wants it in the query's dtype.
-    Out-of-range values saturate to the fp16 limit (still a full mask); -inf is kept."""
+    """Convert the fallback mask; large negative values become -inf, positive ones clamp."""
     if mask is None or not mask.is_floating_point() or mask.dtype is torch.float16:
         return mask
-    finite = mask.clamp(-_FP16_MAX, _FP16_MAX).to(torch.float16)
-    return torch.where(torch.isneginf(mask), float("-inf"), finite).to(torch.float16)
+    return mask.clamp(max=_FP16_MAX).to(torch.float16)
 
 
 def _memory_efficient_dtype(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):

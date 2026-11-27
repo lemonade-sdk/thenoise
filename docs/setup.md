@@ -153,5 +153,5 @@ editing-capable models. Upscale and Control Maps need no diffusion model.
 | Windows runs slower than Linux | Expected by default: the bundle runs eagerly. See the Windows note in [Generate your first image](#3-generate-your-first-image). |
 | `error while loading shared libraries` | Don't run the system Python against the bundle; always use `./bin/thenoise` (or `./bin/python3`). |
 | `libatomic.so.1: cannot open shared object file` at startup | Missing `libatomic` runtime library (seen on Fedora 44): install it with your package manager, e.g. `sudo dnf install libatomic`. Details in [#29](https://github.com/lemonade-sdk/thenoise/issues/29). |
-| NVIDIA GPU older than Turing (below sm_75) gives black or noisy images | Use a PyTorch build that still ships kernels for the card. TheNoise then picks the comfy_kitchen backends, INT8 matmul and attention dtype the card supports, and runs eager on cards too old for Triton. |
+| NVIDIA GPU older than Turing (below sm_75) gives black or noisy images | Use a PyTorch build that still ships kernels for the card. TheNoise then uses an INT8 matmul and attention dtype the card supports, and runs eager on cards too old for Triton. |
 | GPU not detected | You're on the wrong bundle for your GPU — check `gfx` in the asset name against your hardware (gfx1151 for Strix Halo). |

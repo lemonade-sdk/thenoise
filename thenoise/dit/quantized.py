@@ -362,6 +362,8 @@ class QuantizedLinear(nn.Module):
         """
         params = weight.params
         if weight.layout_cls is TensorWiseINT8Layout and not int_mm_supported(x.device):
+            # The INT8 eager handler re-enters _int_mm below sm_75 unless we dequantize.
+            # W4A8 eager does not use _int_mm and needs no escape hatch.
             return F.linear(x, weight.dequantize(), bias)
         if weight.layout_cls not in _LINEAR_OPS or getattr(params, "transposed", False):
             return F.linear(x, weight, bias)

@@ -5,37 +5,35 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from thenoise.utils import attention, device, device_patches
+from thenoise.utils import attention, device
 
 
-def test_kernel_backends_by_capability(monkeypatch):
-    import comfy_kitchen
-    off = []
-    monkeypatch.setattr(comfy_kitchen, "disable_backend", off.append)
-    monkeypatch.setattr(device_patches, "_cuda_capability", lambda d: None)
-    assert device_patches._kernel_backends("cpu") is False
-    monkeypatch.setattr(device_patches, "_cuda_capability", lambda d: (8, 6))
-    assert device_patches._kernel_backends("cuda:0") is False
-    monkeypatch.setattr(device_patches, "_cuda_capability", lambda d: (7, 0))
-    assert device_patches._kernel_backends("cuda:0") is True and off == ["cuda"]
-    off.clear()
-    monkeypatch.setattr(device_patches, "_cuda_capability", lambda d: (6, 0))
-    assert device_patches._kernel_backends("cuda:0") is True and off == ["cuda", "triton"]
+@pytest.mark.parametrize("where, hip", [("cpu", None), ("mps", None), ("cuda:0", "6.4")])
+def test_non_nvidia_never_queries_cuda(monkeypatch, where, hip):
+    def forbidden(*args):
+        raise AssertionError("CUDA queried for another backend")
+
+    monkeypatch.setattr(torch.version, "hip", hip)
+    monkeypatch.setattr(torch.cuda, "is_available", forbidden)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", forbidden)
+    assert device.nvidia_capability(where) is None
+    assert device.int_mm_supported(torch.device(where))
+    assert device.compile_supported(where)
 
 
 def test_int_mm_and_compile_support(monkeypatch):
-    assert device.int_mm_supported(torch.device("cpu"))
     monkeypatch.setattr(torch.version, "hip", None)
-    monkeypatch.setattr(device, "_capability", lambda i: (6, 0))
-    assert not device.int_mm_supported(torch.device("cuda", 0))
-    monkeypatch.setattr(device, "_capability", lambda i: (7, 5))
-    assert device.int_mm_supported(torch.device("cuda", 0))
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    caps = {0: (6, 0), 1: (8, 9)}
-    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda i: caps[i])
-    assert device.compile_supported("cpu")
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 1)
+    caps = {0: (6, 0), 1: (8, 9), 2: (7, 5)}
+    def capability(dev):
+        return caps[dev.index if dev.index is not None else torch.cuda.current_device()]
+    monkeypatch.setattr(torch.cuda, "get_device_capability", capability)
+    assert not device.int_mm_supported(torch.device("cuda:0"))
+    assert device.int_mm_supported(torch.device("cuda:2"))
     assert not device.compile_supported("cuda:0")
-    assert device.compile_supported("cuda:1")      # the selected device decides
+    assert device.compile_supported("cuda:1")
+    assert device.nvidia_capability("cuda") == (8, 9)
 
 
 def _long_bf16(seed=0):
@@ -68,17 +66,23 @@ def test_bf16_attention_fallback_short_sequences_untouched(pre_ampere):
     assert attention._memory_efficient_dtype(q, q, q)[3] is None
 
 
-def test_bf16_attention_fallback_compiles_fullgraph(pre_ampere, monkeypatch):
+@pytest.mark.parametrize("fallback", [True, False], ids=["fallback", "current_hardware_graph_unchanged"])
+def test_attention_compiles_fullgraph(monkeypatch, fallback):
     monkeypatch.delenv("TORCHDYNAMO_DISABLE", raising=False)
+    monkeypatch.setattr(attention, "_bf16_needs_fp16", lambda q: fallback)
     q, k, v = _long_bf16(1)
-
-    def fn(q, k, v):
-        hq, hk, hv, back = attention._memory_efficient_dtype(q, k, v)
-        return F.scaled_dot_product_attention(hq, hk, hv).to(back)
-
+    params = attention.AttentionParams()
     torch._dynamo.reset()
-    compiled = torch.compile(fn, backend="eager", fullgraph=True)
-    torch.testing.assert_close(compiled(q, k, v), fn(q, k, v))
+    try:
+        compiled = torch.compile(attention.attention, fullgraph=True)
+        got = compiled(q, k, v, attn_params=params)
+        want = attention.attention(q, k, v, attn_params=params)
+        torch.testing.assert_close(got, want, atol=2e-2, rtol=2e-2)
+        if not fallback:
+            original = F.scaled_dot_product_attention(q, k, v).transpose(1, 2).reshape(1, 4096, -1)
+            torch.testing.assert_close(got, original, atol=2e-2, rtol=2e-2)
+    finally:
+        torch._dynamo.reset()
 
 
 def test_bf16_attention_fallback_never_overflows_fp16(pre_ampere):
@@ -116,13 +120,52 @@ def test_fallback_mask_keeps_meaning(pre_ampere):
     torch.testing.assert_close(got.float(), want, atol=2e-2, rtol=2e-2)
 
 
-def test_no_shape_guard_when_fallback_off(monkeypatch):
-    """Where the fallback is off (ROCm, Ampere+), the sequence length is never read."""
+@pytest.mark.parametrize("where, hip", [("cpu", None), ("cuda:0", "6.4"), ("cuda:0", None)],
+                         ids=["cpu", "rocm", "ampere"])
+def test_no_shape_guard_when_fallback_off(monkeypatch, where, hip):
     class Q:
         dtype = torch.bfloat16
-        is_cuda = False
+        device = torch.device(where)
+        is_cuda = device.type == "cuda"
         @property
         def shape(self):
             raise AssertionError("shape read")
+
+    def capability(dev):
+        if hip or where == "cpu":
+            raise AssertionError("capability queried")
+        return (8, 0)
+
+    monkeypatch.setattr(torch.version, "hip", hip)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", capability)
     q = Q()
-    assert attention._memory_efficient_dtype(q, q, q) == (q, q, q, None)
+    out = attention._memory_efficient_dtype(q, q, q)
+    assert all(t is q for t in out[:3]) and out[3] is None
+
+
+def test_fallback_mask_conversion():
+    mask = torch.tensor([float("-inf"), -1e30, 0, 1e30])
+    got = attention._fp16_mask(mask)
+    assert got.dtype == torch.float16
+    assert torch.isneginf(got[:2]).all()
+    assert got[2] == 0 and got[3] == attention._FP16_MAX
+
+
+@pytest.mark.parametrize("command, module, handler", [
+    (["upscale", "--pixel-upscaler", "u", "--input", "i"], "upscale_cli", "run_upscale"),
+    (["controlmap"], "controlmap_cli", "run_controlmap"),
+])
+def test_non_diffusion_commands_do_not_probe_compile_support(monkeypatch, command, module, handler):
+    import importlib
+    from thenoise import __main__
+
+    def forbidden(*args):
+        raise AssertionError("early compile probe")
+
+    called = []
+    monkeypatch.setattr(__main__, "_eager_without_triton", forbidden)
+    monkeypatch.setattr(importlib.import_module("thenoise." + module), handler,
+                        lambda args: called.append(args.command))
+    __main__.main(command)
+    assert called == [command[0]]
