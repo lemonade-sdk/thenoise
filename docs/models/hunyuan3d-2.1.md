@@ -40,9 +40,9 @@ a reference photo and writes it as `.glb`, `.obj` or `.stl`. A picture is the wh
 
 ## Performance (Strix Halo)
 
-BF16, 768x1024:
+BF16, 4096 tokens, 30 steps, guidance 5.0, euler, 384³:
 
-- Generate - 4096 tokens, 30 steps, guidance 5.0, euler, 384³: **~55.7 s**
+Generate: **~55.7 s**
 
 ## Examples
 
