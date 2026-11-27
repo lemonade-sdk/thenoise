@@ -28,6 +28,12 @@ BF16 + [6-steps Pika LoRA](https://huggingface.co/Kijai/MiniMax-H3_comfy/tree/ma
 
 *Generated:*
 
+[T2V](https://github.com/user-attachments/assets/d3a402d3-ee3f-457b-9443-d3f47d84e027)
+
+[I2V](https://github.com/user-attachments/assets/d4f80eba-bbac-4834-88ee-65876d5f0fc8)
+
+[Ref2V](https://github.com/user-attachments/assets/50be8696-6a77-41f1-9484-b975ab1a3062)
+
 
 ## Frames and canvas
 
