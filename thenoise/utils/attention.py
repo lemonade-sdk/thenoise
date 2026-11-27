@@ -195,6 +195,40 @@ def eager_attention(
     """
     return attention(qkv_or_q, k=k, v=v, attn_params=attn_params, drop_rate=drop_rate)
 
+# Below sm_80 the memory-efficient SDPA kernel does not take bf16 and the math kernel
+# materializes the full score matrix, so long bf16 sequences run in fp16 there.
+# Largest bf16 value that fp16 can hold (65504 itself rounds up to 65536 in bf16).
+_FP16_MAX = 65280.0
+_LONG = 1 << 24
+
+
+@torch.compiler.assume_constant_result
+def _cuda_capability(index: int) -> tuple[int, int]:
+    return torch.cuda.get_device_capability(index)
+
+
+def _bf16_needs_fp16(q: torch.Tensor) -> bool:
+    if q.dtype is not torch.bfloat16 or not q.is_cuda or torch.version.hip:
+        return False
+    return _cuda_capability(q.device.index or 0) < (8, 0)
+
+
+def _fp16_mask(mask: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+    """An additive mask for the fp16 fallback: SDPA wants it in the query's dtype.
+    Out-of-range values saturate to the fp16 limit (still a full mask); -inf is kept."""
+    if mask is None or not mask.is_floating_point() or mask.dtype is torch.float16:
+        return mask
+    finite = mask.clamp(-_FP16_MAX, _FP16_MAX).to(torch.float16)
+    return torch.where(torch.isneginf(mask), float("-inf"), finite).to(torch.float16)
+
+
+def _memory_efficient_dtype(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
+    if not _bf16_needs_fp16(q) or q.shape[-2] * k.shape[-2] < _LONG:
+        return q, k, v, None
+    half = [t.clamp(-_FP16_MAX, _FP16_MAX).to(torch.float16) for t in (q, k, v)]
+    return (*half, torch.bfloat16)
+
+
 def attention(
     qkv_or_q: Union[torch.Tensor, list],
     k: Optional[torch.Tensor] = None,
@@ -254,9 +288,13 @@ def attention(
 
     q, k, v = uniform_layout(q, k, v)
 
-    x = F.scaled_dot_product_attention(
-        q, k, v, attn_mask=attn_params.attention_mask, dropout_p=drop_rate
-    )
+    q, k, v, out_dtype = _memory_efficient_dtype(q, k, v)
+    mask = attn_params.attention_mask
+    if out_dtype is not None:
+        mask = _fp16_mask(mask)
+    x = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=drop_rate)
+    if out_dtype is not None:
+        x = x.to(out_dtype)
 
     # Token-major output, heads concatenated per token.
     x = x.transpose(1, 2)  # [B, L, H, D]

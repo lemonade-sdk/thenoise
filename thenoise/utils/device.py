@@ -66,3 +66,28 @@ def synchronize_device(device: Optional[Union[str, torch.device]]):
         torch.xpu.synchronize()
     elif device.type == "mps":
         torch.mps.synchronize()
+
+# torch._int_mm needs integer tensor cores (sm_75) on NVIDIA; Triton, and so
+# torch.compile, needs sm_70.
+INT_MM_MIN_CAPABILITY = (7, 5)
+COMPILE_MIN_CAPABILITY = (7, 0)
+
+
+@torch.compiler.assume_constant_result
+def _capability(index: int) -> tuple:
+    return torch.cuda.get_device_capability(index)
+
+
+def int_mm_supported(device: torch.device) -> bool:
+    """Whether ``torch._int_mm`` runs on ``device``."""
+    if device.type != "cuda" or torch.version.hip:
+        return True
+    return _capability(device.index or 0) >= INT_MM_MIN_CAPABILITY
+
+
+def compile_supported(device: Union[str, torch.device]) -> bool:
+    """False when ``device`` is an NVIDIA GPU too old for Triton."""
+    dev = torch.device(device)
+    if dev.type != "cuda" or not torch.cuda.is_available() or torch.version.hip:
+        return True
+    return torch.cuda.get_device_capability(dev.index or 0) >= COMPILE_MIN_CAPABILITY

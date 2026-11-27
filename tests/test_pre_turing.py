@@ -1,0 +1,128 @@
+"""Capability-based fallbacks for older NVIDIA GPUs (no GPU needed)."""
+from __future__ import annotations
+
+import pytest
+import torch
+import torch.nn.functional as F
+
+from thenoise.utils import attention, device, device_patches
+
+
+def test_kernel_backends_by_capability(monkeypatch):
+    import comfy_kitchen
+    off = []
+    monkeypatch.setattr(comfy_kitchen, "disable_backend", off.append)
+    monkeypatch.setattr(device_patches, "_cuda_capability", lambda d: None)
+    assert device_patches._kernel_backends("cpu") is False
+    monkeypatch.setattr(device_patches, "_cuda_capability", lambda d: (8, 6))
+    assert device_patches._kernel_backends("cuda:0") is False
+    monkeypatch.setattr(device_patches, "_cuda_capability", lambda d: (7, 0))
+    assert device_patches._kernel_backends("cuda:0") is True and off == ["cuda"]
+    off.clear()
+    monkeypatch.setattr(device_patches, "_cuda_capability", lambda d: (6, 0))
+    assert device_patches._kernel_backends("cuda:0") is True and off == ["cuda", "triton"]
+
+
+def test_int_mm_and_compile_support(monkeypatch):
+    assert device.int_mm_supported(torch.device("cpu"))
+    monkeypatch.setattr(torch.version, "hip", None)
+    monkeypatch.setattr(device, "_capability", lambda i: (6, 0))
+    assert not device.int_mm_supported(torch.device("cuda", 0))
+    monkeypatch.setattr(device, "_capability", lambda i: (7, 5))
+    assert device.int_mm_supported(torch.device("cuda", 0))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    caps = {0: (6, 0), 1: (8, 9)}
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda i: caps[i])
+    assert device.compile_supported("cpu")
+    assert not device.compile_supported("cuda:0")
+    assert device.compile_supported("cuda:1")      # the selected device decides
+
+
+def _long_bf16(seed=0):
+    g = torch.Generator().manual_seed(seed)
+    shape = (1, 2, 4096, 64)          # 4096 x 4096 = 2^24: the long path
+    return [torch.randn(shape, generator=g).to(torch.bfloat16) for _ in range(3)]
+
+
+@pytest.fixture
+def pre_ampere(monkeypatch):
+    """Route CPU tensors through the sub-sm_80 path."""
+    monkeypatch.setattr(attention, "_bf16_needs_fp16", lambda q: q.dtype is torch.bfloat16)
+
+
+def test_bf16_attention_fallback_runs_fp16_and_matches(pre_ampere):
+    q, k, v = _long_bf16()
+    hq, hk, hv, back = attention._memory_efficient_dtype(q, k, v)
+    assert hq.dtype is torch.float16 and back is torch.bfloat16
+    got = attention.attention(
+        [q, k, v],
+        attn_params=attention.AttentionParams())
+    want = F.scaled_dot_product_attention(q.float(), k.float(), v.float())
+    want = want.transpose(1, 2).reshape(1, 4096, -1)
+    assert got.dtype is torch.bfloat16
+    torch.testing.assert_close(got.float(), want, atol=2e-2, rtol=2e-2)
+
+
+def test_bf16_attention_fallback_short_sequences_untouched(pre_ampere):
+    q = torch.randn(1, 2, 64, 64).to(torch.bfloat16)
+    assert attention._memory_efficient_dtype(q, q, q)[3] is None
+
+
+def test_bf16_attention_fallback_compiles_fullgraph(pre_ampere, monkeypatch):
+    monkeypatch.delenv("TORCHDYNAMO_DISABLE", raising=False)
+    q, k, v = _long_bf16(1)
+
+    def fn(q, k, v):
+        hq, hk, hv, back = attention._memory_efficient_dtype(q, k, v)
+        return F.scaled_dot_product_attention(hq, hk, hv).to(back)
+
+    torch._dynamo.reset()
+    compiled = torch.compile(fn, backend="eager", fullgraph=True)
+    torch.testing.assert_close(compiled(q, k, v), fn(q, k, v))
+
+
+def test_bf16_attention_fallback_never_overflows_fp16(pre_ampere):
+    q, k, v = _long_bf16(2)
+    q[0, 0, :8] = 1e5
+    v[0, 1, :8] = -7e4
+    hq, hk, hv, _ = attention._memory_efficient_dtype(q, k, v)
+    assert all(torch.isfinite(t).all() for t in (hq, hk, hv))
+    assert torch.tensor(attention._FP16_MAX, dtype=torch.bfloat16).item() == attention._FP16_MAX
+
+
+def test_mask_untouched_without_fallback(monkeypatch):
+    seen = {}
+
+    def sdpa(q, k, v, attn_mask=None, dropout_p=0.0):
+        seen["mask"] = attn_mask
+        return torch.zeros_like(q)
+
+    monkeypatch.setattr(attention.F, "scaled_dot_product_attention", sdpa)
+    q = torch.randn(1, 2, 64, 32).to(torch.bfloat16)
+    mask = torch.zeros(1, 1, 64, 64, dtype=torch.float32)
+    attention.attention([q, q, q], attn_params=attention.AttentionParams(attention_mask=mask))
+    assert seen["mask"] is mask                      # same object, same dtype and precision
+
+
+def test_fallback_mask_keeps_meaning(pre_ampere):
+    q, k, v = _long_bf16(3)
+    mask = torch.zeros(1, 1, 4096, 4096, dtype=torch.float32)
+    mask[..., 2048:] = float("-inf")
+    mask[..., 1024:2048] = -1e30
+    got = attention.attention([q, k, v], attn_params=attention.AttentionParams(attention_mask=mask))
+    want = F.scaled_dot_product_attention(q.float(), k.float(), v.float(), attn_mask=mask)
+    want = want.transpose(1, 2).reshape(1, 4096, -1)
+    assert torch.isfinite(got.float()).all()
+    torch.testing.assert_close(got.float(), want, atol=2e-2, rtol=2e-2)
+
+
+def test_no_shape_guard_when_fallback_off(monkeypatch):
+    """Where the fallback is off (ROCm, Ampere+), the sequence length is never read."""
+    class Q:
+        dtype = torch.bfloat16
+        is_cuda = False
+        @property
+        def shape(self):
+            raise AssertionError("shape read")
+    q = Q()
+    assert attention._memory_efficient_dtype(q, q, q) == (q, q, q, None)

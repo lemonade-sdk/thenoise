@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from .cli import build_parser, component_paths
 
@@ -59,8 +60,22 @@ def _serve(args) -> None:
     uvicorn.run(app, host=settings.host, port=settings.port)
 
 
+def _eager_without_triton(device: str) -> None:
+    """Use the eager path (as ``TORCHDYNAMO_DISABLE=1``) when the selected GPU cannot compile.
+
+    Read where ``torch.compile`` is applied, so it must be set before models are imported.
+    """
+    if "TORCHDYNAMO_DISABLE" in os.environ:
+        return
+    from .utils.device import compile_supported
+    if not compile_supported(device):
+        os.environ["TORCHDYNAMO_DISABLE"] = "1"
+        logging.getLogger(__name__).info("GPU too old for torch.compile: running eager")
+
+
 def main(argv=None) -> None:
     args = build_parser().parse_args(argv)
+    _eager_without_triton(getattr(args, "device", "cuda") or "cuda")
     if args.command == "serve":
         _serve(args)
     elif args.command == "generate":

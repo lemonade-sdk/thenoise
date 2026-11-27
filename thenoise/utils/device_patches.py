@@ -61,7 +61,46 @@ def _tiled_int8_gemm(device: Device) -> bool:
     return True
 
 
-PATCHES: tuple[tuple[str, Callable[[Device], bool]], ...] = (("int8_tiled_gemm", _tiled_int8_gemm),)
+# comfy_kitchen backends and the compute capability their kernels need. A card below
+# that gets the next backend in comfy_kitchen's own order (eager in the end).
+BACKEND_MIN_CAPABILITY = {"cuda": (7, 5), "triton": (7, 0)}
+
+
+def _cuda_capability(device: Device) -> Optional[tuple[int, int]]:
+    if device is None or not torch.cuda.is_available() or torch.version.hip:
+        return None
+    dev = torch.device(device)
+    if dev.type != "cuda":
+        return None
+    try:
+        return torch.cuda.get_device_capability(dev.index if dev.index is not None else 0)
+    except Exception:
+        return None
+
+
+def _kernel_backends(device: Device) -> bool:
+    """Disable the comfy_kitchen backends the selected card cannot run.
+
+    comfy_kitchen's own checks read one capability per process, so this is global; it is
+    decided by the device the model runs on, not by every visible GPU."""
+    cap = _cuda_capability(device)
+    if cap is None:
+        return False
+    off = [name for name, need in BACKEND_MIN_CAPABILITY.items() if cap < need]
+    if not off:
+        return False
+    import comfy_kitchen
+    for name in off:
+        comfy_kitchen.disable_backend(name)
+    logger.info("sm_%d%d on %s: comfy_kitchen backends off: %s", cap[0], cap[1], device,
+                ", ".join(off))
+    return True
+
+
+PATCHES: tuple[tuple[str, Callable[[Device], bool]], ...] = (
+    ("int8_tiled_gemm", _tiled_int8_gemm),
+    ("kernel_backends", _kernel_backends),
+)
 
 
 def apply_device_patches(device: Device = None) -> dict[str, bool]:
