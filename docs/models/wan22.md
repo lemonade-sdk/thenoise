@@ -26,6 +26,14 @@ temporal grid, with no fixed maximum frame count.
 > On a [portable bundle](../setup.md) use `./bin/thenoise` and
 > `./bin/python3` instead.
 
+## Performance (Strix Halo)
+
+I2V-A14B, BF16, @ 4 steps, CFG 1, flow shift 5:
+
+- Generate 832x480: **~161.7 s**
+- Generate 1344x768: **~731.4 s**
+
+
 ## TI2V-5B
 
 Native text-to-video and image-to-video. The downloaded DiT is FastWan by default, the
