@@ -39,6 +39,12 @@ Models:
                   https://huggingface.co/Comfy-Org/MiniMax-H3-Image
   h3-video        MiniMax H3 video (fl2va: t2v, i2v, first/last frame, with sound)
                   https://huggingface.co/Comfy-Org/MiniMax-H3
+  hunyuan3d21     Hunyuan3D 2.1 image-to-shape (DiT, conditioner and codec in one file)
+                  https://huggingface.co/Comfy-Org/Hunyuan-3D-2.1
+  pixal3d         Pixal3D image-to-3D, textured (whole cascade in one DiT file;
+                  int8-convrot by default, --variant bf16, --include-multiview)
+                  https://huggingface.co/Comfy-Org/Pixal3D
+                  https://huggingface.co/TencentARC/Pixal3D
   esrgan          Real-ESRGAN x4 pixel upscaler (optional, for upscaling)
                   https://huggingface.co/Comfy-Org/Real-ESRGAN_repackaged
   controlmaps      Control-map checkpoints: a Depth-Anything-V2 depth model, or the
@@ -83,6 +89,9 @@ Usage:
     python scripts/download.py --model wan22-14b
     python scripts/download.py --model wan22-14b --variant base --int8-convrot
     python scripts/download.py --model wan22-14b-i2v
+    python scripts/download.py --model pixal3d
+    python scripts/download.py --model pixal3d --variant bf16
+    python scripts/download.py --model pixal3d --include-multiview
     python scripts/download.py --model esrgan
     python scripts/download.py --model controlmaps
     python scripts/download.py --model controlmaps --variant pose
@@ -516,6 +525,30 @@ def _hunyuan3d21_jobs(args: argparse.Namespace) -> list[Artifact]:
     return [("shape", "Comfy-Org/Hunyuan-3D-2.1", "hunyuan_3d_v2.1.safetensors")]
 
 
+_PIXAL_REPO = "Comfy-Org/Pixal3D"
+
+
+def _pixal3d_jobs(args: argparse.Namespace) -> list[Artifact]:
+    """Pixal3D image-to-3D: one DiT file holding the whole cascade, TRELLIS.2's shape
+    and texture VAEs, and the DINOv3 conditioner with its projection head.
+
+    There is no text encoder — a mesh is conditioned on a picture. The int8-convrot
+    release is the default because it is the one we measure with; ``--variant bf16``
+    takes the full-precision twin, and applies to the multi-view twin too.
+    """
+    suffix = "bf16" if args.variant == "bf16" else "int8_convrot"
+    jobs = [
+        ("dit", _PIXAL_REPO, f"diffusion_models/pixal3d_{suffix}.safetensors"),
+        ("shape_vae", _PIXAL_REPO, "vae/trellis_2_shape_vae_bf16.safetensors"),
+        ("texture_vae", _PIXAL_REPO, "vae/trellis_2_texture_vae_bf16.safetensors"),
+        ("clip_vision", _PIXAL_REPO, "clip_vision/dino_v3_L_naf_fp32.safetensors"),
+    ]
+    if args.include_multiview:
+        jobs.insert(1, ("multiview_dit", _PIXAL_REPO,
+                        f"diffusion_models/pixal3d_multiview_{suffix}.safetensors"))
+    return jobs
+
+
 def _wan22_jobs(args: argparse.Namespace) -> list[Artifact]:
     """Wan 2.2 TI2V-5B: FastWan turbo DiT, UMT5 encoder, and causal video VAE.
 
@@ -721,6 +754,15 @@ MODELS: dict[str, ModelSpec] = {
         _hunyuan3d21_jobs,
         has_int8=False,
     ),
+    "pixal3d": ModelSpec(
+        "pixal3d", "./models/pixal3d",
+        "Pixal3D image-to-3D (cascade to 1536, PBR from the latent; int8-convrot by "
+        "default)",
+        _pixal3d_jobs,
+        variant_supported=True,
+        variant_choices=("int8-convrot", "bf16"),
+        default_variant="int8-convrot",
+    ),
     "wan22": ModelSpec(
         "wan22", "./models/wan22",
         "Wan 2.2 TI2V-5B (T2V / I2V; FastWan turbo by default)",
@@ -800,6 +842,9 @@ def _epilog() -> str:
         "  python scripts/download.py --model wan22-14b",
         "  python scripts/download.py --model wan22-14b --variant base",
         "  python scripts/download.py --model wan22-14b-i2v --int8-convrot",
+        "  python scripts/download.py --model pixal3d",
+        "  python scripts/download.py --model pixal3d --variant bf16",
+        "  python scripts/download.py --model pixal3d --include-multiview",
         "  python scripts/download.py --model esrgan",
         "  python scripts/download.py --model controlmaps            # depth + pose",
         "  python scripts/download.py --model controlmaps --variant base",
@@ -838,7 +883,8 @@ def main() -> None:
             "fibo2: edit-turbo | dev (default: edit-turbo) | "
             "wan22 / wan22-14b / wan22-14b-i2v: turbo | base (default: turbo) | "
             "controlmaps: all | small | base | large | pose | pose-r50vd "
-            "(default: all, the depth model and both pose checkpoints)"
+            "(default: all, the depth model and both pose checkpoints) | "
+            "pixal3d: int8-convrot | bf16 (default: int8-convrot)"
         ),
     )
     ap.add_argument(
@@ -850,6 +896,13 @@ def main() -> None:
         help=(
             "h3-video: also download the lightx2v turbo LoRAs for the pruned fl2va DiT "
             "(4-step and 8-step, trained at 768p; see the model docs for their settings)"
+        ),
+    )
+    ap.add_argument(
+        "--include-multiview", action="store_true",
+        help=(
+            "pixal3d: also download the twin DiT conditioned on many photos of the same "
+            "object, in the precision --variant picked for the single-image one"
         ),
     )
     ap.add_argument(
@@ -890,6 +943,10 @@ def main() -> None:
         ap.error("--include-raw is only supported by --model krea2")
     if args.include_turbo and args.model != "h3-video":
         ap.error("--include-turbo is only supported by --model h3-video")
+    if args.include_multiview and args.model != "pixal3d":
+        ap.error("--include-multiview is only supported by --model pixal3d")
+    if args.int8_convrot and args.model == "pixal3d":
+        ap.error("--model pixal3d is int8-convrot unless you ask for --variant bf16")
     if args.small_decoder and args.model not in ("klein", "moss-image"):
         ap.error("--small-decoder is only supported by --model klein, moss-image")
     if (args.image_only or args.edit_only) and args.model not in ("qwen-image", "mage-flow"):

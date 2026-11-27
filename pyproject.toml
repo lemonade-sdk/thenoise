@@ -48,6 +48,7 @@ packages = [
     "thenoise.dit.mage_flow",
     "thenoise.dit.ming_image",
     "thenoise.dit.moss_image",
+    "thenoise.dit.pixal3d",
     "thenoise.dit.qwen_image",
     "thenoise.dit.qwen_image21",
     "thenoise.dit.wan_video",

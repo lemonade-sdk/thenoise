@@ -210,6 +210,22 @@ def _map_keys(state_dict: dict, key_map: Callable[[str], str], path: str) -> dic
     return mapped
 
 
+#: The wrapper a single-file model hides its modules behind, along with the conditioner
+# and codec that can share its file.
+DIT_PREFIX = "model."
+
+
+def take_prefix(prefix: str) -> Callable[[dict], dict]:
+    """A ``load_dit`` ``state_map`` keeping one submodule of a shared file."""
+    def fold(state_dict: dict) -> dict:
+        return {
+            key[len(prefix):]: value
+            for key, value in state_dict.items()
+            if key.startswith(prefix)
+        }
+    return fold
+
+
 def load_module_state(
     model: torch.nn.Module,
     state_dict: dict,
@@ -900,4 +916,6 @@ __all__ = [
     "RUNTIME_STATE_SUFFIXES",
     "drop_runtime_state",
     "drop_checkpoint_markers",
+    "take_prefix",
+    "DIT_PREFIX",
 ]

@@ -4,11 +4,11 @@ import math
 from dataclasses import dataclass
 from typing import Callable, Mapping, Tuple, Union
 
+from thenoise.utils.loader import DIT_PREFIX, take_prefix
 from thenoise.utils.qk_norm import qk_norm_key_map
 from thenoise.utils.safetensors import Header, Signature, as_header
 
-#: One Hunyuan3D shape file carries the DiT, the image conditioner and the shape codec.
-DIT_PREFIX = "model."
+#: One Hunyuan3D shape file keeps the DiT at home and files the rest around it.
 CONDITIONER_PREFIX = "conditioner.main_image_encoder.model."
 CODEC_PREFIX = "vae."
 
@@ -145,17 +145,6 @@ def codec_key_map(key: str) -> str:
     key = key.replace(".mlp.c_proj.", ".mlp.net.2.")
     key = key.replace(".attention.q_norm.", ".attention.query_norm.")
     return key.replace(".attention.k_norm.", ".attention.key_norm.")
-
-
-def take_prefix(prefix: str) -> Callable[[dict], dict]:
-    """A ``load_dit`` ``state_map`` keeping one submodule of a shared file."""
-    def fold(state_dict: dict) -> dict:
-        return {
-            key[len(prefix):]: value
-            for key, value in state_dict.items()
-            if key.startswith(prefix)
-        }
-    return fold
 
 
 def shape_key_map(key: str) -> str:
