@@ -38,6 +38,20 @@ a reference photo and writes it as `.glb`, `.obj` or `.stl`. A picture is the wh
 |---|---|
 | `--dit` *(the only one there is)* | `hunyuan_3d_v2.1.safetensors` |
 
+## Performance (Strix Halo)
+
+BF16, 768x1024:
+
+- Generate - 4096 tokens, 30 steps, guidance 5.0, euler, 384³: **~55.7 s**
+
+## Examples
+
+*Generated:*
+
+| Ref Image | Result |
+|---|---|
+| <img width="1024" alt="thenoise_edit_2673176517" src="https://github.com/user-attachments/assets/3a7f4fc2-753e-481e-a46d-6c77dcb9ae29" /> | <img width="1024" alt="thenoise_edit_3754200251" src="https://github.com/user-attachments/assets/9fdc5bd6-68e8-412f-bbbe-7332f48eec86" /> |
+
 
 ## Download
 
