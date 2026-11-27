@@ -137,7 +137,7 @@ class StageBlock(nn.Module):
         self.mlp = BlockFeedForward(params)
         self.modulation = nn.Parameter(torch.zeros(ADALN_CHUNKS * width))
 
-   @torch.compile(fullgraph=True)
+    @torch.compile(fullgraph=True)
     def forward(self, feats: torch.Tensor, rope: torch.Tensor, timestep: torch.Tensor,
                 context: torch.Tensor, projection: torch.Tensor) -> torch.Tensor:
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
