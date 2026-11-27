@@ -1,33 +1,64 @@
 # MiniMax-H3 Video
 
-Video with synchronized sound from a text prompt, a starting image, or the two frames a
-clip runs between — the `fl2va` release, which answers `t2v`, `i2v` and `flf2v` from one
-checkpoint. The `ref2va` release answers those three as well and takes [reference
-conditions](#references) on top. Use the normal `/video` or `/jobs/video` endpoints. Picture and sound come out
-of the same run: the transformer holds both streams in one pack, so a clip's audio is
-generated rather than fitted afterwards. Sound lands in `mp4` as AAC and in `webm` as Opus.
+Video with synchronized sound, from a prompt, a first frame, or the two frames a clip runs
+between. Picture and sound come out of the same run, not stitched afterwards.
 
-20 steps at guidance 1.0 with Euler is the released recipe and the default; ask for another
-step count, solver, guidance scale or negative prompt and you get that instead.
+| | fl2va | ref2va |
+|---|---|---|
+| Modes | text-to-video, image-to-video, first-and-last-frame | the same, plus [references](#references) |
+| Transformer | pruned ~20 B trunk, both streams in one pack | the same trunk, with room for references |
+| Codec | 24-channel video at 16× spatial / 4× temporal; 32-channel stereo sound at 40 latent frames a second, vocoded at 32 kHz | the same |
+| Text encoder | Qwen3-VL-32B, int8-convrot | the same |
+| Defaults | 1344×768, 124 frames at 24 FPS, 20 steps, CFG 1.0, Euler, flow shift 12 | the same |
 
-## Download models
+Output is MP4/H.264 or WebM/VP9. Sound is AAC in `mp4` and Opus in `webm`, cut or padded
+to the clip's length.
 
-```sh
-python scripts/download.py --model h3-video --int8-convrot
+> Commands below assume a dev checkout (`./thenoise.sh`, `.venv/bin/python`). On a
+> [portable bundle](../setup.md) use `./bin/thenoise` and `./bin/python3` instead.
+
+## Performance (Strix Halo)
+
+BF16 + [6-steps Pika LoRA](https://huggingface.co/Kijai/MiniMax-H3_comfy/tree/main/loras/Pika), @ 6 steps, CFG 1:
+
+- Generate 832x480, 5s clip: **~194.5 s**
+- Generate 1344x768, 5s clip: **~565.8 s**
+
+## Examples
+
+*Generated:*
+
+[T2V](https://github.com/user-attachments/assets/d3a402d3-ee3f-457b-9443-d3f47d84e027)
+
+[I2V](https://github.com/user-attachments/assets/d4f80eba-bbac-4834-88ee-65876d5f0fc8)
+
+[Ref2V](https://github.com/user-attachments/assets/50be8696-6a77-41f1-9484-b975ab1a3062)
+
+
+## Frames and canvas
+
+The codec runs 17 pixel frames per latent group, so a clip is `17k` frames or
+`17k + 1, 5, 9, 13`: `17, 18, 22, … 34, 35, 39 … 124 …`. `--frames` rounds up to that
+ladder, `--duration` takes the nearest rung; 124 frames at 24 fps are 5.17 seconds. Width
+and height round **down** to multiples of 32, and beyond the trained 1344×768 area runs but
+logs a warning. There is no latent upscaler for these latents; the pixel-domain upscalers
+(`--upscaler-dir`) work on any model's output.
+
+## Download
+
+```bash
+.venv/bin/python scripts/download.py --model h3-video --int8-convrot   # 54 GB, 73 GB BF16
 ```
 
-Omit `--int8-convrot` for the BF16 pruned DiT (37 GB against 20 GB). `--include-turbo` adds
-the two 768p turbo LoRAs described below. The text encoder is the int8-convrot Qwen3-VL-32B
-the image release ships too — 25 GB, published quantized only — so an existing
-`models/h3-image` copy can be passed to `--text-encoder` instead of downloading it again.
+`--include-turbo` adds the two 768p turbo LoRAs. The Qwen3-VL-32B encoder — 25 GB,
+published quantized only — is the one H3-Image ships, so an existing `models/h3-image`
+copy can be passed to `--text-encoder` instead of downloading it twice.
 
-Both codecs are needed: `--vae` is the clip codec, `--audio-vae` the sound one, and a
-request missing either is refused before anything loads. They are a pair — a codec whose
-latent has fewer or more channels than the transformer emits is refused by name.
+## Usage
 
-## Start it
+Serve over HTTP with the web UI (open <http://localhost:8000/>). Both codecs are required.
 
-```sh
+```bash
 ./thenoise.sh serve \
   --dit ./models/h3/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors \
   --vae ./models/h3/vae/minimax_h3_video_vae_fp16.safetensors \
@@ -36,82 +67,59 @@ latent has fewer or more channels than the transformer emits is refused by name.
   --port 8000
 ```
 
-## Generate a clip
+Generate one clip:
 
-```sh
-curl -sS http://127.0.0.1:8000/video -H 'content-type: application/json' \
-  -d '{"prompt":"a lighthouse sweeping over dark water, waves breaking, the beam humming",
-       "width":1344,"height":768,"frames":124,"fps":24,"steps":20,"guidance_scale":1,
-       "sampler":"euler","output_format":"mp4"}' \
-  -o lighthouse.mp4
+```bash
+./thenoise.sh video \
+  --dit ./models/h3/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors \
+  --vae ./models/h3/vae/minimax_h3_video_vae_fp16.safetensors \
+  --audio-vae ./models/h3/vae/minimax_h3_audio_vae_fp32.safetensors \
+  --text-encoder ./models/h3/text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors \
+  --prompt "a lighthouse sweeping over dark water, waves breaking, the beam humming" \
+  --width 1344 --height 768 --frames 124 --fps 24 --steps 20 --out lighthouse.mp4
 ```
 
-The sound belongs to the clip rather than to a file format: it is muxed into `mp4` and
-`webm` alike, and cut or padded to the clip's length. Its own rate is the codec's 32 kHz,
-which travels with it — `webm` encodes it as Opus at 48 kHz, resampled on the way in, since
-Opus will not open at 32.
-
-### Image-to-video, and both frames
-
-Add `image` for a clip that starts on a picture, and `end_image` — same encoding, same rules
-— for one that ends on another. Both are cover-cropped to the clip's canvas, and the first
-frame decides the size when the request names none. Neither is pasted into the output: each
-enters the run as conditioning at a fixed timestep, and what you see at the ends is the
-model's own rendering of them, which is what makes a last frame possible in a checkpoint that
-was never an FLF2V build.
+`--image start.png` starts the clip on a picture and `--end-image end.png` pins the far end
+too. Neither is pasted into the output — each enters as conditioning at a fixed timestep,
+which is what makes a last frame possible in a checkpoint that was never an FLF2V build.
+With no `--width`/`--height`, the first frame's aspect ratio sizes the clip. Over HTTP the
+two frames go in `image` and `end_image` as base64 of the file bytes, and a queued render
+is `POST /jobs/video`.
 
 ### References
 
-The `ref2va` release takes pictures the clip is asked to look like. They are not frames of
-the clip — it starts and ends wherever the prompt takes it — so `image` and `references`
-answer different questions and can be used together.
+`ref2va` also takes pictures the clip should look like without being frames of it, so
+`--image` and `--reference` answer different questions and can be combined. The downloader
+fetches `fl2va` only, so the `--dit` below is a
+[`ref2va` checkpoint](https://huggingface.co/Comfy-Org/MiniMax-H3/tree/main/diffusion_models)
+you fetched yourself; its name is the fl2va one with `fl2va` swapped.
 
-```sh
-curl -sS http://127.0.0.1:8000/video -H 'content-type: application/json' \
-  -d "{\"prompt\":\"<Picture 1> trotting through a garden, late afternoon\",
-       \"references\":[\"$(base64 -w0 dog.png)\"],
-       \"width\":1344,\"height\":768,\"frames\":124,\"steps\":20,
-       \"guidance_scale\":1,\"output_format\":\"mp4\"}" -o dog.mp4
+```bash
+./thenoise.sh video \
+  --dit ./models/h3/diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors \
+  --vae ./models/h3/vae/minimax_h3_video_vae_fp16.safetensors \
+  --audio-vae ./models/h3/vae/minimax_h3_audio_vae_fp32.safetensors \
+  --text-encoder ./models/h3/text_encoders/qwen3vl_32b_minimax_h3_int8_convrot.safetensors \
+  --prompt "<Picture 1> trotting through a garden, late afternoon" \
+  --reference dog.png --width 1344 --height 768 --frames 124 --out dog.mp4
 ```
 
-Name them in the prompt to say which is which: `<Picture 1>`, `<Picture 2>`, numbered in the
-order they were sent. An item may also be `{"media": ..., "frame": n}`, which pins it to a
-frame of the clip — the frame it should match — with a negative `frame` counting back from
-the last one. Sent that way, it is an anchor rather than a resemblance.
+Name them in the prompt — `<Picture 1>`, `<Picture 2>` — in the order sent. `--reference
+path@FRAME` (or `{"media": ..., "frame": n}` over HTTP) pins one to that frame of the clip,
+negative counting back from the last, making it an anchor rather than a resemblance.
 
-A reference is **resized and never cropped**: it keeps the shape it arrived in and occupies a
-grid of its own ahead of the clip, with the canvas deciding only how much area that grid may
-cover, floored onto whole latent cells and never enlarged. A keyframe is different in this
-respect — it *is* a frame of the clip, so it is cover-cropped to it. Name no width or height
-and the first reference's aspect sizes the run, the way a first keyframe does.
+A reference is **resized and never cropped**: it keeps its own shape and packs on a grid of
+its own ahead of the clip, the canvas capping only its area. A keyframe is different — it
+*is* a frame of the clip, so it is cover-cropped to it. Name no size and the first
+reference's aspect sizes the run. Every other video model refuses references outright;
+`GET /health` says whether the loaded one answers `ref2v`.
 
-A short clip or a piece of audio is read — its frames and its sound come with it — but is not
-placed yet, and a request that asks for one is refused with what the trunk lacks rather than
-ignored. Every other video model refuses references outright: `GET /health` shows whether the
-loaded one answers `ref2v`.
+### Turbo LoRAs
 
-## Frames and canvas
+Both 768p turbos `--include-turbo` fetches — 4-step v1.3 and 8-step v1.1 — are distilled at
+**flow shift 6**, not the release's 12, and say so nowhere in the file:
 
-A clip is not any length. The codec runs 17 pixel frames per latent group, opening with one
-frame and then four per latent, so a clip is `17k` frames or `17k + 1, 5, 9, 13`: `5, 9, 13,
-17, 18, 22, 26, 30, 34, 35, 39 … 124 …`. `--frames` rounds up to that ladder — a clip shorter
-than the first rung would have nothing to decode — and `--duration` takes the nearest rung.
-At 24 fps the released 124 frames are 5.17 seconds.
-
-Width and height round **down** to multiples of 32. Asking for more area than the 1344×768
-the release was trained on logs a warning rather than rewriting the request: the rope
-normalizes by area, so a bigger canvas runs — it is just off distribution.
-
-There is no latent upscaler for these 24-channel clip latents, so `upscale` is off; the
-pixel-domain upscalers (`--upscaler-dir`) work on any model's output.
-
-## Turbo LoRAs
-
-The 768p turbos are distilled at **video flow shift 6** while the base release runs at 12, so
-a recipe that leaves `flow_shift` alone will be sampling a distilled model on the wrong
-ladder:
-
-```sh
+```bash
 ./thenoise.sh video \
   --dit ./models/h3/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors \
   --vae ./models/h3/vae/minimax_h3_video_vae_fp16.safetensors \
@@ -122,44 +130,21 @@ ladder:
   --width 1344 --height 768 --frames 124 --steps 4 --flow-shift 6
 ```
 
-The audio's own shift is 3.0 in every release and every turbo, and it stays there: what
-`--flow-shift` changes is the video's schedule, and the ratio between the two — which is how
-the audio travels inside the pack — follows automatically. `--flow-shift 6` therefore asks
-for half the carry of the default 12 while the sound is denoised on exactly the ladder it
-would be at 12.
+The sound keeps its own shift of 3.0 in every release and turbo: `--flow-shift` moves the
+video schedule and the audio's carry follows. The newer 8-step v1.2 is not offered — it
+carries 51 `adaln_proj.linear` targets 2688 wide, the *unpruned* trunk's width, so a pruned
+checkpoint has nothing for them to attach to.
 
-`--include-turbo` fetches the 4-step v1.3 and the 8-step v1.1, both trained at 768p. The
-newer 8-step v1.2 is deliberately not among them: besides the attention and MLP projections
-every other turbo touches, it carries 51 `adaln_proj.linear` targets whose input is 2688 wide
-— the *unpruned* trunk's width, which a pruned checkpoint does not have — so there is nothing
-for it to attach to. The `ref2v` turbos target the reference-to-video release, whose
-requests carry [references](#references) rather than keyframes.
+## Notes
 
-## What it is
+`--attention optimized` runs attention through the block-sparse kernel where
+`comfy_kitchen` compiled it — 4.6x on the attention call at the release's own shape
+(gfx1151, bf16, tau 1.3). `auto`, the default, routes only clips long enough for it to pay,
+`full` never does; a box without the kernel does not answer `optimized` at all.
 
-| | |
-|---|---|
-| Transformer | ~20 B, 50 blocks + 2 token refiners, 56×128 heads |
-| Picture latent | 24 channels, 16× spatial, 4× temporal |
-| Sound latent | 32 channels, 40 frames per second, stereo |
-| Vocoder | BigVGAN-style, 32 kHz out |
-| Text encoder | Qwen3-VL-32B, int8-convrot; a picture arrives as vision tokens |
-| Released defaults | 1344×768, 124 frames at 24 fps, 20 steps, guidance 1.0, Euler, flow shift 12 |
+The unpruned checkpoints and the `sol` codec are refused rather than half-supported: the
+first condition each block from a 2688-wide timestep embedding, the second's decoder is a
+different tree from the one implemented here.
 
-On a GPU where `comfy_kitchen` compiled its block-sparse attention kernel, the trunk's
-attention is routed rather than dense: each 64-row query block attends the key blocks that
-matter exactly and pools the rest, with every prompt, conditioned picture and audio row
-held exact for every query because pooling those is how a run loses them. At the release's
-own shape that measured 4.6x on the attention call (gfx1151, bf16, tau 1.3).
-
-`--attention` decides when it runs. `auto`, the default, routes a clip long enough for
-routing to be the faster of the two and stays exact on a short one. `full` never routes.
-`optimized` routes whatever the clip's length, which is how you measure the difference
-yourself on a clip the engine would have left alone — and a box with no kernel for it does
-not answer `optimized` at all, in `/health` or in a request.
-
-Two more releases exist upstream and are refused rather than half-supported: the unpruned
-checkpoints, which condition each block from a 2688-wide timestep embedding (24 GB of the
-file) where this engine reads the pruned release's distilled curve; and the `sol` codec,
-whose decoder is a different tree from the one implemented here and is refused by name
-instead of being loaded onto the wrong modules.
+For every flag (size, frames, fps, steps, seed, references, LoRAs, attention), see the
+[CLI reference](../cli.md) and the [HTTP API reference](../api.md).

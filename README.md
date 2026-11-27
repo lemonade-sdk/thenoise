@@ -70,14 +70,14 @@ model repainting the picture it was given. Ask for it with `ref_method: vision`.
 
 ### Video models
 
-| Model | Text-to-video | Image-to-video | First/last frame | Details |
+| Model | Text-to-video | Image-to-video | Reference | Details |
 |---|---|---|---|---|
 | **Wan 2.2 TI2V-5B** | ✓ | ✓ | — | [wan22](docs/models/wan22.md#ti2v-5b) |
 | **Wan 2.2 T2V-A14B**, one expert per half of the schedule | ✓ | — | — | [wan22](docs/models/wan22.md#t2v-a14b-two-experts) |
-| **Wan 2.2 I2V-A14B**, the same experts at 36 input channels | — | ✓ | ✓ | [wan22](docs/models/wan22.md#i2v-a14b) |
-| **LTX 2.3 Distilled**, audiovisual generation | ✓ | ✓ | ✓ | [ltx](docs/models/ltx.md) |
-| **LTX 2.5 Distilled**, audiovisual generation | ✓ | ✓ | ✓ | [ltx](docs/models/ltx.md) |
-| **MiniMax-H3 Video**, one transformer holding picture and sound | ✓ | ✓ | ✓ | [h3-video](docs/models/h3-video.md) |
+| **Wan 2.2 I2V-A14B**, the same experts at 36 input channels | — | ✓ | — | [wan22](docs/models/wan22.md#i2v-a14b) |
+| **LTX 2.3 Distilled**, audiovisual generation | ✓ | ✓ | — | [ltx](docs/models/ltx.md) |
+| **LTX 2.5 Distilled**, audiovisual generation | ✓ | ✓ | — | [ltx](docs/models/ltx.md) |
+| **MiniMax-H3 Video**, one transformer holding picture and sound | ✓ | ✓ | audio, video, image | [h3-video](docs/models/h3-video.md) |
 
 ### Mesh models
 
@@ -101,8 +101,8 @@ it is a good fit when:
 
 TheNoise is tuned for the hardware it runs on, and its performance is quite
 similar to ComfyUI's - and sometimes even better. The numbers below are
-seconds per image on a Strix Halo (gfx1151, 128 GB unified), measured after
-a warmup run.
+seconds per image - per 33-frame clip in the video table - on a Strix Halo
+(gfx1151, 128 GB unified), measured after a warmup run.
 
 *Text to image (generation):*
 
@@ -135,6 +135,14 @@ a warmup run.
 | Flux 3 Klein · INT8-Convrot · 15 steps | 41.8s | — *(no KV cache)* |
 | Fibo 2.0 Turbo Edit · INT8-ConvRot · 4 steps | 15.5s | 20.6s |
 | H3-Image · INT8-ConvRot · 4 steps | 15s | 11.5s |
+
+*Image to video, 5s clip:*
+
+| Model & settings | 832x480 | 1344x768 |
+|---|---|---|
+| Wan 2.2 I2V-A14B (two experts) · BF16 · 4 steps | 161.7s | 731.4s |
+| LTX 2.5 Distilled · INT8-ConvRot · 8 steps + 3 refine steps | 42.3s | 120.2s |
+| MiniMax-H3 Video · BF16 + [6-steps Pika LoRA](https://huggingface.co/Kijai/MiniMax-H3_comfy/tree/main/loras/Pika) · 6 steps | 194.5s | 565.8s |
 
 <small>TheNoise 0.11.0, Strix Halo (gfx1151, 128 GB unified)</small>
 
