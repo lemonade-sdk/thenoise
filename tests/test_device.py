@@ -113,7 +113,7 @@ def test_a_model_carries_each_checkpoint_to_the_manager(tmp_path, monkeypatch):
     """The adapter knows the file, the manager owns the answer; nothing decides here."""
     config = _config(tmp_path)
     stub_room(monkeypatch, 10 * GB)
-    monkeypatch.setattr("thenoise.memory._RESERVE_BASE_BYTES", GB)
+    monkeypatch.setattr("thenoise.memory.RESERVE_BASE_BYTES", GB)
     model = StubModel(config=config)
     monkeypatch.setattr("thenoise.models.base.checkpoint_bytes",
                         {config.dit_path: 12 * GB, config.vae_path: GB}.get)

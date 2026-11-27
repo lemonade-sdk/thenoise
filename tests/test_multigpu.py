@@ -70,7 +70,7 @@ def test_device_caps_belong_to_their_spec():
 
 
 def test_a_cap_limits_a_budget(monkeypatch):
-    monkeypatch.setattr(multigpu, "_available", lambda device: 100 << 30)
+    monkeypatch.setattr(multigpu, "get_available_memory", lambda device: 100 << 30)
     caps = {D0: 6 << 30}
     budgets = multigpu._budgets(nn.Linear(2, 2), [D0, D1], caps)
     assert budgets[0] == 6 << 30 and budgets[1] > 6 << 30
@@ -160,8 +160,8 @@ def _blocks(units, where):
 
 def test_assign_fills_in_order_and_keeps_glue_on_primary():
     units = multigpu.split_units(_ToyDiT())
-    block = multigpu._weight_bytes(units[1][1])
-    glue = sum(multigpu._weight_bytes(u) for _, u, b in units if not b)
+    block = multigpu.weight_bytes(units[1][1])
+    glue = sum(multigpu.weight_bytes(u) for _, u, b in units if not b)
     # the primary's glue comes out of its budget: shares of 2, 3 and 3 of the 8 blocks
     where = multigpu.assign(units, [D0, D1, D2], [2 * block + glue, 3 * block, 3 * block])
     assert _blocks(units, where) == [D0, D0, D1, D1, D1, D2, D2, D2]
@@ -173,8 +173,8 @@ def test_assign_fills_in_order_and_keeps_glue_on_primary():
 
 def test_assign_budgets_what_it_places(caplog):
     units = multigpu.split_units(_ToyDiT())
-    block = multigpu._weight_bytes(units[1][1])
-    glue = sum(multigpu._weight_bytes(u) for _, u, b in units if not b)
+    block = multigpu.weight_bytes(units[1][1])
+    glue = sum(multigpu.weight_bytes(u) for _, u, b in units if not b)
     with caplog.at_level("WARNING"):
         where = multigpu.assign(units, [D0, D1], [block, block])
     assert _blocks(units, where).count(D1) >= 6           # the last device takes the rest
@@ -191,7 +191,7 @@ def test_spread_on_one_device_keeps_results_and_shares_copies():
     x = torch.randn(3, 8)
     with torch.no_grad():
         want = model(x)
-    sp = multigpu.spread(model, [CPU], budgets=[1 << 40])
+    sp = multigpu.spread(model, [CPU])
     try:
         with torch.no_grad():
             got = model(x)
@@ -238,7 +238,7 @@ def test_memory_manager_pin_blocks_moves():
         mm.pin("nope")
 
 
-def test_apply_pins_what_it_moves(caplog):
+def test_apply_pins_what_it_moves():
     class Model:
         memory = MemoryManager("cpu", "meta")
 
@@ -246,10 +246,10 @@ def test_apply_pins_what_it_moves(caplog):
     model.memory.register("dit", _ToyDiT())
     model.memory.register("vae", _Vae())
     done = multigpu.apply(model, multigpu.DeviceSpec(devices=[CPU]),
-                          {"dit": "split", "vae": "cpu", "text_encoder": "cpu"})
+                          {"dit": "split", "vae": "cpu"})
     assert set(done) == {"dit"}                    # vae is already on the primary
     assert model.memory._pinned == {"dit"}
-    assert "no component 'text_encoder'" in caplog.text
+
 
 
 class _Vae(nn.Module):
@@ -412,3 +412,43 @@ def test_place_nested_entry_points_move_once(monkeypatch):
         out = list(vae.frames(torch.randn(2, 4)))
     assert len(out) == 2 and len(calls) == 3 + 2   # in once, each item home once
     sp.remove()
+
+
+@pytest.mark.parametrize("placement", ["text_encoderr=cuda:1", "dit_missing=split"])
+def test_unknown_placement_is_refused_before_loading(monkeypatch, fake_model_cls, placement):
+    from thenoise.models.base import DiffusionModel
+    from thenoise.models.config import ModelConfig
+    constructed = []
+    cls = fake_model_cls(constructed=constructed, REQUIRED_COMPONENTS=(),
+                         dit_roles=classmethod(DiffusionModel.dit_roles.__func__))
+    monkeypatch.setattr(model_catalog, "resolve", resolves_to(cls))
+    monkeypatch.setattr(ModelConfig, "all_headers", lambda self: {role: None for role in self.paths})
+    runtime = Runtime(Settings(devices="cuda:0,cuda:1", placement=placement))
+    with pytest.raises(ValueError, match="--place: model has no component"):
+        runtime.load(ModelPaths("dit"))
+    assert constructed == []
+
+
+@pytest.mark.parametrize("placement, cached", [("", False), ("dit=cuda:1", True)])
+def test_split_dit_refuses_kv_cache_without_changing_other_instances(monkeypatch, placement, cached):
+    from conftest import StubModel
+    from thenoise.pipeline import PipelineController
+    from thenoise.models.config import GenerateRequest
+    model = StubModel(capabilities={"kv_cache": True})
+    model.memory.register("dit", _ToyDiT())
+    original = model.CAPABILITIES
+    monkeypatch.setattr(multigpu, "apply", lambda *args: {})
+    runtime = Runtime(Settings(devices="cuda:0,cuda:1", placement=placement))
+    runtime._stack(model, ["dit"])
+    assert model.capability("kv_cache") is cached
+    assert original["kv_cache"] is True
+    if not cached:
+        with pytest.raises(ValueError, match="does not support.*KV cache"):
+            PipelineController(model, runtime.pixel_upscalers).generate(GenerateRequest(prompt="test", kv_cache=True))
+
+
+def test_unknown_headroom_uses_weight_share_and_respects_caps(monkeypatch):
+    monkeypatch.setattr(multigpu, "get_available_memory", lambda device: None)
+    model = _ToyDiT()
+    size = multigpu.weight_bytes(model)
+    assert multigpu._budgets(model, [D0, D1], {D0: size // 2}) == [size // 2, size]

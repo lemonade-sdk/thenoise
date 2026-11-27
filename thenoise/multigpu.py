@@ -22,9 +22,9 @@ import torch
 from torch import nn
 
 from thenoise.inference import held_modules
-from thenoise.memory import (_RESERVE_BASE_BYTES, _owned_tensors, _tensor_bytes,
-                             _weight_bytes, _with_index)
-from thenoise.utils.device import get_free_memory
+from thenoise.memory import (RESERVE_BASE_BYTES, owned_tensors, tensor_bytes,
+                             weight_bytes, with_index)
+from thenoise.utils.device import get_available_memory
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ def parse_devices(spec: Optional[str]) -> DeviceSpec:
         if not item.strip():
             continue
         try:
-            dev = _with_index(item.strip())
+            dev = with_index(item.strip())
         except RuntimeError as error:
             raise ValueError(f"bad device {item.strip()!r} in --devices") from error
         if dev in out.devices:
@@ -93,7 +93,7 @@ def parse_stack(devices: Optional[str], place: Optional[str]) -> DeviceSpec:
                 raise ValueError(f"--place {name}=split needs two or more --devices")
             continue
         try:
-            dev = _with_index(where)
+            dev = with_index(where)
         except RuntimeError as error:
             raise ValueError(f"--place {name}: bad device {where!r}") from error
         if dev.type != "cpu" and dev not in spec.devices:
@@ -126,17 +126,8 @@ def default_placement(dit_roles: Iterable[str], components: Iterable[str],
     return plan
 
 
-def _available(device: torch.device) -> Optional[int]:
-    """Bytes a process could make live on ``device``: driver free plus the allocator's
-    cached blocks, which torch hands out without allocating."""
-    free = get_free_memory(device)
-    if free is None:
-        return None
-    return free + torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
-
-
 def _bytes_on(module: nn.Module, device: torch.device) -> int:
-    return sum(_tensor_bytes(t) for t in _owned_tensors(module) if t.device == device)
+    return sum(tensor_bytes(t) for t in owned_tensors(module) if t.device == device)
 
 
 def _has_module_list(module: nn.Module) -> bool:
@@ -154,7 +145,7 @@ def split_units(module: nn.Module) -> List[Tuple[str, nn.Module, bool]]:
             if isinstance(child, nn.ModuleList):
                 for i, block in enumerate(child):
                     units.append((f"{path}.{i}", block, True))
-            elif _has_module_list(child) and _weight_bytes(child) > 0:
+            elif _has_module_list(child) and weight_bytes(child) > 0:
                 walk(path + ".", child)
             else:
                 units.append((path, child, False))
@@ -169,7 +160,7 @@ def assign(units: Sequence[Tuple[str, nn.Module, bool]], devices: Sequence[torch
     it; the last device takes any remainder). Non-block units stay on the primary device,
     so their bytes come out of its budget first."""
     assert len(devices) == len(budgets) and devices
-    sizes = [_weight_bytes(u) for _, u, _ in units]
+    sizes = [weight_bytes(u) for _, u, _ in units]
     block_total = sum(s for s, (_, _, b) in zip(sizes, units) if b)
     glue = sum(s for s, (_, _, b) in zip(sizes, units) if not b)
     budgets = [max(0, budgets[0] - glue), *budgets[1:]]
@@ -330,16 +321,16 @@ def _budgets(module: nn.Module, devices: Sequence[torch.device],
     there) less a stage's base reserve, up to its cap."""
     out = []
     for dev in devices:
-        free = _available(dev)
+        free = get_available_memory(dev)
         if free is not None:
             free += _bytes_on(module, dev)
-        budget = max(0, (free if free is not None else 1 << 62) - _RESERVE_BASE_BYTES)
+        # Unknown headroom is not a capacity claim: use one model's weights as the share.
+        budget = weight_bytes(module) if free is None else max(0, free - RESERVE_BASE_BYTES)
         out.append(min(budget, caps.get(dev, budget)))
     return out
 
 
 def spread(module: Any, devices: Sequence[torch.device],
-           budgets: Optional[Sequence[int]] = None,
            caps: Optional[Mapping[torch.device, int]] = None) -> Spread:
     """Split ``module`` over ``devices`` (first = primary) and wrap its units."""
     held = held_modules(module)
@@ -348,8 +339,7 @@ def spread(module: Any, devices: Sequence[torch.device],
     module = held[0]
     primary = devices[0]
     units = split_units(module)
-    if budgets is None:
-        budgets = _budgets(module, devices, caps or {})
+    budgets = _budgets(module, devices, caps or {})
     where = assign(units, devices, budgets)
     cache = _Shared()
     for _n, p in module.named_parameters(recurse=False):
@@ -402,13 +392,11 @@ def apply(model: Any, spec: DeviceSpec, plan: Dict[str, str]) -> Dict[str, Sprea
     for name, where in sorted(plan.items(), key=lambda kv: kv[1] == "split"):
         module = memory.component(name)
         if module is None:
-            logger.warning("--place: model has no component %r (has: %s)", name,
-                           ", ".join(sorted(memory.component_names())))
-            continue
+            raise ValueError(f"--place: model has no component {name!r}")
         if where == "split":
             done[name] = spread(module, spec.devices, caps=spec.caps)
         else:
-            dev = _with_index(where)
+            dev = with_index(where)
             if dev == primary:
                 continue
             done[name] = place(module, dev, primary)

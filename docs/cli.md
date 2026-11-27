@@ -293,6 +293,8 @@ thenoise generate --devices cuda:0,cuda:1 --dit ... --vae ... --text-encoder ...
 - GPUs only for a DiT: autocast is per device type, so blocks on `cpu` give a wrong image.
   `--devices` with `cpu` in it and `--place dit=cpu` are refused, as is `--place` without
   `--devices` or naming a device that is not in `--devices`.
+- Unknown component names in `--place` are refused before loading.
+- A split DiT does not support KV caching; explicit cache requests are refused.
 
 ## Upscaling
 

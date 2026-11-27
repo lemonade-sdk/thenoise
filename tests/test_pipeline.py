@@ -996,7 +996,7 @@ def _model_on(monkeypatch, capacity: int, *, reserve: int = 1 << 30):
     ``reserve`` pins what every stage keeps free, so the fixtures are about placement at
     GiB scale and not at the mercy of the fleet's figure.
     """
-    monkeypatch.setattr("thenoise.memory._RESERVE_BASE_BYTES", reserve)
+    monkeypatch.setattr("thenoise.memory.RESERVE_BASE_BYTES", reserve)
     monkeypatch.setattr("thenoise.memory._RESERVE_BYTES_PER_MEGAPIXEL", 0)
 
     model = StubModel()

@@ -121,6 +121,10 @@ class Runtime:
             dit_roles = [f"dit_{role}" if role else "dit"
                          for role in cls.dit_roles(config.all_headers())]
             multigpu.check_dit_placement(self._stack_spec, dit_roles)
+            roles = set(dit_roles) | {"vae", "text_encoder"} | set(cls.COMPONENT_ROLES)
+            unknown = sorted(set(self._stack_spec.placement) - roles)
+            if unknown:
+                raise ValueError("--place: model has no component " + ", ".join(unknown))
 
         self._unload()  # swap: only one model resident at a time
         logger.info("Loading model '%s'", name)
@@ -144,6 +148,9 @@ class Runtime:
         logger.info("stacking %s over %s: %s", type(model).__name__,
                     ", ".join(map(str, spec.devices)), plan)
         self._spreads = multigpu.apply(model, spec, plan)
+        if any(plan.get(role) == "split" for role in dit_roles):
+            # Cache buffers belong to the primary device, not each split block's device.
+            model.CAPABILITIES = {**model.CAPABILITIES, "kv_cache": False}
 
     def reload(self) -> None:
         """Rebuild the loaded model from its checkpoints, which clears an unfit state."""

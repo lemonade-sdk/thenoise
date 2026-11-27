@@ -32,14 +32,13 @@ from torch import nn
 from thenoise.inference import freeze, held_modules
 from thenoise.utils.device import (
     clean_memory_on_device,
-    get_device_memory,
-    get_free_memory,
+    get_available_memory,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def _with_index(device: Union[str, torch.device]) -> torch.device:
+def with_index(device: Union[str, torch.device]) -> torch.device:
     """``device`` with its index filled in: ``cuda`` and ``cuda:0`` compare unequal, and
     taking them as two leaves nothing resident to evict.
     """
@@ -54,13 +53,13 @@ def _with_index(device: Union[str, torch.device]) -> torch.device:
 # A stage's room beside its weights: a fixed part (tiles, halos, feature caches) plus a
 # part per pixel, the sampling loop being the same order as a decode. Coarse because the
 # peaks are: two APUs of one generation measured 1.2-1.4x apart, nothing here on CUDA.
-_RESERVE_BASE_BYTES = 2 << 30
+RESERVE_BASE_BYTES = 2 << 30
 _RESERVE_BYTES_PER_MEGAPIXEL = 1 << 30
 
 
 def reserve_bytes(pixels: int) -> int:
     """Room a stage moving ``pixels`` keeps free for what its kernels allocate."""
-    return _RESERVE_BASE_BYTES + int(_RESERVE_BYTES_PER_MEGAPIXEL * pixels / 1e6)
+    return RESERVE_BASE_BYTES + int(_RESERVE_BYTES_PER_MEGAPIXEL * pixels / 1e6)
 
 
 def _peak_bucket(pixels: int) -> int:
@@ -71,7 +70,7 @@ def _peak_bucket(pixels: int) -> int:
     return 1 << (megapixels - 1).bit_length()
 
 
-def _tensor_bytes(tensor: torch.Tensor) -> int:
+def tensor_bytes(tensor: torch.Tensor) -> int:
     """Device bytes of ``tensor``. A quantized tensor reports the dtype it stands in for,
     so ask its storage.
     """
@@ -81,7 +80,7 @@ def _tensor_bytes(tensor: torch.Tensor) -> int:
     return tensor.numel() * tensor.element_size()
 
 
-def _owned_tensors(component: Any) -> tuple[torch.Tensor, ...]:
+def owned_tensors(component: Any) -> tuple[torch.Tensor, ...]:
     """Every weight and buffer ``component`` owns. A plain wrapper is read through the
     module it holds, as ``freeze`` does.
     """
@@ -89,9 +88,9 @@ def _owned_tensors(component: Any) -> tuple[torch.Tensor, ...]:
                  for tensor in (*held.parameters(), *held.buffers()))
 
 
-def _weight_bytes(component: Any) -> int:
+def weight_bytes(component: Any) -> int:
     """Bytes of ``component``'s weights and buffers, 0 where it reports none."""
-    return sum(_tensor_bytes(tensor) for tensor in _owned_tensors(component))
+    return sum(tensor_bytes(tensor) for tensor in owned_tensors(component))
 
 
 def _attempt(fn, args, kwargs):
@@ -137,8 +136,8 @@ class MemoryManager:
         load_device: Union[str, torch.device],
         offload_device: Union[str, torch.device],
     ):
-        self._load = _with_index(load_device)
-        self._offload = _with_index(offload_device)
+        self._load = with_index(load_device)
+        self._offload = with_index(offload_device)
         self._components: Dict[str, Optional[nn.Module]] = {}
         self._weights: Dict[str, int] = {}
         self._resident: Set[str] = set()
@@ -174,7 +173,7 @@ class MemoryManager:
         if module is not None:
             freeze(module)
         self._components[name] = module
-        self._weights[name] = _weight_bytes(module)
+        self._weights[name] = weight_bytes(module)
         if module is not None and not self._weights[name]:
             logger.warning(
                 "component %r reports no weights: nothing can be traded for it", name)
@@ -215,12 +214,12 @@ class MemoryManager:
         free = self.free_bytes()
         if free is None:
             return self._load                      # no figure, no policy
-        target = self._load if free - nbytes >= _RESERVE_BASE_BYTES else self._offload
+        target = self._load if free - nbytes >= RESERVE_BASE_BYTES else self._offload
         logger.info(
             "%.1f GiB of weights -> %s (%.1f GiB available on %s, "
             "%.1f GiB kept for a stage)",
             nbytes / (1 << 30), target, free / (1 << 30),
-            self._load, _RESERVE_BASE_BYTES / (1 << 30),
+            self._load, RESERVE_BASE_BYTES / (1 << 30),
         )
         return target
 
@@ -336,14 +335,7 @@ class MemoryManager:
         Driver free counts other processes and our cached blocks; the cache is added back
         because torch hands it out without allocating.
         """
-        if self._load.type != "cuda":
-            return None
-        free = get_free_memory(self._load)
-        if free is not None:
-            return free + (torch.cuda.memory_reserved(self._load)
-                           - torch.cuda.memory_allocated(self._load))
-        total = get_device_memory(self._load)
-        return None if total is None else total - torch.cuda.memory_allocated(self._load)
+        return get_available_memory(self._load)
 
     def _place(self, names: Sequence[str], reserve: int) -> None:
         """Put ``names`` on the compute device, with ``reserve`` left over afterwards."""
@@ -382,8 +374,8 @@ class MemoryManager:
         """
         reported = getattr(component, "device", None)
         if reported is not None:
-            return _with_index(reported) == self._load
-        where = {_with_index(tensor.device) for tensor in _owned_tensors(component)}
+            return with_index(reported) == self._load
+        where = {with_index(tensor.device) for tensor in owned_tensors(component)}
         if len(where) > 1:
             logger.warning(
                 "component %r came up across %s: the stage that names it will move it in",
