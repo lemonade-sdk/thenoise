@@ -28,6 +28,8 @@ DiT checkpoint.
 | `--lora-dir` | no | — | Directory containing LoRA `.safetensors` files |
 | `--device` | no | `cuda` | Inference device (ROCm aliases `cuda` → `hip`) |
 | `--attention` | `generate` / `edit` / `video` / `mesh` | `auto` | How attention is computed: `auto` picks block-sparse or exact at every step, `full` is always exact, `optimized` is block-sparse even where it does not pay off yet. Only a model with block-sparse attention takes `optimized` — `/health` lists what the loaded model answers |
+| `--devices` | no | — | `serve` / `generate` / `edit` / `video` / `mesh`: stack several GPUs for one model, e.g. `cuda:0,cuda:1`; see [Several GPUs](#several-gpus-for-one-model) |
+| `--place` | no | — | With `--devices`: where each component goes, e.g. `dit=split,text_encoder=cuda:1` |
 
 `serve` requires only `--dit`. Any further checkpoint is determined by the loaded
 model, and named by flag if it is missing.
@@ -271,6 +273,28 @@ size of the image it was extracted from, so it can be paired with that image lat
 is written as a PNG with a `controlmap_data` text chunk recording the type, the model
 and every option that differed from its default, alongside whatever metadata the input
 already carried.
+
+## Several GPUs for one model
+
+`--devices` spreads one model over several GPUs, so a model larger than one card fits.
+The first device is the primary: inputs, latents and the VAE live there.
+
+```bash
+thenoise generate --devices cuda:0,cuda:1 --dit ... --vae ... --text-encoder ... --prompt "..."
+```
+
+- By default every DiT is **split**: its blocks are dealt out to the devices in order, in
+  proportion to their free memory. The text encoder goes whole on the last device.
+- `--place` overrides that per component: `split`, one of the `--devices`, or `cpu` for
+  anything but a DiT, e.g. `--place dit=split,text_encoder=cuda:1`.
+- `cuda:0@6` caps what a split puts on that device at 6 GiB.
+- Only the hidden state crosses between devices at the boundaries of each device's blocks;
+  tensors every block reads are copied once per step.
+- GPUs only for a DiT: autocast is per device type, so blocks on `cpu` give a wrong image.
+  `--devices` with `cpu` in it and `--place dit=cpu` are refused, as is `--place` without
+  `--devices` or naming a device that is not in `--devices`.
+- Unknown component names in `--place` are refused before loading.
+- A split DiT does not support KV caching; explicit cache requests are refused.
 
 ## Upscaling
 

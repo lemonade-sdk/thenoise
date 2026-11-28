@@ -55,6 +55,18 @@ def get_free_memory(device: Optional[Union[str, torch.device]]) -> Optional[int]
         return None
 
 
+def get_available_memory(device: Optional[Union[str, torch.device]]) -> Optional[int]:
+    """Driver free plus reusable allocator blocks; total minus live bytes as fallback."""
+    if device is None or torch.device(device).type != "cuda":
+        return None
+    device = torch.device(device)
+    free = get_free_memory(device)
+    if free is not None:
+        return free + torch.cuda.memory_reserved(device) - torch.cuda.memory_allocated(device)
+    total = get_device_memory(device)
+    return None if total is None else total - torch.cuda.memory_allocated(device)
+
+
 def synchronize_device(device: Optional[Union[str, torch.device]]):
     if device is None:
         return

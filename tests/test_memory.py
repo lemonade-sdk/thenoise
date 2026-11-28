@@ -47,7 +47,7 @@ def _mib(n: int) -> int:
 
 def _reserve(monkeypatch, base: int, per_megapixel: int = 0) -> None:
     """The stage reserve, so the sizes below are about placement and not about scale."""
-    monkeypatch.setattr("thenoise.memory._RESERVE_BASE_BYTES", base)
+    monkeypatch.setattr("thenoise.memory.RESERVE_BASE_BYTES", base)
     monkeypatch.setattr("thenoise.memory._RESERVE_BYTES_PER_MEGAPIXEL", per_megapixel)
 
 
@@ -268,7 +268,7 @@ def test_weights_are_admitted_while_the_stage_floor_survives(monkeypatch):
     """The one figure admission keeps free is the fixed part of a stage's reserve."""
     from thenoise import memory as memory_module
 
-    floor = memory_module._RESERVE_BASE_BYTES
+    floor = memory_module.RESERVE_BASE_BYTES
     mm = MemoryManager("cuda", "meta")
     stub_room(monkeypatch, floor + 5 * (1 << 30))
 
@@ -283,7 +283,7 @@ def test_a_load_admits_into_the_room_its_own_cache_leaves(monkeypatch):
     from thenoise import memory as memory_module
 
     mm = MemoryManager("cuda", "meta")
-    stub_room(monkeypatch, memory_module._RESERVE_BASE_BYTES, reserved=_mib(512))
+    stub_room(monkeypatch, memory_module.RESERVE_BASE_BYTES, reserved=_mib(512))
     assert mm.device_for(_mib(512)) == mm.load_device
 
 
@@ -299,7 +299,7 @@ def test_resident_mode_admits_everything_without_asking(monkeypatch):
     def never(_dev):
         raise AssertionError("resident mode has no second device to compare against")
 
-    monkeypatch.setattr("thenoise.memory.get_free_memory", never)
+    monkeypatch.setattr("thenoise.utils.device.get_free_memory", never)
     assert MemoryManager("cpu", "cpu").device_for(1 << 60) == torch.device("cpu")
 
 
@@ -573,7 +573,7 @@ def test_the_reserve_is_a_fixed_part_plus_a_part_per_pixel():
     """Both figures live once, in the manager; the stage arithmetic is on them."""
     from thenoise import memory
 
-    flat = memory._RESERVE_BASE_BYTES
+    flat = memory.RESERVE_BASE_BYTES
     slope = memory._RESERVE_BYTES_PER_MEGAPIXEL
     assert memory.reserve_bytes(0) == flat
     assert memory.reserve_bytes(1_000_000) == flat + slope

@@ -1324,8 +1324,8 @@ def stub_room(monkeypatch, free, *, total=None, reserved: int = 0, live: int = 0
     ``free`` and ``total`` both None for a device that quotes nothing.
     """
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
-    monkeypatch.setattr("thenoise.memory.get_free_memory", lambda _dev: free)
-    monkeypatch.setattr("thenoise.memory.get_device_memory", lambda _dev: total)
+    monkeypatch.setattr("thenoise.utils.device.get_free_memory", lambda _dev: free)
+    monkeypatch.setattr("thenoise.utils.device.get_device_memory", lambda _dev: total)
     monkeypatch.setattr(torch.cuda, "memory_reserved", lambda _dev: reserved)
     monkeypatch.setattr(torch.cuda, "memory_allocated", lambda _dev: live)
 

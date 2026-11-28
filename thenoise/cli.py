@@ -106,6 +106,17 @@ def _add_device_arg(p: argparse.ArgumentParser) -> None:
                    help="inference device; ROCm aliases cuda -> hip (default: cuda)")
 
 
+def _add_multigpu_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--devices", default="", metavar="LIST",
+                   help="stack several GPUs for one model, e.g. cuda:0,cuda:1 (first is the "
+                        "primary; overrides --device). The DiT is split over all of them and "
+                        "the text encoder goes on the last one, unless --place says otherwise")
+    p.add_argument("--place", default="", metavar="MAP",
+                   help="with --devices: where each component goes (split, one of "
+                        "the devices, or cpu for all but a DiT), e.g. "
+                        "dit=split,text_encoder=cuda:1,vae=cuda:0")
+
+
 def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png") -> None:
     """Add the generation options shared by ``generate`` and ``edit``."""
     p.add_argument("--pixel-upscaler", default="", metavar="PATH",
@@ -153,6 +164,7 @@ def _add_generation_args(p: argparse.ArgumentParser, out_default: str = "out.png
                         "the VAE. Which of them a model takes is the model's own")
     _add_postprocess_args(p)
     _add_device_arg(p)
+    _add_multigpu_args(p)
 
 
 def _add_video_args(p: argparse.ArgumentParser) -> None:
@@ -193,6 +205,7 @@ def _add_video_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--out", default="out.mp4",
                    help="output clip path (default: out.mp4)")
     _add_device_arg(p)
+    _add_multigpu_args(p)
 
 
 def _add_mesh_args(p: argparse.ArgumentParser) -> None:
@@ -225,6 +238,7 @@ def _add_mesh_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--out", default="out.glb",
                    help="output mesh path (default: out.glb)")
     _add_device_arg(p)
+    _add_multigpu_args(p)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -247,6 +261,7 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8000,
                        help="bind port (default: 8000)")
     _add_device_arg(serve)
+    _add_multigpu_args(serve)
     serve.add_argument(
         "--offload-device", default="cpu",
         help="device for idle weights (default: %(default)s; pass the compute device to"

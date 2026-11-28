@@ -41,7 +41,8 @@ def _build_runtime(args):
     """Load the model and split a one-shot --pixel-upscaler into dir+name."""
     from .runtime import Settings, ModelPaths, Runtime
 
-    settings = Settings(device=args.device)
+    settings = Settings(device=args.device, devices=args.devices,
+                        placement=args.place)
 
     upscaler_dir = ""
     pixel_upscaler = None
